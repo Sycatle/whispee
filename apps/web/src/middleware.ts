@@ -22,6 +22,14 @@ export function middleware(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const dev = process.env.NODE_ENV === "development";
 
+  const api = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
+
+  // La session temps réel est une WebSocket, et `connect-src` ne déduit **pas** l'origine
+  // `ws://` de l'origine `http://` correspondante : sans cette ligne, la gateway est bloquée en
+  // production et nulle part ailleurs — le développement autorisant `ws:` en bloc. C'est la
+  // panne silencieuse type, puisque tout le reste continue de fonctionner par la relève.
+  const websocket = api.replace(/^http/, "ws");
+
   const csp = [
     "default-src 'self'",
     // `wasm-unsafe-eval` est requis pour instancier le module WebAssembly ; il n'autorise
@@ -30,7 +38,7 @@ export function middleware(request: NextRequest) {
     // Tailwind injecte ses styles à l'exécution ; un nonce sur les styles casserait le rendu.
     // Le risque résiduel d'une injection CSS est sans commune mesure avec celui d'un script.
     "style-src 'self' 'unsafe-inline'",
-    `connect-src 'self' ${process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787"}${dev ? " ws: http:" : ""}`,
+    `connect-src 'self' ${api} ${websocket}${dev ? " ws: http:" : ""}`,
     "img-src 'self' data:",
     "object-src 'none'",
     "base-uri 'none'",

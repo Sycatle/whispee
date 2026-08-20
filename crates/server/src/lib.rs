@@ -89,8 +89,17 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
     use axum::http::{HeaderName, Method, HeaderValue};
     use tower_http::cors::CorsLayer;
 
+    // Les origines de l'application de bureau figurent dans le défaut, et pas seulement dans la
+    // documentation : elles sont fixes — le système d'exploitation les impose, elles ne dépendent
+    // d'aucun déploiement — et les oublier produit un « Failed to fetch » que le navigateur émet
+    // avant d'envoyer quoi que ce soit, donc sans rien laisser dans les journaux du serveur.
+    //
+    // `tauri://localhost` sur Linux et macOS, `http://tauri.localhost` sur Windows et Android.
     let origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| "http://127.0.0.1:3000,http://localhost:3000".into())
+        .unwrap_or_else(|_| {
+            "http://127.0.0.1:5173,http://localhost:5173,tauri://localhost,http://tauri.localhost"
+                .into()
+        })
         .split(',')
         .filter_map(|origin| origin.trim().parse().ok())
         .collect();

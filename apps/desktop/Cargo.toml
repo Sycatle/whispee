@@ -1,0 +1,15 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# `tauri-build` lit `tauri.conf.json` et génère le contexte compilé dans le binaire. C'est aussi
+# ce qui fait que l'interface est **embarquée** plutôt que téléchargée : voir la note du module
+# principal sur ce que cela change dans le modèle de menace.
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

@@ -26,6 +26,28 @@
   }
 }
 
+/* Deux panneaux côte à côte, ou un seul à la fois.
+ *
+ * Le seuil ne décrit pas un appareil mais une **capacité** : y a-t-il la place d'afficher la
+ * liste et la conversation ensemble ? Une tablette en portrait répond non, un téléphone posé en
+ * paysage aussi, et un ordinateur à fenêtre étroite également. Nommer la variante d'après ce
+ * qu'elle permet plutôt que d'après un appareil évite d'avoir à la renommer au premier cas qui
+ * ne rentre pas dans la case.
+ *
+ * `min-width` et non `pointer` : le nombre de panneaux est affaire de largeur. Le doigt est un
+ * autre problème, traité par `tactile:`. */
+@custom-variant duo (@media (min-width: 48rem));
+
+/* Ce qui est manipulé au doigt.
+ *
+ * Distinct de la largeur, et le distinguer est tout l'intérêt : une tablette est large **et**
+ * tactile, un ordinateur portable à écran tactile aussi. Les confondre donnerait des cibles
+ * minuscules sur l'une et des boutons démesurés sur l'autre.
+ *
+ * `pointer: coarse` désigne le périphérique principal — un doigt, un stylet — et c'est bien la
+ * question posée : quelle précision peut-on exiger de l'utilisateur ? */
+@custom-variant tactile (@media (pointer: coarse));
+
 body {
   background: var(--color-surface);
   color: var(--color-ink);

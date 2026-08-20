@@ -1,0 +1,24 @@
+[package]
+name = "transparency"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Journal auditable des clés de compte : arbre de Merkle append-only, preuves d'inclusion et
+# de cohérence.
+#
+# Même raison d'être que la crate `attest` : le producteur (`server`) et le vérificateur
+# (`crypto-core`, donc le client) doivent partager **une seule** définition de la fonction de
+# hachage et de la construction de l'arbre. Deux implémentations qui divergent d'un octet
+# produisent des preuves systématiquement refusées — ou, bien pire, une preuve acceptée pour
+# un arbre différent.
+#
+# Aucune dépendance à OpenMLS : le serveur ne parle pas MLS et ne doit pas commencer.
+
+[dependencies]
+ed25519-dalek.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rand_core.workspace = true

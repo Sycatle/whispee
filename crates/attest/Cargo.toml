@@ -1,0 +1,24 @@
+[package]
+name = "attest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Crate volontairement minuscule et sans dépendance lourde.
+#
+# Elle existe pour qu'il n'y ait qu'UNE seule définition du message canonique d'attestation,
+# partagée par le signataire (`crypto-core`) et le vérificateur (`server`). Deux définitions
+# qui divergent d'un octet produiraient un système où les signatures sont refusées au mieux,
+# et où une confusion de champs passe au pire — sans qu'aucun test unitaire de chaque côté
+# ne le révèle.
+#
+# C'est aussi ce qui évite de tirer OpenMLS dans le serveur : celui-ci ne parle pas MLS, et
+# ne doit pas commencer.
+
+[dependencies]
+ed25519-dalek.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rand_core.workspace = true

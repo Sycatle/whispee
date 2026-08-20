@@ -1,0 +1,56 @@
+[package]
+name = "crypto-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# wasm-opt 117 (la version embarquée par wasm-pack) refuse par défaut les opérations
+# bulk-memory que rustc émet — davantage encore depuis l'activation de LTO. Sans ces flags
+# l'optimisation échoue **silencieusement du point de vue du script** : wasm-pack rend une
+# erreur mais le .wasm non optimisé reste en place, et on croit livrer un binaire optimisé.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "-O",
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-reference-types",
+]
+
+[dependencies]
+attest = { path = "../attest" }
+transparency = { path = "../transparency" }
+hmac.workspace = true
+sha2.workspace = true
+crypto-core = { path = "../crypto-core" }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+
+# OpenMLS a besoin des APIs JavaScript pour l'aléa et l'horloge : sans la feature `js`,
+# la compilation vers wasm32 échoue volontairement (`compile_error!` dans openmls/src/lib.rs).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+openmls = { version = "0.8.1", features = ["js"] }
+
+# `openmls/js` couvre getrandom 0.3, mais les crates à courbes elliptiques d'OpenMLS
+# (p256/k256/p384, via hpke-rs-rust-crypto) tirent encore rand_core 0.6, donc getrandom 0.2,
+# qui refuse de compiler pour wasm32 sans sa propre feature `js`.
+#
+# Cette dépendance n'est jamais appelée directement : elle n'existe que pour activer la
+# feature. Elle est pourtant ce qui branche l'aléa du navigateur (`crypto.getRandomValues`)
+# sous les générateurs de clés — un aléa défaillant ne se voit nulle part et casse tout.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+serde = "1"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-test = "0.3"

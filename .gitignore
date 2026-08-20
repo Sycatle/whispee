@@ -1,0 +1,7 @@
+target/
+node_modules/
+.env
+.env.local
+pkg/
+.next/
+.claude/scheduled_tasks.lock

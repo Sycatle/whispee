@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: oklch(0.99 0.002 250);
+  --color-surface-raised: oklch(1 0 0);
+  --color-border-subtle: oklch(0.91 0.004 250);
+  --color-ink: oklch(0.24 0.01 250);
+  --color-ink-muted: oklch(0.52 0.012 250);
+  --color-accent: oklch(0.55 0.13 250);
+  --color-danger: oklch(0.55 0.19 25);
+  --color-warn: oklch(0.62 0.15 70);
+  --color-ok: oklch(0.55 0.12 155);
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-surface: oklch(0.19 0.008 250);
+    --color-surface-raised: oklch(0.24 0.01 250);
+    --color-border-subtle: oklch(0.32 0.012 250);
+    --color-ink: oklch(0.94 0.004 250);
+    --color-ink-muted: oklch(0.68 0.012 250);
+    --color-accent: oklch(0.72 0.12 250);
+    --color-danger: oklch(0.7 0.17 25);
+    --color-warn: oklch(0.78 0.14 70);
+    --color-ok: oklch(0.72 0.13 155);
+  }
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-ink);
+}
+
+/* Les empreintes se comparent caractère par caractère : une chasse fixe et un chiffre zéro
+   distinct de la lettre O ne sont pas cosmétiques, ils rendent la comparaison fiable. */
+.fingerprint {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  font-variant-ligatures: none;
+  letter-spacing: 0.05em;
+}

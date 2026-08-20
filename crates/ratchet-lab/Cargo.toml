@@ -1,0 +1,27 @@
+[package]
+name = "ratchet-lab"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# ATTENTION — crate pédagogique.
+#
+# Cette crate réimplémente X3DH et le Double Ratchet à la main dans le but de les
+# comprendre. Elle n'a reçu aucun audit, ne résiste pas aux attaques par canal auxiliaire
+# et ne doit JAMAIS être importée par `crypto-core` ni par aucun code exécuté par un
+# utilisateur. Le chemin de production passe exclusivement par OpenMLS.
+
+[dependencies]
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+aes-gcm.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

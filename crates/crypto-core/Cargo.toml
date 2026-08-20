@@ -1,0 +1,33 @@
+[package]
+name = "crypto-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# INVARIANT — cette crate ne doit JAMAIS dépendre de `ratchet-lab`.
+# `ratchet-lab` est du code pédagogique non audité ; `crypto-core` est le seul chemin
+# de production. Toute PR ajoutant cette dépendance doit être rejetée.
+
+[dependencies]
+aes-gcm.workspace = true
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+attest = { path = "../attest" }
+# CC0-1.0 : domaine public, donc compatible avec la contrainte de code propriétaire qui a
+# écarté libsignal. `default-features = false` retire la normalisation Unicode, inutile pour
+# la seule liste anglaise et non négligeable dans un binaire WASM.
+bip39 = { version = "2", default-features = false, features = ["alloc"] }
+ed25519-dalek.workspace = true
+hkdf.workspace = true
+openmls = "0.8.1"
+openmls_basic_credential = "0.5.0"
+openmls_rust_crypto = "0.5.1"
+openmls_traits = "0.5.0"
+rand_core.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

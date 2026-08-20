@@ -148,9 +148,15 @@ application dont le code est empaqueté dans le binaire installé ferme cette vo
 ### L'application de bureau
 
 ```sh
-cd apps/web && pnpm run build     # produit `dist/`, que Tauri empaquette
-cargo run -p desktop
+cd apps/web && pnpm run build            # produit `dist/`, que Tauri empaquette
+cargo run -p desktop --release
 ```
+
+**`--release` n'est pas une optimisation, c'est ce qui choisit la source de l'interface.** En
+profil de débogage, Tauri charge `devUrl` — le serveur Vite sur le port 5173 — au lieu du `dist`
+empaqueté ; sans ce serveur, la fenêtre affiche « Connection refused » et rien d'autre. Pour
+travailler sur l'interface avec le rechargement à chaud, lancer `pnpm run dev` dans `apps/web`
+**puis** `cargo run -p desktop`, sans `--release`.
 
 **C'est ce qui ferme la voie décrite juste au-dessus.** L'interface est dans le binaire
 installé : le serveur ne la livre plus, donc il ne peut plus la remplacer. Ce n'est pas le

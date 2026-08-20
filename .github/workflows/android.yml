@@ -1,0 +1,128 @@
+name: Android build
+
+# Construit un APK de débogage, sur un runner Ubuntu où le SDK Android est préinstallé.
+# Aucune signature : elle viendra avec la distribution.
+#
+# # Économie de minutes : ce qui déclenche, et ce qui ne déclenche pas
+#
+# **Rien ne se construit sur `dev`.** C'est la branche de travail : y déclencher un build à
+# chaque poussée dépenserait l'essentiel du quota pour des états intermédiaires que personne
+# n'installe. Le travail s'y valide par `cargo test`, en local.
+#
+# Ne restent que deux entrées : une poussée sur `main`, qui est une intégration, et le
+# déclenchement manuel quand on veut un APK sans attendre.
+#
+# Pas de `pull_request` non plus : une PR de `dev` vers `main` doublerait chaque construction —
+# une fois à l'ouverture, une fois à la fusion — pour le même arbre.
+#
+# Les `paths` restreignent encore : l'APK n'embarque ni le serveur, ni ses migrations, ni les
+# crates de cryptographie. Le module WebAssembly qu'il contient est un artefact **versionné**
+# sous `apps/web/`, donc modifier `crates/crypto-wasm` sans le régénérer ne change pas l'APK.
+#
+# # Ce que ce workflow installe et qu'un projet Capacitor n'aurait pas demandé
+#
+# Le NDK et les quatre cibles Rust Android. Tauri compile du Rust natif pour chaque
+# architecture, là où Capacitor n'embarque que du JavaScript.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "apps/web/**"
+      - "apps/desktop/**"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+
+# Une poussée qui en suit une autre rend la précédente sans objet : la laisser finir paierait
+# un runner pour un artefact que personne ne prendra.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      # `corepack` fournit la version de pnpm épinglée dans `packageManager`, plutôt que celle
+      # qui traîne sur le runner.
+      - name: Enable pnpm
+        run: corepack enable
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      # Le cache est ici une mesure d'économie autant que de vitesse : sans lui, chaque
+      # construction recompile l'arbre de dépendances Rust pour quatre architectures.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      # Le SDK est préinstallé sur le runner, le NDK non. Sans lui, la compilation croisée n'a
+      # pas d'éditeur de liens et échoue tardivement, au premier objet à lier.
+      - name: Install Android NDK
+        run: |
+          echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      # Mis en cache comme le reste : `cargo install` recompile le CLI depuis les sources, ce
+      # qui coûte plusieurs minutes de runner à chaque exécution.
+      - name: Cache the Tauri CLI
+        id: cache-tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-v2-${{ runner.os }}
+
+      - name: Install Tauri CLI
+        if: steps.cache-tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+
+      # Le projet natif est généré à chaque construction plutôt que versionné : `tauri android
+      # init` produit un projet Gradle complet, et un projet généré qui dérive de sa source est
+      # une source d'erreurs silencieuses. Le régénérer coûte quelques secondes.
+      #
+      # `VITE_API_URL` est figée dans le bundle **et** dans la CSP — voir `csp()` dans
+      # `vite.config.ts`. Absente, elle produirait un client qui pointe vers la boucle locale du
+      # téléphone, c'est-à-dire vers rien.
+      - name: Generate the Android project
+        working-directory: apps/desktop
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
+        run: cargo tauri android init
+
+      - name: Build the APK
+        working-directory: apps/desktop
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
+        run: cargo tauri android build --debug --apk
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: app-debug-apk
+          path: apps/desktop/gen/android/app/build/outputs/apk/**/*.apk
+          # Un build qui « réussit » sans produire de binaire est un échec silencieux : c'est
+          # exactement le genre de succès trompeur qu'on ne remarque qu'au moment d'installer.
+          if-no-files-found: error
+          # Les artefacts comptent dans le quota de stockage, et un APK de débogage n'a aucune
+          # valeur au-delà de quelques jours.
+          retention-days: 7

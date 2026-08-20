@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile",
+  "description": "Permissions supplémentaires sur Android et iOS. Séparées du fichier par défaut parce qu'elles n'existent que là : les déclarer partout ferait échouer la construction de bureau sur une permission dont le plugin est absent. Une seule entrée, et elle ne donne accès qu'à l'invite du système — la clé maîtresse, elle, ne passe jamais par le plugin : elle est scellée par les secrets de l'appareil et rendue par une commande qui déclenche l'invite elle-même.",
+  "platforms": ["android", "iOS"],
+  "windows": ["main"],
+  "permissions": ["biometric:default"]
+}

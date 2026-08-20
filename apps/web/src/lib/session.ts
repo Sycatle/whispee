@@ -13,7 +13,8 @@ import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./atta
 import * as content from "./content";
 import * as envelope from "./envelope";
 import { fromBase64, toBase64, toHex } from "./keys";
-import { type LockEnvelope, changePassword, createLock, openLock } from "./lock";
+import { type LockEnvelope, changePassword, createLock, exporterMaster, openLock } from "./lock";
+import * as biometrics from "./biometrics";
 import type { SignalSettings } from "./storage";
 import { type Decision, type Etapes, type Presence, decider, migrer } from "./migration";
 import {
@@ -496,9 +497,9 @@ export class Session {
    * il n'y a rien à comparer, donc pas de comparaison à rendre constante, et pas de « hash du
    * mot de passe » stocké à côté qui offrirait une cible d'attaque hors ligne de plus.
    */
-  static async restore(password?: string): Promise<Session | null> {
+  static async restore(ouverture?: string | CryptoKey): Promise<Session | null> {
     const ancrage = await ancrageCourant();
-    return ancrage === undefined ? null : Session.ouvrir(ancrage, password);
+    return ancrage === undefined ? null : Session.ouvrir(ancrage, ouverture);
   }
 
   /**
@@ -508,17 +509,34 @@ export class Session {
    * même temps : l'ancienne introduit la nouvelle dans les groupes, et seule l'ancienne peut le
    * faire — elle seule en est membre.
    */
-  static async ouvrir(ancrage: Ancrage, password?: string): Promise<Session | null> {
+  static async ouvrir(
+    ancrage: Ancrage,
+    /**
+     * De quoi ouvrir le verrou, s'il y en a un.
+     *
+     * Deux formes et non une, parce que les deux chemins n'ont pas la même entrée : le mot de
+     * passe dérive la clé maîtresse, la biométrie la rend directement. Les réunir derrière une
+     * chaîne obligerait à encoder une clé en texte, c'est-à-dire à la faire passer par un
+     * format dont personne n'a besoin.
+     */
+    ouverture?: string | CryptoKey,
+  ): Promise<Session | null> {
     const stored = await ancrage.store.load();
     if (!stored?.state) return null;
 
-    if (stored.lock && password === undefined) {
+    if (stored.lock && ouverture === undefined) {
       throw new Error("Cette session est verrouillée : mot de passe requis.");
     }
+
+    const master =
+      typeof ouverture === "string" && stored.lock
+        ? await openLock(stored.lock, ouverture)
+        : typeof ouverture === "object"
+          ? ouverture
+          : undefined;
+
     const atRest =
-      stored.lock && password !== undefined
-        ? new LockedCipher(ancrage.cipher, await openLock(stored.lock, password))
-        : ancrage.cipher;
+      stored.lock && master ? new LockedCipher(ancrage.cipher, master) : ancrage.cipher;
 
     const crypto = await loadCrypto();
     const state = await atRest.open(stored.state);
@@ -727,7 +745,40 @@ export class Session {
     await openLock(this.lock, password);
     this.lock = undefined;
     this.atRest = this.ancrage.cipher;
+
+    // La clé rangée pour la biométrie n'a plus rien à ouvrir, et la laisser serait pire
+    // qu'inutile : elle survivrait au verrou qui la justifiait.
+    await biometrics.retirerBiometrie().catch(() => {});
     await this.persist();
+  }
+
+  /**
+   * Fait garder la clé maîtresse par le système, derrière l'empreinte ou le visage.
+   *
+   * # Ce que l'utilisateur échange
+   *
+   * Son mot de passe n'était nulle part ; sa clé maîtresse le sera. Elle est scellée par les
+   * secrets du processus natif, eux-mêmes en clair dans le répertoire privé de l'application :
+   * la protection devient celle du système et de son invite, solide contre qui prend l'appareil
+   * en main, sans valeur contre qui en extrait le stockage. L'interface doit l'annoncer avant.
+   *
+   * # Pourquoi le mot de passe n'est pas redemandé
+   *
+   * Il vient de l'être : sans lui, cette session ne serait pas ouverte. Le redemander
+   * n'ajouterait aucune preuve — quelqu'un qui tient un appareil déverrouillé lit déjà tout —
+   * et ferait payer un geste de sécurité par une gêne sans contrepartie.
+   */
+  async activerBiometrie(): Promise<void> {
+    if (!(this.atRest instanceof LockedCipher)) {
+      throw new Error("Posez d'abord un verrou : la biométrie garde sa clé, elle n'en crée pas.");
+    }
+
+    await biometrics.activerBiometrie(await exporterMaster(this.atRest.cleMaitresse()));
+  }
+
+  /** Retire le déverrouillage biométrique. Le verrou reste posé, le mot de passe l'ouvre encore. */
+  async retirerBiometrie(): Promise<void> {
+    await biometrics.retirerBiometrie();
   }
 
   /**
@@ -2228,9 +2279,13 @@ export interface MigrationProposee {
  * une durabilité qui n'existe pas.
  */
 export async function demarrer(
-  password?: string,
+  /**
+   * De quoi ouvrir le verrou : le mot de passe saisi, ou la clé maîtresse rendue par l'invite
+   * du système. Les deux mènent au même endroit, par des chemins qui n'ont pas la même entrée.
+   */
+  ouverture?: string | CryptoKey,
 ): Promise<{ session: Session | null; migration?: MigrationProposee; repli?: string }> {
-  if (!isTauri()) return { session: await Session.restore(password) };
+  if (!isTauri()) return { session: await Session.restore(ouverture) };
 
   const natif = ancrageNatif();
   const web = await ancrageWebExistant();
@@ -2238,17 +2293,17 @@ export async function demarrer(
   const decision = decider(await presenceDe(web), await presenceDe(natif));
 
   if (decision.quoi === "repli") {
-    return { session: web ? await Session.ouvrir(web, password) : null, repli: decision.raison };
+    return { session: web ? await Session.ouvrir(web, ouverture) : null, repli: decision.raison };
   }
 
   if (decision.quoi !== "demarrer" && decision.quoi !== "reprendre") {
-    return { session: await Session.restore(password) };
+    return { session: await Session.restore(ouverture) };
   }
 
   // L'ancienne session doit être ouverte : elle seule est membre des groupes. Un verrou posé
   // impose donc de proposer la migration après la saisie, pas avant.
-  const ancienne = web ? await Session.ouvrir(web, password) : null;
-  if (!ancienne) return { session: await Session.restore(password) };
+  const ancienne = web ? await Session.ouvrir(web, ouverture) : null;
+  if (!ancienne) return { session: await Session.restore(ouverture) };
 
   return {
     session: ancienne,

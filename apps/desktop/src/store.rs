@@ -101,6 +101,17 @@ impl Emplacement {
         self.racine.join("secrets.bin")
     }
 
+    /// La clé maîtresse du verrou, scellée — présente seulement si le déverrouillage
+    /// biométrique est activé.
+    ///
+    /// Un troisième fichier, et non un champ des deux autres, parce que sa présence **est**
+    /// l'information : le déverrouillage biométrique est actif si et seulement si ce fichier
+    /// existe. Le ranger dans la session obligerait à l'ouvrir pour le savoir, ce qui suppose
+    /// la clé qu'il contient.
+    pub fn master(&self) -> PathBuf {
+        self.racine.join("master.bin")
+    }
+
     /// Lit un fichier, ou `None` s'il n'existe pas.
     ///
     /// L'absence n'est pas une erreur : c'est l'état d'une installation neuve, et le distinguer
@@ -184,6 +195,23 @@ mod tests {
 
         assert!(emplacement.secrets().exists());
         fs::remove_dir_all(racine.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    /// Les trois fichiers sont distincts, et cela porte une propriété.
+    ///
+    /// Oublier une session, retirer le déverrouillage biométrique et détruire l'identité de
+    /// l'appareil sont trois gestes aux conséquences différentes. Deux chemins qui se
+    /// confondraient feraient exécuter le mauvais des trois, sans que rien ne le signale.
+    #[test]
+    fn les_trois_fichiers_ne_se_confondent_pas() {
+        let emplacement = Emplacement::new(repertoire_temporaire("distincts"));
+        let chemins = [emplacement.session(), emplacement.secrets(), emplacement.master()];
+
+        for (i, un) in chemins.iter().enumerate() {
+            for autre in &chemins[i + 1..] {
+                assert_ne!(un, autre);
+            }
+        }
     }
 
     /// Aucun temporaire ne doit survivre à une écriture réussie.

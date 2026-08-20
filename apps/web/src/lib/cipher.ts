@@ -187,6 +187,17 @@ export class LockedCipher implements DeviceCipher {
   open(blob: Uint8Array): Promise<Uint8Array> {
     return unwrapState(this.master, blob);
   }
+
+  /**
+   * La clé maîtresse, pour la confier au processus natif.
+   *
+   * Le seul appelant légitime est l'activation du déverrouillage biométrique, qui doit la faire
+   * sceller là où l'invite du système la garde. Tout autre usage annulerait ce qui fait tenir le
+   * verrou : que cette clé n'existe qu'en mémoire, et seulement après une saisie.
+   */
+  cleMaitresse(): CryptoKey {
+    return this.master;
+  }
 }
 
 /** Réexporté pour que les appelants n'aient pas à importer `keys.ts` juste pour encoder. */

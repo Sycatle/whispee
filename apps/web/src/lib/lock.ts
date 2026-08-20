@@ -134,3 +134,26 @@ async function unlockKey(password: string, salt: Uint8Array): Promise<CryptoKey>
 function importMaster(raw: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", buffer(raw), "AES-GCM", true, ["encrypt", "decrypt"]);
 }
+
+/**
+ * Les octets bruts de la clé maîtresse.
+ *
+ * # Pourquoi cette porte existe
+ *
+ * Le déverrouillage biométrique doit confier la clé au processus natif, qui la scelle et ne la
+ * rend qu'après l'invite du système. Sans export, il n'y aurait rien à lui confier.
+ *
+ * # Pourquoi elle est étroite
+ *
+ * Un seul appelant, dans `Session.activerBiometrie`, et il fait immédiatement traverser la
+ * frontière aux octets. Tout autre usage remettrait en cause le fait que la clé maîtresse
+ * n'existe qu'en mémoire — la propriété qui fait tenir le verrou.
+ */
+export function exporterMaster(master: CryptoKey): Promise<Uint8Array> {
+  return crypto.subtle.exportKey("raw", master).then((brut) => new Uint8Array(brut));
+}
+
+/** Réimporte une clé maîtresse rendue par le processus natif. */
+export function importerMaster(brut: Uint8Array): Promise<CryptoKey> {
+  return importMaster(brut);
+}

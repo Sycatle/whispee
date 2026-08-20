@@ -185,12 +185,20 @@ export function App() {
         await session.poll();
         if (cancelled) return;
 
-        // Ouvre la première conversation tant qu'aucune n'est sélectionnée.
+        // Ouvre la première conversation tant qu'aucune n'est sélectionnée, **et seulement à
+        // deux panneaux**.
         //
-        // Un appareil fraîchement appairé découvre ses conversations pendant la relève : sans
-        // cela il affiche une liste à gauche et un vide à droite, et les messages semblent ne
-        // pas arriver alors qu'ils sont déjà déchiffrés.
-        setActive((current) => current ?? session.conversations.values().next().value ?? null);
+        // Là, elle comble un vide : un appareil fraîchement appairé découvre ses conversations
+        // pendant la relève, et sans cela il affiche une liste à gauche et rien à droite, comme
+        // si les messages n'arrivaient pas alors qu'ils sont déjà déchiffrés.
+        //
+        // À un panneau, la même ligne fait le contraire de ce qu'elle vise : elle ouvre une
+        // conversation que personne n'a demandée et recouvre la liste, qui est l'écran
+        // d'accueil. Le seul moyen d'en sortir est le bouton retour, sur un écran où l'on
+        // n'était jamais entré.
+        if (duo) {
+          setActive((current) => current ?? session.conversations.values().next().value ?? null);
+        }
 
         // Une relève réussie efface l'erreur précédente.
         //
@@ -219,7 +227,7 @@ export function App() {
       clearInterval(id);
       session.stopStream();
     };
-  }, [session, refresh]);
+  }, [session, refresh, duo]);
 
   if (busy) return <Centered>Chargement…</Centered>;
 

@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MIN_LENGTH, bitsApproximatifs, verifier } from "@/lib/password";
+import { biometrieActive, biometrieDisponible } from "@/lib/biometrics";
 import type { MigrationProposee, Session } from "@/lib/session";
 
 /** Saisie du mot de passe au démarrage, quand un verrou est posé. */
@@ -16,6 +17,40 @@ export function Unlock({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [refus, setRefus] = useState(false);
+  const [parBiometrie, setParBiometrie] = useState(false);
+
+  useEffect(() => {
+    void biometrieActive().then(setParBiometrie);
+  }, []);
+
+  /**
+   * Déverrouillage par l'invite du système.
+   *
+   * L'invite est déclenchée dans le processus natif, sur le chemin de la clé — ce composant ne
+   * fait que demander. Un refus laisse l'écran tel quel, avec le champ de mot de passe : la
+   * biométrie est un raccourci, jamais le seul chemin, sans quoi un capteur en panne
+   * enfermerait le compte dehors.
+   */
+  const parEmpreinte = async () => {
+    setBusy(true);
+    setRefus(false);
+    try {
+      const { ouvrirParBiometrie } = await import("@/lib/biometrics");
+      const master = await ouvrirParBiometrie();
+      if (!master) return;
+
+      const [{ demarrer }, { importerMaster }] = await Promise.all([
+        import("@/lib/session"),
+        import("@/lib/lock"),
+      ]);
+      const { session, migration } = await demarrer(await importerMaster(master));
+      if (session) onUnlocked(session, migration);
+    } catch {
+      setRefus(true);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -45,6 +80,17 @@ export function Unlock({
           ici, et nulle part ailleurs : il n&apos;est jamais transmis au serveur.
         </p>
       </div>
+
+      {parBiometrie && (
+        <button
+          type="button"
+          onClick={() => void parEmpreinte()}
+          disabled={busy}
+          className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50 tactile:min-h-11"
+        >
+          Déverrouiller par empreinte ou visage
+        </button>
+      )}
 
       <form onSubmit={submit} className="space-y-3">
         <input
@@ -101,6 +147,82 @@ export function Unlock({
 }
 
 /** Réglage du verrou depuis l'application. */
+/**
+ * Interrupteur du déverrouillage biométrique.
+ *
+ * # Pourquoi il n'apparaît que sous un verrou posé
+ *
+ * La biométrie ne crée pas de clé : elle garde celle du verrou. Sans verrou, il n'y a rien à
+ * garder, et un interrupteur qui poserait un verrou en douce ferait dépendre la lisibilité des
+ * conversations d'un doigt — sans mot de passe pour reprendre la main le jour où le capteur
+ * refuse.
+ *
+ * # Pourquoi le texte insiste sur ce qu'on perd
+ *
+ * L'échange n'est pas intuitif : un mot de passe n'est stocké nulle part, la clé rangée pour la
+ * biométrie l'est. Le confort se paie en surface d'attaque, et quelqu'un qui ne le sait pas
+ * croira renforcer sa sécurité en activant l'option.
+ */
+function BiometricToggle({ session }: { session: Session }) {
+  const [disponible, setDisponible] = useState(false);
+  const [active, setActive] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void Promise.all([biometrieDisponible(), biometrieActive()]).then(([peut, est]) => {
+      setDisponible(peut);
+      setActive(est);
+    });
+  }, []);
+
+  // Rien à proposer : ni bloc, ni explication. Un réglage grisé sur un ordinateur de bureau ne
+  // renseignerait que sur l'existence d'une fonction inaccessible.
+  if (!disponible) return null;
+
+  const basculer = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (active) {
+        await session.retirerBiometrie();
+        setActive(false);
+      } else {
+        await session.activerBiometrie();
+        setActive(true);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border-t border-(--color-border-subtle) pt-3">
+      <h3 className="font-medium">Ouvrir par empreinte ou visage</h3>
+      <p className="mt-1 text-(--color-ink-muted)">
+        {active
+          ? "La clé de votre verrou est gardée par le système, derrière son invite. Le mot de passe continue de fonctionner."
+          : "Votre mot de passe n'est stocké nulle part. L'activer range la clé de votre verrou sur cet appareil, protégée par le système : plus commode, et plus exposé si quelqu'un extrait le stockage du téléphone."}
+      </p>
+      <button
+        type="button"
+        onClick={() => void basculer()}
+        disabled={busy}
+        className="mt-2 underline disabled:opacity-50 tactile:min-h-11"
+      >
+        {busy ? "…" : active ? "Désactiver" : "Activer"}
+      </button>
+      {error && (
+        <p role="alert" className="mt-2 text-(--color-danger)">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function LockSettings({ session, onDone }: { session: Session; onDone: () => void }) {
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -164,6 +286,8 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
             Mot de passe incorrect.
           </p>
         )}
+
+        <BiometricToggle session={session} />
       </div>
     );
   }

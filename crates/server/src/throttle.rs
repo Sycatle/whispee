@@ -33,15 +33,23 @@
 //! proxy limite le proxy entier ; c'est à lui de porter la limite dans ce cas.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Quota par défaut, par adresse et par minute.
+/// Quota par défaut des routes ouvertes, par adresse et par minute.
 ///
 /// Généreux pour un usage humain — créer un compte, y rattacher quelques appareils, appairer —
 /// et étroit devant ce qu'il faut de requêtes pour faire grossir une table de façon gênante.
 pub const DEFAUT_PAR_MINUTE: u32 = 60;
+
+/// Quota par défaut de consommation de KeyPackages, par couple appelant-cible et par minute.
+///
+/// **Deux ordres de grandeur en dessous du précédent, et c'est le point.** Un appelant honnête
+/// n'a besoin que d'un KeyPackage par appareil visé ; la marge couvre les reprises après échec
+/// réseau. Reprendre ici le quota des routes ouvertes laisserait soixante consommations par
+/// minute sur une même victime, soit une attaque toujours efficace : la borne aurait l'air
+/// posée sans rien empêcher.
+pub const DEFAUT_CLAIMS_PAR_MINUTE: u32 = 5;
 
 /// Au-delà de ce nombre d'adresses suivies, les entrées périmées sont balayées.
 ///
@@ -53,7 +61,7 @@ const SEUIL_DE_BALAYAGE: usize = 4096;
 pub struct Throttle {
     quota: u32,
     fenetre: Duration,
-    vues: Mutex<HashMap<IpAddr, Compteur>>,
+    vues: Mutex<HashMap<String, Compteur>>,
 }
 
 struct Compteur {
@@ -86,12 +94,17 @@ impl Throttle {
         Self::par_minute(quota)
     }
 
-    /// Décompte une requête, et dit si elle peut passer.
+    /// Décompte une requête sous une clé, et dit si elle peut passer.
+    ///
+    /// La clé est textuelle plutôt qu'une adresse : le sujet à limiter n'est pas toujours celui
+    /// qui appelle. La consommation de KeyPackages se compte par couple appelant-cible, parce
+    /// que ce qu'on veut borner est l'acharnement d'un appelant **sur une victime précise**, et
+    /// non son activité en général.
     ///
     /// Fenêtre fixe et non glissante : à la bascule, un appelant peut émettre deux quotas en
     /// peu de temps. C'est connu, et sans importance ici — la limite existe pour empêcher une
-    /// croissance soutenue, pas une rafale.
-    pub fn autorise(&self, adresse: IpAddr) -> bool {
+    /// pression soutenue, pas une rafale.
+    pub fn autorise(&self, cle: &str) -> bool {
         if self.quota == 0 {
             return true;
         }
@@ -104,7 +117,7 @@ impl Throttle {
         }
 
         let compteur = vues
-            .entry(adresse)
+            .entry(cle.to_owned())
             .or_insert(Compteur { depuis: maintenant, requetes: 0 });
 
         if maintenant.duration_since(compteur.depuis) >= self.fenetre {
@@ -116,12 +129,44 @@ impl Throttle {
     }
 }
 
+/// Limite de consommation des KeyPackages, par couple appelant-cible.
+///
+/// # Pourquoi un type distinct plutôt qu'un second [`Throttle`]
+///
+/// Parce que confondre les deux est précisément l'erreur à empêcher. Ils comptent des choses
+/// différentes — des adresses d'un côté, des couples de l'autre — et leurs quotas diffèrent de
+/// deux ordres de grandeur. Un type qui ne se substitue pas à l'autre rend impossible de brancher
+/// le mauvais quota sur la mauvaise route, ce qui poserait une borne d'apparence sérieuse et sans
+/// effet.
+pub struct Claims(Throttle);
+
+impl Claims {
+    pub fn par_minute(quota: u32) -> Self {
+        Self(Throttle::par_minute(quota))
+    }
+
+    /// Quota lu depuis `CLAIM_QUOTA_PER_MINUTE`, ou [`DEFAUT_CLAIMS_PAR_MINUTE`].
+    pub fn depuis_environnement() -> Self {
+        let quota = std::env::var("CLAIM_QUOTA_PER_MINUTE")
+            .ok()
+            .and_then(|valeur| valeur.parse().ok())
+            .unwrap_or(DEFAUT_CLAIMS_PAR_MINUTE);
+
+        Self::par_minute(quota)
+    }
+
+    /// `couple` identifie l'appelant **et** sa cible.
+    pub fn autorise(&self, couple: &str) -> bool {
+        self.0.autorise(couple)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ip(dernier: u8) -> IpAddr {
-        IpAddr::from([127, 0, 0, dernier])
+    fn ip(dernier: u8) -> String {
+        format!("ip:127.0.0.{dernier}")
     }
 
     #[test]
@@ -129,20 +174,20 @@ mod tests {
         let throttle = Throttle::par_minute(3);
 
         for tour in 1..=3 {
-            assert!(throttle.autorise(ip(1)), "la requête {tour} devait passer");
+            assert!(throttle.autorise(&ip(1)), "la requête {tour} devait passer");
         }
 
-        assert!(!throttle.autorise(ip(1)), "la quatrième dépasse le quota");
+        assert!(!throttle.autorise(&ip(1)), "la quatrième dépasse le quota");
     }
 
     #[test]
     fn une_adresse_n_epuise_pas_le_quota_d_une_autre() {
         let throttle = Throttle::par_minute(1);
 
-        assert!(throttle.autorise(ip(1)));
-        assert!(!throttle.autorise(ip(1)));
+        assert!(throttle.autorise(&ip(1)));
+        assert!(!throttle.autorise(&ip(1)));
 
-        assert!(throttle.autorise(ip(2)), "le compteur est par adresse, pas global");
+        assert!(throttle.autorise(&ip(2)), "le compteur est par adresse, pas global");
     }
 
     /// Le quota nul rend le limiteur transparent — ce dont dépend le harnais de test.
@@ -151,7 +196,7 @@ mod tests {
         let throttle = Throttle::par_minute(0);
 
         for _ in 0..1000 {
-            assert!(throttle.autorise(ip(1)));
+            assert!(throttle.autorise(&ip(1)));
         }
     }
 }

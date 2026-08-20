@@ -177,6 +177,7 @@ fn reason(error: &ApiError) -> &'static str {
         ApiError::BadRequest(_) => "trame invalide",
         ApiError::Unauthorized | ApiError::Forbidden | ApiError::NotFound => "refusé",
         ApiError::Conflict(_) => "conflit",
+        ApiError::TooManyRequests => "trop de requêtes",
         ApiError::Database(err) => {
             tracing::error!(error = %err, "erreur de base de données dans la gateway");
             "erreur interne"

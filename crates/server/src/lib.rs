@@ -38,8 +38,14 @@ use sqlx::postgres::PgPoolOptions;
 pub struct AppState {
     pub pool: PgPool,
     pub hub: Arc<stream::Hub>,
-    /// Limite de débit des routes ouvertes. Voir [`throttle`] pour sa portée réelle.
+    /// Limite de débit des routes ouvertes, comptée par adresse.
     pub throttle: Arc<throttle::Throttle>,
+    /// Limite de consommation des KeyPackages, comptée par couple appelant-cible.
+    ///
+    /// Séparée de la précédente parce que les deux n'ont pas le même ordre de grandeur : une
+    /// borne unique serait soit trop lâche pour protéger un stock, soit trop serrée pour laisser
+    /// quelqu'un s'inscrire.
+    pub claims: Arc<throttle::Claims>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -51,6 +57,18 @@ impl FromRef<AppState> for PgPool {
 impl FromRef<AppState> for Arc<stream::Hub> {
     fn from_ref(state: &AppState) -> Self {
         state.hub.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<throttle::Throttle> {
+    fn from_ref(state: &AppState) -> Self {
+        state.throttle.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<throttle::Claims> {
+    fn from_ref(state: &AppState) -> Self {
+        state.claims.clone()
     }
 }
 
@@ -97,7 +115,7 @@ async fn limiter_le_debit(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
 
-    if state.throttle.autorise(pair.ip()) {
+    if state.throttle.autorise(&format!("ip:{}", pair.ip())) {
         return suite.run(requete).await;
     }
 
@@ -197,7 +215,11 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
 }
 
 pub fn app(pool: PgPool) -> axum::Router {
-    app_with(pool, throttle::Throttle::depuis_environnement())
+    app_with(
+        pool,
+        throttle::Throttle::depuis_environnement(),
+        throttle::Claims::depuis_environnement(),
+    )
 }
 
 /// Variante à limite de débit imposée.
@@ -205,7 +227,11 @@ pub fn app(pool: PgPool) -> axum::Router {
 /// Existe pour les tests : le harnais désactive la limite — il crée des dizaines de comptes en
 /// quelques secondes depuis la boucle locale, ce qu'aucun quota réaliste ne laisserait passer —
 /// et le test qui vérifie qu'elle mord se construit une application avec un quota bas.
-pub fn app_with(pool: PgPool, throttle: throttle::Throttle) -> axum::Router {
+pub fn app_with(
+    pool: PgPool,
+    throttle: throttle::Throttle,
+    claims: throttle::Claims,
+) -> axum::Router {
     use tower_http::limit::RequestBodyLimitLayer;
     use tower_http::trace::TraceLayer;
 
@@ -216,6 +242,7 @@ pub fn app_with(pool: PgPool, throttle: throttle::Throttle) -> axum::Router {
         pool: pool.clone(),
         hub: stream::Hub::new(),
         throttle: Arc::new(throttle),
+        claims: Arc::new(claims),
     };
 
     // Branche le hub sur Postgres, ce qui permet de faire tourner plusieurs instances sans que

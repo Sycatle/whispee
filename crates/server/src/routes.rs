@@ -1027,12 +1027,36 @@ struct ClaimedKeyPackage {
 /// unique, et OpenMLS n'empêche pas sa réutilisation.
 async fn claim_key_package(
     State(pool): State<PgPool>,
+    State(claims): State<Arc<crate::throttle::Claims>>,
     Path(device_id): Path<String>,
-    _signed: Signed,
+    signed: Signed,
 ) -> ApiResult<Json<ClaimedKeyPackage>> {
+    // **Quota par couple appelant-cible.**
+    //
+    // Cette route consomme irréversiblement un KeyPackage de la cible, et n'importe quel
+    // appareil authentifié peut la viser — l'appelant n'a aucun lien à prouver avec elle. Sans
+    // borne, un compte quelconque vide le stock de qui il veut, et le rend **injoignable pour
+    // toute nouvelle conversation** : c'est ce que dit déjà le client à propos de son propre
+    // stock, « à zéro, plus personne ne peut ouvrir de conversation avec cet appareil ».
+    //
+    // Le réapprovisionnement automatique du client atténue sans supprimer : il ne tourne qu'à la
+    // relève, et une victime hors ligne ne réapprovisionne pas du tout.
+    //
+    // Le quota porte sur le couple et non sur l'appelant seul : ouvrir des conversations avec
+    // beaucoup de correspondants est légitime, s'acharner sur un seul ne l'est pas. Un appelant
+    // honnête n'a besoin que d'un KeyPackage par appareil visé ; la marge couvre les reprises
+    // après échec réseau.
+    //
+    // Ce que cela ne ferme pas : le compteur vit en mémoire, donc par instance, et plusieurs
+    // comptes complices contournent la borne. Voir `crate::throttle`.
+    let quota = format!("{}:{}", signed.device_id, device_id);
+    if !claims.autorise(&quota) {
+        return Err(ApiError::TooManyRequests);
+    }
+
     // Un appareil révoqué ne doit plus pouvoir être ajouté à un groupe. Le stock est déjà
     // purgé à la révocation ; cette clause ferme la fenêtre entre les deux requêtes et
-    // protège d'un stock republié par un appareil volé.
+    // protège d'un stock républié par un appareil volé.
     let revoked: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM devices WHERE id = $1 AND revoked_at IS NOT NULL")
             .bind(&device_id)

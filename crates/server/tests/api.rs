@@ -302,6 +302,72 @@ async fn un_certificat_signe_par_un_autre_compte_est_refuse() {
     assert_eq!(response.status(), 403);
 }
 
+/// **Le test qui fige la protection du stock d'autrui.**
+///
+/// Consommer un KeyPackage est irréversible, et n'importe quel appareil authentifié peut viser
+/// n'importe qui — l'appelant n'a aucun lien à prouver avec sa cible. Sans borne, un compte
+/// quelconque vide le stock de qui il veut et le rend injoignable pour toute nouvelle
+/// conversation.
+#[tokio::test]
+async fn un_tiers_ne_peut_pas_vider_le_stock_d_un_autre() {
+    let server = common::start_with_claim_quota(2).await;
+    let victime = Device::register(&server, &unique("victime")).await;
+
+    // Un stock confortable : ce n'est pas l'épuisement qu'on veut observer, c'est le refus.
+    let paquets: Vec<String> =
+        (0..10u8).map(|i| BASE64_STANDARD.encode([i; 32])).collect();
+    assert!(
+        victime
+            .post("/v1/key-packages", serde_json::json!({ "packages": paquets }))
+            .await
+            .status()
+            .is_success()
+    );
+
+    let intrus = Device::register(&server, &unique("intrus")).await;
+    let claim = format!("/v1/key-packages/{}/claim", victime.id);
+
+    for tour in 1..=2 {
+        let reponse = intrus.post(&claim, serde_json::json!({})).await;
+        assert!(reponse.status().is_success(), "la consommation {tour} devait passer");
+    }
+
+    let refusee = intrus.post(&claim, serde_json::json!({})).await;
+    assert_eq!(refusee.status(), 429, "l'intrus a pu continuer à vider le stock");
+
+    // La victime reste joignable : le stock n'a perdu que ce que le quota autorisait.
+    let stock: serde_json::Value =
+        victime.get("/v1/key-packages/stock").await.json().await.unwrap();
+    assert_eq!(stock["remaining"], 8);
+}
+
+/// Le quota porte sur le couple appelant-cible, pas sur l'appelant seul.
+///
+/// Ouvrir des conversations avec beaucoup de correspondants est légitime ; s'acharner sur un
+/// seul ne l'est pas. Compter par appelant punirait le premier usage pour empêcher le second.
+#[tokio::test]
+async fn le_quota_de_stock_ne_penalise_pas_les_autres_cibles() {
+    let server = common::start_with_claim_quota(1).await;
+
+    let intrus = Device::register(&server, &unique("intrus")).await;
+
+    for _ in 0..2 {
+        let cible = Device::register(&server, &unique("cible")).await;
+        cible
+            .post(
+                "/v1/key-packages",
+                serde_json::json!({ "packages": [BASE64_STANDARD.encode([1u8; 32])] }),
+            )
+            .await;
+
+        let reponse = intrus
+            .post(&format!("/v1/key-packages/{}/claim", cible.id), serde_json::json!({}))
+            .await;
+
+        assert!(reponse.status().is_success(), "une cible distincte a été refusée");
+    }
+}
+
 /// **Le test qui fige la limite des routes ouvertes.**
 ///
 /// La création de compte n'est pas authentifiable — on ne peut pas signer avec une clé que le

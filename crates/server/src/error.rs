@@ -19,6 +19,13 @@ pub enum ApiError {
     #[error("conflit : {0}")]
     Conflict(&'static str),
 
+    /// L'appelant n'a rien fait d'interdit ; il en a seulement trop fait.
+    ///
+    /// Distinct de `Forbidden` à dessein : un client honnête qui reçoit 429 réessaie plus tard,
+    /// là où un 403 lui ferait conclure qu'il est banni et abandonner.
+    #[error("trop de requêtes")]
+    TooManyRequests,
+
     #[error("erreur de stockage")]
     Database(#[from] sqlx::Error),
 }
@@ -31,6 +38,7 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

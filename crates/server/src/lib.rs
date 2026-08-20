@@ -52,8 +52,11 @@ impl FromRef<AppState> for Arc<stream::Hub> {
 }
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
+    // Une connexion de plus qu'avant : l'écoute inter-instances (`stream::Hub::attach`) en
+    // immobilise une en permanence sur son `LISTEN`. Ne pas ajuster ce chiffre reviendrait à
+    // retirer une connexion au service des requêtes.
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(11)
         .connect(database_url)
         .await?;
 
@@ -118,6 +121,11 @@ pub fn app(pool: PgPool) -> axum::Router {
     // requête unique épuise la mémoire du serveur. Les pièces jointes ont leur propre
     // plafond, nettement plus haut, appliqué à leurs seules routes.
     let state = AppState { pool: pool.clone(), hub: stream::Hub::new() };
+
+    // Branche le hub sur Postgres, ce qui permet de faire tourner plusieurs instances sans que
+    // leurs clients cessent de se voir. Détache des tâches : cette fonction doit donc être
+    // appelée depuis un runtime tokio.
+    state.hub.attach(pool.clone());
 
     let messages = routes::router(state).layer(RequestBodyLimitLayer::new(1024 * 1024));
     let attachments =

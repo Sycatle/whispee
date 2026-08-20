@@ -55,6 +55,14 @@ corps, ce qui empêche de rejouer une signature d'un endpoint sur un autre.
 - contrôle d'accès explicite par groupe : un identifiant de groupe aléatoire n'est pas un
   contrôle d'accès.
 
+`envelopes` est partitionnée par `HASH(group_id)`, en seize partitions. Le découpage temporel
+serait le réflexe et c'est le mauvais ici : aucune lecture ne mentionne `created_at`, donc aucune
+partition ne serait élaguée, et PostgreSQL exigerait d'ajouter la clé de partitionnement à la clé
+primaire — ce qui ferait sauter l'unicité de `(group_id, seq)`, dont dépend l'ordre total MLS.
+`group_id` faisant déjà partie de la clé, le hash ne coûte rien de tout cela et élague
+parfaitement. Fait maintenant, tant que la table est petite : PostgreSQL ne convertit pas une table
+en table partitionnée sur place.
+
 **Limites assumées du serveur :**
 
 | Limite | Détail |
@@ -63,6 +71,7 @@ corps, ce qui empêche de rejouer une signature d'un endpoint sur un autre.
 | Anti-rejeu | Fenêtre temporelle de 60 s, sans cache de nonces. Une requête reste rejouable dans cette fenêtre ; le doublon est rejeté par le client MLS, donc l'impact se limite à du bruit. |
 | Enregistrement | Trust on first use. Reprendre un identifiant avec une autre clé est refusé, mais rien ne prouve que le premier arrivé était légitime. Un déploiement réel adosse cet endpoint à une vérification de numéro ou d'e-mail. |
 | `created_at` | Métadonnée temporelle conservée pour la purge. Aucune autre fonctionnalité ne doit s'y adosser — la règle vaut toujours pour cette colonne-ci. |
+| Purge jamais faite | Et elle ne peut pas l'être automatiquement : chaque enveloppe consomme une génération du ratchet applicatif MLS, un trou empêche le déchiffrement de la suite, et le serveur n'a aucune notion de « livré » — la lui donner demanderait des accusés de réception, c'est-à-dire la métadonnée que ce schéma refuse de tenir. `envelopes` croît donc sans borne, et c'est un vrai problème d'exploitation, pas une simplification. |
 | `last_seen_at` | Dernière activité de chaque appareil, à la minute près. C'est **le** registre que les autres colonnes refusaient de tenir, et il est tenu délibérément : voir « Présence » plus bas. Écrit uniquement depuis les chemins authentifiés par identité, jamais depuis un dépôt anonyme. |
 | Arbre de ratchet | Le Welcome d'ajout transporte l'arbre MLS, **public par construction** : il contient les credentials, donc les noms des membres. Vérifié par `le_welcome_expose_les_identites_mais_jamais_le_contenu`. Le serveur connaît déjà ces identités par `devices` et `group_members`, donc la fuite n'ajoute rien à ce qu'il sait — mais elle est réelle. |
 
@@ -508,6 +517,49 @@ Y authentifier imposerait de mettre la signature dans l'URL, où elle finirait d
 d'accès de tout intermédiaire. Le client passe donc par `fetch` et lit le corps en flux, au prix
 d'une reconnexion à réimplémenter.
 
+### La gateway : une connexion, tous les groupes
+
+`GET /v1/gateway` (WebSocket) est la suite de `/v1/stream`, qui reste servi le temps que les
+clients migrent. Trois choses que le flux SSE ne pouvait pas faire :
+
+- **s'abonner à un groupe rejoint après l'ouverture.** Le SSE fige sa liste à la connexion, ce que
+  les limites plus bas mentionnaient comme « portée du flux figée » ; une trame `subscribe` suffit
+  désormais.
+- **rattraper le retard sans relever.** Le client annonce ses curseurs dans son `identify` et le
+  serveur ne répond que s'il a quelque chose à dire. Le rattrapage ne sert que des numéros de
+  séquence — la lecture passe toujours par le chemin HTTP, qui revérifie l'appartenance.
+- **constater qu'un client est parti.** Le keep-alive SSE ne va que du serveur vers le client.
+
+**Ce que cela change dans le modèle de menace**, et qui coupe dans les deux sens.
+
+*Ce qu'on gagne* : la session s'ouvre sur un défi émis par le serveur, consommé à la première
+utilisation. La fenêtre de rejeu de soixante secondes que le HTTP conserve faute de mémoriser ses
+nonces n'existe pas ici. Le défi porte son propre domaine de signature (`wac-gateway-v1`), sans
+quoi n'importe quelle signature HTTP captée ouvrirait une session.
+
+*Ce qu'on perd* : l'authentification passe de la requête à la session. Une signature par requête
+revérifiait gratuitement, à chaque appel, que l'appareil n'était ni révoqué ni évincé. Une session
+ouverte, elle, survivrait à l'un comme à l'autre — d'où une revalidation à chaque battement, qui
+ferme la socket d'un appareil révoqué et retire les groupes dont il est sorti. Deux tests le
+figent.
+
+La trame `signal` reste authentifiée par le MAC de groupe, comme le chemin HTTP : la session
+connaît pourtant l'identité de son propriétaire, mais s'en servir défairait le sealed sender pour
+la seule commodité de ne pas revérifier un MAC.
+
+### Plusieurs instances
+
+Le hub de diffusion vivait dans la mémoire d'un seul processus : deux instances derrière un
+répartiteur donnaient deux populations de clients qui ne se voyaient pas. Elles se parlent
+désormais par `LISTEN/NOTIFY`, sur un canal Postgres unique — la base est déjà là, et la diffusion
+est déjà best-effort, ce qui ne justifiait pas d'ajouter un bus à déployer et à surveiller.
+
+Ce que cela ajoute à ce que le serveur sait : rien. Le `group_id` transite en clair dans le
+payload, mais il le connaît déjà par `group_members`. Ce qui est nouveau, c'est qu'un déploiement
+réglé sur `log_statement = all` verrait passer les signaux dans ses journaux — la propriété « les
+signaux n'atteignent jamais le disque » dépend donc désormais d'un réglage de la base, ce qui n'est
+pas la même chose qu'être vraie par construction.
+
 ### Réactions et réponses
 
 Durables, dans le canal MLS ordinaire. Une réaction **n'est pas** du trafic de protocole : elle
@@ -606,7 +658,9 @@ Le chiffrement de bout en bout ne résout qu'une partie du problème. Ce qui n'e
 | **Signaux non authentifiés** | Le canal éphémère est chiffré sous une clé symétrique de groupe. Dans un groupe, un membre peut donc faire croire qu'un autre est en train d'écrire. Sans conséquence à deux, où il n'y a qu'un autre. |
 | **Forward secrecy des signaux** | Aucune à l'intérieur d'une epoch : la compromission du secret d'export expose les signaux de cette epoch. Ils n'ont aucune valeur rétrospective et ne sont stockés nulle part — le compromis est délibéré, il évite de faire payer à l'historique le prix d'une donnée jetable. |
 | **Accusés et coercition** | Un accusé de lecture prouve qu'un appareil a affiché un message : une information sur le comportement, non sur le contenu. D'où la désactivation, et sa réciprocité. |
-| **Portée du flux figée** | Le serveur fixe les groupes diffusés à l'ouverture du flux. Un groupe rejoint ensuite impose de rouvrir la connexion ; le client le fait, mais un serveur pourrait retarder la découverte. Sans effet sur la correction : la relève périodique rattrape. |
+| **Portée du flux figée** | Vaut pour `/v1/stream` seul : le serveur y fixe les groupes diffusés à l'ouverture, et un groupe rejoint ensuite impose de rouvrir la connexion. La gateway l'a levée par ses abonnements dynamiques. Sans effet sur la correction dans les deux cas : la relève périodique rattrape. |
+| **Authentification par session** | Sur la gateway, la signature vaut pour toute la durée de la connexion et non par requête. Une révocation ou un retrait de groupe ne prend donc effet qu'à la revalidation suivante — au prochain battement du client, ou au tick du serveur pour un client muet. |
+| **Signaux et journaux Postgres** | La diffusion inter-instances fait transiter les signaux par `pg_notify`. Ils ne sont écrits dans aucune table, mais un serveur réglé sur `log_statement = all` les verrait dans ses journaux. |
 | **Omission d'appareil** | Le serveur ne peut ni *ajouter* un appareil à un compte (attestations) ni *inventer* une révocation (certificats signés). Il peut encore en *omettre* un de la liste, ou taire une révocation authentique. La victime constate qu'un appareil ne reçoit rien : de la censure, bruyante, mais réelle. |
 | **Course à la rotation** | Un appareil volé détient la clé du compte et peut tourner avant son propriétaire. Le serveur ne peut pas les distinguer et applique la première rotation valide. Le seul recours est l'alerte de changement d'empreinte chez les correspondants — raison de plus pour ne jamais la banaliser. |
 | **Fork applicatif** | MLS n'applique pas les rôles : ce sont les clients. Un client qui n'appliquerait pas la même règle ne produirait pas une erreur mais un *fork* silencieux du groupe. `RequiredCapabilities` empêche un client qui ignore l'extension d'entrer, mais pas un client qui la lit mal. |

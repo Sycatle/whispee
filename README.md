@@ -63,6 +63,16 @@ table du schéma qu'on ne sait pas nettoyer — la clé étrangère `ON DELETE C
 sortie, mais elle troue le journal, c'est-à-dire qu'elle choisit de casser les preuves plutôt que
 de garder le déchet.
 
+La consommation de KeyPackages porte sa propre borne, comptée par **couple appelant-cible** et
+réglable par `CLAIM_QUOTA_PER_MINUTE` (5 par défaut). Cette route consomme irréversiblement une
+clé d'accueil de la cible, et n'importe quel appareil authentifié peut viser n'importe qui : sans
+borne, un compte quelconque vidait le stock de son choix et rendait sa victime **injoignable pour
+toute nouvelle conversation**. Le quota porte sur le couple et non sur l'appelant seul — ouvrir
+des conversations avec beaucoup de correspondants est légitime, s'acharner sur un seul ne l'est
+pas. Deux ordres de grandeur sous la limite des routes ouvertes : y reprendre le même chiffre
+aurait laissé soixante consommations par minute sur une même victime, c'est-à-dire une borne
+d'apparence sérieuse et sans effet.
+
 Le compteur vit **en mémoire, donc par instance** : deux instances offrent deux fois le quota, et
 un redémarrage remet à zéro. L'adresse n'est pas non plus une identité — qui en change contourne,
 et des utilisateurs derrière un même NAT partagent. C'est un ralentisseur, pas une barrière ; un

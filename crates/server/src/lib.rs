@@ -73,6 +73,45 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     Ok(pool)
 }
 
+/// Efface les nonces devenus inutiles à l'anti-rejeu.
+///
+/// Un nonce n'a besoin d'être mémorisé que le temps où la requête pourrait encore être acceptée,
+/// c'est-à-dire la fenêtre de tolérance d'horloge. Au-delà, `auth::Signed` la refuse sur son
+/// horodatage, et le garder ne protégerait plus de rien.
+///
+/// Le double de la fenêtre est retenu, pour ne pas courir avec l'horloge : effacer un nonce
+/// encore acceptable rouvrirait exactement le trou que la table existe pour fermer.
+///
+/// Cette tâche n'est pas une commodité — sans elle, `request_nonces` grossit d'une ligne par
+/// requête authentifiée, indéfiniment.
+fn purger_les_nonces(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut rythme = tokio::time::interval(std::time::Duration::from_secs(60));
+
+        loop {
+            rythme.tick().await;
+
+            let effacees = sqlx::query(&format!(
+                "DELETE FROM request_nonces WHERE seen_at < now() - interval '{} seconds'",
+                auth::MAX_CLOCK_SKEW * 2
+            ))
+            .execute(&pool)
+            .await;
+
+            match effacees {
+                Ok(resultat) if resultat.rows_affected() > 0 => {
+                    tracing::debug!(lignes = resultat.rows_affected(), "nonces purgés");
+                }
+                Ok(_) => {}
+                // Une base momentanément indisponible n'est pas fatale : la purge suivante
+                // rattrapera le retard. La faire échouer bruyamment ferait passer un incident
+                // d'exploitation pour un défaut de sécurité.
+                Err(error) => tracing::debug!(%error, "purge des nonces reportée"),
+            }
+        }
+    });
+}
+
 /// Plafond d'une pièce jointe, chiffré compris.
 ///
 /// Le chiffrement AES-GCM n'ajoute que 16 octets de tag : la limite porte donc en pratique
@@ -116,6 +155,9 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
             HeaderName::from_static("x-device-id"),
             HeaderName::from_static("x-timestamp"),
             HeaderName::from_static("x-signature"),
+            // Anti-rejeu. Absent d'ici, le navigateur bloque **toute** requête signée au
+            // préflight, avant l'envoi : le serveur ne voit rien passer.
+            HeaderName::from_static("x-nonce"),
             // Dépôt anonyme (sealed sender), utilisé aussi par les signaux éphémères.
             HeaderName::from_static("x-group-nonce"),
             HeaderName::from_static("x-group-mac"),
@@ -135,6 +177,8 @@ pub fn app(pool: PgPool) -> axum::Router {
     // leurs clients cessent de se voir. Détache des tâches : cette fonction doit donc être
     // appelée depuis un runtime tokio.
     state.hub.attach(pool.clone());
+
+    purger_les_nonces(pool.clone());
 
     let messages = routes::router(state).layer(RequestBodyLimitLayer::new(1024 * 1024));
     let attachments =

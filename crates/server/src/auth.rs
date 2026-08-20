@@ -8,13 +8,18 @@
 //! Il n'y a donc ni mot de passe, ni jeton de session à voler côté serveur : la base ne
 //! contient que des clés publiques.
 //!
-//! # Limite connue : anti-rejeu par fenêtre temporelle
+//! # Anti-rejeu
 //!
-//! Une requête signée peut être rejouée pendant [`MAX_CLOCK_SKEW`]. Un vrai anti-rejeu
-//! demanderait un cache de nonces déjà vus, avec sa purge. Conséquence réelle : un
-//! observateur du réseau peut faire redéposer une enveloppe déjà envoyée. Le doublon est
-//! rejeté par le client MLS (la clé de message a été consommée), donc l'impact se limite à
-//! du bruit — mais la limite doit être levée avant tout usage sérieux.
+//! Chaque requête porte un nonce, couvert par la signature et mémorisé à la première
+//! présentation : le rejouer est refusé.
+//!
+//! Le nonce est **indispensable**, et il ne peut pas être remplacé par la signature elle-même :
+//! Ed25519 est déterministe, donc deux requêtes identiques dans la même seconde portent la même
+//! signature — l'une pouvant être un rejeu quand l'autre est légitime. Réclamer deux KeyPackages
+//! coup sur coup suffit à produire le cas.
+//!
+//! La mémoire n'a pas besoin de dépasser [`MAX_CLOCK_SKEW`] : au-delà, l'horodatage refuse la
+//! requête de toute façon. Voir `migrations/0010_anti_rejeu.sql` pour ce que cela permet.
 //!
 //! # Ce que cet extracteur ne fait plus
 //!
@@ -47,6 +52,14 @@ pub const MAX_CLOCK_SKEW: u64 = 60;
 pub const HEADER_DEVICE: &str = "x-device-id";
 pub const HEADER_TIMESTAMP: &str = "x-timestamp";
 pub const HEADER_SIGNATURE: &str = "x-signature";
+pub const HEADER_NONCE: &str = "x-nonce";
+
+/// Longueur du nonce anti-rejeu.
+///
+/// Seize octets tirés au hasard : la probabilité qu'un appareil en retire un déjà mémorisé est
+/// négligeable devant la fenêtre de soixante secondes, et une collision coûterait de toute façon
+/// un simple refus, pas une faille.
+pub const NONCE_LEN: usize = 16;
 
 /// Requête authentifiée : l'appelant a prouvé la possession de la clé privée de `device_id`.
 pub struct Signed {
@@ -59,13 +72,26 @@ pub struct Signed {
 /// La méthode et le chemin en font partie : sans eux, une signature valide pour
 /// `GET /stock` serait rejouable sur `POST /envelopes`. Le corps est inclus par son
 /// empreinte, ce qui évite de le garder deux fois en mémoire.
-pub fn signing_payload(method: &str, path: &str, timestamp: u64, body: &[u8]) -> Vec<u8> {
+///
+/// Le nonce est ce qui rend le message unique quand tout le reste est identique — deux requêtes
+/// semblables dans la même seconde produiraient sinon la même signature, Ed25519 étant
+/// déterministe. Il est **dans le message signé**, donc un tiers ne peut pas rejouer une requête
+/// captée en changeant simplement le nonce de l'en-tête.
+pub fn signing_payload(
+    method: &str,
+    path: &str,
+    timestamp: u64,
+    nonce: &[u8],
+    body: &[u8],
+) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(method.as_bytes());
     payload.push(b'\n');
     payload.extend_from_slice(path.as_bytes());
     payload.push(b'\n');
     payload.extend_from_slice(timestamp.to_string().as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(nonce);
     payload.push(b'\n');
     payload.extend_from_slice(&Sha256::digest(body));
     payload
@@ -84,7 +110,7 @@ where
         // Tout ce qui vient de la requête est extrait en valeurs possédées avant le
         // premier `await` : garder un emprunt sur `request` à travers un point de suspension
         // rendrait le futur non-`Send`, et axum exige des handlers `Send`.
-        let (device_id, timestamp, signature, method, path) = {
+        let (device_id, timestamp, signature, nonce, method, path) = {
             let headers = request.headers();
             let header = |name: &str| -> Option<String> {
                 headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned)
@@ -95,6 +121,7 @@ where
                 .and_then(|t| t.parse().ok())
                 .ok_or(ApiError::Unauthorized)?;
             let signature = header(HEADER_SIGNATURE).ok_or(ApiError::Unauthorized)?;
+            let nonce = header(HEADER_NONCE).ok_or(ApiError::Unauthorized)?;
 
             let method = request.method().as_str().to_owned();
             let path = request
@@ -103,8 +130,14 @@ where
                 .map(|p| p.as_str().to_owned())
                 .unwrap_or_else(|| request.uri().path().to_owned());
 
-            (device_id, timestamp, signature, method, path)
+            (device_id, timestamp, signature, nonce, method, path)
         };
+
+    let nonce = BASE64_STANDARD
+        .decode(nonce)
+        .ok()
+        .filter(|bytes| bytes.len() == NONCE_LEN)
+        .ok_or(ApiError::Unauthorized)?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -141,8 +174,29 @@ where
             .ok_or(ApiError::Unauthorized)?;
 
         verifying_key
-            .verify_strict(&signing_payload(&method, &path, timestamp, &body), &signature)
+            .verify_strict(&signing_payload(&method, &path, timestamp, &nonce, &body), &signature)
             .map_err(|_| ApiError::Unauthorized)?;
+
+        // Anti-rejeu, **après** la vérification : mémoriser une signature invalide permettrait
+        // de remplir la table sans détenir aucune clé.
+        //
+        // Attendu, contrairement à ce qu'était la présence. Une écriture détachée ne protégerait
+        // rien — le rejeu passerait pendant qu'elle est en vol. C'est le prix de la garantie, et
+        // il porte sur toutes les requêtes signées.
+        //
+        // L'unicité est portée par la clé primaire : un `SELECT` puis un `INSERT` laisserait
+        // deux requêtes simultanées passer toutes les deux.
+        let premiere_fois = sqlx::query(
+            "INSERT INTO request_nonces (device_id, nonce) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(&device_id)
+        .bind(&nonce)
+        .execute(&pool)
+        .await?;
+
+        if premiere_fois.rows_affected() == 0 {
+            return Err(ApiError::Unauthorized);
+        }
 
         Ok(Self { device_id, body })
     }

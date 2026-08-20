@@ -302,6 +302,72 @@ async fn un_certificat_signe_par_un_autre_compte_est_refuse() {
     assert_eq!(response.status(), 403);
 }
 
+/// **Le test qui fige l'anti-rejeu.**
+///
+/// La même requête, aux octets près, ne doit passer qu'une fois. Sans cette garantie, un
+/// observateur du réseau peut faire rejouer n'importe quelle requête signée pendant toute la
+/// fenêtre de tolérance d'horloge — soixante secondes.
+#[tokio::test]
+async fn une_requete_signee_ne_passe_qu_une_fois() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+
+    // Tout est figé — horodatage, corps **et nonce** : les deux envois sont donc identiques à
+    // l'octet près, ce qui est exactement ce qu'un observateur du réseau peut reproduire.
+    let instant = common::now();
+    let nonce = [3u8; 16];
+    let corps = serde_json::to_vec(&serde_json::json!({ "handles": [] })).unwrap();
+
+    let envoyer = async |corps: Vec<u8>| {
+        alice
+            .forge_with_nonce(
+                "POST",
+                "/v1/presence",
+                corps.clone(),
+                corps,
+                instant,
+                "/v1/presence",
+                nonce,
+            )
+            .await
+    };
+
+    assert!(envoyer(corps.clone()).await.status().is_success(), "la première doit passer");
+    assert_eq!(envoyer(corps).await.status(), 401, "la requête a été acceptée deux fois");
+}
+
+/// Le nonce est propre à chaque appareil.
+///
+/// Il est tiré au hasard, sans coordination entre clients : si l'unicité était globale, deux
+/// appareils qui tirent le même nonce se couperaient mutuellement, et le refus paraîtrait
+/// aléatoire.
+#[tokio::test]
+async fn deux_appareils_peuvent_tirer_le_meme_nonce() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let bob = Device::register(&server, &unique("bob")).await;
+
+    let instant = common::now();
+    let nonce = [7u8; 16];
+    let corps = serde_json::to_vec(&serde_json::json!({ "handles": [] })).unwrap();
+
+    for appareil in [&alice, &bob] {
+        let reponse = appareil
+            .forge_with_nonce(
+                "POST",
+                "/v1/presence",
+                corps.clone(),
+                corps.clone(),
+                instant,
+                "/v1/presence",
+                nonce,
+            )
+            .await;
+
+        assert!(reponse.status().is_success(), "le nonce d'un appareil a bloqué l'autre");
+    }
+}
+
 /// L'horodatage est dans le message signé : le présenter décalé invalide la signature. Sans
 /// cette borne, un certificat fabriqué à l'avance resterait exploitable après un vol de base.
 #[tokio::test]

@@ -24,18 +24,32 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Message signé par chaque requête.
+ *
+ * Le nonce est ce qui rend le message unique quand tout le reste est identique. Sans lui, deux
+ * requêtes semblables dans la même seconde porteraient la même signature — Ed25519 étant
+ * déterministe — et le serveur ne pourrait pas distinguer un rejeu d'un appel légitime. Il est
+ * **dans le message signé**, donc changer le nonce de l'en-tête invalide la signature.
+ */
 async function signingPayload(
   method: string,
   path: string,
   timestamp: number,
+  nonce: Uint8Array,
   body: Uint8Array,
 ): Promise<Uint8Array> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buffer(body)));
   const prefix = new TextEncoder().encode(`${method}\n${path}\n${timestamp}\n`);
+  const separateur = new TextEncoder().encode("\n");
 
-  const payload = new Uint8Array(prefix.length + digest.length);
+  const payload = new Uint8Array(
+    prefix.length + nonce.length + separateur.length + digest.length,
+  );
   payload.set(prefix, 0);
-  payload.set(digest, prefix.length);
+  payload.set(nonce, prefix.length);
+  payload.set(separateur, prefix.length + nonce.length);
+  payload.set(digest, prefix.length + nonce.length + separateur.length);
   return payload;
 }
 
@@ -122,7 +136,11 @@ export class Api {
     expect: "json" | "bytes",
   ): Promise<T> {
     const timestamp = Math.floor(Date.now() / 1000);
-    const signature = await sign(this.keys, await signingPayload(method, path, timestamp, encoded));
+    const nonce = crypto.getRandomValues(new Uint8Array(16));
+    const signature = await sign(
+      this.keys,
+      await signingPayload(method, path, timestamp, nonce, encoded),
+    );
 
     const response = await fetch(`${BASE_URL}${path}`, {
       method,
@@ -133,6 +151,7 @@ export class Api {
         "x-device-id": this.deviceId,
         "x-timestamp": String(timestamp),
         "x-signature": signature,
+        "x-nonce": toBase64(nonce),
       },
       body: method === "GET" ? undefined : buffer(encoded),
     });

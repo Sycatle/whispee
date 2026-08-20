@@ -14,7 +14,6 @@ use base64::prelude::BASE64_STANDARD;
 use crypto_core::Account;
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 /// Distingue les données de chaque test.
@@ -221,7 +220,8 @@ impl Device {
     /// Sert au test qui vérifie qu'une signature captée sur le chemin HTTP n'ouvre pas de
     /// session : c'est la séparation de domaine qui doit la rejeter, pas un hasard de format.
     pub fn sign_challenge_as_http(&self, challenge: &[u8]) -> String {
-        let payload = server::auth::signing_payload("GET", "/v1/gateway", now(), challenge);
+        let payload =
+            server::auth::signing_payload("GET", "/v1/gateway", now(), &[0u8; 16], challenge);
         BASE64_STANDARD.encode(self.signing_key.sign(&payload).to_bytes())
     }
 
@@ -266,14 +266,37 @@ impl Device {
         timestamp: u64,
         signed_path: &str,
     ) -> reqwest::Response {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(method.as_bytes());
-        payload.push(b'\n');
-        payload.extend_from_slice(signed_path.as_bytes());
-        payload.push(b'\n');
-        payload.extend_from_slice(timestamp.to_string().as_bytes());
-        payload.push(b'\n');
-        payload.extend_from_slice(&Sha256::digest(&signed_body));
+        // Tiré ici plutôt que passé en paramètre : aucun test ne s'intéresse à sa valeur, et le
+        // rendre explicite partout obligerait à en inventer un à chaque appel. Le test du rejeu,
+        // lui, passe par [`Device::forge_with_nonce`] — il doit présenter deux fois exactement
+        // les mêmes octets, ce qu'un nonce tiré au hasard rendrait impossible.
+        let nonce: [u8; 16] = rand_core::OsRng.gen_nonce();
+
+        self.forge_with_nonce(method, path, sent_body, signed_body, timestamp, signed_path, nonce)
+            .await
+    }
+
+    /// Variante à nonce imposé, pour rejouer une requête à l'octet près.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forge_with_nonce(
+        &self,
+        method: &str,
+        path: &str,
+        sent_body: Vec<u8>,
+        signed_body: Vec<u8>,
+        timestamp: u64,
+        signed_path: &str,
+        nonce: [u8; 16],
+    ) -> reqwest::Response {
+        // `server::auth::signing_payload` plutôt qu'une seconde écriture du format : deux
+        // définitions divergeraient, et c'est la copie oubliée qui rend un test vert à tort.
+        let payload = server::auth::signing_payload(
+            method,
+            signed_path,
+            timestamp,
+            &nonce,
+            &signed_body,
+        );
 
         let signature = BASE64_STANDARD.encode(self.signing_key.sign(&payload).to_bytes());
 
@@ -285,11 +308,27 @@ impl Device {
             .header("x-device-id", &self.id)
             .header("x-timestamp", timestamp.to_string())
             .header("x-signature", signature)
+            .header("x-nonce", BASE64_STANDARD.encode(nonce))
             .header("content-type", "application/json")
             .body(sent_body)
             .send()
             .await
             .unwrap()
+    }
+}
+
+/// Tirage d'un nonce de requête.
+trait NonceSource {
+    fn gen_nonce(&mut self) -> [u8; 16];
+}
+
+impl NonceSource for rand_core::OsRng {
+    fn gen_nonce(&mut self) -> [u8; 16] {
+        use rand_core::RngCore;
+
+        let mut nonce = [0u8; 16];
+        self.fill_bytes(&mut nonce);
+        nonce
     }
 }
 

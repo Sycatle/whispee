@@ -54,6 +54,22 @@ Réclamer deux KeyPackages coup sur coup suffit à produire le cas. La table des
 `UNLOGGED` et purgée au-delà de la fenêtre de tolérance d'horloge : au-delà, l'horodatage refuse
 la requête de toute façon.
 
+Les quatre routes qui ne peuvent pas être authentifiées — création de compte, enregistrement
+d'appareil, dépôt et relève d'appairage — portent une **limite de débit par adresse**, réglable par
+`THROTTLE_PER_MINUTE` (60 par défaut). La création de compte est celle qui la justifie : elle
+écrit dans le journal de transparence, dont les entrées ne se reprennent pas sans casser les
+preuves de consistance. Sans limite, un tiers sans identité faisait grossir indéfiniment la seule
+table du schéma qu'on ne sait pas nettoyer — la clé étrangère `ON DELETE CASCADE` offre bien une
+sortie, mais elle troue le journal, c'est-à-dire qu'elle choisit de casser les preuves plutôt que
+de garder le déchet.
+
+Le compteur vit **en mémoire, donc par instance** : deux instances offrent deux fois le quota, et
+un redémarrage remet à zéro. L'adresse n'est pas non plus une identité — qui en change contourne,
+et des utilisateurs derrière un même NAT partagent. C'est un ralentisseur, pas une barrière ; un
+déploiement sérieux porterait cette limite dans le répartiteur, qui voit tout le trafic. Le
+serveur ne lit d'ailleurs que l'adresse de la socket et jamais `X-Forwarded-For`, qui se falsifie
+librement.
+
 **Points critiques implémentés :**
 
 - retrait atomique des KeyPackages (`DELETE ... RETURNING` sur `FOR UPDATE SKIP LOCKED`) —

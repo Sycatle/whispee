@@ -34,6 +34,7 @@
 //! JavaScript n'a aucun accès — demande de rendre asynchrone chaque appel crypto du client, et
 //! reste à faire. Tant que ce n'est pas fait, l'écrire ici évite de croire la propriété acquise.
 
+pub mod cipher;
 pub mod store;
 
 /// Démarre l'application.

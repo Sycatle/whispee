@@ -990,8 +990,12 @@ dependencies = [
 name = "desktop"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "ed25519-dalek",
+ "rand_core 0.6.4",
  "tauri",
  "tauri-build",
+ "zeroize",
 ]
 
 [[package]]

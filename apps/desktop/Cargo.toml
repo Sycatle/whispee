@@ -24,6 +24,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Les mêmes primitives que le reste du projet : AES-256-GCM pour l'état au repos, Ed25519 pour
+# les requêtes. Reprendre celles du workspace évite qu'un jour deux versions de la même courbe
+# cohabitent dans le même binaire.
+aes-gcm.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+zeroize.workspace = true
 
 [features]
 # **Ce drapeau décide d'où vient l'interface**, et non le profil de compilation.

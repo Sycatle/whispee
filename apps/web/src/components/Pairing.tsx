@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Session } from "@/lib/session";
+import { QrCode } from "@/components/QrCode";
+import { scanDisponible, scanner } from "@/lib/scanner";
 
 /**
  * Ajout d'un appareil, côté appareil **déjà authentifié**.
@@ -13,6 +15,50 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
   const [confirmation, setConfirmation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [camera, setCamera] = useState(false);
+  const video = useRef<HTMLVideoElement>(null);
+  const arret = useRef<(() => void) | null>(null);
+
+  // La caméra doit s'éteindre au démontage, y compris si le panneau se ferme pendant un scan.
+  // Un voyant vert qui reste allumé après coup est au mieux inquiétant, au pire une fuite.
+  useEffect(() => () => arret.current?.(), []);
+
+  /**
+   * Scanne, puis appaire directement.
+   *
+   * Sans étape de confirmation intermédiaire : le code lu n'est pas une intention à valider,
+   * c'est la même donnée que celle qu'on aurait recopiée. La vérification, elle, arrive juste
+   * après — le code de confirmation affiché des deux côtés, qui est le seul contrôle qui compte.
+   */
+  const lireLeCarre = async () => {
+    setError(null);
+    setCamera(true);
+    try {
+      if (!video.current) return;
+
+      const { lecture, arreter } = await scanner(video.current);
+      arret.current = arreter;
+
+      const lu = await lecture;
+      setCode(lu);
+      setCamera(false);
+      setBusy(true);
+      setConfirmation(await session.pairDevice(lu.trim()));
+    } catch (e) {
+      // Une caméra refusée n'est pas une panne : le champ de saisie reste, et il suffit.
+      setError(
+        e instanceof Error && e.name === "NotAllowedError"
+          ? "Caméra refusée. Recopiez le code affiché sur l'autre appareil."
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
+      setCamera(false);
+    } finally {
+      arret.current = null;
+      setBusy(false);
+    }
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -60,10 +106,50 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
       </div>
 
       <p className="mt-2 text-(--color-ink-muted)">
-        Sur le nouvel appareil, choisissez « Ajouter cet appareil à un compte » et recopiez ici
-        le code affiché. Ce code ne contient aucun secret : il n&apos;est qu&apos;une clé
-        publique éphémère, inutilisable par qui l&apos;intercepte.
+        Sur le nouvel appareil, choisissez « Ajouter cet appareil à un compte », puis scannez son
+        carré ou recopiez son code ici. Ce code ne contient aucun secret : il n&apos;est
+        qu&apos;une clé publique éphémère, inutilisable par qui l&apos;intercepte.
       </p>
+
+      <p className="mt-2 text-xs text-(--color-ink-muted)">
+        Ne scannez que l&apos;écran que vous avez en main : c&apos;est la seule chose qui
+        distingue votre appareil de celui d&apos;un inconnu. Les deux écrans afficheront ensuite
+        le même code de confirmation — s&apos;ils diffèrent, interrompez.
+      </p>
+
+      {camera && (
+        <div className="mt-3">
+          {/* `playsInline` sans quoi iOS ouvre la vidéo en plein écran, ce qui recouvre le
+              panneau et donne l'impression que l'application a changé d'écran. */}
+          <video
+            ref={video}
+            playsInline
+            muted
+            className="w-full rounded-md border border-(--color-border-subtle)"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              arret.current?.();
+              setCamera(false);
+            }}
+            className="mt-2 text-(--color-ink-muted) underline tactile:min-h-11"
+          >
+            Arrêter la caméra
+          </button>
+        </div>
+      )}
+
+      {!camera && scanDisponible() && (
+        <button
+          type="button"
+          onClick={() => void lireLeCarre()}
+          disabled={busy}
+          className="mt-3 w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50 tactile:min-h-11"
+        >
+          Scanner le carré
+        </button>
+      )}
 
       <form onSubmit={submit} className="mt-3 space-y-2">
         <textarea
@@ -114,13 +200,19 @@ export function ShowPairingCode({
       <div>
         <h1 className="text-xl font-medium">Ajouter cet appareil</h1>
         <p className="mt-2 text-sm text-(--color-ink-muted)">
-          Sur un appareil où vous êtes déjà connecté, ouvrez « Ajouter un appareil » et
-          recopiez-y ce code. Il ne contient aucun secret : votre phrase de récupération reste
-          là où elle est, et n&apos;a pas à être ressaisie.
+          Sur un appareil où vous êtes déjà connecté, ouvrez « Ajouter un appareil » et scannez
+          ce carré — ou recopiez le code en dessous. Il ne contient aucun secret : votre phrase
+          de récupération reste là où elle est, et n&apos;a pas à être ressaisie.
         </p>
       </div>
 
+      <div className="flex justify-center">
+        <QrCode value={code} />
+      </div>
+
       <div className="space-y-2">
+        {/* Le texte reste, sous le carré : toutes les plateformes ne savent pas scanner, et un
+            ordinateur de bureau n'a souvent pas de caméra tournée vers l'autre écran. */}
         <p className="break-all rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) p-4 font-mono text-xs">
           {code}
         </p>

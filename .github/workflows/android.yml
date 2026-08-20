@@ -121,6 +121,21 @@ jobs:
           VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
         run: cargo tauri android init
 
+      # La caméra sert à scanner le carré d'appairage, et Android refuse `getUserMedia` sans
+      # cette déclaration — silencieusement du point de vue de l'utilisateur, qui voit une
+      # caméra qui ne s'ouvre pas.
+      #
+      # Ajoutée ici et non dans un fichier du dépôt parce que `gen/` est régénéré à chaque
+      # build : toute modification manuelle du manifeste serait effacée par l'étape précédente.
+      # Le jour où ce projet Android sera versionné, cette étape devra disparaître avec le
+      # commentaire qui l'explique, sans quoi la permission finira déclarée deux fois.
+      - name: Declare the camera permission
+        working-directory: apps/desktop/gen/android/app/src/main
+        run: |
+          grep -q 'permission.CAMERA' AndroidManifest.xml || \
+            sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA" />\n    <application|' AndroidManifest.xml
+          grep -c 'permission.CAMERA' AndroidManifest.xml
+
       - name: Build the APK
         working-directory: apps/desktop
         env:

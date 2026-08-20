@@ -15,12 +15,16 @@ import * as envelope from "./envelope";
 import { fromBase64, toBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, openLock } from "./lock";
 import type { SignalSettings } from "./storage";
+import { type Decision, type Etapes, type Presence, decider, migrer } from "./migration";
 import {
   type Ancrage,
   ancrageCourant,
+  ancrageNatif,
   ancrageNeuf,
+  ancrageWebExistant,
   effacerTout,
 } from "./persistence";
+import { isTauri } from "./platform";
 import { type ReceiptBook, pending, record, statusOf } from "./receipts";
 import {
   type Typing,
@@ -312,9 +316,9 @@ export class Session {
    * Chemin normal d'ajout d'un appareil : la phrase de récupération n'est jamais ressaisie, et
    * n'a donc pas à être exposée une seconde fois.
    */
-  static async fromSeed(handle: string, seed: Uint8Array): Promise<Session> {
+  static async fromSeed(handle: string, seed: Uint8Array, ancrage?: Ancrage): Promise<Session> {
     const crypto = await loadCrypto();
-    return Session.attach(crypto, crypto.AccountKey.fromSeed(seed), handle);
+    return Session.attach(crypto, crypto.AccountKey.fromSeed(seed), handle, ancrage);
   }
 
   static async restoreFromPhrase(handle: string, phrase: string): Promise<Session> {
@@ -328,11 +332,16 @@ export class Session {
     crypto: Crypto,
     account: AccountKey,
     handle: string,
+    /**
+     * Ancrage imposé, pour la migration : elle enregistre un appareil natif depuis un appareil
+     * web, donc le défaut de la plateforme ne dit pas ce qu'il faut faire.
+     */
+    impose?: Ancrage,
   ): Promise<Session> {
     // L'ancrage décide où vivront les clés : dans le processus natif sous Tauri, dans
     // IndexedDB ailleurs. L'enregistrement n'a pas à savoir lequel des deux — il ne manipule
     // que la moitié publique.
-    const ancrage = await ancrageNeuf();
+    const ancrage = impose ?? (await ancrageNeuf());
     const authKey = await ancrage.cipher.authPublicKey();
 
     // L'identifiant est qualifié par le handle : sans cela l'espace de noms serait global et
@@ -406,6 +415,69 @@ export class Session {
   }
 
   /**
+   * Enregistre un appareil natif à partir de celui-ci, puis s'efface.
+   *
+   * # Pourquoi c'est l'ancien appareil qui pilote
+   *
+   * Lui seul est membre des groupes MLS. Le nouvel appareil ne peut pas s'y inviter : MLS ne
+   * rattrape pas un membre absent de l'arbre, il faut qu'un membre l'ajoute. C'est exactement
+   * ce que fait `propagateOwnDevices` à chaque relève, sans rien de spécifique à la migration.
+   *
+   * # L'ordre est dans `migration.ts`
+   *
+   * Ici, seulement de quoi l'exécuter. La séparation n'est pas cosmétique : l'enchaînement est
+   * le seul endroit qu'une interruption peut abîmer, et il ne serait pas testable mêlé à MLS,
+   * au réseau et à la webview.
+   */
+  async migrerVersNatif(
+    decision: Decision,
+    natif: Ancrage,
+    progres?: (etape: string) => void,
+  ): Promise<Session> {
+    // Ouverte d'abord si elle existe déjà : une reprise ne réenregistre pas: le serveur
+    // décline les noms pris, donc un second enregistrement créerait un appareil de plus.
+    let nouvelle = await Session.ouvrir(natif);
+
+    const etapes: Etapes = {
+      progres,
+      enregistrerAppareilNatif: async () => {
+        nouvelle = await Session.fromSeed(this.handle, this.account.exportSeed(), natif);
+        return nouvelle.deviceId;
+      },
+      propagerDepuisAncien: () => this.poll(),
+      avancement: async () => {
+        // La nouvelle session relève avant d'être comptée : les groupes n'arrivent pas par
+        // l'ajout lui-même, mais par les Welcome qu'elle doit aller chercher.
+        await nouvelle?.poll();
+        return {
+          rejointes: nouvelle?.conversations.size ?? 0,
+          attendues: this.conversations.size,
+        };
+      },
+      restaurerHistorique: async () => {
+        for (const view of nouvelle?.conversations.values() ?? []) {
+          // Une conversation dont l'historique manque reste utilisable : mieux vaut une
+          // migration qui aboutit avec un fil incomplet qu'un compte bloqué sur une entrée
+          // d'archive illisible.
+          await nouvelle?.hydrate(view).catch((error: unknown) => {
+            console.warn("historique non restauré pour une conversation", error);
+          });
+        }
+      },
+      revoquerAncien: (ancien) => {
+        if (!nouvelle) throw new Error("migration : aucun appareil natif à qui confier la suite");
+        return nouvelle.revokeOwnDevice(ancien);
+      },
+      oublierWeb: () => this.forget(),
+    };
+
+    await migrer(decision, etapes, this.deviceId);
+
+    if (!nouvelle) throw new Error("migration : l'appareil natif n'a pas été enregistré");
+    return nouvelle;
+  }
+
+  /**
    * Indique si une session verrouillée attend un mot de passe.
    *
    * Permet à l'interface de demander la saisie **avant** de tenter une restauration, plutôt
@@ -426,8 +498,19 @@ export class Session {
    */
   static async restore(password?: string): Promise<Session | null> {
     const ancrage = await ancrageCourant();
-    const stored = await ancrage?.store.load();
-    if (!ancrage || !stored?.state) return null;
+    return ancrage === undefined ? null : Session.ouvrir(ancrage, password);
+  }
+
+  /**
+   * Recharge la session rangée dans un ancrage précis.
+   *
+   * Séparé de `restore` pour la migration, qui doit tenir les **deux** sessions ouvertes en
+   * même temps : l'ancienne introduit la nouvelle dans les groupes, et seule l'ancienne peut le
+   * faire — elle seule en est membre.
+   */
+  static async ouvrir(ancrage: Ancrage, password?: string): Promise<Session | null> {
+    const stored = await ancrage.store.load();
+    if (!stored?.state) return null;
 
     if (stored.lock && password === undefined) {
       throw new Error("Cette session est verrouillée : mot de passe requis.");
@@ -2106,4 +2189,54 @@ async function vaultCipherOf(_crypto: Crypto, account: AccountKey): Promise<Cryp
     console.warn("clé de coffre indisponible : archivage désactivé pour cette session", error);
     return null;
   }
+}
+
+/**
+ * Ce qu'il faut faire au démarrage, migration comprise.
+ *
+ * # Pourquoi ce n'est pas dans `Session.restore`
+ *
+ * Une reprise de migration tient **deux** sessions ouvertes en même temps, et `restore` en rend
+ * une. Les faire cohabiter dans la même fonction reviendrait à lui donner deux contrats selon un
+ * état qu'elle découvrirait en chemin.
+ *
+ * # Le repli n'est pas un échec silencieux
+ *
+ * Quand la migration est refusée — coffre coupé, ou stockage natif occupé par un autre compte —
+ * l'application continue sur IndexedDB et `repli` porte la raison. La taire laisserait croire à
+ * une durabilité qui n'existe pas.
+ */
+export async function demarrer(
+  password?: string,
+  progres?: (etape: string) => void,
+): Promise<{ session: Session | null; repli?: string }> {
+  if (!isTauri()) return { session: await Session.restore(password) };
+
+  const natif = ancrageNatif();
+  const web = await ancrageWebExistant();
+
+  const decision = decider(await presenceDe(web), await presenceDe(natif));
+
+  if (decision.quoi === "repli") {
+    return { session: web ? await Session.ouvrir(web, password) : null, repli: decision.raison };
+  }
+
+  if (decision.quoi !== "demarrer" && decision.quoi !== "reprendre") {
+    return { session: await Session.restore(password) };
+  }
+
+  // L'ancienne session doit être ouverte : elle seule est membre des groupes, et c'est elle qui
+  // y introduit la nouvelle. Un verrou posé impose donc de migrer après la saisie, pas avant.
+  const ancienne = web ? await Session.ouvrir(web, password) : null;
+  if (!ancienne) return { session: await Session.restore(password) };
+
+  return { session: await ancienne.migrerVersNatif(decision, natif, progres) };
+}
+
+/** Ce qu'un ancrage révèle sans être ouvert : de quoi décider, et rien de plus. */
+async function presenceDe(ancrage: Ancrage | undefined): Promise<Presence | undefined> {
+  const stored = await ancrage?.store.load();
+  if (!stored?.state) return undefined;
+
+  return { handle: stored.handle, vaultEnabled: stored.vaultEnabled };
 }

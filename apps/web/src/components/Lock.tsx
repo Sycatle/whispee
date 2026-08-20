@@ -19,8 +19,10 @@ export function Unlock({
     setBusy(true);
     setRefus(false);
     try {
-      const { Session } = await import("@/lib/session");
-      const session = await Session.restore(password);
+      const { demarrer } = await import("@/lib/session");
+      // Le même chemin qu'au démarrage sans verrou : une installation à migrer doit l'être
+      // ici aussi, et c'est seulement maintenant que l'état est lisible.
+      const { session } = await demarrer(password);
       if (session) onUnlocked(session);
     } catch {
       // Toute erreur est présentée comme un mot de passe incorrect : distinguer « mauvais mot

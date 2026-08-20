@@ -5,6 +5,7 @@ node_modules/
 pkg/
 *.tsbuildinfo
 dist/
+release/artefacts/
 apps/desktop/gen/
 .claude/scheduled_tasks.lock
 .worktrees/

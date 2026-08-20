@@ -22,6 +22,7 @@ crates/
   server/         delivery service (axum + PostgreSQL)
 apps/
   web/            Vite + React (web, et source de l'application de bureau)
+  desktop/        application de bureau (Tauri 2)
 ```
 
 ### Le serveur
@@ -134,7 +135,37 @@ n'en garder qu'une couperait la moitié du client sans que l'autre ne le signale
 
 Ce que rien de tout cela ne corrige, et qu'il faut redire : le serveur livre ce JavaScript et
 peut en livrer une version hostile. Aucune politique navigateur ne s'y oppose. Seule une
-application dont le code est empaqueté dans le binaire installé ferme cette voie.
+application dont le code est empaqueté dans le binaire installé ferme cette voie — d'où
+`apps/desktop`.
+
+### L'application de bureau
+
+```sh
+cd apps/web && pnpm run build     # produit `dist/`, que Tauri empaquette
+cargo run -p desktop
+```
+
+**C'est ce qui ferme la voie décrite juste au-dessus.** L'interface est dans le binaire
+installé : le serveur ne la livre plus, donc il ne peut plus la remplacer. Ce n'est pas le
+confort d'une fenêtre native qui justifie cette cible, c'est cela.
+
+Ce que cela déplace plutôt que supprimer : la confiance va désormais au canal de distribution du
+binaire. Une mise à jour non signée, ou signée par une clé volée, reproduit exactement le
+problème. **Ce projet ne fournit ni signature ni mise à jour automatique.**
+
+Ce que cela ne change pas encore : la cryptographie tourne toujours en WebAssembly dans la
+webview, comme sur le web. Les clés privées vivent donc dans la mémoire linéaire du module,
+accessible au JavaScript de la page. Les faire passer en Rust natif — où `zeroize` s'applique
+vraiment et où le JavaScript n'a aucun accès — demande de rendre asynchrone chaque appel crypto
+du client, et reste à faire.
+
+Le mobile passe par la même base de code (Tauri 2 cible iOS et Android), mais n'a pas été
+construit : il demande le SDK Android et, pour iOS, un macOS. La webview mobile ne vaudra de
+toute façon pas du natif sur les gestes et les notifications.
+
+Les origines `tauri://localhost` et `http://tauri.localhost` figurent dans le défaut
+d'`ALLOWED_ORIGINS` côté serveur : elles sont imposées par le système d'exploitation, et les
+oublier produirait un « Failed to fetch » que le serveur ne verrait jamais passer.
 
 #### Pièces jointes
 

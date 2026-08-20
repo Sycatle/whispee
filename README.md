@@ -171,8 +171,47 @@ installé : le serveur ne la livre plus, donc il ne peut plus la remplacer. Ce n
 confort d'une fenêtre native qui justifie cette cible, c'est cela.
 
 Ce que cela déplace plutôt que supprimer : la confiance va désormais au canal de distribution du
-binaire. Une mise à jour non signée, ou signée par une clé volée, reproduit exactement le
-problème. **Ce projet ne fournit ni signature ni mise à jour automatique.**
+binaire. Un binaire substitué annule le bénéfice entier de cette cible — et le fait
+silencieusement. C'est à quoi répond la publication vérifiable décrite ci-dessous.
+
+#### Publier et vérifier un binaire
+
+```sh
+scripts/release.sh /chemin/vers/cle-privee.pem   # construit, empreinte, signe
+scripts/verify-release.sh                        # vérifie, sans aucune clé privée
+```
+
+**Reproductible d'abord, signé ensuite.** Une signature dit « quelqu'un détenant cette clé a
+produit ce fichier » ; elle ne dit pas « ce fichier correspond à ce code ». L'ordre importe pour
+un projet dont la thèse est que l'utilisateur ne devrait pas avoir à croire l'opérateur sur
+parole : le binaire est **reproductible**, donc vérifiable en le reconstruisant, sans faire
+confiance à quiconque. La signature n'authentifie ensuite que la publication.
+
+La reproductibilité tient à trois `--remap-path-prefix` posés par `scripts/release.sh` — dépôt,
+registre Cargo et sysroot. Sans eux, le binaire contenait 217 chemins absolus, et deux
+constructions honnêtes du même commit donnaient deux empreintes différentes. Ils sont calculés
+par le script et non figés dans un fichier versionné : les y écrire en dur reproduirait le défaut
+qu'ils corrigent, en ne valant que pour une machine.
+
+Ed25519 via `openssl`, plutôt que GPG ou minisign : ce projet vérifie déjà des signatures Ed25519
+partout — attestations, révocations, rotations, tête du journal. Une seule primitive pour une
+seule question.
+
+**Ce que cela ne protège pas**, et qu'il faut dire aussi nettement que le reste :
+
+| Limite | Détail |
+|---|---|
+| Première installation | Trust on first use, exactement comme l'enregistrement d'un compte : rien ne prouve que la première clé publique rencontrée soit légitime. |
+| Clé publique dans le dépôt | Qui contrôle le dépôt peut la remplacer en même temps que le binaire. La seule protection réelle est de comparer son empreinte hors bande — le même geste que la vérification d'empreinte de compte que l'application demande déjà. |
+| Vérification manuelle | Sans mécanisme de mise à jour, `verify-release.sh` doit être lancé à la main. Un utilisateur qui ne le lance pas n'est protégé par rien. |
+| Reproductibilité conditionnelle | Elle vaut **à environnement donné**. Une autre version de `rustc` ou de `pnpm` produit un binaire différent sans que rien ne soit compromis, d'où le fichier `BUILD-INFO` publié avec les empreintes. Vérifié ici entre deux constructions successives sur la même machine ; la reproductibilité entre machines distinctes n'a pas été mesurée. |
+
+La clé privée n'entre jamais dans le dépôt. Pour en produire une :
+
+```sh
+openssl genpkey -algorithm ed25519 -out cle-privee.pem
+openssl pkey -in cle-privee.pem -pubout -out release/whatsapp_clone.pub
+```
 
 Ce que cela ne change pas encore : la cryptographie tourne toujours en WebAssembly dans la
 webview, comme sur le web. Les clés privées vivent donc dans la mémoire linéaire du module,

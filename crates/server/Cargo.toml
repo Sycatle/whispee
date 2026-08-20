@@ -40,3 +40,6 @@ serde_json = "1"
 attest = { path = "../attest" }
 transparency = { path = "../transparency" }
 aes-gcm.workspace = true
+# Client WebSocket des tests. Déjà dans l'arbre : axum l'utilise pour sa propre couche `ws`.
+tokio-tungstenite = "0.29"
+futures-util = "0.3"

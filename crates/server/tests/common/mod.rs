@@ -2,6 +2,10 @@
 //!
 //! Rien n'est simulé. Un test de delivery service qui court-circuite l'authentification ou
 //! la base ne teste que sa propre maquette.
+//!
+//! Ce module est compilé une fois par binaire de test, et aucun n'utilise tout le harnais :
+//! `dead_code` y signalerait donc, à chaque compilation, ce qui sert seulement aux autres.
+#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -201,6 +205,24 @@ impl Device {
 
     pub fn public_key_b64(&self) -> String {
         BASE64_STANDARD.encode(self.signing_key.verifying_key().as_bytes())
+    }
+
+    /// Signe un défi de gateway, comme le ferait un vrai client.
+    ///
+    /// Passe par `attest::gateway_message` plutôt que de réécrire le format : une seconde
+    /// définition dans les tests validerait la maquette, pas le serveur.
+    pub fn sign_challenge(&self, challenge: &[u8]) -> String {
+        let message = attest::gateway_message(&self.id, challenge).unwrap();
+        BASE64_STANDARD.encode(self.signing_key.sign(&message).to_bytes())
+    }
+
+    /// Signe un défi **avec le format d'une requête HTTP**.
+    ///
+    /// Sert au test qui vérifie qu'une signature captée sur le chemin HTTP n'ouvre pas de
+    /// session : c'est la séparation de domaine qui doit la rejeter, pas un hasard de format.
+    pub fn sign_challenge_as_http(&self, challenge: &[u8]) -> String {
+        let payload = server::auth::signing_payload("GET", "/v1/gateway", now(), challenge);
+        BASE64_STANDARD.encode(self.signing_key.sign(&payload).to_bytes())
     }
 
     pub async fn get(&self, path: &str) -> reqwest::Response {

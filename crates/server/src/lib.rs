@@ -21,6 +21,7 @@ pub mod log;
 pub mod presence;
 pub mod routes;
 pub mod stream;
+pub mod throttle;
 
 use std::sync::Arc;
 
@@ -37,6 +38,8 @@ use sqlx::postgres::PgPoolOptions;
 pub struct AppState {
     pub pool: PgPool,
     pub hub: Arc<stream::Hub>,
+    /// Limite de débit des routes ouvertes. Voir [`throttle`] pour sa portée réelle.
+    pub throttle: Arc<throttle::Throttle>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -71,6 +74,35 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     log::backfill(&pool).await?;
 
     Ok(pool)
+}
+
+/// Refuse une requête ouverte quand l'adresse a dépassé son quota.
+///
+/// # Pourquoi l'adresse de la socket, et rien d'autre
+///
+/// `X-Forwarded-For` se falsifie librement : le lire ferait de la limite une formalité, un
+/// en-tête à écrire pour la contourner. Le serveur ne connaît donc que ce que la pile TCP lui
+/// dit. La contrepartie est réelle et assumée — derrière un proxy, toutes les requêtes portent
+/// l'adresse du proxy, et c'est alors à lui de porter la limite.
+///
+/// # Pourquoi 429 et pas 403
+///
+/// L'appelant n'a rien fait d'interdit ; il en a seulement trop fait. Le distinguer permet à un
+/// client honnête de réessayer plus tard au lieu de conclure qu'il est banni.
+async fn limiter_le_debit(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::ConnectInfo(pair): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    requete: axum::extract::Request,
+    suite: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    if state.throttle.autorise(pair.ip()) {
+        return suite.run(requete).await;
+    }
+
+    tracing::debug!(adresse = %pair.ip(), "quota de route ouverte dépassé");
+    (axum::http::StatusCode::TOO_MANY_REQUESTS, "trop de requêtes").into_response()
 }
 
 /// Efface les nonces devenus inutiles à l'anti-rejeu.
@@ -165,13 +197,26 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
 }
 
 pub fn app(pool: PgPool) -> axum::Router {
+    app_with(pool, throttle::Throttle::depuis_environnement())
+}
+
+/// Variante à limite de débit imposée.
+///
+/// Existe pour les tests : le harnais désactive la limite — il crée des dizaines de comptes en
+/// quelques secondes depuis la boucle locale, ce qu'aucun quota réaliste ne laisserait passer —
+/// et le test qui vérifie qu'elle mord se construit une application avec un quota bas.
+pub fn app_with(pool: PgPool, throttle: throttle::Throttle) -> axum::Router {
     use tower_http::limit::RequestBodyLimitLayer;
     use tower_http::trace::TraceLayer;
 
     // Les KeyPackages et les enveloppes MLS sont petits : un plafond serré empêche qu'une
     // requête unique épuise la mémoire du serveur. Les pièces jointes ont leur propre
     // plafond, nettement plus haut, appliqué à leurs seules routes.
-    let state = AppState { pool: pool.clone(), hub: stream::Hub::new() };
+    let state = AppState {
+        pool: pool.clone(),
+        hub: stream::Hub::new(),
+        throttle: Arc::new(throttle),
+    };
 
     // Branche le hub sur Postgres, ce qui permet de faire tourner plusieurs instances sans que
     // leurs clients cessent de se voir. Détache des tâches : cette fonction doit donc être
@@ -180,12 +225,20 @@ pub fn app(pool: PgPool) -> axum::Router {
 
     purger_les_nonces(pool.clone());
 
-    let messages = routes::router(state).layer(RequestBodyLimitLayer::new(1024 * 1024));
+    let messages = routes::router(state.clone()).layer(RequestBodyLimitLayer::new(1024 * 1024));
     let attachments =
         routes::attachment_router(pool).layer(RequestBodyLimitLayer::new(MAX_ATTACHMENT_BYTES));
 
+    // Les routes ouvertes portent en plus la limite de débit. Elle ne s'applique qu'à elles :
+    // ailleurs, la signature identifie l'appelant, et un abus se traite en révoquant l'appareil
+    // plutôt qu'en pénalisant une adresse partagée par des innocents.
+    let publiques = routes::public_router(state.clone())
+        .layer(axum::middleware::from_fn_with_state(state, limiter_le_debit))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024));
+
     messages
         .merge(attachments)
+        .merge(publiques)
         .layer(cors_layer())
         .layer(TraceLayer::new_for_http())
 }

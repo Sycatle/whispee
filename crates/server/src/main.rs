@@ -20,7 +20,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(%addr, "delivery service à l'écoute");
 
-    axum::serve(listener, server::app(pool))
+    // `into_make_service_with_connect_info` plutôt que le service nu : sans lui, l'extracteur
+    // `ConnectInfo` de la limite de débit échoue, et **toutes** les routes ouvertes renvoient une
+    // erreur interne. C'est une panne totale du chemin d'inscription pour un oubli d'une ligne.
+    axum::serve(listener, server::app(pool).into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

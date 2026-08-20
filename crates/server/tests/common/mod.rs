@@ -46,9 +46,31 @@ pub async fn start() -> TestServer {
         panic!("base injoignable ({e}) — lancer `docker compose up -d`");
     });
 
+    // Limite de débit désactivée : la suite crée des dizaines de comptes en quelques secondes
+    // depuis la boucle locale, ce qu'aucun quota réaliste ne laisserait passer. Le test qui
+    // vérifie que la limite mord se construit sa propre application, avec un quota bas.
+    demarrer_avec(pool, server::throttle::Throttle::par_minute(0)).await
+}
+
+/// Serveur de test à limite de débit imposée.
+pub async fn start_with_throttle(quota: u32) -> TestServer {
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://whatsapp_clone:dev_only_not_a_secret@localhost:55432/whatsapp_clone".into()
+    });
+
+    let pool = server::connect(&database_url).await.unwrap();
+    demarrer_avec(pool, server::throttle::Throttle::par_minute(quota)).await
+}
+
+async fn demarrer_avec(pool: PgPool, throttle: server::throttle::Throttle) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = server::app(pool.clone());
+
+    // `into_make_service_with_connect_info` comme en production : sans lui, l'extracteur
+    // `ConnectInfo` de la limite échoue et les routes ouvertes renvoient une erreur interne.
+    // Un harnais qui servirait autrement que le binaire testerait sa propre maquette.
+    let app = server::app_with(pool.clone(), throttle)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();

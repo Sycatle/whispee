@@ -302,6 +302,61 @@ async fn un_certificat_signe_par_un_autre_compte_est_refuse() {
     assert_eq!(response.status(), 403);
 }
 
+/// **Le test qui fige la limite des routes ouvertes.**
+///
+/// La création de compte n'est pas authentifiable — on ne peut pas signer avec une clé que le
+/// serveur ne connaît pas encore — et elle écrit dans le journal de transparence, dont les
+/// entrées ne se reprennent pas sans casser les preuves de consistance. Sans limite, un tiers
+/// sans identité fait grossir indéfiniment la seule table du schéma qu'on ne sait pas nettoyer.
+#[tokio::test]
+async fn les_routes_ouvertes_refusent_au_dela_du_quota() {
+    let server = common::start_with_throttle(2).await;
+
+    for tour in 1..=2 {
+        let reponse = reqwest::Client::new()
+            .post(format!("{}/v1/accounts", server.base_url))
+            .json(&serde_json::json!({
+                "handle": unique("quota"),
+                "identity_key": BASE64_STANDARD.encode([7u8; 32]),
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert!(reponse.status().is_success(), "la création {tour} devait passer");
+    }
+
+    let refusee = reqwest::Client::new()
+        .post(format!("{}/v1/accounts", server.base_url))
+        .json(&serde_json::json!({
+            "handle": unique("quota"),
+            "identity_key": BASE64_STANDARD.encode([7u8; 32]),
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(refusee.status(), 429, "le quota n'a pas été appliqué");
+}
+
+/// La limite ne déborde pas sur les routes authentifiées.
+///
+/// Elle y serait nuisible : la signature identifie déjà l'appelant, et pénaliser une adresse
+/// punirait tous ceux qui la partagent — un NAT, un campus — pour l'abus d'un seul.
+#[tokio::test]
+async fn la_limite_ne_touche_pas_les_routes_signees() {
+    // Deux, et pas moins : préparer un appareil consomme exactement deux routes ouvertes — la
+    // création du compte puis l'enregistrement de l'appareil. C'est aussi ce qui rend le défaut
+    // de soixante par minute confortable, un utilisateur réel n'en consommant que quelques-unes.
+    let server = common::start_with_throttle(2).await;
+    let alice = Device::register(&server, &unique("alice")).await;
+
+    for tour in 1..=5 {
+        let reponse = alice.get("/v1/groups").await;
+        assert!(reponse.status().is_success(), "la requête signée {tour} a été limitée");
+    }
+}
+
 /// **Le test qui fige l'anti-rejeu.**
 ///
 /// La même requête, aux octets près, ne doit passer qu'une fois. Sans cette garantie, un

@@ -46,20 +46,38 @@ const MAX_ENVELOPES_PER_PAGE: i64 = 200;
 /// Séparées des pièces jointes pour que chaque famille porte sa propre limite de taille.
 /// Un plafond unique obligerait soit à interdire les fichiers, soit à autoriser des
 /// mégaoctets sur des endpoints qui n'en ont aucun besoin.
+/// Routes **ouvertes**, c'est-à-dire sans authentification possible.
+///
+/// Elles précèdent l'existence d'une identité : on ne peut pas signer une création de compte avec
+/// une clé que le serveur ne connaît pas encore. Elles sont donc isolées ici pour porter la seule
+/// borne qui leur reste — une limite de débit par adresse.
+///
+/// Séparées comme l'est déjà [`attachment_router`], et pour la même raison : une famille de
+/// routes qui a besoin d'une couche particulière la porte seule, plutôt que de l'imposer à
+/// toutes.
+///
+/// **La création de compte est celle qui justifie le dispositif.** Elle écrit dans le journal de
+/// transparence, dont les entrées ne se reprennent pas sans casser les preuves de consistance.
+/// Voir `crate::throttle` pour ce que la limite ferme, et pour ce qu'elle ne ferme pas.
+pub fn public_router(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/accounts", post(create_account))
+        .route("/v1/devices", post(register_device))
+        .route("/v1/pairings/{pairing_id}", post(deposit_pairing).get(claim_pairing))
+        .with_state(state)
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/gateway", get(crate::gateway::handler))
         .route("/v1/presence", post(read_presence))
         .route("/v1/presence/optout", post(set_presence_optout))
-        .route("/v1/accounts", post(create_account))
         .route("/v1/accounts/{handle}/devices", get(list_account_devices))
         .route("/v1/accounts/{handle}/rotate", post(rotate_account))
         .route("/v1/log/sth", get(log_head))
         .route("/v1/log/proof/{handle}", get(log_proof))
         .route("/v1/log/consistency", get(log_consistency))
-        .route("/v1/devices", post(register_device))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
-        .route("/v1/pairings/{pairing_id}", post(deposit_pairing).get(claim_pairing))
         .route("/v1/vault/{group_id}", post(store_vault).get(fetch_vault))
         .route("/v1/key-packages", post(publish_key_packages))
         .route("/v1/key-packages/stock", get(key_package_stock))

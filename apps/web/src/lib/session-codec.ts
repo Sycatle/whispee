@@ -9,17 +9,12 @@
  * invariants de forme de la session sont écrits noir sur blanc — ce qui vaut d'être testable sans
  * base de données ni processus Rust.
  *
- * # Ce que le codec ne transporte pas, et ne pourra jamais transporter
+ * # Ce que le codec ne transporte pas
  *
- * Les clés. `StoredSession.keys` porte deux `CryptoKey` non extractables : elles ne se
- * sérialisent pas, **par construction**, et c'est leur seule raison d'être. Le codec opère donc
- * sur `SessionSansCles`, et le stockage natif suppose que les clés vivent ailleurs — dans le
- * processus Rust, via `NativeCipher`.
- *
- * C'est là que se trouve le nœud de la migration : une installation existante a sa clé
- * d'authentification enfermée dans IndexedDB, et le serveur **refuse d'en changer** (voir la
- * clause sur `auth_key` dans `register_device`). Elle ne peut donc pas la déplacer. Rien ici ne
- * résout ce problème ; ce module se contente de ne pas le masquer.
+ * Les clés. `StoredSession` n'en porte aucune : sur le web elles vivent dans la même base, mais
+ * c'est le store qui les y range, pas la session. Un fichier ne pourrait pas les recevoir — des
+ * `CryptoKey` non extractables ne se sérialisent pas, par construction — et il n'a pas à le
+ * faire : sous Tauri elles vivent dans le processus natif, derrière `NativeCipher`.
  *
  * # Le champ qui justifie les tests
  *
@@ -32,14 +27,6 @@
  */
 import { fromBase64, toBase64 } from "./keys.ts";
 import type { StoredSession } from "./storage";
-
-/**
- * La session moins ses clés.
- *
- * Le type dit ce que le stockage natif peut réellement contenir. Le laisser implicite ferait
- * croire à l'appelant qu'il récupère une session complète.
- */
-export type SessionSansCles = Omit<StoredSession, "keys">;
 
 /**
  * Version du format sur disque.
@@ -56,7 +43,7 @@ const VERSION = 1;
  * `JSON.stringify` devient un objet indexé par chaînes, qui se relit en objet et non en tableau
  * d'octets. La panne serait silencieuse : `state` redeviendrait un objet vide plutôt que d'échouer.
  */
-export function encoderSession(session: SessionSansCles): Uint8Array {
+export function encoderSession(session: StoredSession): Uint8Array {
   const brut = {
     v: VERSION,
     deviceId: session.deviceId,
@@ -83,7 +70,7 @@ export function encoderSession(session: SessionSansCles): Uint8Array {
  * des clés déjà consommées, et la conversation resterait vide après un simple rechargement. Une
  * erreur visible au démarrage vaut mieux qu'une session qui semble marcher.
  */
-export function decoderSession(octets: Uint8Array): SessionSansCles {
+export function decoderSession(octets: Uint8Array): StoredSession {
   const brut: unknown = JSON.parse(new TextDecoder().decode(octets));
 
   if (typeof brut !== "object" || brut === null) {
@@ -105,7 +92,7 @@ export function decoderSession(octets: Uint8Array): SessionSansCles {
     // pour `Object.keys`, pour une comparaison structurelle, ou pour un futur `in`. Puisque toute
     // la subtilité de `vaultEnabled` tient à la distinction absent / `false`, autant que la forme
     // relue soit exactement celle qui a été écrite.
-    ...(champ.lock === undefined ? {} : { lock: champ.lock as SessionSansCles["lock"] }),
+    ...(champ.lock === undefined ? {} : { lock: champ.lock as StoredSession["lock"] }),
     ...(champ.vaultEnabled === undefined ? {} : { vaultEnabled: champ.vaultEnabled as boolean }),
     ...(champ.state === undefined
       ? {}
@@ -116,7 +103,7 @@ export function decoderSession(octets: Uint8Array): SessionSansCles {
     verified: exigerObjet(champ.verified, "verified") as Record<string, string>,
     cursors: exigerObjet(champ.cursors, "cursors") as Record<string, number>,
     knownDevices: exigerObjet(champ.knownDevices, "knownDevices") as Record<string, string[]>,
-    ...(champ.signals === undefined ? {} : { signals: champ.signals as SessionSansCles["signals"] }),
+    ...(champ.signals === undefined ? {} : { signals: champ.signals as StoredSession["signals"] }),
     ...(champ.postingKeys === undefined
       ? {}
       : { postingKeys: champ.postingKeys as Record<string, string> }),

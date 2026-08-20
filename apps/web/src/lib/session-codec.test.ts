@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { decoderSession, encoderSession, type SessionSansCles } from "./session-codec.ts";
+import { decoderSession, encoderSession } from "./session-codec.ts";
+import type { StoredSession } from "./storage.ts";
 
-function session(ajouts: Partial<SessionSansCles> = {}): SessionSansCles {
+function session(ajouts: Partial<StoredSession> = {}): StoredSession {
   return {
     deviceId: "appareil-1",
     handle: "alice",
@@ -16,7 +17,7 @@ function session(ajouts: Partial<SessionSansCles> = {}): SessionSansCles {
   };
 }
 
-const allerRetour = (valeur: SessionSansCles) => decoderSession(encoderSession(valeur));
+const allerRetour = (valeur: StoredSession) => decoderSession(encoderSession(valeur));
 
 test("une session complète se relit à l'identique", () => {
   const original = session({

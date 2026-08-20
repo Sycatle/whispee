@@ -23,8 +23,11 @@
  * compris le scellement, puisque c'est l'enchaînement codec → chiffrement → fichier qui peut
  * perdre un compte, pas chacun de ses maillons.
  */
+import { invoke } from "@tauri-apps/api/core";
+
 import { fromBase64, toBase64 } from "./keys.ts";
-import { decoderSession, encoderSession, type SessionSansCles } from "./session-codec.ts";
+import { decoderSession, encoderSession } from "./session-codec.ts";
+import type { SessionStore, StoredSession } from "./storage.ts";
 import type { DeviceCipher } from "./cipher.ts";
 
 /**
@@ -44,15 +47,11 @@ export interface PontSession {
 /**
  * Le pont réel, adossé à l'IPC de Tauri.
  *
- * `invoke` est importé paresseusement : sur le web, ce module peut être chargé sans que
- * `@tauri-apps/api` ait quoi que ce soit à faire — et sans qu'il tente d'atteindre un IPC absent.
+ * `invoke` est importé statiquement : `cipher.ts` le fait déjà, donc le différer ici ne
+ * retirerait rien du paquet — cela donnerait seulement l'illusion que le module se charge sans
+ * Tauri. L'appel, lui, n'a lieu que si quelqu'un construit ce pont.
  */
 export function pontTauri(): PontSession {
-  const invoke = async <T>(commande: string, args?: Record<string, unknown>): Promise<T> => {
-    const { invoke: appeler } = await import("@tauri-apps/api/core");
-    return appeler<T>(commande, args);
-  };
-
   return {
     charger: () => invoke<string | null>("session_load"),
     enregistrer: (contenu) => invoke<void>("session_save", { contenu }),
@@ -63,21 +62,20 @@ export function pontTauri(): PontSession {
 /**
  * Le store natif.
  *
- * # Pourquoi il n'implémente pas `SessionStore`
+ * # Le même port que le store du navigateur
  *
- * `StoredSession` porte `keys`, deux `CryptoKey` non extractables. Elles ne se sérialisent pas —
- * c'est leur seule raison d'être — donc aucun fichier ne peut les contenir. Ce store opère sur
- * `SessionSansCles`, et suppose que les clés vivent dans le processus natif, via `NativeCipher`.
+ * `StoredSession` ne porte aucune clé : celles du navigateur sont rangées par `IndexedDbStore`,
+ * celles-ci vivent dans le processus natif. C'est ce qui permet aux deux stores de remplir la
+ * même interface, et à la session d'ignorer laquelle des deux la sert.
  *
- * # Pourquoi rien ne l'utilise encore
+ * # Une installation existante ne bascule pas dessus telle quelle
  *
- * Le brancher sur une installation existante la casserait. Ses clés d'aujourd'hui sont enfermées
- * dans IndexedDB, non extractables, et le serveur **refuse d'en changer** (clause sur `auth_key`
- * dans `register_device`) : l'appareil ne peut donc pas les déplacer, et un store natif adossé à
- * des clés natives neuves ne saurait ni relire son ancien état ni prouver son identité. La
- * bascule est indissociable de la migration ; elle n'est pas encore tranchée.
+ * Ses clés sont enfermées dans IndexedDB, non extractables, et le serveur **refuse d'en changer**
+ * (clause sur `auth_key` dans `register_device`). Un store natif adossé à des clés natives neuves
+ * ne saurait ni relire son ancien état ni prouver son identité : il faut enregistrer un appareil
+ * neuf et révoquer l'ancien. Voir `migration.ts`.
  */
-export class NativeStore {
+export class NativeStore implements SessionStore {
   // Champs déclarés plutôt que propriétés de paramètre : le lanceur de tests de Node se
   // contente de retirer les types, et une propriété de paramètre demanderait une transformation.
   private readonly cipher: DeviceCipher;
@@ -88,7 +86,7 @@ export class NativeStore {
     this.pont = pont;
   }
 
-  async load(): Promise<SessionSansCles | undefined> {
+  async load(): Promise<StoredSession | undefined> {
     const scelle = await this.pont.charger();
     // `null` est un premier lancement, pas une panne. Les confondre créerait un compte neuf
     // par-dessus un état encore présent, ce qui est irréversible.
@@ -97,7 +95,7 @@ export class NativeStore {
     return decoderSession(await this.cipher.open(fromBase64(scelle)));
   }
 
-  async save(session: SessionSansCles): Promise<void> {
+  async save(session: StoredSession): Promise<void> {
     const scelle = await this.cipher.seal(encoderSession(session));
     await this.pont.enregistrer(toBase64(scelle));
   }

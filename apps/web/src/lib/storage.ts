@@ -8,16 +8,13 @@
  * après sept jours d'inactivité, Android purge sous pression mémoire. Et la perte est
  * définitive : le ratchet MLS détruit ses clés au fur et à mesure.
  *
- * # Ce que le passage au natif coûtera, et qu'il faut voir maintenant
+ * # Les clés ne passent pas par ici
  *
- * `StoredSession` contient des `CryptoKey` non extractables. IndexedDB les accepte telles
- * quelles — elles sont structured-cloneable, et le navigateur garde le matériel hors de portée
- * du script, ce qui distingue IndexedDB de `localStorage` où tout devient chaîne. **Aucun
- * stockage natif ne pourra les recevoir** : elles ne se sérialisent pas, par construction.
- *
- * Le port natif devra donc d'abord déplacer les clés elles-mêmes, pas seulement les octets
- * qu'elles protègent. C'est la raison d'être de `DeviceCipher` dans `cipher.ts`, et c'est
- * pourquoi ce fichier reste, pour l'instant, la seule implémentation.
+ * `StoredSession` n'en porte aucune. Sur le web elles existent bel et bien dans la même base —
+ * ce sont des `CryptoKey` non extractables, qu'IndexedDB accepte telles quelles et qu'aucun
+ * fichier ne pourrait recevoir — mais c'est l'affaire du store, pas de la session. Celle-ci
+ * demande un scellement à `DeviceCipher` et ne voit jamais de matériel de clé, ce qui est
+ * précisément ce qui lui permet d'être la même sur les deux plateformes.
  *
  * L'état MLS, lui, est chiffré avant d'arriver ici (voir `wrapState`).
  */
@@ -42,7 +39,6 @@ interface StoredSession {
    * clair, ni partir sur le réseau autrement que scellée dans un blob d'appairage.
    */
   accountSeed: Uint8Array;
-  keys: DeviceKeys;
   /**
    * Verrou local, s'il est activé.
    *
@@ -213,13 +209,39 @@ export interface SessionStore {
   clear(): Promise<void>;
 }
 
-class IndexedDbStore implements SessionStore {
-  load(): Promise<StoredSession | undefined> {
-    return transact("readonly", (store) => store.get("session"));
+/** Ce qu'IndexedDB contient réellement : la session, plus les clés que seul le store manipule. */
+interface StoredWithKeys extends StoredSession {
+  keys: DeviceKeys;
+}
+
+/**
+ * Le store du navigateur, qui range aussi les clés de l'appareil.
+ *
+ * Il les tient parce qu'il est le seul à pouvoir : elles ne se sérialisent pas, donc elles ne
+ * peuvent vivre que là où le clonage structuré les accepte. La session, elle, les ignore — ce
+ * qui lui permet d'être identique sous Tauri, où elles vivent dans un autre processus.
+ */
+export class IndexedDbStore implements SessionStore {
+  private keys: DeviceKeys;
+
+  constructor(keys: DeviceKeys) {
+    this.keys = keys;
+  }
+
+  async load(): Promise<StoredSession | undefined> {
+    const stored = await transact<StoredWithKeys | undefined>("readonly", (store) =>
+      store.get("session"),
+    );
+    if (!stored) return undefined;
+
+    // Les clés lues font autorité sur celles reçues à la construction : au rechargement, ce
+    // sont les seules qui déchiffrent l'état déjà écrit.
+    this.keys = stored.keys;
+    return stored;
   }
 
   async save(session: StoredSession): Promise<void> {
-    await transact("readwrite", (store) => store.put(session, "session"));
+    await transact("readwrite", (store) => store.put({ ...session, keys: this.keys }, "session"));
   }
 
   async clear(): Promise<void> {
@@ -228,22 +250,17 @@ class IndexedDbStore implements SessionStore {
 }
 
 /**
- * L'implémentation qui convient à la plateforme.
+ * Lit les clés déjà rangées dans la base, s'il y en a.
  *
- * Sous Tauri, il n'y a pour l'instant rien d'autre : le stockage natif attend que les clés
- * puissent quitter la webview. L'appel à `isTauri()` est là pour que l'endroit du choix existe
- * **avant** l'implémentation, plutôt que d'être inventé dans l'urgence en même temps qu'elle.
+ * Séparé de `load` parce que l'ordre l'exige : il faut les clés pour construire le chiffreur,
+ * et le chiffreur pour ouvrir l'état. Sur le web les deux sortent de la même base, ce qui invite
+ * à les confondre — sous Tauri elles viennent d'un autre processus, et la confusion se paierait.
  */
-export function sessionStore(): SessionStore {
-  if (isTauri()) {
-    // Le store natif existe — voir `storage-native.ts` — mais n'est pas branché : il suppose des
-    // clés natives, et une installation existante ne peut pas y déplacer les siennes. En
-    // attendant la migration, le comportement est celui d'aujourd'hui : l'application de bureau
-    // n'est pas exposée à l'éviction, seul le mobile l'est.
-    return new IndexedDbStore();
-  }
-
-  return new IndexedDbStore();
+export async function readStoredKeys(): Promise<DeviceKeys | undefined> {
+  const stored = await transact<StoredWithKeys | undefined>("readonly", (store) =>
+    store.get("session"),
+  );
+  return stored?.keys;
 }
 
 export type { StoredSession };

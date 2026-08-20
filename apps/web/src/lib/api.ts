@@ -6,7 +6,7 @@
  * endpoint n'est donc rejouable ni sur un autre chemin, ni avec un corps modifié.
  */
 import type { DeviceCipher } from "./cipher";
-import { type DeviceKeys, exportAuthPublicKey, fromBase64, toBase64, toHex } from "./keys";
+import { fromBase64, toBase64, toHex } from "./keys";
 import type { AttestedDevice } from "./wasm";
 
 /** Voir la note sur `buffer` dans `keys.ts`. */
@@ -105,7 +105,14 @@ export class Api {
   static async register(
     deviceId: string,
     handle: string,
-    keys: DeviceKeys,
+    /**
+     * La clé publique d'authentification, en octets.
+     *
+     * Passée telle quelle plutôt que déduite d'un `DeviceKeys` : l'appelant peut détenir ses
+     * clés dans la webview ou dans le processus natif, et l'enregistrement n'a aucune raison de
+     * savoir lequel des deux.
+     */
+    authKey: Uint8Array,
     mlsKey: Uint8Array,
     attestation: Uint8Array,
   ): Promise<void> {
@@ -115,7 +122,7 @@ export class Api {
       body: JSON.stringify({
         id: deviceId,
         handle,
-        auth_key: await exportAuthPublicKey(keys),
+        auth_key: toBase64(authKey),
         mls_key: toBase64(mlsKey),
         attestation: toBase64(attestation),
       }),

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { NativeStore, type PontSession } from "./storage-native.ts";
-import type { SessionSansCles } from "./session-codec.ts";
+import type { StoredSession } from "./storage.ts";
 import type { DeviceCipher } from "./cipher.ts";
 
 /**
@@ -42,7 +42,7 @@ function pontMemoire(): PontSession & { contenu: string | null } {
   };
 }
 
-function session(ajouts: Partial<SessionSansCles> = {}): SessionSansCles {
+function session(ajouts: Partial<StoredSession> = {}): StoredSession {
   return {
     deviceId: "appareil-1",
     handle: "alice",

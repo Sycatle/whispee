@@ -12,18 +12,15 @@ import { type PairingCode, awaitPairing, decodePairingCode, encodePairingCode } 
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
 import * as envelope from "./envelope";
-import {
-  type DeviceKeys,
-  exportAuthPublicKeyBytes,
-  fromBase64,
-  generateDeviceKeys,
-  toBase64,
-  toHex,
-  unwrapState,
-  wrapState,
-} from "./keys";
+import { fromBase64, toBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, openLock } from "./lock";
-import { type SignalSettings, sessionStore } from "./storage";
+import type { SignalSettings } from "./storage";
+import {
+  type Ancrage,
+  ancrageCourant,
+  ancrageNeuf,
+  effacerTout,
+} from "./persistence";
 import { type ReceiptBook, pending, record, statusOf } from "./receipts";
 import {
   type Typing,
@@ -33,7 +30,7 @@ import {
   sealTyping,
   without,
 } from "./signals";
-import { WebCryptoCipher } from "./cipher";
+import { LockedCipher, type DeviceCipher } from "./cipher";
 import { Gateway } from "./gateway";
 import * as vault from "./vault";
 import * as log from "./transparency";
@@ -182,14 +179,22 @@ export class Session {
     private account: AccountKey,
     private readonly crypto: Crypto,
     private readonly api: Api,
-    private readonly keys: DeviceKeys,
     /**
-     * Clé qui chiffre l'état au repos.
+     * Où l'état est rangé, et sous quelle identité.
      *
-     * Soit la clé maîtresse du verrou — présente en mémoire seulement, après saisie du mot de
-     * passe — soit la clé non-extractable d'IndexedDB quand aucun verrou n'est posé.
+     * Une paire et non deux champs : la clé qui ouvre l'état doit être celle sous laquelle il a
+     * été scellé, et les dissocier permettrait d'assembler un store avec le chiffreur de
+     * l'autre plateforme — un état illisible, sans autre symptôme qu'un échec de déchiffrement.
      */
-    private vaultKey: CryptoKey,
+    private readonly ancrage: Ancrage,
+    /**
+     * Ce qui chiffre l'état au repos.
+     *
+     * Le socle de l'ancrage quand aucun verrou n'est posé ; un `LockedCipher` sinon, dont la
+     * clé maîtresse n'existe qu'en mémoire après saisie du mot de passe. L'identité, elle, ne
+     * bascule pas : c'est toujours le socle qui signe.
+     */
+    private atRest: DeviceCipher,
     private lock: LockEnvelope | undefined,
     /**
      * Clé du coffre. Présente par défaut ; `null` seulement si l'utilisateur a coupé la
@@ -324,8 +329,11 @@ export class Session {
     account: AccountKey,
     handle: string,
   ): Promise<Session> {
-    const keys = await generateDeviceKeys();
-    const authKey = await exportAuthPublicKeyBytes(keys);
+    // L'ancrage décide où vivront les clés : dans le processus natif sous Tauri, dans
+    // IndexedDB ailleurs. L'enregistrement n'a pas à savoir lequel des deux — il ne manipule
+    // que la moitié publique.
+    const ancrage = await ancrageNeuf();
+    const authKey = await ancrage.cipher.authPublicKey();
 
     // L'identifiant est qualifié par le handle : sans cela l'espace de noms serait global et
     // le premier arrivé accaparerait « desktop » et « mobile » pour tout le monde. Le serveur
@@ -350,7 +358,7 @@ export class Session {
       const attestation = account.attest(handle, deviceId, authKey, mlsKey);
 
       try {
-        await Api.register(deviceId, handle, keys, mlsKey, attestation);
+        await Api.register(deviceId, handle, authKey, mlsKey, attestation);
         client = candidate;
         break;
       } catch (error) {
@@ -363,10 +371,9 @@ export class Session {
       throw new Error("Trop d'appareils portant ce nom sur ce compte.");
     }
 
-    // Sans verrou, l'état est chiffré par la clé non extractable rangée à côté de lui ; poser
-    // un verrou remplacera cette clé sans toucher à l'identité de l'appareil.
-    const cipher = new WebCryptoCipher(keys, keys.wrap);
-    const api = new Api(deviceId, cipher);
+    // Sans verrou, l'état est chiffré par le socle lui-même ; poser un verrou l'enveloppera
+    // sans toucher à l'identité de l'appareil.
+    const api = new Api(deviceId, ancrage.cipher);
     const session = new Session(
       deviceId,
       handle,
@@ -374,11 +381,11 @@ export class Session {
       account,
       crypto,
       api,
-      keys,
+      ancrage,
       // Pas de verrou à la création : l'utilisateur le pose s'il le souhaite, depuis
       // l'application. L'imposer ici mettrait une saisie de mot de passe juste avant l'écran
       // de la phrase de récupération, qui mérite toute l'attention disponible.
-      keys.wrap,
+      ancrage.cipher,
       undefined,
       // Coffre actif dès la création, donc dès le premier message.
       //
@@ -405,7 +412,8 @@ export class Session {
    * que de traiter l'absence de mot de passe comme une erreur de déchiffrement.
    */
   static async isLocked(): Promise<boolean> {
-    const stored = await sessionStore().load();
+    const ancrage = await ancrageCourant();
+    const stored = await ancrage?.store.load();
     return Boolean(stored?.state && stored.lock);
   }
 
@@ -417,25 +425,25 @@ export class Session {
    * mot de passe » stocké à côté qui offrirait une cible d'attaque hors ligne de plus.
    */
   static async restore(password?: string): Promise<Session | null> {
-    const stored = await sessionStore().load();
-    if (!stored?.state) return null;
+    const ancrage = await ancrageCourant();
+    const stored = await ancrage?.store.load();
+    if (!ancrage || !stored?.state) return null;
 
     if (stored.lock && password === undefined) {
       throw new Error("Cette session est verrouillée : mot de passe requis.");
     }
-    const vault =
+    const atRest =
       stored.lock && password !== undefined
-        ? await openLock(stored.lock, password)
-        : stored.keys.wrap;
+        ? new LockedCipher(ancrage.cipher, await openLock(stored.lock, password))
+        : ancrage.cipher;
 
     const crypto = await loadCrypto();
-    const state = await unwrapState(vault, stored.state);
+    const state = await atRest.open(stored.state);
     const client = crypto.Client.restore(state, stored.groupIds);
-    const account = crypto.AccountKey.fromSeed(
-      await unwrapState(vault, stored.accountSeed),
-    );
-    const cipher = new WebCryptoCipher(stored.keys, vault);
-    const api = new Api(stored.deviceId, cipher);
+    const account = crypto.AccountKey.fromSeed(await atRest.open(stored.accountSeed));
+    // Le socle et non `atRest` : c'est l'identité qui signe les requêtes, et elle ne bascule
+    // pas avec le verrou — le serveur ne doit voir aucune différence.
+    const api = new Api(stored.deviceId, ancrage.cipher);
 
     const conversations = new Map<string, ConversationView>();
     for (const groupId of stored.groupIds) {
@@ -465,8 +473,8 @@ export class Session {
       account,
       crypto,
       api,
-      stored.keys,
-      vault,
+      ancrage,
+      atRest,
       stored.lock,
       // Trois valeurs, pas deux, et c'est toute la migration des comptes existants : `false`
       // signifie que l'utilisateur a explicitement coupé la sauvegarde, et cela se respecte ;
@@ -620,7 +628,7 @@ export class Session {
 
     const [envelope, master] = await createLock(password);
     this.lock = envelope;
-    this.vaultKey = master;
+    this.atRest = new LockedCipher(this.ancrage.cipher, master);
     await this.persist();
   }
 
@@ -635,7 +643,7 @@ export class Session {
 
     await openLock(this.lock, password);
     this.lock = undefined;
-    this.vaultKey = this.keys.wrap;
+    this.atRest = this.ancrage.cipher;
     await this.persist();
   }
 
@@ -673,12 +681,12 @@ export class Session {
 
   async forget(): Promise<void> {
     this.forgotten = true;
-    await sessionStore().clear();
+    await this.ancrage.store.clear();
   }
 
   /** Efface sans détenir de session — cas d'un verrou dont on a perdu le mot de passe. */
   static async forget(): Promise<void> {
-    await sessionStore().clear();
+    await effacerTout();
   }
 
   fingerprint(): string {
@@ -707,16 +715,15 @@ export class Session {
       [...this.conversations.values()].map((view) => [view.key, view.cursor]),
     );
 
-    await sessionStore().save({
+    await this.ancrage.store.save({
       cursors,
       deviceId: this.deviceId,
       handle: this.handle,
       // La graine est chiffrée comme l'état MLS : elle vaut le compte entier.
-      accountSeed: await wrapState(this.vaultKey, this.account.exportSeed()),
-      keys: this.keys,
+      accountSeed: await this.atRest.seal(this.account.exportSeed()),
       lock: this.lock,
       vaultEnabled: this.vaultCipher !== null,
-      state: await wrapState(this.vaultKey, this.client.exportState()),
+      state: await this.atRest.seal(this.client.exportState()),
       groupIds,
       verified: this.verified,
       knownDevices: this.knownDevices,
@@ -1334,12 +1341,12 @@ export class Session {
     // Ré-attestation immédiate. Sans elle, cet appareil serait rejeté par tous les clients —
     // y compris par nous-mêmes à la relève suivante — puisque son attestation porte la
     // signature d'une clé morte.
-    const authKey = await exportAuthPublicKeyBytes(this.keys);
+    const authKey = await this.ancrage.cipher.authPublicKey();
     const mlsKey = this.client.signatureKey();
     await Api.register(
       this.deviceId,
       this.handle,
-      this.keys,
+      authKey,
       mlsKey,
       this.account.attest(this.handle, this.deviceId, authKey, mlsKey),
     );

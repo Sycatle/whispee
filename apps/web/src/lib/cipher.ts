@@ -67,17 +67,11 @@ export interface DeviceCipher {
  * pouvoir garder un secret hors de portée du script qu'il exécute.
  */
 export class WebCryptoCipher implements DeviceCipher {
-  constructor(
-    private readonly keys: DeviceKeys,
-    /**
-     * Clé de chiffrement au repos.
-     *
-     * Séparée de `keys` parce qu'elle **change** : sans verrou local c'est `keys.wrap`, la clé
-     * non extractable rangée à côté ; avec verrou c'est une clé maîtresse qui n'existe qu'en
-     * mémoire après saisie du mot de passe. Voir `lock.ts`.
-     */
-    private readonly atRest: CryptoKey,
-  ) {}
+  private readonly keys: DeviceKeys;
+
+  constructor(keys: DeviceKeys) {
+    this.keys = keys;
+  }
 
   async authPublicKey(): Promise<Uint8Array> {
     return new Uint8Array(await crypto.subtle.exportKey("raw", this.keys.auth.publicKey));
@@ -87,34 +81,18 @@ export class WebCryptoCipher implements DeviceCipher {
     return signAvecWebCrypto(this.keys, payload);
   }
 
+  /**
+   * Chiffre sous la clé non extractable rangée à côté des clés d'identité.
+   *
+   * Elle protège de l'exfiltration par script, pas de qui obtient la session du navigateur.
+   * C'est exactement ce que le verrou local vient corriger — voir `LockedCipher`.
+   */
   seal(plaintext: Uint8Array): Promise<Uint8Array> {
-    return wrapState(this.atRest, plaintext);
+    return wrapState(this.keys.wrap, plaintext);
   }
 
   open(blob: Uint8Array): Promise<Uint8Array> {
-    return unwrapState(this.atRest, blob);
-  }
-
-  /**
-   * Le même appareil, mais chiffrant au repos sous une autre clé.
-   *
-   * C'est ce que fait la pose ou le retrait du verrou : l'identité de l'appareil ne change pas —
-   * la clé d'authentification est la même, le serveur ne voit rien — seule bascule la clé qui
-   * protège l'état sur le disque.
-   */
-  withKeyAtRest(atRest: CryptoKey): WebCryptoCipher {
-    return new WebCryptoCipher(this.keys, atRest);
-  }
-
-  /**
-   * Les clés brutes, pour le seul code qui doit encore les voir : la persistance, qui range les
-   * `CryptoKey` non extractables dans IndexedDB.
-   *
-   * **À supprimer** quand le stockage natif prendra le relais. Chaque appelant restant est une
-   * raison de plus pour laquelle la clé ne peut pas encore quitter la webview.
-   */
-  get rawKeys(): DeviceKeys {
-    return this.keys;
+    return unwrapState(this.keys.wrap, blob);
   }
 }
 
@@ -160,6 +138,54 @@ export class NativeCipher implements DeviceCipher {
 
   async open(blob: Uint8Array): Promise<Uint8Array> {
     return fromBase64(await invoke<string>("state_open", { blob: toBase64(blob) }));
+  }
+}
+
+/**
+ * Un appareil dont l'état au repos est protégé par un mot de passe.
+ *
+ * # Ce qui change, et ce qui ne change pas
+ *
+ * L'identité ne bouge pas : signer reste l'affaire du socle, donc le serveur ne voit rien et
+ * poser ou retirer un verrou n'est jamais un événement de compte. Seule bascule la clé qui
+ * protège l'état sur le disque.
+ *
+ * # Pourquoi il enveloppe au lieu de remplacer
+ *
+ * Le verrou est orthogonal à l'endroit où vivent les clés. Un appareil web verrouillé et un
+ * appareil natif verrouillé posent le même problème — chiffrer sous une clé maîtresse qui
+ * n'existe qu'en mémoire après saisie — et il n'y a aucune raison d'en écrire deux versions.
+ *
+ * # Le socle ne scelle pas par-dessus
+ *
+ * L'état est chiffré sous la clé maîtresse, un point c'est tout. Déléguer ensuite au socle
+ * ajouterait une couche, changerait le format déjà écrit chez les installations existantes, et
+ * n'apporterait rien contre le seul attaquant que ce verrou vise : celui qui tient l'appareil
+ * et n'a pas le mot de passe. Sans le mot de passe, l'état est illisible dans les deux cas.
+ */
+export class LockedCipher implements DeviceCipher {
+  private readonly socle: DeviceCipher;
+  private readonly master: CryptoKey;
+
+  constructor(socle: DeviceCipher, master: CryptoKey) {
+    this.socle = socle;
+    this.master = master;
+  }
+
+  authPublicKey(): Promise<Uint8Array> {
+    return this.socle.authPublicKey();
+  }
+
+  sign(payload: Uint8Array): Promise<string> {
+    return this.socle.sign(payload);
+  }
+
+  seal(plaintext: Uint8Array): Promise<Uint8Array> {
+    return wrapState(this.master, plaintext);
+  }
+
+  open(blob: Uint8Array): Promise<Uint8Array> {
+    return unwrapState(this.master, blob);
   }
 }
 

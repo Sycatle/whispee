@@ -32,7 +32,8 @@ const MAX_KEY_PACKAGES_PER_REQUEST: usize = 100;
 type DeviceRow = (String, Vec<u8>, Vec<u8>, Vec<u8>);
 
 /// Un appareil et l'état de sa révocation, tel que servi aux clients.
-type RevocableDeviceRow = (String, Vec<u8>, Vec<u8>, Vec<u8>, Option<i64>, Option<Vec<u8>>);
+type RevocableDeviceRow =
+    (String, Vec<u8>, Vec<u8>, Vec<u8>, Option<i64>, Option<Vec<u8>>, Option<i64>);
 
 /// Plafond du corps d'un dépôt, aligné sur la limite de la couche HTTP.
 ///
@@ -513,6 +514,14 @@ struct AccountDevice {
     /// la base l'impose (`revocation_accompagne_revoked_at`, migration 0005).
     #[serde(skip_serializing_if = "Option::is_none")]
     revocation: Option<String>,
+    /// Dernière activité de cet appareil, **servie au seul propriétaire du compte**.
+    ///
+    /// Le détail par appareil ne sort jamais vers un tiers : il dirait combien d'appareils une
+    /// personne possède et lequel elle utilise à quelle heure, ce qui est une fuite distincte
+    /// de « en ligne ». Pour son propriétaire, en revanche, c'est ce qui rend visible un
+    /// appareil fantôme réellement actif.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_seen: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -534,7 +543,7 @@ struct AccountDevices {
 async fn list_account_devices(
     State(pool): State<PgPool>,
     Path(handle): Path<String>,
-    _signed: Signed,
+    signed: Signed,
 ) -> ApiResult<Json<AccountDevices>> {
     let account: Option<(Vec<u8>,)> =
         sqlx::query_as("SELECT identity_key FROM accounts WHERE handle = $1")
@@ -549,7 +558,8 @@ async fn list_account_devices(
     // disparaît sans certificat est donc un signal, pas un événement normal.
     let rows: Vec<RevocableDeviceRow> = sqlx::query_as(
         "SELECT id, auth_key, mls_key, attestation,
-                EXTRACT(EPOCH FROM revoked_at)::BIGINT, revocation
+                EXTRACT(EPOCH FROM revoked_at)::BIGINT, revocation,
+                EXTRACT(EPOCH FROM last_seen_at)::BIGINT
          FROM devices
          WHERE handle = $1
          ORDER BY id",
@@ -558,19 +568,27 @@ async fn list_account_devices(
     .fetch_all(&pool)
     .await?;
 
+    // Le détail par appareil n'est servi qu'au propriétaire du compte.
+    let proprietaire = caller_handle(&pool, &signed.device_id).await? == handle;
+
     Ok(Json(AccountDevices {
         handle,
         identity_key: BASE64_STANDARD.encode(identity_key),
         devices: rows
             .into_iter()
-            .map(|(id, auth_key, mls_key, attestation, revoked_at, revocation)| AccountDevice {
-                id,
-                auth_key: BASE64_STANDARD.encode(auth_key),
-                mls_key: BASE64_STANDARD.encode(mls_key),
-                attestation: BASE64_STANDARD.encode(attestation),
-                revoked_at: revoked_at.map(|t| t as u64),
-                revocation: revocation.map(|r| BASE64_STANDARD.encode(r)),
-            })
+            .map(
+                |(id, auth_key, mls_key, attestation, revoked_at, revocation, last_seen)| {
+                    AccountDevice {
+                        id,
+                        auth_key: BASE64_STANDARD.encode(auth_key),
+                        mls_key: BASE64_STANDARD.encode(mls_key),
+                        attestation: BASE64_STANDARD.encode(attestation),
+                        revoked_at: revoked_at.map(|t| t as u64),
+                        revocation: revocation.map(|r| BASE64_STANDARD.encode(r)),
+                        last_seen: if proprietaire { last_seen } else { None },
+                    }
+                },
+            )
             .collect(),
     }))
 }

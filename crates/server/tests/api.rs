@@ -2352,3 +2352,38 @@ async fn trop_de_handles_en_une_requete_est_refuse() {
 
     assert_eq!(response.status(), 400);
 }
+
+/// Le détail par appareil ne sort jamais vers un tiers.
+///
+/// Il dirait combien d'appareils une personne possède et lequel elle utilise à quelle heure :
+/// une fuite distincte de « en ligne », et que le maximum par compte suffit à éviter.
+#[tokio::test]
+async fn le_detail_par_appareil_n_est_servi_qu_a_son_proprietaire() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "tel").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "tel").await;
+
+    alice.get("/v1/groups").await;
+    attendre_presence(&server.pool, &alice.id).await.unwrap();
+
+    let sien: serde_json::Value = alice
+        .get(&format!("/v1/accounts/{}/devices", a.handle))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(sien["devices"][0]["last_seen"].is_i64(), "le propriétaire ne voit pas ses appareils");
+
+    let tiers: serde_json::Value = bob
+        .get(&format!("/v1/accounts/{}/devices", a.handle))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        tiers["devices"][0]["last_seen"].is_null(),
+        "un tiers obtient l'activité appareil par appareil",
+    );
+}

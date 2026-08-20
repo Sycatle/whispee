@@ -209,7 +209,7 @@ export class Session {
      * grand public : les désactiver silencieusement rendrait l'affichage de l'autre côté
      * incompréhensible. C'est un choix de produit, et il est réversible d'un clic.
      */
-    private signals: SignalSettings = { readReceipts: true, typingIndicator: true },
+    private signals: SignalSettings = { readReceipts: true, typingIndicator: true, presence: true },
   ) {}
 
   /** Flux temps réel, quand il est ouvert. Sa panne ne retire aucune fonctionnalité. */
@@ -485,8 +485,36 @@ export class Session {
       conversations,
       stored.verified ?? {},
       stored.knownDevices ?? {},
-      stored.signals ?? { readReceipts: true, typingIndicator: true },
+      // `presence` absent vaut activé : c'est le défaut, le drapeau ne retient qu'un refus.
+      { readReceipts: true, typingIndicator: true, ...stored.signals },
     );
+  }
+
+  /**
+   * Dernière activité connue de chaque correspondant, en millisecondes.
+   *
+   * **Jamais persistée**, pour la même raison que les accusés et les indicateurs de frappe : une
+   * présence restaurée d'une session à l'autre afficherait en ligne quelqu'un que personne n'a
+   * vu depuis. Elle revient d'elle-même au premier tour de relève.
+   */
+  private presence = new Map<string, number>();
+
+  /**
+   * Horloge du serveur au moment de la dernière relève de présence.
+   *
+   * Conservée parce que la fraîcheur se juge en comparant deux horodatages, et que celui du
+   * navigateur peut être n'importe quoi.
+   */
+  private presenceNow = 0;
+
+  /** Dernière activité d'un compte, ou `undefined` si le serveur n'a rien à en dire. */
+  presenceOf(handle: string): number | undefined {
+    return this.presence.get(handle);
+  }
+
+  /** Horloge du serveur à la dernière relève : la référence pour juger de la fraîcheur. */
+  get presenceClock(): number {
+    return this.presenceNow;
   }
 
   /** Le coffre est-il actif sur ce compte ? */
@@ -1632,11 +1660,21 @@ export class Session {
    *
    * Désactiver les accusés de lecture cesse aussi de montrer ceux des autres : voir sans être
    * vu serait exactement ce que le réglage prétend empêcher.
+   *
+   * La présence est le seul de ces réglages qui doive **remonter au serveur** : lui seul peut
+   * cesser d'enregistrer. Un réglage qui se contenterait de ne plus afficher laisserait le
+   * registre se remplir quand même, ce qui n'est pas ce que l'utilisateur a demandé.
    */
   async setSignalSetting<K extends keyof SignalSettings>(
     key: K,
     value: SignalSettings[K],
   ): Promise<void> {
+    if (key === "presence") {
+      await this.api.setPresenceOptout(!value);
+      // Ce que le serveur vient d'effacer ne doit pas rester à l'écran jusqu'à la relève.
+      this.presence = new Map();
+    }
+
     this.signals[key] = value;
     await this.persist();
   }
@@ -1845,6 +1883,44 @@ export class Session {
         console.warn("accusé reporté", error);
       });
     }
+
+    await this.refreshPresence().catch((error: unknown) => {
+      console.warn("présence non relevée", error);
+    });
+  }
+
+  /**
+   * Relève la présence de tous les correspondants connus, en une requête.
+   *
+   * # Pourquoi c'est ici et pas sur un minuteur à part
+   *
+   * Parce qu'un minuteur dédié redonnerait au serveur le journal d'activité à la seconde que le
+   * flux lui a précisément retiré — pour un point de couleur. La relève existe déjà, elle passe
+   * toutes les trente secondes, et c'est une granularité honnête pour cette information.
+   *
+   * Et pas non plus par le flux : le point vert en dépendrait, or un flux bloqué par un proxy
+   * afficherait alors tout le monde hors ligne. Une interface fausse est pire qu'une interface
+   * en retard.
+   */
+  private async refreshPresence(): Promise<void> {
+    if (!this.signals.presence) return;
+
+    const handles = [
+      ...new Set(
+        [...this.conversations.values()]
+          .flatMap((view) => view.accounts.map((account) => account.handle))
+          .filter((handle) => handle !== this.handle),
+      ),
+    ];
+    if (handles.length === 0) return;
+
+    // Le serveur plafonne à 64 par requête. Au-delà, on relève les premiers : c'est une
+    // limite visible plutôt qu'un 400 silencieux, et un carnet de cette taille demanderait
+    // de toute façon un autre découpage.
+    const { now, accounts } = await this.api.presence(handles.slice(0, 64));
+
+    this.presenceNow = now * 1000;
+    this.presence = new Map(accounts.map((entry) => [entry.handle, entry.last_seen * 1000]));
   }
 
   /**

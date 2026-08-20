@@ -177,6 +177,7 @@ export class Api {
         attestation: string;
         revoked_at?: number;
         revocation?: string;
+        last_seen?: number;
       }[];
     }>("GET", `/v1/accounts/${encodeURIComponent(handle)}/devices`);
 
@@ -189,6 +190,7 @@ export class Api {
         attestation: fromBase64(device.attestation),
         revokedAt: device.revoked_at,
         revocation: device.revocation ? fromBase64(device.revocation) : undefined,
+        lastSeen: device.last_seen,
       })),
     };
   }
@@ -316,6 +318,28 @@ export class Api {
       `/v1/vault/${toHex(groupId)}?after=${after}`,
     );
     return rows.map((row) => ({ seq: row.seq, payload: fromBase64(row.payload) }));
+  }
+
+  /**
+   * Dernière activité des comptes demandés.
+   *
+   * `POST` et non `GET` : les handles restent hors de l'URL, donc hors des journaux d'accès de
+   * tout proxy traversé. Même argument que celui qui a écarté `EventSource` pour le flux — et le
+   * corps est de toute façon couvert par la signature.
+   *
+   * Le serveur renvoie sa propre horloge avec la réponse : la fraîcheur se juge en comparant
+   * deux horodatages, et celui du navigateur peut être n'importe quoi.
+   */
+  presence(handles: string[]): Promise<{
+    now: number;
+    accounts: { handle: string; last_seen: number }[];
+  }> {
+    return this.request("POST", "/v1/presence", { handles });
+  }
+
+  /** Coupe ou rétablit la diffusion de sa présence. Réciproque : couper, c'est cesser de voir. */
+  setPresenceOptout(optout: boolean): Promise<void> {
+    return this.request("POST", "/v1/presence/optout", { optout });
   }
 
   /** Groupes où le serveur nous a déclaré membre — comment on découvre un Welcome. */

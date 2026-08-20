@@ -124,6 +124,17 @@ export interface SignalSettings {
   readReceipts: boolean;
   /** Émettre l'indicateur de frappe. Le recevoir reste possible : rien à cacher à s'en priver. */
   typingIndicator: boolean;
+  /**
+   * Diffuser — et donc voir — sa présence.
+   *
+   * Un seul drapeau, comme pour les accusés de lecture, et pour la même raison : deux drapeaux
+   * distincts inviteraient à voir sans être vu. La réciprocité est en outre **appliquée par le
+   * serveur**, qui cesse d'enregistrer autant que de servir ; ce drapeau-ci ne fait qu'éviter
+   * une requête inutile et refléter l'état à l'écran.
+   *
+   * Absent vaut activé : la présence est le défaut, ce drapeau ne sert qu'à retenir un refus.
+   */
+  presence?: boolean;
 }
 
 /**

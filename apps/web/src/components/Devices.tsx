@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ResolvedAccount } from "@/lib/account";
+import { describePresence } from "@/lib/presence";
 import type { Session } from "@/lib/session";
 
 /**
@@ -123,6 +124,24 @@ export function DeviceSettings({
                 {device.id}
                 {device.id === session.deviceId && (
                   <span className="ml-2 font-sans text-(--color-ink-muted)">(celui-ci)</span>
+                )}
+                {/*
+                  Servi au seul propriétaire du compte. C'est ce qui rend visible un appareil
+                  qu'on croyait éteint et qui relève toujours ses messages — le symptôme d'un
+                  appareil perdu, ou pire.
+                */}
+                {device.lastSeen !== undefined && (
+                  <span className="ml-2 block font-sans text-(--color-ink-muted)">
+                    {/*
+                      L'horloge du serveur si on l'a déjà relevée, la locale sinon : comparer
+                      deux horodatages produits par des machines différentes est justement ce
+                      qui fait clignoter un statut chez qui a l'heure mal réglée.
+                    */}
+                    {describePresence(
+                      device.lastSeen * 1000,
+                      session.presenceClock || Date.now(),
+                    )}
+                  </span>
                 )}
               </span>
               {device.id !== session.deviceId && (

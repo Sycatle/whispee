@@ -116,6 +116,14 @@ export interface AttestedDevice {
   revokedAt?: number;
   /** Certificat signé par le compte. Présent exactement quand `revokedAt` l'est. */
   revocation?: Uint8Array;
+  /**
+   * Dernière activité, en secondes Unix. **Servi au seul propriétaire du compte.**
+   *
+   * Absent pour les appareils d'autrui : le détail par appareil dirait combien d'appareils une
+   * personne possède et lequel elle utilise à quelle heure. Pour soi, c'est ce qui rend visible
+   * un appareil fantôme réellement actif.
+   */
+  lastSeen?: number;
 }
 
 /** Retour de `Client.invite`. */

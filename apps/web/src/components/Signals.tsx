@@ -10,11 +10,13 @@
  * annoncé. L'enfouir dans une documentation reviendrait à faire découvrir la contrepartie
  * après coup, ce qui est exactement ce qu'un réglage de vie privée ne doit pas faire.
  *
- * # Pourquoi il n'y a pas de réglage de présence
+ * # La présence suit la même règle, et va plus loin
  *
- * Parce qu'il n'y a pas de présence. Elle est la seule des trois fonctions demandées qui
- * oblige quelqu'un à tenir un registre transverse aux conversations — donc à connaître les
- * horaires de chacun. Aucune formulation chiffrée ne contourne cela.
+ * Elle est la seule des fonctions affichées ici qui oblige le serveur à tenir un registre
+ * transverse aux conversations — donc à connaître les horaires d'éveil de chacun. Aucune
+ * formulation chiffrée ne contourne cela : c'est pourquoi la couper ne se contente pas de
+ * masquer l'affichage, mais dit au serveur de **cesser d'enregistrer** et d'effacer ce qu'il
+ * a déjà noté. Un réglage qui filtrerait seulement à la lecture ne réglerait rien.
  */
 import { useState } from "react";
 
@@ -29,7 +31,7 @@ export function SignalSettings({
 }) {
   const [settings, setSettings] = useState(session.signalSettings());
 
-  const basculer = (cle: "readReceipts" | "typingIndicator") => {
+  const basculer = (cle: "readReceipts" | "typingIndicator" | "presence") => {
     const valeur = !settings[cle];
     setSettings({ ...settings, [cle]: valeur });
     session.setSignalSetting(cle, valeur).catch((e: unknown) => {
@@ -72,9 +74,27 @@ export function SignalSettings({
         </span>
       </label>
 
+      <label className="flex items-start gap-2">
+        <input
+          type="checkbox"
+          checked={settings.presence !== false}
+          onChange={() => basculer("presence")}
+          className="mt-1"
+        />
+        <span>
+          Statut « en ligne »
+          <span className="block text-xs opacity-70">
+            La désactiver vous empêche aussi de voir qui est en ligne, et demande au serveur
+            d’effacer ce qu’il a déjà noté de votre activité. Tant qu’elle est active, il
+            conserve l’heure de votre dernière connexion, à la minute près — c’est la seule de
+            ces trois fonctions qui exige de lui un registre.
+          </span>
+        </span>
+      </label>
+
       <p className="text-xs opacity-60">
-        Aucune présence n’est diffusée : personne, pas même le serveur, ne sait si vous êtes
-        connecté.
+        Votre historique est sauvegardé par défaut, chiffré par votre phrase de récupération.
+        Cela se règle dans « Sauvegarde de l’historique ».
       </p>
     </section>
   );

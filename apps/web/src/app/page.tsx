@@ -8,6 +8,7 @@ import { LockSettings, Unlock } from "@/components/Lock";
 import { PairDevice, ShowPairingCode, usePairingOffer } from "@/components/Pairing";
 import { VaultSettings } from "@/components/Vault";
 import { Messages } from "@/components/Messages";
+import { PresenceDot, PresenceLine } from "@/components/Presence";
 import { SignalSettings } from "@/components/Signals";
 import { Verification, VerificationPanel, VerificationToggle } from "@/components/Verification";
 import { type ConversationView, Session } from "@/lib/session";
@@ -642,13 +643,23 @@ function Sidebar({
             <button
               type="button"
               onClick={() => onSelect(view)}
-              className={`w-full px-3 py-2 text-left text-sm ${
+              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm ${
                 current?.key === view.key ? "bg-(--color-surface-raised) font-medium" : ""
               }`}
             >
-              {view.accounts.map((a) => `@${a.handle}`).join(", ") ||
-                [...new Set(view.peers.map((p) => p.name))].map((n) => `@${n}`).join(", ") ||
-                "conversation vide"}
+              {/*
+                Une pastille par conversation, et seulement en tête-à-tête. Sur un groupe, elle
+                ne dirait pas de qui elle parle — et poser la question multiplie les inférences
+                au lieu d'informer.
+              */}
+              {view.accounts.length === 1 && (
+                <PresenceDot session={session} handle={view.accounts[0].handle} />
+              )}
+              <span className="min-w-0 truncate">
+                {view.accounts.map((a) => `@${a.handle}`).join(", ") ||
+                  [...new Set(view.peers.map((p) => p.name))].map((n) => `@${n}`).join(", ") ||
+                  "conversation vide"}
+              </span>
             </button>
           </li>
         ))}
@@ -734,6 +745,8 @@ function Conversation({
     }
   };
 
+  const enTrainDEcrire = session.typingIn(view);
+
   const title =
     view.accounts.map((a) => `@${a.handle}`).join(", ") ||
     [...new Set(view.peers.map((p) => p.name))].map((n) => `@${n}`).join(", ") ||
@@ -749,9 +762,26 @@ function Conversation({
           quand un message n'arrive pas, et la chercher autrement demande d'instrumenter le
           module WebAssembly.
         */}
-        <h2 className="truncate text-sm font-medium" data-epoch={String(view.epoch)}>
-          {title}
-        </h2>
+        <div className="min-w-0">
+          <h2 className="truncate text-sm font-medium" data-epoch={String(view.epoch)}>
+            {title}
+          </h2>
+          {/*
+            « écrit… » prend le pas sur la présence : écrire implique être en ligne, et afficher
+            les deux ajoute du bruit sans ajouter d'information. En tête-à-tête seulement — sur
+            un groupe, « en ligne » ne dirait pas de qui il s'agit.
+          */}
+          {enTrainDEcrire.length > 0 ? (
+            <span className="text-xs text-(--color-ink-muted)">
+              {enTrainDEcrire.map((handle) => `@${handle}`).join(", ")}{" "}
+              {enTrainDEcrire.length > 1 ? "écrivent" : "écrit"}…
+            </span>
+          ) : (
+            view.accounts.length === 1 && (
+              <PresenceLine session={session} handle={view.accounts[0].handle} />
+            )
+          )}
+        </div>
         <div className="flex shrink-0 gap-3">
           {view.accounts.length > 1 && (
             <GroupToggle count={view.accounts.length} onClick={() => setGroup(!group)} />

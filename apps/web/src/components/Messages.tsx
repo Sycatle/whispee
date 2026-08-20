@@ -8,10 +8,11 @@
  * pour la citation d'une réponse. Garder cette logique dans le rendu de la page mêlait la
  * mise en page de l'application à la structure de la conversation.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
 import type { ConversationView, Session } from "@/lib/session";
+import { nextExpiry } from "@/lib/signals";
 
 /** Palette proposée au survol. Volontairement courte : un sélecteur complet est un autre sujet. */
 const EMOJIS = ["👍", "❤️", "😂", "😮", "🙏"];
@@ -87,6 +88,24 @@ export function Messages({
   };
 
   const enTrainDEcrire = session.typingIn(view);
+
+  // Réveil à l'expiration.
+  //
+  // `typingIn` filtre les indicateurs périmés, mais il ne s'exécute qu'au rendu — et quand le
+  // correspondant cesse d'écrire, plus rien ne provoque de rendu : aucun signal n'arrive, et la
+  // relève périodique ne repasse que trente secondes plus tard. L'indicateur restait donc peint
+  // à l'écran bien après avoir cessé d'être vrai.
+  //
+  // Ce minuteur n'ajoute aucune donnée : il ne fait que redemander un rendu à l'instant où le
+  // filtre changera d'avis. `tick` n'est jamais lu, seul son changement compte.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const delai = nextExpiry(view.typing, Date.now());
+    if (delai === undefined) return;
+
+    const minuteur = setTimeout(() => setTick((n) => n + 1), delai);
+    return () => clearTimeout(minuteur);
+  });
 
   return (
     <>
@@ -164,9 +183,12 @@ export function Messages({
       </ol>
 
       {/*
-        Ligne d'activité. Elle disparaît d'elle-même : aucun signal « a cessé d'écrire » n'est
-        émis, parce qu'un tel signal peut se perdre et laisserait l'indicateur allumé pour
-        toujours. C'est l'expiration locale qui décide.
+        Ligne d'activité. Elle s'éteint de deux façons, aucune ne dépendant d'un signal « a cessé
+        d'écrire » — un tel signal peut se perdre et laisserait l'indicateur allumé pour toujours.
+
+        À l'arrivée d'un message de l'auteur, immédiatement : l'envoi prouve qu'il a fini, et
+        cette preuve ne peut pas s'égarer puisqu'on ne l'attend pas. Sinon, par expiration locale,
+        réveillée par le minuteur ci-dessus.
       */}
       {enTrainDEcrire.length > 0 && (
         <p className="px-4 pb-1 text-xs opacity-60" aria-live="polite">

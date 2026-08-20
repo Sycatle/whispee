@@ -25,7 +25,14 @@ import {
 import { type LockEnvelope, changePassword, createLock, openLock } from "./lock";
 import { type SignalSettings, clearSession, loadSession, saveSession } from "./storage";
 import { type ReceiptBook, pending, record, statusOf } from "./receipts";
-import { type Typing, TYPING_DEBOUNCE_MS, fresh, openTyping, sealTyping } from "./signals";
+import {
+  type Typing,
+  TYPING_DEBOUNCE_MS,
+  fresh,
+  openTyping,
+  sealTyping,
+  without,
+} from "./signals";
 import { Stream } from "./stream";
 import * as vault from "./vault";
 import * as log from "./transparency";
@@ -1538,8 +1545,8 @@ export class Session {
     const handle = await openTyping(this.client.signalKey(view.groupId), payload);
     if (handle === undefined || handle === this.handle) return;
 
-    view.typing = [...fresh(view.typing, Date.now()).filter((e) => e.handle !== handle),
-      { handle, at: Date.now() }];
+    const maintenant = Date.now();
+    view.typing = [...without(fresh(view.typing, maintenant), handle), { handle, at: maintenant }];
   }
 
   /**
@@ -1591,6 +1598,11 @@ export class Session {
     // On note la séquence pour ne pas tenter de la relire, sans toucher au curseur : les
     // enveloppes déposées entre-temps par d'autres restent à traiter.
     view.mine.add(seq);
+
+    // Le throttle repart de zéro : après un envoi, la frappe suivante ouvre un nouveau message
+    // et doit être annoncée tout de suite. La laisser sous le seuil ferait attendre jusqu'à une
+    // seconde et demie avant que le correspondant ne voie qu'on répond de nouveau.
+    view.typingSentAt = undefined;
 
     // Le trafic de protocole ne rejoint ni le fil ni le coffre. Il emprunte le même canal
     // chiffré que les messages — c'est tout l'intérêt — mais ce n'est pas une conversation.
@@ -1836,6 +1848,12 @@ export class Session {
       }
       return;
     }
+
+    // L'auteur vient d'envoyer : il n'écrit plus. Aucun signal « a cessé d'écrire » n'est
+    // nécessaire — le message lui-même en est la preuve, et il ne peut pas se perdre puisqu'on
+    // ne l'attend pas. Sans cela, l'expéditeur paraît continuer d'écrire tout le temps du TTL
+    // après avoir appuyé sur Entrée.
+    if (incoming.sender) view.typing = without(view.typing, incoming.sender);
 
     view.messages.push({
       seq,

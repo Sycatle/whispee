@@ -26,6 +26,17 @@
  *
  * Ce qu'il garantit en revanche est réel : la clé change à chaque commit, donc un membre
  * retiré perd ce canal au même instant que le reste.
+ *
+ * # Comment un indicateur s'éteint
+ *
+ * Jamais par un signal de fin — il pourrait se perdre, et l'indicateur resterait allumé pour
+ * toujours. Deux chemins, tous deux locaux :
+ *
+ *  * **l'arrivée d'un message de l'auteur** (`without`), qui est la preuve la plus sûre qu'il a
+ *    fini d'écrire, et qui ne coûte rien puisqu'on ne l'attend pas ;
+ *  * **l'expiration** (`fresh`), en dernier recours. Elle demande un minuteur côté affichage :
+ *    calculer qu'une entrée est périmée ne sert à rien si personne ne redessine. Voir
+ *    `nextExpiry`.
  */
 
 /** Ce qu'un signal transporte. Un seul cas, et le format le dit explicitement. */
@@ -36,16 +47,28 @@ const TYPE_TYPING = 0;
  *
  * Aucun signal « a cessé d'écrire » n'est émis : l'expiration s'en charge, et un signal de fin
  * pourrait se perdre — laissant l'indicateur allumé indéfiniment.
+ *
+ * Trois secondes, et non six : c'est le délai au bout duquel quelqu'un qui a réellement cessé
+ * d'écrire cesse d'être annoncé. Le porter plus haut rend l'indicateur menteur plus longtemps,
+ * ce qui est le seul défaut qu'il puisse avoir.
+ *
+ * **L'expiration doit être rendue, pas seulement calculée.** `fresh()` ne s'évalue qu'au rendu ;
+ * sans minuteur qui force ce rendu au moment voulu, la valeur ci-dessous ne décrit rien. Voir
+ * `Messages.tsx`.
  */
-export const TYPING_TTL_MS = 6000;
+export const TYPING_TTL_MS = 3000;
 
 /**
  * Intervalle minimal entre deux émissions pendant qu'on tape.
  *
  * Plus court, on paie un dépôt réseau par frappe de touche pour une information que le
- * destinataire a déjà. Plus long que la moitié du TTL, l'indicateur clignote.
+ * destinataire a déjà. Plus long que la moitié du TTL, l'indicateur clignote — d'où la moitié
+ * exacte de `TYPING_TTL_MS`.
+ *
+ * C'est aussi le pire cas d'inertie : la dernière frappe avant l'arrêt peut être avalée par ce
+ * seuil, donc le dernier signal émis peut dater d'une seconde et demie avant l'arrêt réel.
  */
-export const TYPING_DEBOUNCE_MS = 3000;
+export const TYPING_DEBOUNCE_MS = 1500;
 
 export interface Typing {
   handle: string;
@@ -109,6 +132,39 @@ export async function openTyping(
 /** Ne garde que les indicateurs non expirés. */
 export function fresh(typing: Typing[], now: number): Typing[] {
   return typing.filter((entry) => now - entry.at < TYPING_TTL_MS);
+}
+
+/**
+ * Délai avant que le prochain indicateur n'expire, ou `undefined` s'il n'y en a aucun.
+ *
+ * L'expiration est paresseuse : `fresh()` ne s'évalue qu'au rendu, et un rendu n'a lieu que sur
+ * un événement extérieur. Or quand quelqu'un cesse d'écrire, il ne se produit justement plus
+ * rien — l'indicateur restait donc peint à l'écran jusqu'au prochain événement quelconque, soit
+ * la relève périodique, soit trente secondes. C'est cette fonction qui donne à l'affichage de
+ * quoi se réveiller tout seul.
+ *
+ * Jamais négatif : une entrée déjà expirée demande un rendu immédiat, pas un `setTimeout` au
+ * passé.
+ */
+export function nextExpiry(typing: Typing[], now: number): number | undefined {
+  if (typing.length === 0) return undefined;
+
+  const plusAncien = Math.min(...typing.map((entry) => entry.at));
+  return Math.max(0, plusAncien + TYPING_TTL_MS - now);
+}
+
+/**
+ * Retire les indicateurs d'un correspondant.
+ *
+ * Appelé quand un message de sa part arrive : l'envoi est la preuve la plus sûre qu'il a fini
+ * d'écrire, et elle ne coûte aucun signal supplémentaire. Sans cela, l'auteur d'un message
+ * paraît continuer d'écrire pendant tout le TTL après l'avoir envoyé.
+ *
+ * Le risque du signal « a cessé d'écrire » ne s'applique pas ici : rien n'est émis, donc rien ne
+ * peut se perdre. Au pire on n'éteint pas, et l'expiration reprend la main.
+ */
+export function without(typing: Typing[], handle: string): Typing[] {
+  return typing.filter((entry) => entry.handle !== handle);
 }
 
 /**

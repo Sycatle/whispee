@@ -101,3 +101,41 @@ parler à Apple et Google doit rester pleinement fonctionnel.
   `windowSoftInputMode` : trois choses qu'aucun émulateur ne tranche honnêtement.
 - **Android sans services Google n'aura pas de réveil.** UnifiedPush serait la réponse ; non
   spécifié.
+
+## Où en est l'exécution
+
+Écrit après coup, à mesure que les lots tombent — un plan qui ne dit pas ce qui a été fait devient
+un document d'intention.
+
+| Lot | État | Ce qui reste |
+|---|---|---|
+| 0 | fait | — |
+| 1 | fait | clavier et zones sûres non vérifiés sur un appareil réel |
+| 2 | fait | la migration native n'a jamais été exécutée de bout en bout |
+| 3 | fait | la temporisation du reverrouillage n'est vérifiée que dans son branchement |
+| 4 | code écrit | **aucune ligne du chemin biométrique n'a été exécutée** : ni cible Rust Android ni NDK sur la machine de développement, donc même la compilation de la dépendance reste à confirmer |
+| 5 | fait | le scan lui-même, faute de `BarcodeDetector` sur Chrome Linux |
+| 6 | moitié | voir ci-dessous |
+
+### Ce qui manque au lot 6, précisément
+
+Le serveur sait enregistrer un jeton, choisir qui réveiller et ne rien envoyer. Ce qui manque est
+tout ce qui exige des secrets :
+
+1. **Un fournisseur.** Une implémentation de `push::Emetteur` pour FCM (HTTP v1, donc OAuth2 avec
+   un compte de service, donc un JWT RS256) et pour APNs (JWT ES256, `content-available: 1`). Le
+   serveur n'a aujourd'hui aucun client HTTP sortant : c'est une dépendance à ajouter, et une
+   surface réseau nouvelle sur un service qui n'en avait pas.
+
+2. **La configuration qui les branche.** Absente par défaut, sans quoi la deuxième borne de
+   `migrations/0011_push.sql` tombe.
+
+3. **Le jeton, côté appareil.** Il vient du système, à travers un plugin Tauri qu'il faut
+   intégrer, et il **change sans prévenir** : l'enregistrement doit être rejoué à chaque
+   démarrage, pas seulement à l'activation.
+
+4. **Le réglage.** L'activation appartient à l'utilisateur, et l'écran doit dire ce qu'elle
+   divulgue avant de la proposer — comme le fait celui du coffre, et pour la même raison.
+
+Rien de tout cela n'est écrit, délibérément : du code d'intégration jamais exécuté donnerait
+l'apparence d'une fonctionnalité là où il n'y en a pas.

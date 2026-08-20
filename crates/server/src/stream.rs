@@ -2,10 +2,16 @@
 //!
 //! # Ce que ce module change pour la vie privée
 //!
-//! Contre-intuitivement, il en **retire**. Le client relevait jusqu'ici sa boîte toutes les
-//! 1,5 seconde, par une requête signée et par conversation : le serveur recevait donc un
-//! journal détaillé de qui était éveillé, à la seconde près, pour chaque groupe. Une connexion
-//! longue remplace ce flux par un seul point d'observation à l'ouverture.
+//! Il en **retire** plus qu'il n'en ajoute, ce qui n'est pas la même chose que de ne rien
+//! ajouter. Le client relevait jusqu'ici sa boîte toutes les 1,5 seconde, par une requête signée
+//! et par conversation : le serveur recevait donc un journal détaillé de qui était éveillé, à la
+//! seconde près, pour chaque groupe. Une connexion longue remplace ce flux par un seul point
+//! d'observation à l'ouverture.
+//!
+//! Le solde s'est réduit depuis : ce flux est aussi le battement qui alimente le registre de
+//! présence (`crate::presence`). Une observation par minute et par appareil, au lieu d'une par
+//! seconde et par groupe, reste un progrès net — mais l'affirmation « il ne fait que retirer »
+//! n'est plus exacte, et la laisser telle quelle serait un confort d'écriture.
 //!
 //! # Ce qui ne transite pas ici
 //!

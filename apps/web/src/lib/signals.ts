@@ -18,7 +18,7 @@
  *
  * **Pas de forward secrecy à l'intérieur d'une epoch.** La clé vient du secret d'export du
  * groupe : tous les signaux d'une même epoch tombent ensemble si elle fuit. Acceptable pour une
- * donnée qui expire en six secondes ; inacceptable pour un message, d'où la séparation.
+ * donnée qui expire en trois secondes ; inacceptable pour un message, d'où la séparation.
  *
  * **Pas d'authentification de l'émetteur.** La clé est celle du groupe, donc tout membre peut
  * produire un signal qui paraît venir d'un autre. Sans conséquence à deux — il n'y a qu'un

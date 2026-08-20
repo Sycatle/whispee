@@ -15,6 +15,19 @@
 //! observateur du réseau peut faire redéposer une enveloppe déjà envoyée. Le doublon est
 //! rejeté par le client MLS (la clé de message a été consommée), donc l'impact se limite à
 //! du bruit — mais la limite doit être levée avant tout usage sérieux.
+//!
+//! # Effet de bord : la présence
+//!
+//! Toute requête dont la signature est vérifiée note l'appareil comme éveillé
+//! (`crate::presence`). L'écriture est **détachée et jamais attendue** : cet extracteur est sur
+//! le chemin de latence de tout le serveur, et une présence qui ferait échouer — ou seulement
+//! ralentir — un envoi de message serait une régression de la fonction principale au profit d'un
+//! point de couleur. Son échec est ignoré, et elle est amortie à une écriture par minute et par
+//! appareil.
+//!
+//! Elle ne s'applique qu'ici, donc qu'aux chemins authentifiés **par identité**. Les dépôts
+//! anonymes et les signaux de frappe ne construisent pas de [`Signed`] : le serveur ne sait pas
+//! qui dépose, et l'en déduire reviendrait à défaire le sealed sender.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

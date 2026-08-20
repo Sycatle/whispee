@@ -17,9 +17,11 @@ crates/
   crypto-core/    OpenMLS — le seul chemin de production
   crypto-wasm/    binding web (wasm-bindgen)
   crypto-ffi/     (à venir) binding iOS/Android via UniFFI
+  attest/         domaines de signature et de MAC
+  transparency/   arbre de Merkle append-only (key transparency)
   server/         delivery service (axum + PostgreSQL)
 apps/
-  web/            (à venir) Next.js
+  web/            Next.js + React
 ```
 
 ### Le serveur
@@ -60,7 +62,8 @@ corps, ce qui empêche de rejouer une signature d'un endpoint sur un autre.
 | `group_members` | Le serveur sait qui parle avec qui. Même compromis que WhatsApp ; l'éviter demande des credentials à divulgation nulle (Private Group System de Signal). |
 | Anti-rejeu | Fenêtre temporelle de 60 s, sans cache de nonces. Une requête reste rejouable dans cette fenêtre ; le doublon est rejeté par le client MLS, donc l'impact se limite à du bruit. |
 | Enregistrement | Trust on first use. Reprendre un identifiant avec une autre clé est refusé, mais rien ne prouve que le premier arrivé était légitime. Un déploiement réel adosse cet endpoint à une vérification de numéro ou d'e-mail. |
-| `created_at` | Métadonnée temporelle conservée pour la purge. Aucune autre fonctionnalité ne doit s'y adosser. |
+| `created_at` | Métadonnée temporelle conservée pour la purge. Aucune autre fonctionnalité ne doit s'y adosser — la règle vaut toujours pour cette colonne-ci. |
+| `last_seen_at` | Dernière activité de chaque appareil, à la minute près. C'est **le** registre que les autres colonnes refusaient de tenir, et il est tenu délibérément : voir « Présence » plus bas. Écrit uniquement depuis les chemins authentifiés par identité, jamais depuis un dépôt anonyme. |
 | Arbre de ratchet | Le Welcome d'ajout transporte l'arbre MLS, **public par construction** : il contient les credentials, donc les noms des membres. Vérifié par `le_welcome_expose_les_identites_mais_jamais_le_contenu`. Le serveur connaît déjà ces identités par `devices` et `group_members`, donc la fuite n'ajoute rien à ce qu'il sait — mais elle est réelle. |
 
 Un seul cœur crypto en Rust, compilé vers WASM, UniFFI et natif. Réimplémenter la crypto
@@ -371,22 +374,56 @@ bruit — il ne produira pas de MLS valide, mais il peut polluer. C'est le prix 
 symétrique ; des jetons à divulgation nulle l'éviteraient, au prix d'une machinerie sans commune
 mesure avec ce projet.
 
-## Signalisation : accusés, frappe, réactions
+## Signalisation : accusés, frappe, présence, réactions
 
-Trois signaux séparent une démonstration cryptographique d'une messagerie utilisable : savoir si le
-message est arrivé, savoir s'il a été lu, savoir si l'autre est en train de répondre. Ils sont tous
-générateurs de métadonnées — mais à des degrés si inégaux que les traiter ensemble serait l'erreur.
+Quatre signaux séparent une démonstration cryptographique d'une messagerie utilisable : savoir si le
+message est arrivé, savoir s'il a été lu, savoir si l'autre est en train de répondre, savoir s'il
+est là. Ils sont tous générateurs de métadonnées — mais à des degrés si inégaux que les traiter
+ensemble serait l'erreur.
 
-### Aucune présence, et c'est une décision
+### Présence : un registre serveur, et ce qu'il coûte
 
-Il n'y a **pas** d'indicateur « en ligne », et il n'y en aura pas. C'est la seule des trois fonctions
-couramment demandées qui oblige *quelqu'un* à tenir un registre transverse aux conversations : pour
-afficher qu'un compte est connecté, il faut savoir qu'il l'est, donc connaître ses horaires de
-sommeil, son fuseau, ses absences. Aucune formulation chiffrée ne contourne cela — c'est le routage
+Ce projet a longtemps refusé la présence, et l'argument n'était pas faux : c'est la seule de ces
+quatre fonctions qui oblige *quelqu'un* à tenir un registre transverse aux conversations. Pour
+afficher qu'un compte est connecté, il faut savoir qu'il l'est — donc connaître ses horaires de
+sommeil, son fuseau, ses absences. Aucune formulation chiffrée ne contourne cela : c'est le routage
 lui-même qui l'apprend.
 
-Signal ne diffuse pas de présence non plus. Ce n'est pas un oubli, c'est le refus de tenir ce
-registre.
+Le registre est désormais tenu, et c'est un choix, pas une dérive. Signal, lui, refuse toujours de
+le tenir ; il n'y a pas de parité à revendiquer ici, seulement un compromis assumé et son prix.
+
+**Ce que le serveur détient** : `devices.last_seen_at`, un horodatage par appareil, **tronqué à la
+minute**, écrasé à chaque battement. Pas d'historique — une table `presence_log` serait un journal
+de déplacements, et l'écrasement est la fonctionnalité, pas un raccourci d'implémentation.
+
+**Ce qui borne la fuite**, et qui est le vrai contenu de la fonctionnalité :
+
+- la colonne est sur l'appareil, mais **n'est jamais servie par appareil à un tiers** : seul le
+  maximum par compte sort. Servir le détail dirait combien d'appareils une personne possède et
+  lequel elle utilise à quelle heure — une fuite distincte de « en ligne ». Le propriétaire, lui,
+  voit ses propres appareils : c'est ce qui rend visible un appareil perdu qui relève toujours ;
+- elle n'est écrite que depuis les chemins **authentifiés par identité**. Un dépôt anonyme ou un
+  signal de frappe ne la touche jamais : le serveur ne sait pas qui dépose, et l'en déduire
+  reviendrait à défaire le sealed sender. Le test
+  `un_depot_anonyme_ne_met_jamais_a_jour_la_presence` existe pour que cela le reste — la protection
+  tient aujourd'hui à une seule ligne ;
+- la lecture exige un **groupe commun**. Sans cette clause, la route serait un oracle d'activité sur
+  n'importe quel pseudonyme. Un handle inconnu et un handle sans groupe commun rendent le même
+  résultat, faute de quoi elle serait aussi un oracle d'existence de compte ;
+- un appareil **révoqué** cesse de compter : un téléphone volé puis révoqué ne doit plus afficher
+  son propriétaire éveillé.
+
+**Le réglage coupe à la source.** Le refuser ne masque pas l'affichage : le serveur cesse
+d'enregistrer et efface ce qu'il avait noté. Un réglage qui filtrerait seulement à la lecture
+laisserait le registre se remplir quand même, c'est-à-dire ne réglerait rien. Il est **réciproque**,
+comme celui des accusés de lecture — ne plus diffuser sa présence, c'est aussi cesser de voir celle
+des autres, sans quoi il permettrait de voir sans être vu.
+
+**Ce qu'il en coûte quand même**, et qu'aucune de ces bornes ne répare : la présence rétrécit
+l'ensemble d'anonymat d'un dépôt anonyme. Si le serveur voit un dépôt dans un groupe à deux et qu'un
+seul des deux comptes est éveillé, il conclut. L'inférence existait déjà partiellement — les
+abonnements au flux disent qui écoute quel groupe — mais elle était volatile et cantonnée à un
+groupe ; elle devient durable et transverse.
 
 ### Accusés : cumulatifs, réciproques, et coupés de la boucle
 
@@ -430,8 +467,16 @@ Le dépôt réutilise le MAC d'appartenance du sealed sender, sous un **domaine 
 (`wac-signal-mac-v1` contre `wac-post-v1`) : un MAC de signal — dont le rejeu n'est volontairement
 pas contrôlé — ne vaut pas comme MAC de dépôt d'enveloppe.
 
-Aucun signal « a cessé d'écrire » n'est émis : l'expiration locale s'en charge. Un signal de fin
-pourrait se perdre, et laisserait l'indicateur allumé indéfiniment.
+Aucun signal « a cessé d'écrire » n'est émis : un signal de fin pourrait se perdre, et laisserait
+l'indicateur allumé indéfiniment. Il s'éteint donc par deux chemins purement locaux — l'arrivée
+d'un message de l'auteur, qui est la preuve la plus sûre qu'il a fini et qui ne peut pas s'égarer
+puisqu'on ne l'attend pas ; et à défaut l'expiration, trois secondes après le dernier signal reçu.
+
+Cette expiration demande un minuteur côté affichage, et ce n'est pas un détail d'implémentation :
+calculer qu'un indicateur est périmé ne sert à rien si personne ne redessine. Or quand quelqu'un
+cesse d'écrire, il ne se produit précisément plus rien — pas de signal, pas d'enveloppe. Sans
+réveil programmé, l'indicateur restait peint à l'écran jusqu'au prochain événement quelconque,
+c'est-à-dire jusqu'à la relève périodique : trente secondes pour une donnée qui en vaut trois.
 
 Bénéfice non planifié : la clé du canal éphémère change à chaque commit. **Un membre retiré perd
 l'indicateur de frappe au même instant qu'il perd les messages**, sans une ligne de code
@@ -450,6 +495,13 @@ voir » ; c'est la relève normale qui lit, revérifie l'appartenance et fait av
 navigateur qui bloque la connexion laisse l'application entièrement fonctionnelle, seulement moins
 réactive. Cette propriété est une contrainte de conception : un flux dont la panne perdrait des
 messages serait un transport construit au-dessus du transport.
+
+Elle explique aussi la forme prise par la présence. Le flux en est le chemin d'**écriture** — une
+connexion ouverte est le signal le plus fidèle qu'un client est là, plus fidèle qu'une requête, qui
+peut venir d'un onglet oublié. Mais sa **lecture** ne passe délibérément pas par lui : le point vert
+en dépendrait, et un flux bloqué afficherait alors tout le monde hors ligne. Une interface fausse
+est pire qu'une interface en retard. La présence se relève donc sur le même tour de 30 secondes que
+le reste, et jamais sur un minuteur à part.
 
 Détail qui a dicté l'implémentation : l'API `EventSource` du navigateur **n'accepte aucun en-tête**.
 Y authentifier imposerait de mettre la signature dans l'URL, où elle finirait dans les journaux
@@ -495,14 +547,36 @@ abandonnées dans SP 800-63B.
 
 ## Coffre d'historique
 
-**Optionnel, et désactivé par défaut.** L'écran d'activation énonce ce qu'on abandonne au lieu
-de le ranger dans un menu : les entrées sont chiffrées par une clé dérivée de la phrase de
-récupération, donc **stable pour toujours**. Si cette phrase fuit un jour, tout le passé
-sauvegardé fuit avec elle, rétroactivement. Sans coffre, ce passé serait resté hors d'atteinte —
-c'est la forward secrecy, et c'est une protection réelle, pas un effet de bord gênant.
+**Activé par défaut.** Ce qu'on abandonne ne change pas pour autant : les entrées sont chiffrées
+par une clé dérivée de la phrase de récupération, donc **stable pour toujours**. Si cette phrase
+fuit un jour, tout le passé sauvegardé fuit avec elle, rétroactivement. Sans coffre, ce passé serait
+resté hors d'atteinte — c'est la forward secrecy, et c'est une protection réelle, pas un effet de
+bord gênant.
 
-Ce compromis se paie une fois, en connaissance de cause. L'activer par défaut le ferait payer à
-tous ceux qui n'en ont pas besoin.
+Le compromis a été tranché dans l'autre sens, et il faut dire pourquoi : une messagerie dont la
+conversation repart vide à chaque rechargement n'en est pas une. Faire porter ce choix par un écran
+de réglage revenait à le refuser pour presque tout le monde, sans que presque personne ne l'ait
+décidé. Il est donc pris ici, une fois, et il reste **révocable dans les réglages**.
+
+Ce que cela change dans le reste du document : le paragraphe qui disait « l'activer par défaut le
+ferait payer à tous ceux qui n'en ont pas besoin » énonçait la décision inverse. Elle a changé ;
+l'argument, lui, reste vrai, et c'est précisément ce qui en fait un compromis plutôt qu'une
+amélioration.
+
+Deux conséquences qui suivent du défaut, et qui n'existaient pas quand il était optionnel :
+
+- **la phrase de récupération protège désormais le passé autant que le compte.** Elle est énoncée
+  comme telle sur l'écran qui l'affiche, puisque c'est le seul moment où elle est sous les yeux de
+  quelqu'un ;
+- **la rotation de compte rend l'historique archivé définitivement illisible**, sa clé dérivant de
+  l'ancienne phrase. Celui qui tournait sa clé savait autrefois qu'il avait un coffre ; ce n'est
+  plus le cas, et l'écran de rotation le dit avant de proposer le bouton.
+
+L'historique revient tout seul à l'ouverture d'une conversation, une fois par session. Cette
+restauration **ne fait avancer aucun curseur d'accusé** : un message restauré a déjà été accusé
+lors d'une session antérieure, et faire avancer `contentCursor` ferait ré-émettre un accusé à chaque
+rechargement — donc renaître la boucle décrite plus haut. C'est le seul chemin par lequel elle peut
+revenir.
 
 Chaque compte a **son** coffre, chiffré sous sa propre clé : un message d'une conversation à deux
 est stocké deux fois, une par participant. Partager une clé de coffre entre comptes reviendrait à
@@ -540,14 +614,19 @@ Le chiffrement de bout en bout ne résout qu'une partie du problème. Ce qui n'e
 | **Ancienneté approximative** | La succession d'un admin sans modérateur désigne le membre le plus ancien *au sens de l'arbre MLS*. MLS réutilisant les feuilles libérées, un arrivant tardif peut en hériter. Le déterminisme — qui protège du fork — a été préféré à l'exactitude ; la vraie ancienneté demanderait de tenir l'ordre d'arrivée dans le roster. |
 | **Suppression de groupe** | Un groupe vidé disparaît du client, mais le serveur garde la boîte. Rien ne prouverait qu'il l'ait réellement effacée ; le prétendre serait pire que de ne rien dire. |
 | **Compte compromis** | Un appareil ajouté par un compte dont la phrase a fuité est dûment attesté, donc indiscernable d'un ajout légitime. L'application le signale ; seul l'utilisateur peut dire s'il possède cet appareil. |
-| **Coffre d'historique** | Activé, il retire à l'historique la protection de la forward secrecy : la fuite de la phrase devient rétroactivement totale. D'où l'opt-in, désactivé par défaut, avec la contrepartie énoncée à l'écran d'activation. |
+| **Coffre d'historique** | Il retire à l'historique la protection de la forward secrecy : la fuite de la phrase devient rétroactivement totale. Il est **actif par défaut**, la contrepartie étant énoncée sur l'écran de la phrase de récupération et rappelée au présent dans les réglages, où il reste débrayable. |
+| **Historique orphelin** | Après récupération par phrase, le coffre est lisible mais les groupes correspondants n'apparaissent nulle part : le client ne connaît que les conversations dont son état MLS porte la trace. La promesse « survit à la perte de tous les appareils » n'est donc pas encore tenue. La tenir demanderait une route listant les groupes archivés et des conversations en lecture seule. |
+| **Rotation et coffre** | Tourner la clé du compte rend l'historique déjà archivé définitivement illisible. L'écran de rotation l'annonce ; rien ne permet de le rechiffrer. |
+| **Registre de présence** | Le serveur détient l'heure de dernière activité de chaque appareil. C'est un registre transverse aux conversations — horaires d'éveil, fuseau, absences — qu'aucune formulation chiffrée n'évite. Débrayable, et alors non enregistré. |
+| **Présence et sealed sender** | La présence rétrécit l'ensemble d'anonymat d'un dépôt anonyme : un dépôt dans un groupe à deux dont un seul membre est éveillé se laisse attribuer. |
+| **Précision de la présence** | La troncature à la minute borne ce que voient les *clients*, pas ce que sait le serveur : il observe de toute façon l'instant exact de chaque requête. |
 | **Backups** | Non implémentés. Un backup en clair annule intégralement le E2EE ; c'est l'échec le plus courant en production. |
 | **Post-quantique** | Pas de PQXDH ni de ratchet PQ. Vulnérable au *harvest-now-decrypt-later*. |
 | **Le web** | Le serveur livre le JS à chaque chargement et peut donc livrer une version qui exfiltre les clés. Aucune quantité de WebCrypto ne corrige ça — seule une application native ou une extension signée le fait. |
 | **Liste de mots de passe** | La liste des mots de passe rejetés est courte : elle attrape les cas manifestes, pas plus. Un déploiement réel utiliserait les 10 000 premiers de rockyou, ou l'API k-anonyme de Have I Been Pwned. |
 | **Estimation d'entropie** | Le nombre de bits affiché suppose des caractères tirés au hasard, ce qu'un humain ne fait jamais. C'est un plafond optimiste, présenté comme tel ; un vrai estimateur (zxcvbn) reconnaît mots et substitutions, au prix de 400 Ko. |
 | **Verrou et mémoire** | Une fois déverrouillé, l'état est en clair en mémoire jusqu'à la fermeture de l'onglet. Il n'y a pas de re-verrouillage après inactivité. |
-| **Volume du coffre** | Le serveur apprend combien de messages chaque compte archive et quand. Il savait déjà qui parle à qui ; ceci ajoute un volume et une chronologie. L'éviter demanderait du padding et des dépôts factices. |
+| **Volume du coffre** | Le serveur apprend combien de messages chaque compte archive et quand. Il savait déjà qui parle à qui ; ceci ajoute un volume et une chronologie. Cette fuite n'est plus subie par une minorité qui l'a choisie : elle est le régime normal. L'éviter demanderait du padding et des dépôts factices. |
 | **Suppression du coffre** | Aucun endpoint d'effacement. Même s'il en existait un, rien ne prouverait que le serveur a réellement supprimé les copies. |
 | **Endpoint compromis** | Hors périmètre par nature. Un appareil compromis lit les messages déchiffrés. |
 

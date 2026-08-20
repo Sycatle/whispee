@@ -1,7 +1,7 @@
 /**
- * Coffre d'historique. **Optionnel, et désactivé par défaut.**
+ * Coffre d'historique. **Actif par défaut.**
  *
- * # Ce qu'on abandonne en l'activant
+ * # Ce qu'on abandonne en le gardant
  *
  * MLS détruit ses clés au fil des messages : quiconque met la main sur le transport après coup
  * ne peut rien en tirer — y compris l'utilisateur lui-même sur un appareil neuf. C'est la
@@ -11,9 +11,15 @@
  * de la phrase de récupération, donc stable dans le temps. Si cette phrase fuit un jour, tout
  * le passé sauvegardé fuit avec elle, rétroactivement.
  *
- * C'est le prix d'un historique qui survit à la perte de tous les appareils. Il se paie une
- * fois, en connaissance de cause — d'où l'activation explicite, et l'écran qui l'énonce au
- * lieu de l'enfouir dans un menu.
+ * C'est le prix d'un historique qui survit à la perte de tous les appareils, et il a été payé :
+ * une messagerie dont la conversation repart vide à chaque rechargement n'en est pas une, et
+ * faire porter ce choix par un écran de réglage revenait à le refuser pour presque tout le monde
+ * sans que presque personne ne l'ait décidé.
+ *
+ * Le compromis est donc pris dans `Session.attach`, énoncé sur l'écran de la phrase de
+ * récupération — le seul moment où cette phrase, qui est aussi la clé du coffre, est sous les
+ * yeux de quelqu'un — et rappelé au présent dans les réglages, où il reste révocable. Un
+ * compromis devenu le défaut est celui qu'on cesse d'énoncer si l'on n'y prend pas garde.
  *
  * # Ce que le serveur apprend malgré tout
  *

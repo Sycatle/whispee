@@ -68,6 +68,15 @@ const DOMAIN_POST: &[u8] = b"wac-post-v1";
 /// raisonnement qui cesse d'être vrai à la première évolution du format.
 const DOMAIN_SIGNAL: &[u8] = b"wac-signal-mac-v1";
 
+/// Domaine de l'ouverture d'une session gateway.
+///
+/// Distinct de tous les précédents, et surtout de ce que signe [`crate::message`] : la
+/// signature d'ouverture prouve la possession de la clé d'authentification d'un appareil, la
+/// même que celle qui signe les requêtes HTTP. Sans séparation de domaine, une signature
+/// captée sur une requête HTTP ouvrirait une session, et réciproquement — ce qui rendrait
+/// inutile le nonce dont c'est précisément la raison d'être.
+const DOMAIN_GATEWAY: &[u8] = b"wac-gateway-v1";
+
 /// Longueur maximale acceptée pour un champ de longueur variable.
 ///
 /// Le préfixe de longueur est un `u16` : au-delà, la sérialisation tronquerait silencieusement,
@@ -303,6 +312,26 @@ pub fn signal_message(
     body_digest: &[u8],
 ) -> Result<Vec<u8>, AttestError> {
     encode(DOMAIN_SIGNAL, &[group_id, nonce, body_digest])
+}
+
+/// Message signé pour ouvrir une session gateway.
+///
+/// # Pourquoi un défi, là où le HTTP se contente d'un horodatage
+///
+/// L'authentification HTTP de ce projet accepte toute signature dont l'horodatage tient dans
+/// une fenêtre de soixante secondes, faute de mémoriser les nonces déjà vus — c'est la limite
+/// que documente `server::auth`. Une signature captée y reste donc rejouable pendant une
+/// minute.
+///
+/// Ici le nonce est **émis par le serveur** et consommé à la première utilisation : il n'y a
+/// pas de fenêtre. Ce n'est pas un raffinement gratuit, c'est la contrepartie d'un changement
+/// de modèle — une session gateway s'authentifie une fois puis vit longtemps, là où une requête
+/// HTTP s'authentifie à chaque appel. Un rejeu y coûterait beaucoup plus cher.
+///
+/// L'identifiant d'appareil est dans le message signé : sans lui, un nonce servi à Alice
+/// pourrait être renvoyé accompagné de la signature de Bob captée ailleurs.
+pub fn gateway_message(device_id: &str, nonce: &[u8]) -> Result<Vec<u8>, AttestError> {
+    encode(DOMAIN_GATEWAY, &[device_id.as_bytes(), nonce])
 }
 
 /// Empreinte du compte, à comparer hors bande avec son correspondant.

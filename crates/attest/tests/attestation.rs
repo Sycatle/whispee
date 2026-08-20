@@ -346,3 +346,42 @@ fn un_signal_ne_vaut_pas_un_depot() {
 
     assert_ne!(depot, signal, "même clé, mêmes champs : seul le domaine les sépare");
 }
+
+use attest::gateway_message;
+
+/// **Le test qui justifie le domaine gateway.**
+///
+/// Une session gateway est authentifiée par la clé d'authentification de l'appareil — la même
+/// que celle qui signe les requêtes HTTP. Sans domaine propre, il suffirait de capter la
+/// signature d'un `GET` quelconque pour ouvrir une session au nom de son auteur, et le défi
+/// émis par le serveur ne servirait à rien.
+#[test]
+fn une_ouverture_de_session_ne_vaut_dans_aucun_autre_domaine() {
+    let nonce = [3u8; 32];
+    let ouverture = gateway_message("appareil-a", &nonce).unwrap();
+
+    // Les mêmes champs, présentés dans les autres domaines.
+    assert_ne!(ouverture, post_message(b"appareil-a", &nonce, &[]).unwrap());
+    assert_ne!(ouverture, signal_message(b"appareil-a", &nonce, &[]).unwrap());
+}
+
+/// Un défi ne vaut que pour l'appareil auquel il a été servi.
+///
+/// Sans l'identifiant dans le message signé, un nonce servi à Alice pourrait être renvoyé
+/// accompagné d'une signature de Bob captée ailleurs.
+#[test]
+fn un_defi_ne_vaut_que_pour_son_appareil() {
+    let nonce = [3u8; 32];
+
+    assert_ne!(
+        gateway_message("appareil-a", &nonce).unwrap(),
+        gateway_message("appareil-b", &nonce).unwrap(),
+    );
+}
+
+/// Deux découpages différents ne doivent pas produire les mêmes octets — sans quoi une
+/// signature obtenue pour l'un vaudrait pour l'autre.
+#[test]
+fn deux_decoupages_differents_ne_collisionnent_pas_en_gateway() {
+    assert_ne!(gateway_message("ab", b"cd").unwrap(), gateway_message("abc", b"d").unwrap());
+}

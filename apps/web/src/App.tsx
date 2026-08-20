@@ -6,10 +6,11 @@ import { LockSettings, Unlock } from "@/components/Lock";
 import { PairDevice, ShowPairingCode, usePairingOffer } from "@/components/Pairing";
 import { VaultSettings } from "@/components/Vault";
 import { Messages } from "@/components/Messages";
+import { MigrationBanner } from "@/components/Migration";
 import { PresenceDot, PresenceLine } from "@/components/Presence";
 import { SignalSettings } from "@/components/Signals";
 import { Verification, VerificationPanel, VerificationToggle } from "@/components/Verification";
-import { type ConversationView, Session, demarrer } from "@/lib/session";
+import { type ConversationView, type MigrationProposee, Session, demarrer } from "@/lib/session";
 import { supportsEd25519 } from "@/lib/keys";
 
 /**
@@ -30,17 +31,15 @@ export function App() {
   const [active, setActive] = useState<ConversationView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
-  /**
-   * Ce que fait le démarrage, quand il fait autre chose que charger.
-   *
-   * Une migration vers le stockage natif enregistre un appareil, attend que les conversations
-   * le rejoignent, puis révoque l'ancien : plusieurs allers-retours réseau, une seule fois dans
-   * la vie de l'installation. Un « Chargement… » figé pendant ce temps ressemblerait à une
-   * panne.
-   */
-  const [etape, setEtape] = useState<string | null>(null);
-  /** Pourquoi la migration a été refusée, s'il y a lieu. Informatif : rien n'est cassé. */
+  /** Pourquoi la migration est impossible, s'il y a lieu. Informatif : rien n'est cassé. */
   const [repli, setRepli] = useState<string | null>(null);
+  /**
+   * Migration proposée, tant que l'utilisateur ne l'a ni lancée ni écartée.
+   *
+   * Proposée et non exécutée : elle enregistre un appareil et en révoque un autre, ce que rien
+   * dans « ouvrir l'application » ne demande.
+   */
+  const [migration, setMigration] = useState<MigrationProposee | null>(null);
   const [locked, setLocked] = useState(false);
   const [, forceRender] = useState(0);
   const refresh = useCallback(() => forceRender((n) => n + 1), []);
@@ -56,10 +55,11 @@ export function App() {
           return null;
         }
 
-        // `demarrer` et non `restore` : sous Tauri, une installation existante doit d'abord
-        // passer au stockage natif, ce qui suppose de tenir l'ancienne session ouverte.
-        const { session, repli: refuse } = await demarrer(undefined, setEtape);
+        // `demarrer` et non `restore` : sous Tauri, une installation existante peut avoir une
+        // migration à faire, ce qui suppose de tenir l'ancienne session ouverte.
+        const { session, migration: proposee, repli: refuse } = await demarrer();
         if (refuse) setRepli(refuse);
+        if (proposee) setMigration(proposee);
         return session;
       })
       .then(setSession)
@@ -71,10 +71,7 @@ export function App() {
           "Impossible de restaurer la session précédente. Effacez l'identité pour repartir de zéro.",
         );
       })
-      .finally(() => {
-        setEtape(null);
-        setBusy(false);
-      });
+      .finally(() => setBusy(false));
   }, []);
 
   useEffect(() => {
@@ -122,13 +119,14 @@ export function App() {
     };
   }, [session, refresh]);
 
-  if (busy) return <Centered>{etape ?? "Chargement…"}</Centered>;
+  if (busy) return <Centered>Chargement…</Centered>;
 
   if (locked && !session) {
     return (
       <Unlock
-        onUnlocked={(s) => {
+        onUnlocked={(s, proposee) => {
           setSession(s);
+          if (proposee) setMigration(proposee);
           setLocked(false);
         }}
         onError={setError}
@@ -183,6 +181,18 @@ export function App() {
           <Centered>Aucune conversation. Ouvrez-en une avec le pseudonyme d&apos;un correspondant.</Centered>
         )}
       </div>
+
+      {migration && (
+        <MigrationBanner
+          migration={migration}
+          onDone={(nouvelle) => {
+            setMigration(null);
+            setActive(null);
+            setSession(nouvelle);
+          }}
+          onError={setError}
+        />
+      )}
 
       {repli && (
         <p className="flex items-baseline justify-between gap-4 border-t border-(--color-ink-muted)/30 bg-(--color-ink-muted)/10 px-4 py-2 text-sm text-(--color-ink-muted)">

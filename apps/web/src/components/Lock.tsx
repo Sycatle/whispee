@@ -1,13 +1,16 @@
 import { useState } from "react";
 import { MIN_LENGTH, bitsApproximatifs, verifier } from "@/lib/password";
-import type { Session } from "@/lib/session";
+import type { MigrationProposee, Session } from "@/lib/session";
 
 /** Saisie du mot de passe au démarrage, quand un verrou est posé. */
 export function Unlock({
   onUnlocked,
   onError,
 }: {
-  onUnlocked: (session: Session) => void;
+  // La proposition de migration voyage avec la session : elle naît du même démarrage, et la
+  // laisser ici la perdrait pour les installations verrouillées — précisément celles dont
+  // l'état ne devient lisible qu'à cet instant.
+  onUnlocked: (session: Session, migration?: MigrationProposee) => void;
   onError: (message: string) => void;
 }) {
   const [password, setPassword] = useState("");
@@ -22,8 +25,8 @@ export function Unlock({
       const { demarrer } = await import("@/lib/session");
       // Le même chemin qu'au démarrage sans verrou : une installation à migrer doit l'être
       // ici aussi, et c'est seulement maintenant que l'état est lisible.
-      const { session } = await demarrer(password);
-      if (session) onUnlocked(session);
+      const { session, migration } = await demarrer(password);
+      if (session) onUnlocked(session, migration);
     } catch {
       // Toute erreur est présentée comme un mot de passe incorrect : distinguer « mauvais mot
       // de passe » de « données corrompues » apprendrait à un attaquant quand il approche.

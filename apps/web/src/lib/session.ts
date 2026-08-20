@@ -2192,24 +2192,44 @@ async function vaultCipherOf(_crypto: Crypto, account: AccountKey): Promise<Cryp
 }
 
 /**
- * Ce qu'il faut faire au démarrage, migration comprise.
+ * Ce que le démarrage propose : une migration, à laquelle il ne procède pas.
+ *
+ * Elle enregistre un appareil et **en révoque un autre**. Ce sont des gestes de compte, visibles
+ * du serveur et des correspondants, et rien dans « ouvrir l'application » ne les demande. Les
+ * exécuter d'office reviendrait à décider à la place de quelqu'un qui n'a rien demandé.
+ *
+ * Différer ne coûte rien : l'application continue exactement comme avant, et la proposition
+ * revient au démarrage suivant.
+ */
+export interface MigrationProposee {
+  /**
+   * A-t-elle déjà commencé ?
+   *
+   * Change ce qu'il faut dire, pas ce qu'il faut faire : deux appareils sont alors actifs — un
+   * état sain, seulement redondant — et l'utilisateur mérite de savoir pourquoi il en voit deux
+   * dans ses réglages.
+   */
+  reprise: boolean;
+  executer(progres?: (etape: string) => void): Promise<Session>;
+}
+
+/**
+ * Ce qu'il faut faire au démarrage.
  *
  * # Pourquoi ce n'est pas dans `Session.restore`
  *
- * Une reprise de migration tient **deux** sessions ouvertes en même temps, et `restore` en rend
- * une. Les faire cohabiter dans la même fonction reviendrait à lui donner deux contrats selon un
- * état qu'elle découvrirait en chemin.
+ * Une migration tient **deux** sessions ouvertes en même temps — l'ancienne est la seule membre
+ * des groupes, donc la seule à pouvoir y introduire la nouvelle — et `restore` en rend une.
  *
  * # Le repli n'est pas un échec silencieux
  *
- * Quand la migration est refusée — coffre coupé, ou stockage natif occupé par un autre compte —
- * l'application continue sur IndexedDB et `repli` porte la raison. La taire laisserait croire à
+ * Quand la migration est impossible — coffre coupé, ou stockage natif occupé par un autre compte
+ * — l'application continue sur IndexedDB et `repli` porte la raison. La taire laisserait croire à
  * une durabilité qui n'existe pas.
  */
 export async function demarrer(
   password?: string,
-  progres?: (etape: string) => void,
-): Promise<{ session: Session | null; repli?: string }> {
+): Promise<{ session: Session | null; migration?: MigrationProposee; repli?: string }> {
   if (!isTauri()) return { session: await Session.restore(password) };
 
   const natif = ancrageNatif();
@@ -2225,12 +2245,18 @@ export async function demarrer(
     return { session: await Session.restore(password) };
   }
 
-  // L'ancienne session doit être ouverte : elle seule est membre des groupes, et c'est elle qui
-  // y introduit la nouvelle. Un verrou posé impose donc de migrer après la saisie, pas avant.
+  // L'ancienne session doit être ouverte : elle seule est membre des groupes. Un verrou posé
+  // impose donc de proposer la migration après la saisie, pas avant.
   const ancienne = web ? await Session.ouvrir(web, password) : null;
   if (!ancienne) return { session: await Session.restore(password) };
 
-  return { session: await ancienne.migrerVersNatif(decision, natif, progres) };
+  return {
+    session: ancienne,
+    migration: {
+      reprise: decision.quoi === "reprendre",
+      executer: (progres) => ancienne.migrerVersNatif(decision, natif, progres),
+    },
+  };
 }
 
 /** Ce qu'un ancrage révèle sans être ouvert : de quoi décider, et rien de plus. */

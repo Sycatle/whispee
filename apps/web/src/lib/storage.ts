@@ -1,13 +1,27 @@
 /**
- * Persistance locale, dans IndexedDB.
+ * Persistance locale.
  *
- * Les `CryptoKey` non extractables y sont stockées telles quelles : elles sont
- * structured-cloneable, et le navigateur conserve le matériel hors de portée du script.
- * C'est ce qui distingue IndexedDB de `localStorage`, où tout doit devenir une chaîne —
- * donc où toute clé serait exposée.
+ * # Deux implémentations, une interface
+ *
+ * Sur le web, IndexedDB. Sous Tauri, un fichier écrit par le processus Rust — parce que le
+ * stockage d'une webview mobile **n'est pas garanti** : iOS évince les données de WKWebView
+ * après sept jours d'inactivité, Android purge sous pression mémoire. Et la perte est
+ * définitive : le ratchet MLS détruit ses clés au fur et à mesure.
+ *
+ * # Ce que le passage au natif coûtera, et qu'il faut voir maintenant
+ *
+ * `StoredSession` contient des `CryptoKey` non extractables. IndexedDB les accepte telles
+ * quelles — elles sont structured-cloneable, et le navigateur garde le matériel hors de portée
+ * du script, ce qui distingue IndexedDB de `localStorage` où tout devient chaîne. **Aucun
+ * stockage natif ne pourra les recevoir** : elles ne se sérialisent pas, par construction.
+ *
+ * Le port natif devra donc d'abord déplacer les clés elles-mêmes, pas seulement les octets
+ * qu'elles protègent. C'est la raison d'être de `DeviceCipher` dans `cipher.ts`, et c'est
+ * pourquoi ce fichier reste, pour l'instant, la seule implémentation.
  *
  * L'état MLS, lui, est chiffré avant d'arriver ici (voir `wrapState`).
  */
+import { isTauri } from "./platform";
 import type { DeviceKeys } from "./keys";
 import type { LockEnvelope } from "./lock";
 
@@ -180,20 +194,54 @@ function transact<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => I
   );
 }
 
-export function loadSession(): Promise<StoredSession | undefined> {
-  return transact("readonly", (store) => store.get("session"));
+/**
+ * Où la session est rangée.
+ *
+ * Trois opérations et rien de plus : tout ce qui décide *quoi* ranger vit dans `Session`, et
+ * tout ce qui décide *comment le protéger* vit dans `DeviceCipher`. Un port qui saurait aussi
+ * chiffrer devrait connaître les clés, ce qui est précisément ce qu'on cherche à éviter.
+ */
+export interface SessionStore {
+  load(): Promise<StoredSession | undefined>;
+  save(session: StoredSession): Promise<void>;
+  /**
+   * Efface tout.
+   *
+   * Sur le web, les clés non extractables disparaissent avec la base : sans elles, l'état
+   * chiffré résiduel est définitivement illisible, y compris par nous.
+   */
+  clear(): Promise<void>;
 }
 
-export function saveSession(session: StoredSession): Promise<IDBValidKey> {
-  return transact("readwrite", (store) => store.put(session, "session"));
+class IndexedDbStore implements SessionStore {
+  load(): Promise<StoredSession | undefined> {
+    return transact("readonly", (store) => store.get("session"));
+  }
+
+  async save(session: StoredSession): Promise<void> {
+    await transact("readwrite", (store) => store.put(session, "session"));
+  }
+
+  async clear(): Promise<void> {
+    await transact("readwrite", (store) => store.clear());
+  }
 }
 
 /**
- * Efface tout. Les clés non extractables disparaissent avec la base : sans elles, l'état
- * chiffré résiduel est définitivement illisible, y compris par nous.
+ * L'implémentation qui convient à la plateforme.
+ *
+ * Sous Tauri, il n'y a pour l'instant rien d'autre : le stockage natif attend que les clés
+ * puissent quitter la webview. L'appel à `isTauri()` est là pour que l'endroit du choix existe
+ * **avant** l'implémentation, plutôt que d'être inventé dans l'urgence en même temps qu'elle.
  */
-export function clearSession(): Promise<undefined> {
-  return transact("readwrite", (store) => store.clear());
+export function sessionStore(): SessionStore {
+  if (isTauri()) {
+    // À remplacer par le store natif. En attendant, le comportement est celui d'aujourd'hui :
+    // l'application de bureau n'est pas exposée à l'éviction, seul le mobile l'est.
+    return new IndexedDbStore();
+  }
+
+  return new IndexedDbStore();
 }
 
 export type { StoredSession };

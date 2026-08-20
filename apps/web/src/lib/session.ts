@@ -23,7 +23,7 @@ import {
   wrapState,
 } from "./keys";
 import { type LockEnvelope, changePassword, createLock, openLock } from "./lock";
-import { type SignalSettings, clearSession, loadSession, saveSession } from "./storage";
+import { type SignalSettings, sessionStore } from "./storage";
 import { type ReceiptBook, pending, record, statusOf } from "./receipts";
 import {
   type Typing,
@@ -405,7 +405,7 @@ export class Session {
    * que de traiter l'absence de mot de passe comme une erreur de déchiffrement.
    */
   static async isLocked(): Promise<boolean> {
-    const stored = await loadSession();
+    const stored = await sessionStore().load();
     return Boolean(stored?.state && stored.lock);
   }
 
@@ -417,7 +417,7 @@ export class Session {
    * mot de passe » stocké à côté qui offrirait une cible d'attaque hors ligne de plus.
    */
   static async restore(password?: string): Promise<Session | null> {
-    const stored = await loadSession();
+    const stored = await sessionStore().load();
     if (!stored?.state) return null;
 
     if (stored.lock && password === undefined) {
@@ -673,12 +673,12 @@ export class Session {
 
   async forget(): Promise<void> {
     this.forgotten = true;
-    await clearSession();
+    await sessionStore().clear();
   }
 
   /** Efface sans détenir de session — cas d'un verrou dont on a perdu le mot de passe. */
   static async forget(): Promise<void> {
-    await clearSession();
+    await sessionStore().clear();
   }
 
   fingerprint(): string {
@@ -707,7 +707,7 @@ export class Session {
       [...this.conversations.values()].map((view) => [view.key, view.cursor]),
     );
 
-    await saveSession({
+    await sessionStore().save({
       cursors,
       deviceId: this.deviceId,
       handle: this.handle,

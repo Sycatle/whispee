@@ -1,5 +1,3 @@
-"use client";
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Attachment } from "@/components/Attachment";
 import { DeviceSettings } from "@/components/Devices";
@@ -27,7 +25,7 @@ import { supportsEd25519 } from "@/lib/keys";
  */
 const POLL_MS = 30_000;
 
-export default function Page() {
+export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [active, setActive] = useState<ConversationView | null>(null);
   const [error, setError] = useState<string | null>(null);

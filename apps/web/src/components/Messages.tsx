@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Fil de messages : bulles, réactions repliées, citations, état de lecture.
  *

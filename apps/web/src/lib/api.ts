@@ -13,7 +13,7 @@ function buffer(bytes: Uint8Array): BufferSource {
   return bytes as unknown as BufferSource;
 }
 
-export const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8787";
+export const BASE_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8787";
 
 export class ApiError extends Error {
   constructor(

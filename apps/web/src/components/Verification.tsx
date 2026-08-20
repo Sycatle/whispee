@@ -1,5 +1,3 @@
-"use client";
-
 import { useState } from "react";
 import type { ResolvedAccount } from "@/lib/account";
 import type { VerificationState } from "@/lib/session";

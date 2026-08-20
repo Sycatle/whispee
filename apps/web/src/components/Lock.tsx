@@ -1,5 +1,3 @@
-"use client";
-
 import { useState } from "react";
 import { MIN_LENGTH, bitsApproximatifs, verifier } from "@/lib/password";
 import type { Session } from "@/lib/session";

@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Affichage de la présence.
  *

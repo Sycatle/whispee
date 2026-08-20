@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Réglages de signalisation.
  *

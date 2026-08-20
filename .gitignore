@@ -3,6 +3,7 @@ node_modules/
 .env
 .env.local
 pkg/
-.next/
+*.tsbuildinfo
+dist/
 .claude/scheduled_tasks.lock
 .worktrees/

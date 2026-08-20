@@ -1,0 +1,9 @@
+# pnpm refuse par défaut d'exécuter les scripts d'installation d'une dépendance : un script
+# post-install s'exécute avec tous les droits de l'utilisateur, et c'est une voie de compromission
+# de chaîne d'approvisionnement bien réelle. Chaque exception se déclare donc ici, une par une.
+#
+# `esbuild` télécharge son binaire natif à l'installation. C'est le transpileur de Vite : sans
+# lui, rien ne se construit. L'autoriser n'est pas un contournement du garde-fou, c'est ce que le
+# garde-fou demande — une décision explicite plutôt qu'une permission générale.
+allowBuilds:
+  esbuild: true

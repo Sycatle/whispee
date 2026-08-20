@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useState } from "react";
 import type { ResolvedAccount } from "@/lib/account";
 import { describePresence } from "@/lib/presence";

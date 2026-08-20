@@ -9,6 +9,26 @@ utilisateurs à risque.** Il n'a reçu aucun audit externe et n'en recevra pas. 
 E2EE correct sur le papier échoue en pratique sur des détails que seul un audit révèle.
 Pour des communications réellement sensibles : utilisez Signal.
 
+## Branches et intégration continue
+
+`dev` est la branche de travail, `main` l'intégration. **Rien ne se construit sur `dev`** : y
+déclencher un build à chaque poussée dépenserait l'essentiel du quota d'Actions pour des états
+intermédiaires que personne n'installe. Le travail s'y valide en local, par `cargo test`.
+
+| Déclencheur | Ce qui tourne | Coût |
+|---|---|---|
+| Poussée sur `dev` | rien | — |
+| Poussée sur `main` | build Android, si  ou  a changé | runner Ubuntu |
+| Déclenchement manuel | Android ou iOS, au choix | selon la cible |
+
+Le déclenchement manuel est la voie normale pour obtenir un binaire mobile. **iOS ne tourne
+jamais automatiquement** : un runner macOS coûte dix fois les minutes d'un runner Linux, ce qui
+en fait le poste de dépense décisif.
+
+Les constructions concurrentes s'annulent ( avec ) : une poussée
+qui en suit une autre rend la précédente sans objet, et la laisser finir paierait un runner pour
+un artefact que personne ne prendra.
+
 ## Architecture
 
 ```

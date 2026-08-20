@@ -1095,6 +1095,44 @@ export function deriveUnlockKey(password, salt) {
 }
 
 /**
+ * Message à signer pour ouvrir une session gateway.
+ *
+ * Retourne les octets à signer, **pas la signature** : la clé d'authentification de l'appareil
+ * est une clé WebCrypto non extractible, qui ne quitte jamais le navigateur et n'entre donc
+ * jamais dans ce module. La séparation est délibérée — c'est elle qui fait qu'un bug ici ne
+ * peut pas divulguer la clé.
+ *
+ * Même argument que pour [`post_mac`] quant au lieu du calcul : le format canonique vit dans la
+ * crate `attest`, et le réécrire en JavaScript le dupliquerait. Un octet de divergence, et
+ * aucune session ne s'ouvre.
+ * @param {string} device_id
+ * @param {Uint8Array} nonce
+ * @returns {Uint8Array}
+ */
+export function gatewayChallenge(device_id, nonce) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(device_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(nonce, wasm.__wbindgen_export);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.gatewayChallenge(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export4(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * Hash de feuille d'une entrée du journal, tel que le serveur doit l'avoir calculé.
  *
  * Le client le recalcule lui-même à partir du handle et de la clé qu'on lui sert : accepter le

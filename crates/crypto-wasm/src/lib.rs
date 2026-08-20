@@ -683,6 +683,21 @@ pub fn signal_mac(
     Ok(mac.finalize().into_bytes().to_vec())
 }
 
+/// Message à signer pour ouvrir une session gateway.
+///
+/// Retourne les octets à signer, **pas la signature** : la clé d'authentification de l'appareil
+/// est une clé WebCrypto non extractible, qui ne quitte jamais le navigateur et n'entre donc
+/// jamais dans ce module. La séparation est délibérée — c'est elle qui fait qu'un bug ici ne
+/// peut pas divulguer la clé.
+///
+/// Même argument que pour [`post_mac`] quant au lieu du calcul : le format canonique vit dans la
+/// crate `attest`, et le réécrire en JavaScript le dupliquerait. Un octet de divergence, et
+/// aucune session ne s'ouvre.
+#[wasm_bindgen(js_name = gatewayChallenge)]
+pub fn gateway_challenge(device_id: &str, nonce: &[u8]) -> Result<Vec<u8>, JsError> {
+    attest::gateway_message(device_id, nonce).map_err(|_| JsError::new("défi mal formé"))
+}
+
 // ---------------------------------------------------------------- journal de transparence
 
 /// Hash de feuille d'une entrée du journal, tel que le serveur doit l'avoir calculé.

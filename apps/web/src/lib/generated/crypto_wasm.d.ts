@@ -293,6 +293,20 @@ export function accountFingerprint(identity_key: Uint8Array): string;
 export function deriveUnlockKey(password: string, salt: Uint8Array): Uint8Array;
 
 /**
+ * Message à signer pour ouvrir une session gateway.
+ *
+ * Retourne les octets à signer, **pas la signature** : la clé d'authentification de l'appareil
+ * est une clé WebCrypto non extractible, qui ne quitte jamais le navigateur et n'entre donc
+ * jamais dans ce module. La séparation est délibérée — c'est elle qui fait qu'un bug ici ne
+ * peut pas divulguer la clé.
+ *
+ * Même argument que pour [`post_mac`] quant au lieu du calcul : le format canonique vit dans la
+ * crate `attest`, et le réécrire en JavaScript le dupliquerait. Un octet de divergence, et
+ * aucune session ne s'ouvre.
+ */
+export function gatewayChallenge(device_id: string, nonce: Uint8Array): Uint8Array;
+
+/**
  * Hash de feuille d'une entrée du journal, tel que le serveur doit l'avoir calculé.
  *
  * Le client le recalcule lui-même à partir du handle et de la clé qu'on lui sert : accepter le
@@ -427,6 +441,7 @@ export interface InitOutput {
     readonly client_signalKey: (a: number, b: number, c: number, d: number) => void;
     readonly client_signatureKey: (a: number, b: number) => void;
     readonly deriveUnlockKey: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly gatewayChallenge: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly logLeaf: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly pairing_id: (a: number, b: number) => void;
     readonly pairing_new: () => number;

@@ -22,7 +22,7 @@ hmac.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 # Déjà présentes dans l'arbre via axum ; déclarées ici parce que le hub de diffusion les
 # utilise directement. Licences MIT et MIT/Apache-2.0, compatibles avec du code propriétaire.
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["sync", "time"] }
 futures-util = "0.3"
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 tracing = "0.1"

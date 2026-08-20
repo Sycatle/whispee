@@ -7,7 +7,8 @@
 //! * qui est enregistré, et depuis quand ;
 //! * quel appareil appartient à quel groupe (table `group_members`) ;
 //! * qui écrit dans quel groupe, quand, et la taille de chaque message ;
-//! * qui réclame le KeyPackage de qui — donc qui ouvre une conversation avec qui.
+//! * qui réclame le KeyPackage de qui — donc qui ouvre une conversation avec qui ;
+//! * quand chaque compte est éveillé, à la minute près (`devices.last_seen_at`).
 //!
 //! C'est le compromis de WhatsApp. Le réduire demande du sealed sender, du padding et des
 //! credentials à divulgation nulle. Ce n'est pas fait ici, et le prétendre serait pire que
@@ -16,6 +17,7 @@
 pub mod auth;
 pub mod error;
 pub mod log;
+pub mod presence;
 pub mod routes;
 pub mod stream;
 

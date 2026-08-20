@@ -2012,3 +2012,343 @@ async fn le_flux_annonce_une_enveloppe_deposee() {
     assert!(recu.contains("event: envelope"), "événement inattendu : {recu}");
     assert!(recu.contains(&group_id), "l'événement ne désigne pas le groupe : {recu}");
 }
+
+// ---------------------------------------------------------------- présence
+
+/// Attend qu'une présence spawnée atteigne la base, ou renonce.
+///
+/// La touche est détachée — elle ne doit pas ralentir la requête qui la déclenche — donc un test
+/// qui lit la colonne aussitôt après course avec elle. Sonder est plus honnête qu'un `sleep`
+/// arbitraire : le test réussit dès que la valeur arrive, et échoue franchement sinon.
+async fn attendre_presence(pool: &sqlx::PgPool, device_id: &str) -> Option<i64> {
+    for _ in 0..40 {
+        let row: Option<(Option<i64>,)> = sqlx::query_as(
+            "SELECT EXTRACT(EPOCH FROM last_seen_at)::BIGINT FROM devices WHERE id = $1",
+        )
+        .bind(device_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+
+        if let Some((Some(vu),)) = row {
+            return Some(vu);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
+}
+
+async fn derniere_presence(pool: &sqlx::PgPool, device_id: &str) -> Option<i64> {
+    let (vu,): (Option<i64>,) = sqlx::query_as(
+        "SELECT EXTRACT(EPOCH FROM last_seen_at)::BIGINT FROM devices WHERE id = $1",
+    )
+    .bind(device_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    vu
+}
+
+async fn oublier_presence(pool: &sqlx::PgPool, device_id: &str) {
+    sqlx::query("UPDATE devices SET last_seen_at = NULL WHERE id = $1")
+        .bind(device_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// **Le test qui protège le sealed sender.**
+///
+/// Les dépôts anonymes et les signaux de frappe prouvent l'appartenance à un groupe par un MAC,
+/// pas l'identité : le serveur ne sait pas qui dépose. En dériver une présence reviendrait à le
+/// lui apprendre — c'est-à-dire à défaire ce que la migration 0007 a mis en place.
+///
+/// La protection tient aujourd'hui à une seule ligne : dans `post_envelope`, l'extracteur
+/// `Signed` n'est construit que dans la branche signée. C'est correct, et gratuit ; ce test
+/// existe pour que ça le reste.
+#[tokio::test]
+async fn un_depot_anonyme_ne_met_jamais_a_jour_la_presence() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let posting_key = [42u8; 32];
+    let group_id = groupe_avec_cle(&alice, &posting_key).await;
+
+    // La préparation ci-dessus passe par des requêtes signées, qui marquent légitimement la
+    // présence. On attend que leur touche détachée ait atterri — sinon elle arriverait après le
+    // nettoyage et se ferait passer pour la fuite qu'on cherche — puis on repart d'une ardoise
+    // vierge, pour n'observer que les chemins anonymes.
+    attendre_presence(&server.pool, &alice.id).await.expect("la requête signée n'a rien marqué");
+    oublier_presence(&server.pool, &alice.id).await;
+
+    let depot = post_anonyme(&server, &group_id, &posting_key, b"chiffre", [1u8; 16]).await;
+    assert!(depot.status().is_success(), "le dépôt anonyme a été refusé");
+
+    let signal = post_signal(&server, &group_id, &posting_key, b"frappe", [2u8; 16]).await;
+    assert_eq!(signal.status(), 204, "le signal a été refusé");
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    assert_eq!(
+        derniere_presence(&server.pool, &alice.id).await,
+        None,
+        "un chemin anonyme a marqué la présence : le sealed sender ne tient plus",
+    );
+}
+
+#[tokio::test]
+async fn une_requete_signee_marque_l_appareil_en_ligne() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+
+    // L'enregistrement n'est pas signé : cet appareil n'a encore jamais été vu.
+    assert_eq!(derniere_presence(&server.pool, &alice.id).await, None);
+
+    alice.get("/v1/groups").await;
+    assert!(attendre_presence(&server.pool, &alice.id).await.is_some());
+}
+
+/// Fige la décision de coût : une écriture par appareil et par minute, pas une par requête.
+///
+/// Sans amortissement, un client à dix conversations produit une écriture par seconde pour une
+/// information qui ne change pas entre deux battements.
+#[tokio::test]
+async fn la_presence_n_est_pas_reecrite_a_chaque_requete() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+
+    alice.get("/v1/groups").await;
+    let premier = attendre_presence(&server.pool, &alice.id).await.unwrap();
+
+    // Une valeur artificiellement ancienne : seule la garde en mémoire peut encore retenir
+    // l'écriture, et c'est précisément ce qu'on vérifie.
+    sqlx::query("UPDATE devices SET last_seen_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(&alice.id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let recule = derniere_presence(&server.pool, &alice.id).await.unwrap();
+    assert!(recule < premier);
+
+    for _ in 0..5 {
+        alice.get("/v1/groups").await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    assert_eq!(derniere_presence(&server.pool, &alice.id).await, Some(recule));
+}
+
+/// Prépare deux comptes membres d'un même groupe, plus un troisième à l'écart.
+async fn trio(server: &TestServer) -> (TestAccount, Device, TestAccount, Device, TestAccount, Device)
+{
+    let a = TestAccount::create(server, &unique("alice")).await;
+    let alice = a.device(server, "tel").await;
+    let b = TestAccount::create(server, &unique("bob")).await;
+    let bob = b.device(server, "tel").await;
+    let c = TestAccount::create(server, &unique("carol")).await;
+    let carol = c.device(server, "tel").await;
+
+    let group_id = hex::encode(unique("groupe").as_bytes());
+    alice
+        .post(
+            &format!("/v1/groups/{group_id}/members"),
+            serde_json::json!({ "device_ids": [alice.id, bob.id] }),
+        )
+        .await;
+
+    (a, alice, b, bob, c, carol)
+}
+
+async fn presence_de(appelant: &Device, handles: &[&str]) -> serde_json::Value {
+    let response = appelant
+        .post("/v1/presence", serde_json::json!({ "handles": handles }))
+        .await;
+    assert!(response.status().is_success(), "présence refusée : {:?}", response.status());
+    response.json().await.unwrap()
+}
+
+/// Sans cette clause, la route serait un oracle d'activité sur n'importe quel pseudonyme.
+#[tokio::test]
+async fn la_presence_n_est_visible_que_dans_un_groupe_commun() {
+    let server = start().await;
+    let (a, alice, b, bob, _c, carol) = trio(&server).await;
+
+    alice.get("/v1/groups").await;
+    bob.get("/v1/groups").await;
+    attendre_presence(&server.pool, &alice.id).await.unwrap();
+    attendre_presence(&server.pool, &bob.id).await.unwrap();
+
+    let vu = presence_de(&bob, &[&a.handle]).await;
+    assert_eq!(vu["accounts"].as_array().unwrap().len(), 1, "bob partage un groupe avec alice");
+
+    let rien = presence_de(&carol, &[&a.handle, &b.handle]).await;
+    assert!(
+        rien["accounts"].as_array().unwrap().is_empty(),
+        "carol n'a aucun groupe commun et voit pourtant quelque chose",
+    );
+}
+
+/// Les distinguer ferait de la route un oracle d'existence de compte.
+#[tokio::test]
+async fn un_handle_inconnu_et_un_handle_sans_groupe_commun_sont_indistinguables() {
+    let server = start().await;
+    let (a, alice, _b, _bob, _c, carol) = trio(&server).await;
+
+    alice.get("/v1/groups").await;
+    attendre_presence(&server.pool, &alice.id).await.unwrap();
+
+    let etranger = presence_de(&carol, &[&a.handle]).await;
+    let inexistant = presence_de(&carol, &["personne-de-ce-nom"]).await;
+
+    assert_eq!(etranger["accounts"], inexistant["accounts"]);
+}
+
+/// Un compte est en ligne dès qu'un seul de ses appareils l'est — et seul ce maximum sort.
+///
+/// Servir le détail par appareil dirait combien d'appareils une personne possède et lequel elle
+/// utilise à quelle heure : une fuite distincte de « en ligne ».
+#[tokio::test]
+async fn un_compte_est_en_ligne_des_qu_un_seul_de_ses_appareils_l_est() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let tel = a.device(&server, "tel").await;
+    let portable = a.device(&server, "portable").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "tel").await;
+
+    let group_id = hex::encode(unique("groupe").as_bytes());
+    tel.post(
+        &format!("/v1/groups/{group_id}/members"),
+        serde_json::json!({ "device_ids": [tel.id, portable.id, bob.id] }),
+    )
+    .await;
+
+    // Seul le portable s'est manifesté ; le téléphone est resté éteint.
+    oublier_presence(&server.pool, &tel.id).await;
+    portable.get("/v1/groups").await;
+    let vu_portable = attendre_presence(&server.pool, &portable.id).await.unwrap();
+
+    let reponse = presence_de(&bob, &[&a.handle]).await;
+    let comptes = reponse["accounts"].as_array().unwrap();
+
+    assert_eq!(comptes.len(), 1, "un compte, une entrée — jamais une par appareil");
+    assert_eq!(comptes[0]["handle"], a.handle);
+    assert_eq!(comptes[0]["last_seen"].as_i64(), Some(vu_portable));
+}
+
+/// Un appareil volé puis révoqué ne doit plus maintenir son propriétaire éveillé.
+#[tokio::test]
+async fn un_appareil_revoque_ne_maintient_plus_son_compte_en_ligne() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let tel = a.device(&server, "tel").await;
+    let vole = a.device(&server, "vole").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "tel").await;
+
+    let group_id = hex::encode(unique("groupe").as_bytes());
+    tel.post(
+        &format!("/v1/groups/{group_id}/members"),
+        serde_json::json!({ "device_ids": [tel.id, vole.id, bob.id] }),
+    )
+    .await;
+
+    vole.get("/v1/groups").await;
+    attendre_presence(&server.pool, &vole.id).await.unwrap();
+    oublier_presence(&server.pool, &tel.id).await;
+
+    assert_eq!(presence_de(&bob, &[&a.handle]).await["accounts"].as_array().unwrap().len(), 1);
+
+    let revocation = a.revoke(&tel, &vole.id).await;
+    assert!(revocation.status().is_success(), "révocation refusée");
+
+    let apres = presence_de(&bob, &[&a.handle]).await;
+    assert!(
+        apres["accounts"].as_array().unwrap().is_empty(),
+        "un appareil révoqué maintient encore son compte en ligne",
+    );
+}
+
+/// Le refus est honoré **à l'écriture** : rien n'est enregistré, et le passé est effacé.
+///
+/// Un réglage qui se contenterait de filtrer en lecture laisserait le serveur tenir le registre
+/// quand même — c'est-à-dire ne réglerait rien.
+#[tokio::test]
+async fn le_refus_de_presence_empeche_l_enregistrement() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "tel").await;
+
+    alice.get("/v1/groups").await;
+    attendre_presence(&server.pool, &alice.id).await.unwrap();
+
+    let response = alice.post("/v1/presence/optout", serde_json::json!({ "optout": true })).await;
+    assert!(response.status().is_success());
+
+    assert_eq!(
+        derniere_presence(&server.pool, &alice.id).await,
+        None,
+        "le passé enregistré survit au refus",
+    );
+
+    // La garde en mémoire ne doit pas masquer le résultat : on la contourne en repartant d'une
+    // valeur ancienne, comme dans le test d'amortissement.
+    sqlx::query("UPDATE devices SET last_seen_at = NULL WHERE id = $1")
+        .bind(&alice.id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    for _ in 0..5 {
+        alice.get("/v1/groups").await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    assert_eq!(derniere_presence(&server.pool, &alice.id).await, None);
+}
+
+/// Réciprocité : ne plus diffuser sa présence, c'est aussi cesser de voir celle des autres.
+///
+/// Sans cette symétrie, le réglage permettrait de voir sans être vu — exactement ce qu'il
+/// prétend empêcher. La même règle vaut pour les accusés de lecture.
+#[tokio::test]
+async fn refuser_de_diffuser_sa_presence_coupe_aussi_la_lecture() {
+    let server = start().await;
+    let (a, alice, _b, bob, _c, _carol) = trio(&server).await;
+
+    alice.get("/v1/groups").await;
+    attendre_presence(&server.pool, &alice.id).await.unwrap();
+
+    assert_eq!(presence_de(&bob, &[&a.handle]).await["accounts"].as_array().unwrap().len(), 1);
+
+    bob.post("/v1/presence/optout", serde_json::json!({ "optout": true })).await;
+
+    assert!(
+        presence_de(&bob, &[&a.handle]).await["accounts"].as_array().unwrap().is_empty(),
+        "bob a coupé sa présence et voit encore celle des autres",
+    );
+}
+
+#[tokio::test]
+async fn demander_la_presence_sans_signature_est_refuse() {
+    let server = start().await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/presence", server.base_url))
+        .json(&serde_json::json!({ "handles": ["alice"] }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 401);
+}
+
+#[tokio::test]
+async fn trop_de_handles_en_une_requete_est_refuse() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+
+    let handles: Vec<String> = (0..65).map(|i| format!("compte{i}")).collect();
+    let response = alice.post("/v1/presence", serde_json::json!({ "handles": handles })).await;
+
+    assert_eq!(response.status(), 400);
+}

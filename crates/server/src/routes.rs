@@ -15,11 +15,12 @@ use base64::prelude::BASE64_STANDARD;
 use futures_util::stream::{Stream, StreamExt, select_all};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 
 use crate::AppState;
 use crate::auth::Signed;
 use crate::error::{ApiError, ApiResult};
+use crate::presence;
 use crate::stream::{Hub, Notice};
 
 /// Plafond du nombre de KeyPackages déposés en une requête. Sans plafond, un appareil peut
@@ -51,6 +52,8 @@ const MAX_ENVELOPES_PER_PAGE: i64 = 200;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/stream", get(stream))
+        .route("/v1/presence", post(read_presence))
+        .route("/v1/presence/optout", post(set_presence_optout))
         .route("/v1/accounts", post(create_account))
         .route("/v1/accounts/{handle}/devices", get(list_account_devices))
         .route("/v1/accounts/{handle}/rotate", post(rotate_account))
@@ -138,7 +141,7 @@ async fn stream(
 
     // `boxed` n'est pas un détail de style : `SelectAll` exige des flux `Unpin`, et les
     // combinateurs asynchrones ne le sont pas.
-    let subscriptions: Vec<_> = groups
+    let mut subscriptions: Vec<_> = groups
         .into_iter()
         .map(|(group_id,)| {
         // Les événements manqués pour cause de retard sont écartés sans bruit : le flux est une
@@ -166,6 +169,33 @@ async fn stream(
                 .boxed()
         })
         .collect();
+
+    // Battement de présence, greffé sur le flux.
+    //
+    // Un flux ouvert est le signal le plus fidèle qu'un client est là — plus fidèle qu'une
+    // requête, qui peut venir d'un onglet oublié. Rien n'est écrit à la fermeture : la
+    // déconnexion se constate par péremption, ce qui traite de la même façon une fermeture
+    // propre et un câble arraché.
+    //
+    // Ce flux n'émet aucun événement (`filter_map` vers `None`) : il ne fait qu'écrire. Il tique
+    // deux fois plus vite que le rythme de réécriture pour qu'un décalage d'ordonnancement ne
+    // fasse pas systématiquement sauter un battement — c'est `presence::touch` qui décide
+    // vraiment, en mémoire puis en SQL. Chaque écriture prend et rend une connexion du pool ;
+    // en garder une pendant toute la durée d'un flux épuiserait `max_connections` avec dix
+    // utilisateurs.
+    let battement = IntervalStream::new(tokio::time::interval(presence::PRESENCE_REFRESH / 2))
+        .filter_map(move |_| {
+            let pool = pool.clone();
+            let device_id = signed.device_id.clone();
+            async move {
+                if let Err(error) = presence::touch(&pool, &device_id).await {
+                    tracing::debug!(%error, "présence non enregistrée");
+                }
+                None
+            }
+        })
+        .boxed();
+    subscriptions.push(battement);
 
     // `pending` garde la connexion ouverte quand l'appareil n'a encore aucun groupe : sans
     // elle, le flux se terminerait aussitôt et le client boucler sur la reconnexion.
@@ -1621,4 +1651,106 @@ async fn fetch_envelopes(
             .map(|(seq, payload)| Envelope { seq, payload: BASE64_STANDARD.encode(payload) })
             .collect(),
     ))
+}
+
+/// Plafond de handles par requête de présence.
+///
+/// Même raison que pour les KeyPackages : borner ce qu'une seule requête peut demander. Ici
+/// s'ajoute une raison propre — sans plafond, la route deviendrait un moyen commode de balayer
+/// tout le carnet d'un coup.
+const MAX_PRESENCE_HANDLES: usize = 64;
+
+#[derive(Deserialize)]
+struct PresenceRequest {
+    handles: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PresenceEntry {
+    handle: String,
+    last_seen: i64,
+}
+
+#[derive(Serialize)]
+struct PresenceResponse {
+    /// Horloge du serveur, servie avec la réponse.
+    ///
+    /// Le client compare deux horloges pour décider si quelqu'un est en ligne. `MAX_CLOCK_SKEW`
+    /// existe précisément parce qu'elles divergent : comparer un horodatage serveur à l'heure
+    /// locale ferait clignoter le point chez tout utilisateur mal réglé.
+    now: i64,
+    accounts: Vec<PresenceEntry>,
+}
+
+/// Présence des correspondants demandés.
+///
+/// # Pourquoi POST plutôt que GET
+///
+/// Pour que les handles restent hors de l'URL, donc hors des journaux d'accès de tout proxy
+/// traversé. C'est le même argument que celui qui a écarté `EventSource` pour le flux. Le corps
+/// est déjà couvert par la signature, il n'y a rien à ajouter.
+///
+/// # Pourquoi pas une poussée par le flux
+///
+/// Le hub est indexé par groupe, la présence est un fait de compte : pousser demanderait une
+/// diffusion par groupe et par battement, dans des canaux qui existent pour la correction. Et
+/// surtout, le point vert dépendrait alors du flux — un flux bloqué afficherait tout le monde
+/// hors ligne, ce qui est une interface *fausse*, pas seulement en retard.
+async fn read_presence(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Json<PresenceResponse>> {
+    let payload: PresenceRequest = signed.json()?;
+
+    if payload.handles.len() > MAX_PRESENCE_HANDLES {
+        return Err(ApiError::BadRequest("trop de handles"));
+    }
+
+    let seen = presence::read(&pool, &signed.device_id, &payload.handles).await?;
+    // `SystemTime` plutôt qu'une dépendance de date : on ne sert qu'un nombre de secondes.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    Ok(Json(PresenceResponse {
+        now,
+        accounts: seen
+            .into_iter()
+            .map(|s| PresenceEntry { handle: s.handle, last_seen: s.last_seen })
+            .collect(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct OptoutRequest {
+    optout: bool,
+}
+
+/// Active ou lève le refus de diffuser sa présence.
+///
+/// Le refus est **réciproque** : il coupe aussi la lecture. Sans cette symétrie, le réglage
+/// permettrait de voir sans être vu, c'est-à-dire exactement ce qu'il prétend empêcher. La même
+/// règle vaut déjà pour les accusés de lecture.
+///
+/// Il est honoré à l'écriture, dans `presence::touch` : rien n'est enregistré. Un réglage qui se
+/// contenterait de filtrer en lecture laisserait le serveur tenir le registre quand même.
+async fn set_presence_optout(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
+    let payload: OptoutRequest = signed.json()?;
+    let handle = caller_handle(&pool, &signed.device_id).await?;
+
+    sqlx::query("UPDATE accounts SET presence_optout = $2 WHERE handle = $1")
+        .bind(&handle)
+        .bind(payload.optout)
+        .execute(&pool)
+        .await?;
+
+    // Le passé n'a pas à survivre au refus : ce qui a déjà été enregistré cesse d'être servi,
+    // et cesse aussi d'exister. Le garder ferait mentir le réglage à l'instant même où il est
+    // pris.
+    if payload.optout {
+        sqlx::query("UPDATE devices SET last_seen_at = NULL WHERE handle = $1")
+            .bind(&handle)
+            .execute(&pool)
+            .await?;
+    }
+
+    Ok(())
 }

@@ -131,6 +131,19 @@ where
             .verify_strict(&signing_payload(&method, &path, timestamp, &body), &signature)
             .map_err(|_| ApiError::Unauthorized)?;
 
+        // Filet de présence, après vérification et jamais avant : une signature invalide ne doit
+        // pas permettre de déclarer quelqu'un éveillé.
+        //
+        // Détaché et non attendu. Cet extracteur est sur le chemin de latence de toutes les
+        // requêtes signées ; une présence qui ferait échouer — ou seulement ralentir — un envoi
+        // de message serait une régression de la fonction principale au profit d'un point de
+        // couleur. L'écriture est amortie à une par minute et par appareil.
+        //
+        // Ce chemin ne couvre que les requêtes AUTHENTIFIÉES PAR IDENTITÉ. Les dépôts anonymes
+        // et les signaux de frappe n'extraient pas `Signed` — c'est ce qui préserve le sealed
+        // sender, et un test le gèle.
+        crate::presence::touch_detached(pool, device_id.clone());
+
         Ok(Self { device_id, body })
     }
 }

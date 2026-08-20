@@ -33,6 +33,7 @@ import {
   sealTyping,
   without,
 } from "./signals";
+import { WebCryptoCipher } from "./cipher";
 import { Gateway } from "./gateway";
 import * as vault from "./vault";
 import * as log from "./transparency";
@@ -362,7 +363,10 @@ export class Session {
       throw new Error("Trop d'appareils portant ce nom sur ce compte.");
     }
 
-    const api = new Api(deviceId, keys);
+    // Sans verrou, l'état est chiffré par la clé non extractable rangée à côté de lui ; poser
+    // un verrou remplacera cette clé sans toucher à l'identité de l'appareil.
+    const cipher = new WebCryptoCipher(keys, keys.wrap);
+    const api = new Api(deviceId, cipher);
     const session = new Session(
       deviceId,
       handle,
@@ -430,7 +434,8 @@ export class Session {
     const account = crypto.AccountKey.fromSeed(
       await unwrapState(vault, stored.accountSeed),
     );
-    const api = new Api(stored.deviceId, stored.keys);
+    const cipher = new WebCryptoCipher(stored.keys, vault);
+    const api = new Api(stored.deviceId, cipher);
 
     const conversations = new Map<string, ConversationView>();
     for (const groupId of stored.groupIds) {

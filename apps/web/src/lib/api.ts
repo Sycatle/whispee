@@ -5,7 +5,8 @@
  * méthode, le chemin, l'horodatage et l'empreinte du corps : une signature capturée sur un
  * endpoint n'est donc rejouable ni sur un autre chemin, ni avec un corps modifié.
  */
-import { type DeviceKeys, exportAuthPublicKey, fromBase64, sign, toBase64, toHex } from "./keys";
+import type { DeviceCipher } from "./cipher";
+import { type DeviceKeys, exportAuthPublicKey, fromBase64, toBase64, toHex } from "./keys";
 import type { AttestedDevice } from "./wasm";
 
 /** Voir la note sur `buffer` dans `keys.ts`. */
@@ -62,7 +63,14 @@ export class Api {
      * WebSocket ne portant aucun en-tête pour le dire avant.
      */
     readonly deviceId: string,
-    private readonly keys: DeviceKeys,
+    /**
+     * Ce que l'appareil sait faire, et non ce qu'il détient.
+     *
+     * Ce module signait autrefois en manipulant directement les `CryptoKey`. Passer par une
+     * capacité est ce qui permettra à la clé de vivre hors de la webview sans qu'une ligne
+     * d'ici ne change.
+     */
+    private readonly cipher: DeviceCipher,
   ) {}
 
   /**
@@ -137,8 +145,7 @@ export class Api {
   ): Promise<T> {
     const timestamp = Math.floor(Date.now() / 1000);
     const nonce = crypto.getRandomValues(new Uint8Array(16));
-    const signature = await sign(
-      this.keys,
+    const signature = await this.cipher.sign(
       await signingPayload(method, path, timestamp, nonce, encoded),
     );
 
@@ -478,7 +485,7 @@ export class Api {
    * chargement du WASM, qui est asynchrone et n'a pas lieu au même moment.
    */
   signGatewayChallenge(nonce: Uint8Array, format: GatewayChallenge): Promise<string> {
-    return sign(this.keys, format(this.deviceId, nonce));
+    return this.cipher.sign(format(this.deviceId, nonce));
   }
 
   /** Dépose un signal éphémère. Le serveur le relaie et l'oublie : rien n'est stocké. */

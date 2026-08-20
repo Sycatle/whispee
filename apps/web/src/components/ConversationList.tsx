@@ -48,7 +48,12 @@ export function ConversationList({
   };
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-(--color-border-subtle)">
+    <aside
+      // Toute la largeur quand elle est seule à l'écran, une colonne fixe quand elle accompagne
+      // une conversation. La bordure suit : elle sépare deux panneaux, et n'a rien à séparer
+      // quand il n'y en a qu'un.
+      className="flex w-full shrink-0 flex-col duo:w-64 duo:border-r duo:border-(--color-border-subtle)"
+    >
       <form onSubmit={start} className="space-y-2 border-b border-(--color-border-subtle) p-3">
         <input
           value={peer}
@@ -140,7 +145,10 @@ export function ConversationList({
             <button
               type="button"
               onClick={() => onSelect(view)}
-              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm ${
+              // `tactile:` et non `duo:` : la question n'est pas la largeur de l'écran mais la
+              // précision du pointeur. Une tablette est large **et** manipulée au doigt ; un
+              // seuil de largeur y donnerait des cibles pensées pour une souris.
+              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm tactile:min-h-11 ${
                 current?.key === view.key ? "bg-(--color-surface-raised) font-medium" : ""
               }`}
             >

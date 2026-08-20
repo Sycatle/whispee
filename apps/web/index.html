@@ -2,7 +2,17 @@
 <html lang="fr">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      `viewport-fit=cover` étend la page sous l'encoche et sous la barre de geste ; sans lui,
+      le système laisse des bandes inertes aux couleurs du fond, et `env(safe-area-inset-*)`
+      vaut zéro — c'est-à-dire que les retraits déclarés dans `index.css` seraient sans effet.
+
+      `maximum-scale` et `user-scalable` sont délibérément absents : ils désactiveraient le zoom,
+      ce dont personne n'a besoin ici et qui retire à qui voit mal le seul recours dont il
+      dispose. Le champ de saisie évite le zoom automatique d'iOS par sa taille de police, pas
+      en interdisant le geste.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 
     <title>whatsapp_clone — messagerie chiffrée de bout en bout</title>
     <meta

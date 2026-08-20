@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Unlock } from "@/components/Lock";
 import { Conversation } from "@/components/Conversation";
 import { ConversationList } from "@/components/ConversationList";
 import { Onboarding } from "@/components/Onboarding";
 import { MigrationBanner } from "@/components/Migration";
 import { type ConversationView, type MigrationProposee, Session, demarrer } from "@/lib/session";
+import { useDuo } from "@/lib/duo";
 
 /**
  * Intervalle de relève, désormais un filet plutôt qu'un moteur.
@@ -35,6 +36,7 @@ export function App() {
   const [migration, setMigration] = useState<MigrationProposee | null>(null);
   const [locked, setLocked] = useState(false);
   const [, forceRender] = useState(0);
+  const duo = useDuo();
   const refresh = useCallback(() => forceRender((n) => n + 1), []);
 
   useEffect(() => {
@@ -66,6 +68,50 @@ export function App() {
       })
       .finally(() => setBusy(false));
   }, []);
+
+  /**
+   * Le retour du système ferme la conversation, au lieu de quitter l'application.
+   *
+   * # Pourquoi passer par l'historique
+   *
+   * Sur Android comme dans un navigateur mobile, le geste de retour agit sur l'historique. Une
+   * application à un seul panneau qui n'y touche pas se fait quitter au premier retour, alors
+   * que l'utilisateur voulait revenir à sa liste — le réflexe le plus courant sur mobile, et
+   * celui dont l'échec ressemble le plus à un plantage.
+   *
+   * # Le garde-fou
+   *
+   * L'entrée poussée doit être retirée si la conversation se ferme autrement — par le bouton
+   * retour de l'en-tête, ou parce que l'écran s'est élargi. Le drapeau distingue les deux : sans
+   * lui, un `history.back()` de trop consommerait une entrée qui ne nous appartient pas, et sur
+   * Android cela ferme l'application.
+   */
+  const entreePoussee = useRef(false);
+
+  useEffect(() => {
+    // `active` et non la conversation retenue : celle-ci n'est calculée qu'après les écrans de
+    // démarrage, donc après les hooks. Les deux coïncident à un panneau, où la sélection ne se
+    // replie sur rien.
+    if (duo || !active) return;
+
+    history.pushState({ wac: "conversation" }, "");
+    entreePoussee.current = true;
+
+    const revenir = () => {
+      // Consommée par le système : il n'y a plus rien à retirer.
+      entreePoussee.current = false;
+      setActive(null);
+    };
+
+    addEventListener("popstate", revenir);
+    return () => {
+      removeEventListener("popstate", revenir);
+      if (entreePoussee.current) {
+        entreePoussee.current = false;
+        history.back();
+      }
+    };
+  }, [duo, active]);
 
   useEffect(() => {
     if (!session) return;
@@ -132,10 +178,20 @@ export function App() {
   }
 
   const conversations = [...session.conversations.values()];
-  const current = active && session.conversations.get(active.key) ? active : conversations[0] ?? null;
+
+  // À deux panneaux, une conversation est toujours ouverte : un panneau droit vide serait du
+  // vide permanent. À un seul, l'absence de sélection **est** l'écran de liste — retomber sur la
+  // première conversation rendrait la liste inatteignable.
+  const retenue = active && session.conversations.get(active.key) ? active : null;
+  const current = duo ? retenue ?? conversations[0] ?? null : retenue;
 
   return (
-    <div className="mx-auto flex h-dvh max-w-5xl flex-col">
+    <div
+      // `h-dvh` et non `h-screen` : sur mobile, `100vh` compte la hauteur barres déployées, si
+      // bien qu'une centaine de pixels passent sous l'écran — précisément le champ de saisie et
+      // le dernier message.
+      className="safe-cotes safe-haut mx-auto flex h-dvh max-w-5xl flex-col"
+    >
       <Header session={session} onForget={() => session.forget().then(() => location.reload())} />
 
       {/*
@@ -160,18 +216,32 @@ export function App() {
       )}
 
       <div className="flex min-h-0 flex-1">
-        <ConversationList
-          session={session}
-          conversations={conversations}
-          current={current}
-          onSelect={setActive}
-          onError={setError}
-          onChanged={refresh}
-        />
+        {/* À un panneau, un seul des deux est monté — et non masqué : une conversation cachée
+            continuerait de relever, de défiler et de réclamer le focus au clavier. */}
+        {(duo || !current) && (
+          <ConversationList
+            session={session}
+            conversations={conversations}
+            current={current}
+            onSelect={setActive}
+            onError={setError}
+            onChanged={refresh}
+          />
+        )}
         {current ? (
-          <Conversation session={session} view={current} onChanged={refresh} onError={setError} />
+          <Conversation
+            session={session}
+            view={current}
+            onChanged={refresh}
+            onError={setError}
+            onBack={duo ? undefined : () => setActive(null)}
+          />
         ) : (
-          <Centered>Aucune conversation. Ouvrez-en une avec le pseudonyme d&apos;un correspondant.</Centered>
+          duo && (
+            <Centered>
+              Aucune conversation. Ouvrez-en une avec le pseudonyme d&apos;un correspondant.
+            </Centered>
+          )
         )}
       </div>
 

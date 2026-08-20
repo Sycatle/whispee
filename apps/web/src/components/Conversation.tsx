@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useOcclusion } from "@/lib/viewport";
 import { GroupPanel, GroupToggle } from "@/components/Group";
 import { Messages } from "@/components/Messages";
 import { PresenceLine } from "@/components/Presence";
@@ -10,11 +11,19 @@ export function Conversation({
   view,
   onChanged,
   onError,
+  onBack,
 }: {
   session: Session;
   view: ConversationView;
   onChanged: () => void;
   onError: (message: string) => void;
+  /**
+   * Retour à la liste, quand elle n'est pas affichée à côté.
+   *
+   * Absent à deux panneaux : un bouton retour y désignerait un écran déjà visible. Sa présence
+   * est donc ce qui dit à ce composant qu'il occupe l'écran entier.
+   */
+  onBack?: () => void;
 }) {
   const [text, setText] = useState("");
   const [verifying, setVerifying] = useState<string | null>(null);
@@ -22,6 +31,7 @@ export function Conversation({
   const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const occlusion = useOcclusion();
 
   // Rapatriement de l'historique archivé, à l'ouverture de la conversation.
   //
@@ -92,6 +102,16 @@ export function Conversation({
   return (
     <section className="flex min-w-0 flex-1 flex-col">
       <header className="flex items-baseline justify-between gap-4 border-b border-(--color-border-subtle) px-4 py-2">
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            aria-label="Revenir aux conversations"
+            className="-ml-2 shrink-0 self-center px-2 py-1 text-(--color-ink-muted) tactile:min-h-11"
+          >
+            ‹
+          </button>
+        )}
         {/*
           L'epoch n'est pas affichée — c'est un détail de protocole qui n'apprend rien à
           l'utilisateur. Elle est exposée en attribut parce que deux membres à des epochs
@@ -188,14 +208,24 @@ export function Conversation({
         </div>
       )}
 
-      <form onSubmit={send} className="flex items-center gap-2 border-t border-(--color-border-subtle) p-3">
+      <form
+        onSubmit={send}
+        // Le clavier logiciel ne redimensionne pas la fenêtre sur iOS : il glisse la page
+        // dessous, sans qu'aucune requête média ne se déclenche. Sans ce retrait, le champ qui
+        // vient de recevoir le focus se retrouve caché par le clavier qui l'a ouvert.
+        //
+        // `safe-bas` en plus : les deux ne se recouvrent pas — la barre de geste est là quand le
+        // clavier est fermé, et le clavier la remplace quand il s'ouvre.
+        style={{ paddingBottom: occlusion || undefined }}
+        className="safe-bas flex items-center gap-2 border-t border-(--color-border-subtle) p-3"
+      >
         <input ref={fileInput} type="file" onChange={attach} className="hidden" />
         <button
           type="button"
           onClick={() => fileInput.current?.click()}
           disabled={sending}
           title="Joindre un fichier"
-          className="rounded-md border border-(--color-border-subtle) px-3 py-2 text-sm disabled:opacity-50"
+          className="rounded-md border border-(--color-border-subtle) px-3 py-2 text-sm tactile:min-h-11 tactile:min-w-11 disabled:opacity-50"
         >
           {sending ? "…" : "📎"}
         </button>
@@ -203,9 +233,15 @@ export function Conversation({
           value={text}
           onChange={(e) => typing(e.target.value)}
           placeholder={replyTo === null ? "Message" : "Réponse"}
-          className="min-w-0 flex-1 rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2"
+          // `text-base` explicitement : en dessous de 16 pixels, iOS zoome sur le champ au
+          // focus et ne dézoome pas en sortant. Le corriger en interdisant le zoom priverait de
+          // recours ceux qui en ont besoin ; le corriger par la taille ne coûte rien.
+          className="min-w-0 flex-1 rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2 text-base tactile:min-h-11"
         />
-        <button type="submit" className="rounded-md bg-(--color-accent) px-4 py-2 text-sm font-medium text-white">
+        <button
+          type="submit"
+          className="rounded-md bg-(--color-accent) px-4 py-2 text-sm font-medium text-white tactile:min-h-11"
+        >
           Envoyer
         </button>
       </form>

@@ -28,6 +28,7 @@
  * remonter une barre de saisie, réduire une liste, ne rien changer — appartient aux composants,
  * qui seuls savent ce qui doit rester visible.
  */
+import { useEffect, useState } from "react";
 
 export interface Viewport {
   /** Hauteur réellement visible, en pixels CSS. */
@@ -83,4 +84,19 @@ export function observer(reagir: (vue: Viewport) => void): () => void {
     vue.removeEventListener("resize", relever);
     vue.removeEventListener("scroll", relever);
   };
+}
+
+/**
+ * La hauteur masquée par le clavier, suivie au fil de son ouverture.
+ *
+ * Rendue en pixels, à appliquer en marge ou en retrait par le composant. Le module ne pose pas
+ * lui-même de style : la même mesure sert à décaler une barre de saisie ou à raccourcir une
+ * liste, et seul l'appelant sait laquelle des deux est juste.
+ */
+export function useOcclusion(): number {
+  const [occlusion, setOcclusion] = useState(0);
+
+  useEffect(() => observer((vue) => setOcclusion(vue.occlusion)), []);
+
+  return occlusion;
 }

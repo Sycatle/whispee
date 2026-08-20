@@ -2162,6 +2162,12 @@ async fn mettre_en_ligne(server: &TestServer, device: &Device) -> Option<i64> {
     let mut socket = common::session(server, device, serde_json::json!([])).await;
     assert_eq!(common::lire(&mut socket).await.unwrap()["op"], "ready");
 
+    // Un battement, parce que c'est lui qui écrit la présence — et non le tick du serveur.
+    // Une session ouverte ne prouve rien : la socket d'un téléphone suspendu reste ouverte
+    // jusqu'à `SILENCE_MAX`, et le serveur déclarerait éveillé quelqu'un qui ne l'est plus.
+    common::envoyer(&mut socket, serde_json::json!({ "op": "heartbeat" })).await;
+    assert_eq!(common::lire(&mut socket).await.unwrap()["op"], "heartbeat_ack");
+
     let vu = attendre_presence(&server.pool, &device.id).await;
     drop(socket);
     vu

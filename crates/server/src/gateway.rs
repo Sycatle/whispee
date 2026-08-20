@@ -541,7 +541,8 @@ impl Session {
                         Err(error) => tracing::debug!(%error, "revalidation reportée"),
                     }
 
-                    crate::presence::touch_detached(self.pool.clone(), self.device_id.clone());
+                    // La présence n'est **pas** écrite ici : voir la trame `heartbeat`. Ce tick
+                    // ne constate rien sur le client, il ne fait que compter le temps du serveur.
                 }
             }
         }
@@ -564,7 +565,22 @@ impl Session {
             // chaque appel ; un client qui martèlerait ses battements se limiterait lui-même
             // par sa bande passante bien avant d'inquiéter la base.
             ClientFrame::Heartbeat => match self.revalidate().await {
-                Ok(true) => Reaction::Repondre(ServerFrame::HeartbeatAck),
+                Ok(true) => {
+                    // **La présence s'écrit ici, à la réception d'un battement, et non au tick
+                    // du serveur.**
+                    //
+                    // L'écrire au tick la faisait mentir : un téléphone suspendu par son système
+                    // laisse une socket que rien ne ferme avant `SILENCE_MAX`, et le serveur
+                    // continuait pendant tout ce temps à déclarer éveillé quelqu'un qui ne l'est
+                    // plus. En comptant la fenêtre d'affichage du client par-dessus, cela faisait
+                    // plusieurs minutes de « en ligne » pour un appareil au fond d'une poche.
+                    //
+                    // Un battement reçu est la seule preuve qu'il y a encore quelqu'un au bout.
+                    // C'est la même exigence que celle qui a fait sortir la présence du chemin des
+                    // requêtes : ne déclarer présent que ce qu'on constate.
+                    crate::presence::touch_detached(self.pool.clone(), self.device_id.clone());
+                    Reaction::Repondre(ServerFrame::HeartbeatAck)
+                }
                 Ok(false) => {
                     Reaction::Terminer(ServerFrame::Error { reason: "session révoquée" })
                 }

@@ -8,72 +8,9 @@ mod common;
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
-use common::{Device, TestAccount, TestServer, start, unique};
-use futures_util::{SinkExt, StreamExt};
+use common::{Device, TestAccount, TestServer, envoyer, lire, ouvrir, session, start, unique};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use tokio_tungstenite::tungstenite::Message;
-
-type Socket = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
-
-/// Ouvre une socket et retourne le défi reçu dans `hello`.
-async fn ouvrir(server: &TestServer) -> (Socket, Vec<u8>) {
-    let url = format!("{}/v1/gateway", server.base_url.replace("http://", "ws://"));
-    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.expect("upgrade refusé");
-
-    let hello = lire(&mut socket).await.expect("le serveur ouvre par un hello");
-    assert_eq!(hello["op"], "hello");
-
-    let nonce = BASE64_STANDARD.decode(hello["nonce"].as_str().unwrap()).unwrap();
-    (socket, nonce)
-}
-
-/// Lit la prochaine trame JSON, en ignorant ping et pong.
-///
-/// Un délai borne l'attente : sans lui, un test qui n'obtient pas la trame attendue pendrait au
-/// lieu d'échouer, et un test qui pend ne dit rien à personne.
-async fn lire(socket: &mut Socket) -> Option<serde_json::Value> {
-    let deadline = std::time::Duration::from_secs(5);
-
-    tokio::time::timeout(deadline, async {
-        while let Some(message) = socket.next().await {
-            match message.ok()? {
-                Message::Text(text) => return serde_json::from_str(&text).ok(),
-                Message::Close(_) => return None,
-                _ => continue,
-            }
-        }
-        None
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-async fn envoyer(socket: &mut Socket, frame: serde_json::Value) {
-    socket.send(Message::Text(frame.to_string().into())).await.unwrap();
-}
-
-/// Ouvre une session authentifiée et consomme le `ready`.
-async fn session(server: &TestServer, device: &Device, cursors: serde_json::Value) -> Socket {
-    let (mut socket, challenge) = ouvrir(server).await;
-
-    envoyer(
-        &mut socket,
-        serde_json::json!({
-            "op": "identify",
-            "device_id": device.id,
-            "nonce": BASE64_STANDARD.encode(&challenge),
-            "signature": device.sign_challenge(&challenge),
-            "cursors": cursors,
-        }),
-    )
-    .await;
-
-    socket
-}
 
 async fn groupe_avec(server: &TestServer, alice: &Device, bob: &Device) -> Vec<u8> {
     let _ = server;

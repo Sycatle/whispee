@@ -4,18 +4,14 @@
 //! total des messages par groupe, et ne peut rien déchiffrer.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
-use futures_util::stream::{Stream, StreamExt, select_all};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 
 use crate::AppState;
 use crate::auth::Signed;
@@ -52,7 +48,6 @@ const MAX_ENVELOPES_PER_PAGE: i64 = 200;
 /// mégaoctets sur des endpoints qui n'en ont aucun besoin.
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/stream", get(stream))
         .route("/v1/gateway", get(crate::gateway::handler))
         .route("/v1/presence", post(read_presence))
         .route("/v1/presence/optout", post(set_presence_optout))
@@ -103,107 +98,6 @@ pub(crate) fn decode_group_id(value: &str) -> ApiResult<Vec<u8>> {
         return Err(ApiError::BadRequest("longueur de group_id invalide"));
     }
     Ok(bytes)
-}
-
-/// Flux temps réel des événements destinés à cet appareil.
-///
-/// # Pourquoi le client n'utilise pas `EventSource`
-///
-/// L'API `EventSource` du navigateur **n'accepte aucun en-tête**, ce qui la rend incompatible
-/// avec [`Signed`] : il faudrait mettre la signature en paramètre d'URL, où elle finirait dans
-/// les journaux d'accès de tout proxy traversé. Le client passe donc par `fetch()` et lit le
-/// corps en flux, au prix d'une reconnexion à réimplémenter.
-///
-/// # Ce que le flux ne remplace pas
-///
-/// Rien. Il n'écourte que la latence : chaque événement renvoie le client vers le chemin
-/// normal, qui revérifie son appartenance. Un client dont le flux ne se connecte jamais reste
-/// entièrement fonctionnel par la relève périodique — c'est la propriété à préserver, parce
-/// qu'un flux qui deviendrait nécessaire à la correction serait un flux dont la panne perd des
-/// messages.
-///
-/// # Portée figée à l'ouverture
-///
-/// Les groupes écoutés sont ceux dont l'appareil est membre **au moment de l'ouverture**. Un
-/// groupe rejoint ensuite n'est pas couvert : c'est la relève périodique qui le découvre, et
-/// le client rouvre alors son flux.
-async fn stream(
-    State(pool): State<PgPool>,
-    State(hub): State<Arc<Hub>>,
-    signed: Signed,
-) -> ApiResult<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>> {
-    let groups: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT m.group_id FROM group_members m
-         JOIN devices d ON d.id = m.device_id
-         WHERE m.device_id = $1 AND d.revoked_at IS NULL",
-    )
-    .bind(&signed.device_id)
-    .fetch_all(&pool)
-    .await?;
-
-    // `boxed` n'est pas un détail de style : `SelectAll` exige des flux `Unpin`, et les
-    // combinateurs asynchrones ne le sont pas.
-    let mut subscriptions: Vec<_> = groups
-        .into_iter()
-        .map(|(group_id,)| {
-        // Les événements manqués pour cause de retard sont écartés sans bruit : le flux est une
-        // optimisation, et la relève périodique rattrape ce qu'il laisse tomber.
-            BroadcastStream::new(hub.subscribe(&group_id))
-                .filter_map(|notice| async move {
-                    match notice {
-                        Ok(Notice::Envelope { group_id, seq }) => Some(Ok(Event::default()
-                            .event("envelope")
-                            .data(format!(
-                                r#"{{"groupId":"{}","seq":{}}}"#,
-                                hex::encode(&group_id),
-                                seq
-                            )))),
-                        Ok(Notice::Signal { group_id, payload }) => Some(Ok(Event::default()
-                            .event("signal")
-                            .data(format!(
-                                r#"{{"groupId":"{}","payload":"{}"}}"#,
-                                hex::encode(&group_id),
-                                BASE64_STANDARD.encode(&payload)
-                            )))),
-                        Err(_) => None,
-                    }
-                })
-                .boxed()
-        })
-        .collect();
-
-    // Battement de présence, greffé sur le flux.
-    //
-    // Un flux ouvert est le signal le plus fidèle qu'un client est là — plus fidèle qu'une
-    // requête, qui peut venir d'un onglet oublié. Rien n'est écrit à la fermeture : la
-    // déconnexion se constate par péremption, ce qui traite de la même façon une fermeture
-    // propre et un câble arraché.
-    //
-    // Ce flux n'émet aucun événement (`filter_map` vers `None`) : il ne fait qu'écrire. Il tique
-    // deux fois plus vite que le rythme de réécriture pour qu'un décalage d'ordonnancement ne
-    // fasse pas systématiquement sauter un battement — c'est `presence::touch` qui décide
-    // vraiment, en mémoire puis en SQL. Chaque écriture prend et rend une connexion du pool ;
-    // en garder une pendant toute la durée d'un flux épuiserait `max_connections` avec dix
-    // utilisateurs.
-    let battement = IntervalStream::new(tokio::time::interval(presence::PRESENCE_REFRESH / 2))
-        .filter_map(move |_| {
-            let pool = pool.clone();
-            let device_id = signed.device_id.clone();
-            async move {
-                if let Err(error) = presence::touch(&pool, &device_id).await {
-                    tracing::debug!(%error, "présence non enregistrée");
-                }
-                None
-            }
-        })
-        .boxed();
-    subscriptions.push(battement);
-
-    // `pending` garde la connexion ouverte quand l'appareil n'a encore aucun groupe : sans
-    // elle, le flux se terminerait aussitôt et le client boucler sur la reconnexion.
-    let events = select_all(subscriptions).chain(futures_util::stream::pending());
-
-    Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 /// Plafond d'un signal éphémère.

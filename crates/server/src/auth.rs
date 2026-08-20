@@ -16,18 +16,18 @@
 //! rejeté par le client MLS (la clé de message a été consommée), donc l'impact se limite à
 //! du bruit — mais la limite doit être levée avant tout usage sérieux.
 //!
-//! # Effet de bord : la présence
+//! # Ce que cet extracteur ne fait plus
 //!
-//! Toute requête dont la signature est vérifiée note l'appareil comme éveillé
-//! (`crate::presence`). L'écriture est **détachée et jamais attendue** : cet extracteur est sur
-//! le chemin de latence de tout le serveur, et une présence qui ferait échouer — ou seulement
-//! ralentir — un envoi de message serait une régression de la fonction principale au profit d'un
-//! point de couleur. Son échec est ignoré, et elle est amortie à une écriture par minute et par
-//! appareil.
+//! Noter l'appareil comme éveillé. La présence se lisait ici de toute requête signée, ce qui
+//! plaçait une écriture SQL potentielle sur le chemin de latence de tout le serveur — pour un
+//! point de couleur. Elle est désormais alimentée par le battement de [`crate::gateway`], qui
+//! est un signal plus juste : une session ouverte dit qu'un client est là, là où une requête
+//! peut venir d'un onglet oublié.
 //!
-//! Elle ne s'applique qu'ici, donc qu'aux chemins authentifiés **par identité**. Les dépôts
-//! anonymes et les signaux de frappe ne construisent pas de [`Signed`] : le serveur ne sait pas
-//! qui dépose, et l'en déduire reviendrait à défaire le sealed sender.
+//! Conséquence à assumer : un client qui n'ouvre jamais de session n'apparaît jamais en ligne,
+//! même s'il interroge le serveur. C'est cohérent — sans session, il n'est de toute façon pas
+//! joignable en temps réel — mais c'est un changement de comportement, pas une optimisation
+//! transparente.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -143,19 +143,6 @@ where
         verifying_key
             .verify_strict(&signing_payload(&method, &path, timestamp, &body), &signature)
             .map_err(|_| ApiError::Unauthorized)?;
-
-        // Filet de présence, après vérification et jamais avant : une signature invalide ne doit
-        // pas permettre de déclarer quelqu'un éveillé.
-        //
-        // Détaché et non attendu. Cet extracteur est sur le chemin de latence de toutes les
-        // requêtes signées ; une présence qui ferait échouer — ou seulement ralentir — un envoi
-        // de message serait une régression de la fonction principale au profit d'un point de
-        // couleur. L'écriture est amortie à une par minute et par appareil.
-        //
-        // Ce chemin ne couvre que les requêtes AUTHENTIFIÉES PAR IDENTITÉ. Les dépôts anonymes
-        // et les signaux de frappe n'extraient pas `Signed` — c'est ce qui préserve le sealed
-        // sender, et un test le gèle.
-        crate::presence::touch_detached(pool, device_id.clone());
 
         Ok(Self { device_id, body })
     }

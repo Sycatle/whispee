@@ -1958,68 +1958,33 @@ async fn le_mac_d_un_depot_ne_vaut_pas_pour_un_signal() {
     assert_eq!(response.status(), 403);
 }
 
-// ---------------------------------------------------------------- flux temps réel
-
-/// Le flux est authentifié comme tout le reste. Sans signature, rien ne sort — sans quoi il
-/// suffirait d'écouter pour apprendre le rythme d'une conversation.
-#[tokio::test]
-async fn le_flux_sans_signature_est_refuse() {
-    let server = start().await;
-
-    let response =
-        reqwest::Client::new().get(format!("{}/v1/stream", server.base_url)).send().await.unwrap();
-
-    assert_eq!(response.status(), 401);
-}
-
-/// Un appareil authentifié ouvre le flux et y reçoit ses propres groupes.
-///
-/// L'événement ne porte que le numéro de séquence : le client va ensuite chercher l'enveloppe
-/// par le chemin normal, qui revérifie son appartenance. Dupliquer ce contrôle dans la
-/// diffusion aurait dupliqué la faille possible.
-#[tokio::test]
-async fn le_flux_annonce_une_enveloppe_deposee() {
-    use futures_util::StreamExt;
-
-    let server = start().await;
-    let alice = Device::register(&server, &unique("alice")).await;
-    let posting_key = [42u8; 32];
-    let group_id = groupe_avec_cle(&alice, &posting_key).await;
-
-    let response = alice.get("/v1/stream").await;
-    assert!(response.status().is_success(), "flux refusé : {:?}", response.status());
-
-    let mut flux = response.bytes_stream();
-
-    // Le dépôt a lieu après l'ouverture : un abonné ne reçoit que ce qui suit son abonnement.
-    post_anonyme(&server, &group_id, &posting_key, b"enveloppe", [1u8; 16]).await;
-
-    // Un événement peut arriver en plusieurs morceaux, et le serveur intercale des
-    // keep-alive : on accumule jusqu'à reconnaître l'événement, ou jusqu'au délai.
-    let recu = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let mut tampon = String::new();
-        while let Some(morceau) = flux.next().await {
-            tampon.push_str(&String::from_utf8_lossy(&morceau.unwrap()));
-            if tampon.contains("event: envelope") {
-                return tampon;
-            }
-        }
-        tampon
-    })
-    .await
-    .expect("le flux n'a rien émis dans le délai");
-
-    assert!(recu.contains("event: envelope"), "événement inattendu : {recu}");
-    assert!(recu.contains(&group_id), "l'événement ne désigne pas le groupe : {recu}");
-}
-
 // ---------------------------------------------------------------- présence
+
+/// Met un appareil en ligne, puis attend que la base l'enregistre.
+///
+/// # Pourquoi une session, et non plus une requête
+///
+/// La présence était autrefois un effet de bord de l'extracteur `Signed` : n'importe quelle
+/// requête signée suffisait. Elle est maintenant alimentée par le battement de la gateway, ce
+/// qui est un signal plus juste — une session ouverte dit qu'un client est là, là où une requête
+/// peut venir d'un onglet oublié.
+///
+/// La socket est **gardée ouverte** pendant l'attente : la fermer aussitôt ne changerait rien à
+/// la valeur écrite, mais ferait courir le test contre la fermeture côté serveur.
+async fn mettre_en_ligne(server: &TestServer, device: &Device) -> Option<i64> {
+    let mut socket = common::session(server, device, serde_json::json!([])).await;
+    assert_eq!(common::lire(&mut socket).await.unwrap()["op"], "ready");
+
+    let vu = attendre_presence(&server.pool, &device.id).await;
+    drop(socket);
+    vu
+}
 
 /// Attend qu'une présence spawnée atteigne la base, ou renonce.
 ///
-/// La touche est détachée — elle ne doit pas ralentir la requête qui la déclenche — donc un test
-/// qui lit la colonne aussitôt après course avec elle. Sonder est plus honnête qu'un `sleep`
-/// arbitraire : le test réussit dès que la valeur arrive, et échoue franchement sinon.
+/// La touche est détachée — elle ne doit pas ralentir ce qui la déclenche — donc un test qui lit
+/// la colonne aussitôt après course avec elle. Sonder est plus honnête qu'un `sleep` arbitraire :
+/// le test réussit dès que la valeur arrive, et échoue franchement sinon.
 async fn attendre_presence(pool: &sqlx::PgPool, device_id: &str) -> Option<i64> {
     for _ in 0..40 {
         let row: Option<(Option<i64>,)> = sqlx::query_as(
@@ -2073,11 +2038,10 @@ async fn un_depot_anonyme_ne_met_jamais_a_jour_la_presence() {
     let posting_key = [42u8; 32];
     let group_id = groupe_avec_cle(&alice, &posting_key).await;
 
-    // La préparation ci-dessus passe par des requêtes signées, qui marquent légitimement la
-    // présence. On attend que leur touche détachée ait atterri — sinon elle arriverait après le
-    // nettoyage et se ferait passer pour la fuite qu'on cherche — puis on repart d'une ardoise
-    // vierge, pour n'observer que les chemins anonymes.
-    attendre_presence(&server.pool, &alice.id).await.expect("la requête signée n'a rien marqué");
+    // On met d'abord l'appareil en ligne pour de bon, puis on efface : sans ce passage, un
+    // `last_seen_at` resté nul rendrait le test vert quoi qu'il arrive, y compris si la présence
+    // avait cessé de fonctionner entièrement.
+    mettre_en_ligne(&server, &alice).await.expect("la session n'a rien marqué");
     oublier_presence(&server.pool, &alice.id).await;
 
     let depot = post_anonyme(&server, &group_id, &posting_key, b"chiffre", [1u8; 16]).await;
@@ -2095,29 +2059,45 @@ async fn un_depot_anonyme_ne_met_jamais_a_jour_la_presence() {
     );
 }
 
+/// **Le test qui fige le nouveau déclencheur de présence.**
+///
+/// Une session ouverte met en ligne ; une requête signée, non. C'est un changement de
+/// comportement assumé — voir l'en-tête de `server::auth` — et non une optimisation invisible :
+/// un client qui interroge le serveur sans jamais ouvrir de session reste hors ligne.
 #[tokio::test]
-async fn une_requete_signee_marque_l_appareil_en_ligne() {
+async fn seule_une_session_marque_l_appareil_en_ligne() {
     let server = start().await;
     let alice = Device::register(&server, &unique("alice")).await;
 
     // L'enregistrement n'est pas signé : cet appareil n'a encore jamais été vu.
     assert_eq!(derniere_presence(&server.pool, &alice.id).await, None);
 
-    alice.get("/v1/groups").await;
-    assert!(attendre_presence(&server.pool, &alice.id).await.is_some());
+    // Des requêtes signées, en nombre, sans session : la colonne doit rester vide.
+    for _ in 0..3 {
+        alice.get("/v1/groups").await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    assert_eq!(
+        derniere_presence(&server.pool, &alice.id).await,
+        None,
+        "la présence est repartie sur le chemin de latence des requêtes",
+    );
+
+    assert!(mettre_en_ligne(&server, &alice).await.is_some());
 }
 
-/// Fige la décision de coût : une écriture par appareil et par minute, pas une par requête.
+/// Fige la décision de coût : une écriture par appareil et par minute, pas une par battement.
 ///
-/// Sans amortissement, un client à dix conversations produit une écriture par seconde pour une
-/// information qui ne change pas entre deux battements.
+/// Le test appelle `touch` directement plutôt que de battre par la socket : le rythme réel du
+/// battement se compte en dizaines de secondes, et l'attendre ferait de ce test le plus lent de
+/// la suite pour vérifier une garde qui, elle, est purement locale.
 #[tokio::test]
-async fn la_presence_n_est_pas_reecrite_a_chaque_requete() {
+async fn la_presence_n_est_pas_reecrite_a_chaque_battement() {
     let server = start().await;
     let alice = Device::register(&server, &unique("alice")).await;
 
-    alice.get("/v1/groups").await;
-    let premier = attendre_presence(&server.pool, &alice.id).await.unwrap();
+    let premier = mettre_en_ligne(&server, &alice).await.unwrap();
 
     // Une valeur artificiellement ancienne : seule la garde en mémoire peut encore retenir
     // l'écriture, et c'est précisément ce qu'on vérifie.
@@ -2130,9 +2110,8 @@ async fn la_presence_n_est_pas_reecrite_a_chaque_requete() {
     assert!(recule < premier);
 
     for _ in 0..5 {
-        alice.get("/v1/groups").await;
+        server::presence::touch(&server.pool, &alice.id).await.unwrap();
     }
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     assert_eq!(derniere_presence(&server.pool, &alice.id).await, Some(recule));
 }
@@ -2174,8 +2153,8 @@ async fn la_presence_n_est_visible_que_dans_un_groupe_commun() {
 
     alice.get("/v1/groups").await;
     bob.get("/v1/groups").await;
-    attendre_presence(&server.pool, &alice.id).await.unwrap();
-    attendre_presence(&server.pool, &bob.id).await.unwrap();
+    mettre_en_ligne(&server, &alice).await.unwrap();
+    mettre_en_ligne(&server, &bob).await.unwrap();
 
     let vu = presence_de(&bob, &[&a.handle]).await;
     assert_eq!(vu["accounts"].as_array().unwrap().len(), 1, "bob partage un groupe avec alice");
@@ -2194,7 +2173,7 @@ async fn un_handle_inconnu_et_un_handle_sans_groupe_commun_sont_indistinguables(
     let (a, alice, _b, _bob, _c, carol) = trio(&server).await;
 
     alice.get("/v1/groups").await;
-    attendre_presence(&server.pool, &alice.id).await.unwrap();
+    mettre_en_ligne(&server, &alice).await.unwrap();
 
     let etranger = presence_de(&carol, &[&a.handle]).await;
     let inexistant = presence_de(&carol, &["personne-de-ce-nom"]).await;
@@ -2225,7 +2204,7 @@ async fn un_compte_est_en_ligne_des_qu_un_seul_de_ses_appareils_l_est() {
     // Seul le portable s'est manifesté ; le téléphone est resté éteint.
     oublier_presence(&server.pool, &tel.id).await;
     portable.get("/v1/groups").await;
-    let vu_portable = attendre_presence(&server.pool, &portable.id).await.unwrap();
+    let vu_portable = mettre_en_ligne(&server, &portable).await.unwrap();
 
     let reponse = presence_de(&bob, &[&a.handle]).await;
     let comptes = reponse["accounts"].as_array().unwrap();
@@ -2253,7 +2232,7 @@ async fn un_appareil_revoque_ne_maintient_plus_son_compte_en_ligne() {
     .await;
 
     vole.get("/v1/groups").await;
-    attendre_presence(&server.pool, &vole.id).await.unwrap();
+    mettre_en_ligne(&server, &vole).await.unwrap();
     oublier_presence(&server.pool, &tel.id).await;
 
     assert_eq!(presence_de(&bob, &[&a.handle]).await["accounts"].as_array().unwrap().len(), 1);
@@ -2279,7 +2258,7 @@ async fn le_refus_de_presence_empeche_l_enregistrement() {
     let alice = a.device(&server, "tel").await;
 
     alice.get("/v1/groups").await;
-    attendre_presence(&server.pool, &alice.id).await.unwrap();
+    mettre_en_ligne(&server, &alice).await.unwrap();
 
     let response = alice.post("/v1/presence/optout", serde_json::json!({ "optout": true })).await;
     assert!(response.status().is_success());
@@ -2316,7 +2295,7 @@ async fn refuser_de_diffuser_sa_presence_coupe_aussi_la_lecture() {
     let (a, alice, _b, bob, _c, _carol) = trio(&server).await;
 
     alice.get("/v1/groups").await;
-    attendre_presence(&server.pool, &alice.id).await.unwrap();
+    mettre_en_ligne(&server, &alice).await.unwrap();
 
     assert_eq!(presence_de(&bob, &[&a.handle]).await["accounts"].as_array().unwrap().len(), 1);
 
@@ -2366,7 +2345,7 @@ async fn le_detail_par_appareil_n_est_servi_qu_a_son_proprietaire() {
     let bob = b.device(&server, "tel").await;
 
     alice.get("/v1/groups").await;
-    attendre_presence(&server.pool, &alice.id).await.unwrap();
+    mettre_en_ligne(&server, &alice).await.unwrap();
 
     let sien: serde_json::Value = alice
         .get(&format!("/v1/accounts/{}/devices", a.handle))

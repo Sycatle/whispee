@@ -21,6 +21,13 @@
 //! La mémoire n'a pas besoin de dépasser [`MAX_CLOCK_SKEW`] : au-delà, l'horodatage refuse la
 //! requête de toute façon. Voir `migrations/0010_anti_rejeu.sql` pour ce que cela permet.
 //!
+//! **Limite de la table `UNLOGGED`**, non dite dans la migration et qui ne peut plus y être
+//! ajoutée — sqlx vérifie l'empreinte de chaque migration appliquée, son texte est donc figé.
+//! PostgreSQL vide une table `UNLOGGED` après un arrêt brutal. Les nonces mémorisés sont alors
+//! perdus, et une requête captée redevient rejouable jusqu'à la fin de sa fenêtre de tolérance.
+//! La fenêtre est courte et l'événement rare, mais la propriété n'est pas « aucun rejeu
+//! possible » : elle est « aucun rejeu tant que la base ne s'est pas effondrée ».
+//!
 //! # Ce que cet extracteur ne fait plus
 //!
 //! Noter l'appareil comme éveillé. La présence se lisait ici de toute requête signée, ce qui

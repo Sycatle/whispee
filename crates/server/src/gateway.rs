@@ -93,6 +93,22 @@ const IDENTIFY_MAX: Duration = Duration::from_secs(10);
 /// groupes dont il est réellement membre, donc sans rien violer.
 const MAX_SUBSCRIPTIONS: usize = 512;
 
+/// Plafond de taille d'une trame, dans les deux sens.
+///
+/// Vaut avant l'authentification : c'est là qu'il compte, puisque le pair n'a alors rien prouvé.
+const MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// Plafond de curseurs acceptés dans un `identify`.
+///
+/// **Sans cette borne, une seule trame achète autant de requêtes SQL qu'elle contient d'entrées.**
+/// Le filtre d'appartenance ne suffit pas : il écarte les groupes étrangers, mais rien n'empêche
+/// de répéter mille fois un groupe dont on est réellement membre. L'amplification est le
+/// problème, pas l'accès.
+///
+/// Aligné sur [`MAX_SUBSCRIPTIONS`] : un client n'a pas de raison d'annoncer un curseur pour un
+/// groupe auquel il ne peut pas s'abonner.
+const MAX_CURSORS: usize = MAX_SUBSCRIPTIONS;
+
 /// Plafond d'enveloppes annoncées par groupe lors du rattrapage.
 ///
 /// Aligné sur la pagination du chemin HTTP. Un client très en retard reçoit les premières et
@@ -178,11 +194,23 @@ type Sender = SplitSink<WebSocket, Message>;
 /// atterrir dans les journaux d'accès de tout proxy traversé ; on ouvre donc la socket sans
 /// identité et rien n'est servi avant le défi.
 pub async fn handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| async move {
-        if let Err(error) = session(state, socket).await {
-            tracing::debug!(%error, "session gateway terminée");
-        }
-    })
+    // **Plafond de taille, avant toute authentification.**
+    //
+    // Sans lui, la valeur par défaut de tungstenite s'applique : 64 Mio par message. Un pair
+    // qui n'a encore rien prouvé peut donc faire allouer 64 Mio, autant de fois qu'il ouvre de
+    // sockets. Le chemin HTTP se protège depuis toujours par `RequestBodyLimitLayer` à 1 Mio ;
+    // cette route est arrivée sans son équivalent.
+    //
+    // La borne est large devant ce que le protocole transporte — la plus grosse trame est un
+    // `signal`, plafonné à 4 Kio par `MAX_SIGNAL_BYTES`, plus son encodage base64 — et étroite
+    // devant ce qu'une machine peut encaisser.
+    ws.max_message_size(MAX_FRAME_BYTES)
+        .max_frame_size(MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| async move {
+            if let Err(error) = session(state, socket).await {
+                tracing::debug!(%error, "session gateway terminée");
+            }
+        })
 }
 
 /// État d'une session authentifiée.
@@ -354,7 +382,18 @@ impl Session {
     ) -> ApiResult<()> {
         let membres: HashSet<&[u8]> = groups.iter().map(Vec::as_slice).collect();
 
-        for cursor in cursors {
+        // Les curseurs excédentaires sont ignorés en silence plutôt que la session refusée : un
+        // client honnête n'en produit jamais autant, et refuser transformerait une borne de
+        // sécurité en panne pour un cas qui ne se présente pas.
+        let mut vus: HashSet<&str> = HashSet::new();
+
+        for cursor in cursors.iter().take(MAX_CURSORS) {
+            // Un même groupe répété n'achète qu'une requête. C'est la seconde moitié de la
+            // borne : sans elle, `MAX_CURSORS` entrées identiques passeraient toutes.
+            if !vus.insert(cursor.group_id.as_str()) {
+                continue;
+            }
+
             let Ok(group_id) = hex::decode(&cursor.group_id) else { continue };
             if !membres.contains(group_id.as_slice()) {
                 continue;

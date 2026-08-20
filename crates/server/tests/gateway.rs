@@ -359,6 +359,37 @@ async fn un_curseur_sur_un_groupe_etranger_est_ignore_en_silence() {
     assert!(lire(&mut socket).await.is_none(), "ni séquence, ni erreur : rien");
 }
 
+/// **Le test qui fige la borne d'amplification du rattrapage.**
+///
+/// Une trame `identify` ne doit pas acheter autant de requêtes SQL qu'elle contient de curseurs.
+/// Le filtre d'appartenance ne suffit pas à l'empêcher : rien n'interdit de répéter mille fois un
+/// groupe dont on est réellement membre, et c'est l'amplification qui est le problème, pas
+/// l'accès.
+#[tokio::test]
+async fn un_identify_charge_de_curseurs_ne_repond_qu_une_fois_par_groupe() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let bob = Device::register(&server, &unique("bob")).await;
+    let group_id = groupe_avec(&server, &alice, &bob).await;
+
+    deposer(&server, &alice, &group_id, b"un seul message").await;
+
+    // Le même groupe, mille fois, avec un curseur qui laisse une séquence à rattraper.
+    let curseur = serde_json::json!({ "group_id": hex::encode(&group_id), "seq": 0 });
+    let cursors = serde_json::Value::Array(vec![curseur; 1000]);
+
+    let mut socket = session(&server, &bob, cursors).await;
+    assert_eq!(common::lire(&mut socket).await.unwrap()["op"], "ready");
+
+    let frame = common::lire(&mut socket).await.expect("le retard doit être annoncé une fois");
+    assert_eq!(frame["op"], "envelope");
+
+    assert!(
+        common::lire(&mut socket).await.is_none(),
+        "la séquence a été réannoncée : chaque curseur répété a coûté une requête",
+    );
+}
+
 // ------------------------------------------------------------------ fanout multi-instance
 
 /// **Le test qui prouve que le hub n'est plus enfermé dans son processus.**

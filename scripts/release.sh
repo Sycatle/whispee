@@ -67,7 +67,17 @@ SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
 export SOURCE_DATE_EPOCH
 
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-export RUSTFLAGS="--remap-path-prefix=$racine=/build --remap-path-prefix=$cargo_home/registry=/cargo-registry"
+
+# Le sysroot compte autant que les deux autres. Les messages de panique de `core` et `alloc`
+# portent le chemin de la bibliothèque standard, qui vit sous le répertoire personnel : sans ce
+# troisième préfixe, il restait 26 chemins absolus dans le binaire — contre 217 sans aucun
+# remap. Assez peu pour passer inaperçu à la relecture, assez pour que deux utilisateurs
+# obtiennent des empreintes différentes.
+sysroot="$(rustc --print sysroot)"
+
+export RUSTFLAGS="--remap-path-prefix=$racine=/build"
+RUSTFLAGS+=" --remap-path-prefix=$cargo_home/registry=/cargo-registry"
+RUSTFLAGS+=" --remap-path-prefix=$sysroot=/rust-sysroot"
 
 sortie="$racine/release/artefacts"
 rm -rf "$sortie"

@@ -47,6 +47,14 @@ réutiliser une clé pour deux protocoles est une erreur classique dès que les 
 message se recouvrent. Le message signé couvre méthode, chemin, horodatage et empreinte du
 corps, ce qui empêche de rejouer une signature d'un endpoint sur un autre.
 
+Chaque requête porte en outre un **nonce**, couvert par la signature et mémorisé à la première
+présentation : la rejouer est refusé. Le nonce est indispensable et ne peut pas être remplacé par
+la signature elle-même — Ed25519 est déterministe, donc deux requêtes identiques dans la même
+seconde portent la même signature, l'une pouvant être un rejeu quand l'autre est légitime.
+Réclamer deux KeyPackages coup sur coup suffit à produire le cas. La table des nonces est
+`UNLOGGED` et purgée au-delà de la fenêtre de tolérance d'horloge : au-delà, l'horodatage refuse
+la requête de toute façon.
+
 **Points critiques implémentés :**
 
 - retrait atomique des KeyPackages (`DELETE ... RETURNING` sur `FOR UPDATE SKIP LOCKED`) —
@@ -69,7 +77,6 @@ en table partitionnée sur place.
 | Limite | Détail |
 |---|---|
 | `group_members` | Le serveur sait qui parle avec qui. Même compromis que WhatsApp ; l'éviter demande des credentials à divulgation nulle (Private Group System de Signal). |
-| Anti-rejeu | Fenêtre temporelle de 60 s, sans cache de nonces. Une requête reste rejouable dans cette fenêtre ; le doublon est rejeté par le client MLS, donc l'impact se limite à du bruit. |
 | Enregistrement | Trust on first use. Reprendre un identifiant avec une autre clé est refusé, mais rien ne prouve que le premier arrivé était légitime. Un déploiement réel adosse cet endpoint à une vérification de numéro ou d'e-mail. |
 | `created_at` | Métadonnée temporelle conservée pour la purge. Aucune autre fonctionnalité ne doit s'y adosser — la règle vaut toujours pour cette colonne-ci. |
 | Purge jamais faite | Et elle ne peut pas l'être automatiquement : chaque enveloppe consomme une génération du ratchet applicatif MLS, un trou empêche le déchiffrement de la suite, et le serveur n'a aucune notion de « livré » — la lui donner demanderait des accusés de réception, c'est-à-dire la métadonnée que ce schéma refuse de tenir. `envelopes` croît donc sans borne, et c'est un vrai problème d'exploitation, pas une simplification. |

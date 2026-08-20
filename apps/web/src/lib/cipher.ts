@@ -35,7 +35,16 @@
  * IPC offrira exactement la même propriété, garantie cette fois par une frontière de processus
  * plutôt que par une politique de moteur JavaScript.
  */
-import { type DeviceKeys, sign as signAvecWebCrypto, toBase64, unwrapState, wrapState } from "./keys";
+import { invoke } from "@tauri-apps/api/core";
+
+import {
+  type DeviceKeys,
+  fromBase64,
+  sign as signAvecWebCrypto,
+  toBase64,
+  unwrapState,
+  wrapState,
+} from "./keys";
 
 export interface DeviceCipher {
   /** La clé publique d'authentification, en octets — la seule moitié qui quitte l'appareil. */
@@ -106,6 +115,51 @@ export class WebCryptoCipher implements DeviceCipher {
    */
   get rawKeys(): DeviceKeys {
     return this.keys;
+  }
+}
+
+/**
+ * Les mêmes capacités, rendues par le processus natif.
+ *
+ * # Ce que cela change, et ce que cela ne change pas
+ *
+ * Les clés vivent côté Rust, dans le répertoire privé de l'application — qui n'est purgé qu'à la
+ * désinstallation, là où le stockage d'une webview mobile est évincé sans préavis. C'est la
+ * durabilité qu'on vient chercher.
+ *
+ * Ce n'est **pas** un renforcement contre un script hostile. Il pouvait déjà utiliser les
+ * `CryptoKey` non extractables sans les extraire ; il peut toujours appeler ces commandes. Ce
+ * qui change est la garantie qui empêche l'extraction : une frontière de processus au lieu d'une
+ * politique de moteur JavaScript.
+ *
+ * # Pourquoi rien ne l'utilise encore
+ *
+ * Basculer une installation existante vers ces clés-ci la casserait : les clés natives sont
+ * neuves, donc l'état chiffré sous l'ancienne clé devient illisible et le serveur ne reconnaît
+ * plus la signature de l'appareil. La bascule est indissociable de la migration, et la migration
+ * bute sur un point dur — la clé d'authentification actuelle est non extractable et
+ * `register_device` refuse d'en changer, donc les appareils déjà enregistrés ne peuvent pas la
+ * déplacer.
+ *
+ * Le brancher avant d'avoir tranché cela ne ferait pas gagner de temps : cela ferait perdre des
+ * comptes.
+ */
+export class NativeCipher implements DeviceCipher {
+  async authPublicKey(): Promise<Uint8Array> {
+    return fromBase64(await invoke<string>("device_public_key"));
+  }
+
+  /** Rend déjà du base64 : la commande native signe et encode, il n'y a rien à reconvertir. */
+  sign(payload: Uint8Array): Promise<string> {
+    return invoke<string>("device_sign", { payload: toBase64(payload) });
+  }
+
+  async seal(plaintext: Uint8Array): Promise<Uint8Array> {
+    return fromBase64(await invoke<string>("state_seal", { plaintext: toBase64(plaintext) }));
+  }
+
+  async open(blob: Uint8Array): Promise<Uint8Array> {
+    return fromBase64(await invoke<string>("state_open", { blob: toBase64(blob) }));
   }
 }
 

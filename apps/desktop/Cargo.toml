@@ -13,3 +13,18 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+
+[features]
+# **Ce drapeau décide d'où vient l'interface**, et non le profil de compilation.
+#
+# Avec lui, la webview lit les fichiers empaquetés dans le binaire ; sans lui, elle va chercher
+# `devUrl` — le serveur Vite sur le port 5173 — et affiche « Connection refused » s'il n'y en a
+# pas. C'est le CLI `tauri build` qui l'ajoute d'ordinaire ; ce projet n'utilise pas ce CLI, donc
+# il doit le déclarer lui-même.
+#
+# Activé par défaut, à rebours de la convention de `create-tauri-app` : le cas courant est de
+# lancer l'application, pas de travailler sur son interface. Pour ce dernier cas, lancer
+# `pnpm run dev` dans `apps/web` puis `cargo run -p desktop --no-default-features`, ce qui rend
+# le rechargement à chaud.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

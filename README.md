@@ -152,11 +152,19 @@ cd apps/web && pnpm run build            # produit `dist/`, que Tauri empaquette
 cargo run -p desktop --release
 ```
 
-**`--release` n'est pas une optimisation, c'est ce qui choisit la source de l'interface.** En
-profil de débogage, Tauri charge `devUrl` — le serveur Vite sur le port 5173 — au lieu du `dist`
-empaqueté ; sans ce serveur, la fenêtre affiche « Connection refused » et rien d'autre. Pour
-travailler sur l'interface avec le rechargement à chaud, lancer `pnpm run dev` dans `apps/web`
-**puis** `cargo run -p desktop`, sans `--release`.
+**Ce qui décide d'où vient l'interface est la feature `custom-protocol`, pas le profil de
+compilation.** Avec elle, la webview lit les fichiers empaquetés dans le binaire ; sans elle,
+elle va chercher `devUrl` — le serveur Vite sur le port 5173 — et affiche « Connection refused »
+s'il n'y en a pas. C'est le CLI `tauri build` qui l'ajoute d'ordinaire ; ce projet n'utilisant pas
+ce CLI, `apps/desktop/Cargo.toml` la déclare **activée par défaut**, à rebours de la convention :
+le cas courant est de lancer l'application, pas de travailler sur son interface.
+
+Pour ce dernier cas, avec rechargement à chaud :
+
+```sh
+cd apps/web && pnpm run dev              # sert sur 5173, ce que `devUrl` attend
+cargo run -p desktop --no-default-features
+```
 
 **C'est ce qui ferme la voie décrite juste au-dessus.** L'interface est dans le binaire
 installé : le serveur ne la livre plus, donc il ne peut plus la remplacer. Ce n'est pas le

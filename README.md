@@ -21,7 +21,7 @@ crates/
   transparency/   arbre de Merkle append-only (key transparency)
   server/         delivery service (axum + PostgreSQL)
 apps/
-  web/            Next.js + React
+  web/            Vite + React (web, et source de l'application de bureau)
 ```
 
 ### Le serveur
@@ -98,20 +98,43 @@ la garantie qu'aucune crypto maison ne dérive vers le chemin d'exécution réel
 MLS ne fournit ni le *Delivery Service* ni l'*Authentication Service* : les deux sont à
 construire.
 
-### Le client web
+### Le client
 
 ```sh
 cd apps/web
 pnpm install
 pnpm run wasm     # compile crypto-core en WASM et le copie dans public/
-pnpm run build && pnpm run start
+pnpm run build && pnpm run preview
 ```
 
-La CSP porte un **nonce par requête**, posé par `src/middleware.ts`. Cela impose
-`export const dynamic = "force-dynamic"` dans le layout : Next ne peut pas injecter de nonce
-dans un HTML prégénéré au build, et avec `'strict-dynamic'` un script sans nonce est bloqué
-— `'self'` étant ignoré dès que `'strict-dynamic'` est présent. Une page statique
-n'exécuterait donc aucun script.
+L'origine de l'API se déclare par `VITE_API_URL` ; à défaut, `http://127.0.0.1:8787`.
+
+#### Pourquoi Vite et non Next
+
+Le projet n'utilisait de Next qu'une seule chose : un middleware posant un nonce CSP par
+requête. Pas de rendu serveur — tout est chiffré localement, il n'y a rien à prégénérer —, pas
+de route d'API puisque le serveur est en Rust, et une seule page.
+
+Or ce nonce n'était nécessaire **que parce que Next injecte des scripts inline** (amorçage,
+streaming RSC). Sans eux, il n'y a rien d'inline à autoriser et `script-src 'self'` suffit — ce
+qui est **plus strict** qu'un nonce : `'self'` n'autorise que les fichiers de cette origine, là
+où un nonce autorise ce que le serveur désigne. Retirer Next n'a donc pas affaibli la CSP, il
+l'a durcie.
+
+Un réglage porte cette propriété et ne doit pas être défait : `build.modulePreload.polyfill`
+est à `false` dans `vite.config.ts`. Vite injecte sinon un petit polyfill inline, ce qui
+réintroduirait exactement le script inline qu'on vient de supprimer.
+
+La CSP elle-même est **calculée au build** à partir de `VITE_API_URL`, et non écrite dans
+`index.html` : une politique en dur et une origine configurable divergent au premier
+déploiement, et le symptôme est un « Failed to fetch » émis par le navigateur avant tout envoi
+— le serveur ne voit rien, et le message ne désigne pas la cause. `connect-src` y porte les
+deux origines, `http(s)://` et `ws(s)://` : la seconde ne se déduit pas de la première, et
+n'en garder qu'une couperait la moitié du client sans que l'autre ne le signale.
+
+Ce que rien de tout cela ne corrige, et qu'il faut redire : le serveur livre ce JavaScript et
+peut en livrer une version hostile. Aucune politique navigateur ne s'y oppose. Seule une
+application dont le code est empaqueté dans le binaire installé ferme cette voie.
 
 #### Pièces jointes
 

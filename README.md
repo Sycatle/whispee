@@ -72,7 +72,7 @@ en table partitionnée sur place.
 | Enregistrement | Trust on first use. Reprendre un identifiant avec une autre clé est refusé, mais rien ne prouve que le premier arrivé était légitime. Un déploiement réel adosse cet endpoint à une vérification de numéro ou d'e-mail. |
 | `created_at` | Métadonnée temporelle conservée pour la purge. Aucune autre fonctionnalité ne doit s'y adosser — la règle vaut toujours pour cette colonne-ci. |
 | Purge jamais faite | Et elle ne peut pas l'être automatiquement : chaque enveloppe consomme une génération du ratchet applicatif MLS, un trou empêche le déchiffrement de la suite, et le serveur n'a aucune notion de « livré » — la lui donner demanderait des accusés de réception, c'est-à-dire la métadonnée que ce schéma refuse de tenir. `envelopes` croît donc sans borne, et c'est un vrai problème d'exploitation, pas une simplification. |
-| `last_seen_at` | Dernière activité de chaque appareil, à la minute près. C'est **le** registre que les autres colonnes refusaient de tenir, et il est tenu délibérément : voir « Présence » plus bas. Écrit uniquement depuis les chemins authentifiés par identité, jamais depuis un dépôt anonyme. |
+| `last_seen_at` | Dernière activité de chaque appareil, à la minute près. C'est **le** registre que les autres colonnes refusaient de tenir, et il est tenu délibérément : voir « Présence » plus bas. Écrit par le seul battement de la gateway, donc jamais depuis un dépôt anonyme. |
 | Arbre de ratchet | Le Welcome d'ajout transporte l'arbre MLS, **public par construction** : il contient les credentials, donc les noms des membres. Vérifié par `le_welcome_expose_les_identites_mais_jamais_le_contenu`. Le serveur connaît déjà ces identités par `devices` et `group_members`, donc la fuite n'ajoute rien à ce qu'il sait — mais elle est réelle. |
 
 Un seul cœur crypto en Rust, compilé vers WASM, UniFFI et natif. Réimplémenter la crypto
@@ -491,44 +491,28 @@ Bénéfice non planifié : la clé du canal éphémère change à chaque commit.
 l'indicateur de frappe au même instant qu'il perd les messages**, sans une ligne de code
 supplémentaire — la PCS s'applique là aussi.
 
-### Flux temps réel : moins de métadonnées, pas plus
-
-`GET /v1/stream` (Server-Sent Events) remplace la relève à 1,5 seconde. Contre-intuitivement, cela
-**retire** de l'information au serveur : il recevait jusqu'ici une requête signée par conversation
-et par tour, soit un journal d'activité à la seconde près. Une connexion longue le remplace par un
-seul point d'observation, à l'ouverture. La relève subsiste à 30 secondes pour l'entretien qui n'a
-pas d'événement déclencheur.
-
-Le flux n'est **jamais** une dépendance de correction. Chaque événement se contente de dire « va
-voir » ; c'est la relève normale qui lit, revérifie l'appartenance et fait avancer le curseur. Un
-navigateur qui bloque la connexion laisse l'application entièrement fonctionnelle, seulement moins
-réactive. Cette propriété est une contrainte de conception : un flux dont la panne perdrait des
-messages serait un transport construit au-dessus du transport.
-
-Elle explique aussi la forme prise par la présence. Le flux en est le chemin d'**écriture** — une
-connexion ouverte est le signal le plus fidèle qu'un client est là, plus fidèle qu'une requête, qui
-peut venir d'un onglet oublié. Mais sa **lecture** ne passe délibérément pas par lui : le point vert
-en dépendrait, et un flux bloqué afficherait alors tout le monde hors ligne. Une interface fausse
-est pire qu'une interface en retard. La présence se relève donc sur le même tour de 30 secondes que
-le reste, et jamais sur un minuteur à part.
-
-Détail qui a dicté l'implémentation : l'API `EventSource` du navigateur **n'accepte aucun en-tête**.
-Y authentifier imposerait de mettre la signature dans l'URL, où elle finirait dans les journaux
-d'accès de tout intermédiaire. Le client passe donc par `fetch` et lit le corps en flux, au prix
-d'une reconnexion à réimplémenter.
-
 ### La gateway : une connexion, tous les groupes
 
-`GET /v1/gateway` (WebSocket) est la suite de `/v1/stream`, qui reste servi le temps que les
-clients migrent. Trois choses que le flux SSE ne pouvait pas faire :
+`GET /v1/gateway` (WebSocket) remplace la relève à 1,5 seconde, et a remplacé le flux SSE qui
+l'avait précédée. Contre-intuitivement, cela **retire** de l'information au serveur : il recevait
+une requête signée par conversation et par tour, soit un journal d'activité à la seconde près. Une
+connexion longue le remplace par un seul point d'observation, à l'ouverture. La relève subsiste à
+30 secondes pour l'entretien qui n'a pas d'événement déclencheur.
 
-- **s'abonner à un groupe rejoint après l'ouverture.** Le SSE fige sa liste à la connexion, ce que
-  les limites plus bas mentionnaient comme « portée du flux figée » ; une trame `subscribe` suffit
-  désormais.
+La session n'est **jamais** une dépendance de correction. Chaque trame se contente de dire « va
+voir » ; c'est la relève normale qui lit, revérifie l'appartenance et fait avancer le curseur. Un
+navigateur qui bloque la connexion laisse l'application entièrement fonctionnelle, seulement moins
+réactive. Cette propriété est une contrainte de conception : un transport dont la panne perdrait
+des messages serait un transport construit au-dessus du transport.
+
+Trois choses que le flux SSE ne pouvait pas faire, et qui ont chacune un coût réel :
+
+- **s'abonner à un groupe rejoint après l'ouverture.** Le SSE figeait sa liste à la connexion ;
+  une trame `subscribe` suffit désormais.
 - **rattraper le retard sans relever.** Le client annonce ses curseurs dans son `identify` et le
   serveur ne répond que s'il a quelque chose à dire. Le rattrapage ne sert que des numéros de
   séquence — la lecture passe toujours par le chemin HTTP, qui revérifie l'appartenance.
-- **constater qu'un client est parti.** Le keep-alive SSE ne va que du serveur vers le client.
+- **constater qu'un client est parti.** Le keep-alive SSE n'allait que du serveur vers le client.
 
 **Ce que cela change dans le modèle de menace**, et qui coupe dans les deux sens.
 
@@ -546,6 +530,29 @@ figent.
 La trame `signal` reste authentifiée par le MAC de groupe, comme le chemin HTTP : la session
 connaît pourtant l'identité de son propriétaire, mais s'en servir défairait le sealed sender pour
 la seule commodité de ne pas revérifier un MAC.
+
+Détail qui a dicté l'implémentation, et qui vaut aussi pour l'`EventSource` d'avant : l'API
+`WebSocket` du navigateur **n'accepte aucun en-tête**. Y authentifier le handshake imposerait de
+mettre la signature dans l'URL, où elle finirait dans les journaux d'accès de tout intermédiaire.
+La socket s'ouvre donc sans identité, et rien n'est servi avant le défi — ce qui est aussi ce qui
+a permis de supprimer la fenêtre de rejeu, plutôt que de la transporter telle quelle.
+
+### La présence a changé de déclencheur
+
+Elle était un effet de bord de l'extracteur `Signed` : n'importe quelle requête signée marquait
+l'appareil éveillé, ce qui plaçait une écriture SQL potentielle sur le chemin de latence de tout
+le serveur — pour un point de couleur. Elle est désormais écrite par le battement de la gateway.
+
+C'est un signal plus juste : une session ouverte dit qu'un client est là, là où une requête peut
+venir d'un onglet oublié. Mais c'est un **changement de comportement**, pas une optimisation
+invisible — un client qui interroge le serveur sans jamais ouvrir de session n'apparaît jamais en
+ligne. C'est cohérent, puisqu'il n'est de toute façon pas joignable en temps réel, et un test le
+fige.
+
+Sa **lecture** ne passe délibérément pas par la session : le point vert en dépendrait, et une
+socket bloquée afficherait alors tout le monde hors ligne. Une interface fausse est pire qu'une
+interface en retard. La présence se relève donc sur le même tour de 30 secondes que le reste, et
+jamais sur un minuteur à part.
 
 ### Plusieurs instances
 
@@ -658,7 +665,6 @@ Le chiffrement de bout en bout ne résout qu'une partie du problème. Ce qui n'e
 | **Signaux non authentifiés** | Le canal éphémère est chiffré sous une clé symétrique de groupe. Dans un groupe, un membre peut donc faire croire qu'un autre est en train d'écrire. Sans conséquence à deux, où il n'y a qu'un autre. |
 | **Forward secrecy des signaux** | Aucune à l'intérieur d'une epoch : la compromission du secret d'export expose les signaux de cette epoch. Ils n'ont aucune valeur rétrospective et ne sont stockés nulle part — le compromis est délibéré, il évite de faire payer à l'historique le prix d'une donnée jetable. |
 | **Accusés et coercition** | Un accusé de lecture prouve qu'un appareil a affiché un message : une information sur le comportement, non sur le contenu. D'où la désactivation, et sa réciprocité. |
-| **Portée du flux figée** | Vaut pour `/v1/stream` seul : le serveur y fixe les groupes diffusés à l'ouverture, et un groupe rejoint ensuite impose de rouvrir la connexion. La gateway l'a levée par ses abonnements dynamiques. Sans effet sur la correction dans les deux cas : la relève périodique rattrape. |
 | **Authentification par session** | Sur la gateway, la signature vaut pour toute la durée de la connexion et non par requête. Une révocation ou un retrait de groupe ne prend donc effet qu'à la revalidation suivante — au prochain battement du client, ou au tick du serveur pour un client muet. |
 | **Signaux et journaux Postgres** | La diffusion inter-instances fait transiter les signaux par `pg_notify`. Ils ne sont écrits dans aucune table, mais un serveur réglé sur `log_statement = all` les verrait dans ses journaux. |
 | **Omission d'appareil** | Le serveur ne peut ni *ajouter* un appareil à un compte (attestations) ni *inventer* une révocation (certificats signés). Il peut encore en *omettre* un de la liste, ou taire une révocation authentique. La victime constate qu'un appareil ne reçoit rien : de la censure, bruyante, mais réelle. |

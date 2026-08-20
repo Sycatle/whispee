@@ -21,8 +21,9 @@ name: Android build
 #
 # # Ce que ce workflow installe et qu'un projet Capacitor n'aurait pas demandé
 #
-# Le NDK et les quatre cibles Rust Android. Tauri compile du Rust natif pour chaque
-# architecture, là où Capacitor n'embarque que du JavaScript.
+# Le NDK et une cible Rust Android. Tauri compile du Rust natif par architecture, là où
+# Capacitor n'embarque que du JavaScript — c'est ce qui rend chaque architecture coûteuse, et
+# donc ce qui justifie de n'en construire qu'une pour du débogage.
 
 on:
   workflow_dispatch:
@@ -63,12 +64,22 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
 
+      # **Une seule architecture, et c'est une mesure d'économie.**
+      #
+      # Tauri compile du Rust natif par architecture : les quatre cibles par défaut quadruplent
+      # la compilation de tout l'arbre de dépendances, ce qui a suffi à frôler le délai maximal
+      # d'un runner dès que le cache a été invalidé.
+      #
+      # `aarch64` couvre l'essentiel du parc réel ; `armv7` et `x86` sont respectivement les
+      # appareils anciens et les émulateurs. Un APK de débogage n'a besoin ni des uns ni des
+      # autres. Une publication, si — et elle passera par un workflow distinct, où la dépense
+      # sera justifiée par un artefact qu'on distribue.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       # Le cache est ici une mesure d'économie autant que de vitesse : sans lui, chaque
-      # construction recompile l'arbre de dépendances Rust pour quatre architectures.
+      # construction recompile tout l'arbre de dépendances Rust en compilation croisée.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
@@ -114,7 +125,7 @@ jobs:
         working-directory: apps/desktop
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
-        run: cargo tauri android build --debug --apk
+        run: cargo tauri android build --debug --apk --target aarch64
 
       - uses: actions/upload-artifact@v6
         with:

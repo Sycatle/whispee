@@ -6,6 +6,7 @@ import { Onboarding } from "@/components/Onboarding";
 import { MigrationBanner } from "@/components/Migration";
 import { type ConversationView, type MigrationProposee, Session, demarrer } from "@/lib/session";
 import { useDuo } from "@/lib/duo";
+import { REVERROUILLAGE_MS, observerCycle, reseauDeclare } from "@/lib/lifecycle";
 
 /**
  * Intervalle de relève, désormais un filet plutôt qu'un moteur.
@@ -34,6 +35,14 @@ export function App() {
    * dans « ouvrir l'application » ne demande.
    */
   const [migration, setMigration] = useState<MigrationProposee | null>(null);
+  /**
+   * Le système déclare-t-il une connexion ?
+   *
+   * Affiché parce que `false` est une information sûre et qu'elle explique tous les échecs à
+   * venir. L'inverse ne prouve rien — un portail captif se déclare en ligne — donc rien n'est
+   * empêché sur la foi de cette valeur.
+   */
+  const [horsLigne, setHorsLigne] = useState(false);
   const [locked, setLocked] = useState(false);
   const [, forceRender] = useState(0);
   const duo = useDuo();
@@ -68,6 +77,60 @@ export function App() {
       })
       .finally(() => setBusy(false));
   }, []);
+
+  /**
+   * Reprise après un passage en arrière-plan.
+   *
+   * Le système gèle les minuteurs et coupe les connexions sans prévenir. Au retour, l'intervalle
+   * qui repart ne suffit pas : il faut relever tout de suite et **rouvrir le flux** sans
+   * chercher à savoir s'il a survécu. La question n'a pas de réponse fiable — un socket coupé
+   * par le système reste `OPEN` jusqu'à la première écriture — et reconnecter à tort coûte moins
+   * cher que de rester silencieusement muet.
+   */
+  useEffect(() => {
+    if (!session) return;
+
+    const arret = observerCycle((transition) => {
+      if (transition.quoi === "veille") return;
+
+      if (transition.quoi === "reseau") setHorsLigne(false);
+
+      // Une absence prolongée referme un appareil verrouillé.
+      //
+      // Sans cela le verrou n'agit qu'au démarrage à froid : il protège un appareil éteint, et
+      // pas celui qu'on pose sur une table. Écarter la session de l'écran suffit à exiger le
+      // mot de passe — l'état sur le disque est chiffré sous une clé qui n'existait qu'en
+      // mémoire.
+      //
+      // Ce que cela ne fait pas : effacer cette clé de la mémoire du processus. Le module
+      // WebAssembly garde son état, et rien dans un navigateur ne permet de l'exiger. La
+      // protection vise qui prend l'appareil en main, pas qui inspecte sa mémoire.
+      if (transition.quoi === "reprise" && session.locked && transition.absenceMs > REVERROUILLAGE_MS) {
+        setSession(null);
+        setActive(null);
+        setLocked(true);
+        return;
+      }
+
+      session.startStream(refresh);
+      void session
+        .poll()
+        .then(() => {
+          setError(null);
+          refresh();
+        })
+        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    });
+
+    const perdu = () => setHorsLigne(true);
+    addEventListener("offline", perdu);
+    setHorsLigne(!reseauDeclare());
+
+    return () => {
+      arret();
+      removeEventListener("offline", perdu);
+    };
+  }, [session, refresh]);
 
   /**
    * Le retour du système ferme la conversation, au lieu de quitter l'application.
@@ -255,6 +318,16 @@ export function App() {
           }}
           onError={setError}
         />
+      )}
+
+      {horsLigne && (
+        <p
+          role="status"
+          className="border-t border-(--color-warn) bg-(--color-warn)/10 px-4 py-2 text-sm text-(--color-warn)"
+        >
+          Hors ligne. Les messages écrits maintenant ne partiront pas ; ce qui a été reçu reste
+          lisible.
+        </p>
       )}
 
       {repli && (

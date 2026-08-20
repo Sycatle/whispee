@@ -16,7 +16,6 @@ crates/
   ratchet-lab/    Réimplémentation pédagogique de X3DH + Double Ratchet
   crypto-core/    OpenMLS — le seul chemin de production
   crypto-wasm/    binding web (wasm-bindgen)
-  crypto-ffi/     (à venir) binding iOS/Android via UniFFI
   attest/         domaines de signature et de MAC
   transparency/   arbre de Merkle append-only (key transparency)
   server/         delivery service (axum + PostgreSQL)
@@ -83,8 +82,9 @@ en table partitionnée sur place.
 | `last_seen_at` | Dernière activité de chaque appareil, à la minute près. C'est **le** registre que les autres colonnes refusaient de tenir, et il est tenu délibérément : voir « Présence » plus bas. Écrit par le seul battement de la gateway, donc jamais depuis un dépôt anonyme. |
 | Arbre de ratchet | Le Welcome d'ajout transporte l'arbre MLS, **public par construction** : il contient les credentials, donc les noms des membres. Vérifié par `le_welcome_expose_les_identites_mais_jamais_le_contenu`. Le serveur connaît déjà ces identités par `devices` et `group_members`, donc la fuite n'ajoute rien à ce qu'il sait — mais elle est réelle. |
 
-Un seul cœur crypto en Rust, compilé vers WASM, UniFFI et natif. Réimplémenter la crypto
-une fois par plateforme triplerait la surface de bug sur la partie où un bug est silencieux.
+Un seul cœur crypto en Rust. Réimplémenter la crypto une fois par plateforme triplerait la
+surface de bug sur la partie où un bug est silencieux — c'est ce qui a fait écarter un binding
+UniFFI séparé pour le mobile : l'application Tauri sert les trois cibles depuis le même code.
 
 ### `ratchet-lab` est isolé par construction
 
@@ -204,6 +204,7 @@ seule question.
 | Première installation | Trust on first use, exactement comme l'enregistrement d'un compte : rien ne prouve que la première clé publique rencontrée soit légitime. |
 | Clé publique dans le dépôt | Qui contrôle le dépôt peut la remplacer en même temps que le binaire. La seule protection réelle est de comparer son empreinte hors bande — le même geste que la vérification d'empreinte de compte que l'application demande déjà. |
 | Vérification manuelle | Sans mécanisme de mise à jour, `verify-release.sh` doit être lancé à la main. Un utilisateur qui ne le lance pas n'est protégé par rien. |
+| Fichiers surnuméraires | La vérification contrôle que chaque fichier listé dans `SHA256SUMS` est conforme, pas qu'aucun autre n'a été ajouté à côté. Sans effet sur le binaire lancé, qui est listé. |
 | Reproductibilité conditionnelle | Elle vaut **à environnement donné**. Une autre version de `rustc` ou de `pnpm` produit un binaire différent sans que rien ne soit compromis, d'où le fichier `BUILD-INFO` publié avec les empreintes. Vérifié ici entre deux constructions successives sur la même machine ; la reproductibilité entre machines distinctes n'a pas été mesurée. |
 
 La clé privée n'entre jamais dans le dépôt. Pour en produire une :

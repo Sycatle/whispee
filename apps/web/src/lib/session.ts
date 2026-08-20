@@ -102,6 +102,14 @@ export interface ConversationView {
    */
   gossiped?: boolean;
   /**
+   * L'historique archivé a-t-il déjà été rapatrié dans cette session ?
+   *
+   * Même raisonnement que `gossiped` : volontairement non persisté, parce que les messages ne
+   * vivent qu'en mémoire. Chaque session doit donc redemander le coffre — une fois, à
+   * l'ouverture de la conversation, pas à chaque relève.
+   */
+  hydrated?: boolean;
+  /**
    * Clé de dépôt du groupe, si nous la connaissons.
    *
    * Sa présence fait basculer les envois sur le chemin anonyme : le serveur cesse d'apprendre
@@ -183,11 +191,12 @@ export class Session {
     private vaultKey: CryptoKey,
     private lock: LockEnvelope | undefined,
     /**
-     * Clé du coffre, si l'utilisateur l'a activé. `null` sinon — et c'est le défaut.
+     * Clé du coffre. Présente par défaut ; `null` seulement si l'utilisateur a coupé la
+     * sauvegarde, ou si sa dérivation a échoué.
      *
      * Dérivée de la phrase de récupération, donc **stable dans le temps** : c'est ce qui
-     * permet à un appareil neuf de relire l'historique, et c'est exactement ce à quoi
-     * l'utilisateur renonce en l'activant. Voir `vault.ts`.
+     * permet à un appareil neuf de relire l'historique, et c'est exactement ce à quoi on
+     * renonce en la gardant. Voir `vault.ts`.
      */
     private vaultCipher: CryptoKey | null,
     readonly conversations: Map<string, ConversationView>,
@@ -380,9 +389,14 @@ export class Session {
       // de la phrase de récupération, qui mérite toute l'attention disponible.
       keys.wrap,
       undefined,
-      // Coffre désactivé à la création : renoncer à la forward secrecy sur l'historique est
-      // une décision à prendre en connaissance de cause, pas un défaut hérité.
-      null,
+      // Coffre actif dès la création, donc dès le premier message.
+      //
+      // Renoncer à la forward secrecy sur l'historique reste un vrai renoncement — mais une
+      // messagerie dont la conversation repart vide à chaque rechargement n'en est pas une, et
+      // faire porter ce choix à un écran de réglage revenait à le refuser pour presque tout le
+      // monde. Le compromis est donc pris ici, énoncé sur l'écran de la phrase de récupération
+      // (qui est aussi la clé du coffre), et révocable dans les réglages.
+      await vault.importVaultKey(account.vaultKey()),
       new Map(),
       {},
       {},
@@ -462,7 +476,12 @@ export class Session {
       stored.keys,
       vault,
       stored.lock,
-      stored.vaultEnabled ? await vaultCipherOf(crypto, account) : null,
+      // Trois valeurs, pas deux, et c'est toute la migration des comptes existants : `false`
+      // signifie que l'utilisateur a explicitement coupé la sauvegarde, et cela se respecte ;
+      // `undefined` signifie qu'il n'a jamais eu à en décider, et se traite comme un compte
+      // neuf, donc actif. Confondre les deux reviendrait à réactiver le coffre dans le dos de
+      // quelqu'un qui l'avait refusé.
+      stored.vaultEnabled === false ? null : await vaultCipherOf(crypto, account),
       conversations,
       stored.verified ?? {},
       stored.knownDevices ?? {},
@@ -476,13 +495,12 @@ export class Session {
   }
 
   /**
-   * Active le coffre : les messages suivants seront archivés, chiffrés sous une clé dérivée
-   * de la phrase de récupération.
+   * Réactive le coffre après une coupure explicite.
    *
-   * Les messages **déjà échangés** ne le seront pas : leurs clés MLS sont détruites, et rien
-   * ne permet de les reconstituer. L'archivage commence maintenant, jamais rétroactivement —
-   * l'interface doit le dire, sans quoi l'utilisateur croira avoir sauvegardé un passé qui
-   * n'existe plus.
+   * Les messages **déjà échangés** ne seront pas archivés : leurs clés MLS sont détruites, et
+   * rien ne permet de les reconstituer. L'archivage reprend maintenant, jamais rétroactivement
+   * — l'interface doit le dire, sans quoi l'utilisateur croira avoir récupéré un passé qui
+   * n'existe plus. C'est vrai de la période pendant laquelle il l'avait coupé.
    */
   async enableVault(): Promise<void> {
     this.vaultCipher = await vault.importVaultKey(this.account.vaultKey());
@@ -523,6 +541,33 @@ export class Session {
 
     view.messages.push(...nouveaux);
     return nouveaux.length;
+  }
+
+  /**
+   * Rapatrie l'historique archivé, une seule fois par conversation et par session.
+   *
+   * Appelé à l'ouverture d'une conversation, pas au démarrage : la restauration passe par le
+   * réseau et déchiffre entrée par entrée, ce qui n'a pas à retarder l'affichage de la liste.
+   * Et surtout pas depuis la relève périodique, qui repasse toutes les trente secondes sur
+   * **toutes** les conversations — ce serait un aller-retour réseau par groupe, en boucle.
+   *
+   * # Ce qu'elle ne touche pas, et pourquoi
+   *
+   * Ni `contentCursor`, ni `readCursor`, ni `receipts`. Un message restauré a déjà été accusé
+   * lors d'une session antérieure ; faire avancer le curseur annoncé ferait ré-émettre un accusé
+   * à chaque rechargement, et chaque accusé en engendrerait un autre. C'est le seul chemin par
+   * lequel la boucle décrite dans le README peut renaître.
+   *
+   * Ni `view.cursor` non plus : il appartient à l'état MLS, pas à l'affichage. Le coffre ne dit
+   * rien du ratchet.
+   */
+  async hydrate(view: ConversationView): Promise<number> {
+    if (view.hydrated || !this.vaultCipher) return 0;
+
+    // Posé **avant** l'attente : deux rendus rapprochés lanceraient sinon deux rapatriements
+    // concurrents de la même conversation.
+    view.hydrated = true;
+    return this.restoreHistory(view);
   }
 
   /** Archive les messages qui viennent d'être lus ou envoyés, si le coffre est actif. */
@@ -626,10 +671,11 @@ export class Session {
    * À appeler après **toute** opération qui fait avancer un groupe. Un état persisté en
    * retard puis restauré ferait reculer les epochs et rejouerait des clés déjà utilisées.
    *
-   * L'historique des messages n'est volontairement pas conservé : il serait en clair sur le
-   * disque. Une conversation rechargée repart donc visuellement vide, à partir du curseur.
-   * Le conserver demanderait de le chiffrer avec la même clé que l'état — faisable, mais
-   * c'est une décision de produit, pas un oubli.
+   * **L'historique ne passe pas par ici.** Rien de ce qui est écrit sur ce disque ne contient
+   * de message : les conserver localement demanderait de les chiffrer sous la clé d'état, ce qui
+   * est faisable, mais fabriquerait un second historique par appareil, à tenir cohérent avec le
+   * premier. C'est le coffre serveur (`vault.ts`) qui tient ce rôle, désormais par défaut, et
+   * la conversation se repeuple à l'ouverture via `hydrate`.
    */
   private async persist(): Promise<void> {
     // Voir `forget` : une écriture qui gagnerait la course contre le rechargement
@@ -1216,12 +1262,17 @@ export class Session {
    * n'est pas un mécanisme séparé : c'est une conséquence. Cet appareil se ré-atteste
    * immédiatement ; les autres, légitimes, devront être ré-appairés par QR.
    *
-   * # Les deux prix à payer, à annoncer avant et non après
+   * # Les trois prix à payer, à annoncer avant et non après
    *
    * L'empreinte du compte change, donc tous les correspondants voient l'alerte de changement
    * d'identité. Elle est **correcte** : la clé a bien changé. Et le voleur détient la même clé
    * que nous — il peut tourner le premier. Le serveur ne peut pas les distinguer et applique
    * la première rotation valide qui se présente.
+   *
+   * Le troisième est apparu avec le coffre par défaut : sa clé dérive de la phrase de
+   * récupération, donc **tout l'historique déjà archivé devient définitivement illisible**.
+   * Tant que le coffre était optionnel, celui qui tournait sa clé savait qu'il en avait un ;
+   * ce n'est plus le cas, et l'interface doit le dire avant de proposer le bouton.
    *
    * Retourne la nouvelle phrase de récupération. L'ancienne ne vaut plus rien.
    */
@@ -1941,7 +1992,16 @@ export { fromBase64 };
  *
  * Isolé en fonction pour que `Session.restore` reste lisible : la dérivation elle-même est
  * dans `crypto-core`, ce module ne fait que la transformer en `CryptoKey`.
+ *
+ * Retourne `null` plutôt que de lever. Depuis que le coffre est actif par défaut, cet appel est
+ * sur le chemin d'ouverture de **toute** session : y laisser une exception rendrait les messages
+ * inaccessibles parce que leur sauvegarde a échoué. On perd l'archivage, jamais la conversation.
  */
-async function vaultCipherOf(_crypto: Crypto, account: AccountKey): Promise<CryptoKey> {
-  return vault.importVaultKey(account.vaultKey());
+async function vaultCipherOf(_crypto: Crypto, account: AccountKey): Promise<CryptoKey | null> {
+  try {
+    return await vault.importVaultKey(account.vaultKey());
+  } catch (error) {
+    console.warn("clé de coffre indisponible : archivage désactivé pour cette session", error);
+    return null;
+  }
 }

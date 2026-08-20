@@ -352,8 +352,10 @@ function Onboarding({
           d&apos;être exposée.
           <br />
           Vous retrouverez votre compte, mais pas vos conversations en cours : elles vivent
-          dans des groupes chiffrés dont ce nouvel appareil n&apos;est pas membre, et les clés
-          passées ont été détruites — c&apos;est la forward secrecy qui joue son rôle.
+          dans des groupes chiffrés dont ce nouvel appareil n&apos;est pas membre. Votre
+          historique sauvegardé, lui, existe toujours et votre phrase l&apos;ouvre — mais tant
+          que quelqu&apos;un ne vous a pas réintégré à la conversation, cet appareil ignore
+          jusqu&apos;à son existence et ne peut pas aller le chercher.
         </p>
       )}
 
@@ -472,6 +474,17 @@ function RecoveryPhrase({
       <p className="text-sm text-(--color-danger)">
         Notez-les hors ligne. Cet écran ne pourra pas être réaffiché — pas par précaution
         excessive, mais parce que l&apos;application ne conserve pas la phrase.
+      </p>
+
+      {/*
+        Dit ici, et pas dans un écran de réglage que personne n'ouvrira : c'est le moment où
+        ces douze mots deviennent aussi la clé de l'historique. La sauvegarde est active par
+        défaut, donc le compromis se prend maintenant, à l'endroit où la phrase est à l'écran.
+      */}
+      <p className="text-sm text-(--color-ink-muted)">
+        Ces douze mots chiffrent aussi votre historique sauvegardé. Qui les obtient peut donc
+        relire tout votre passé archivé, y compris rétroactivement. Vous pouvez couper cette
+        sauvegarde dans les réglages.
       </p>
 
       <label className="flex items-start gap-2 text-sm">
@@ -609,7 +622,8 @@ function Sidebar({
             {session.locked ? "Retirer le verrou" : "Verrouiller cet appareil"}
           </button>
           <button type="button" onClick={() => setVaultPanel(true)} className="text-left underline">
-            {session.archiving ? "Sauvegarde de l'historique" : "Sauvegarder l'historique"}
+            {/* L'état coupé se lit comme une anomalie choisie, pas comme une invitation. */}
+            {session.archiving ? "Sauvegarde de l'historique" : "Sauvegarde désactivée"}
           </button>
           <button type="button" onClick={() => setSignalPanel(true)} className="text-left underline">
             Accusés et indicateurs
@@ -660,6 +674,20 @@ function Conversation({
   const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  // Rapatriement de l'historique archivé, à l'ouverture de la conversation.
+  //
+  // Paresseux et non bloquant : la conversation s'affiche tout de suite, le passé se remplit
+  // derrière. `hydrate` ne fait le travail qu'une fois par session — l'effet peut donc se
+  // rejouer sans conséquence quand la vue change d'identité.
+  useEffect(() => {
+    session
+      .hydrate(view)
+      .then((restaures) => {
+        if (restaures > 0) onChanged();
+      })
+      .catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
+  }, [session, view, onChanged, onError]);
 
   const send = async (event: React.FormEvent) => {
     event.preventDefault();

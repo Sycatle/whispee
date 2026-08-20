@@ -174,8 +174,10 @@ export function DeviceSettings({
                 sera exact.
               </li>
               <li>
-                L&apos;historique déjà archivé dans le coffre deviendra illisible : il est
-                chiffré sous l&apos;ancienne clé.
+                <strong>Tout votre historique sauvegardé deviendra définitivement illisible</strong>
+                : il est chiffré sous une clé dérivée de l&apos;ancienne phrase, et rien ne permet
+                de le rechiffrer. La sauvegarde étant active par défaut, cela vous concerne même
+                si vous ne l&apos;avez jamais réglée.
               </li>
               <li>
                 Le voleur détient la même clé que vous et peut agir le premier. Faites-le

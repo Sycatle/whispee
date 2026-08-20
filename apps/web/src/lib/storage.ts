@@ -44,6 +44,11 @@ interface StoredSession {
   /**
    * Le coffre d'historique est-il actif ?
    *
+   * **Absent vaut actif.** Le coffre est le défaut ; ce drapeau ne sert donc qu'à retenir un
+   * refus. Trois valeurs, pas deux : `false` est une décision de l'utilisateur et se respecte,
+   * `undefined` est l'absence de décision et se traite comme un compte neuf. Les confondre
+   * rallumerait la sauvegarde dans le dos de quelqu'un qui l'avait coupée.
+   *
    * Seul le drapeau est stocké : la clé se redérive de la graine du compte, elle-même
    * chiffrée juste au-dessus. La conserver ici ferait une copie de plus d'un secret qui
    * ouvre tout le passé archivé.

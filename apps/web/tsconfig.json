@@ -10,6 +10,11 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    // Le lanceur de tests de Node résout les imports en ESM strict : il n'ajoute aucune
+    // extension. Un module qui importe une valeur d'un module voisin n'est donc testable que si
+    // le chemin porte son extension. Sans danger ici — `noEmit` est vrai, rien n'est transpilé
+    // vers un chemin qui n'existerait plus.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",

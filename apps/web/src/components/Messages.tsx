@@ -120,7 +120,7 @@ export function Messages({
           return (
             <li key={message.seq} className={`group ${message.mine ? "text-right" : ""}`}>
               <div
-                className={`inline-block max-w-[75%] rounded-lg px-3 py-2 text-left text-sm ${
+                className={`inline-block max-w-[75%] wrap-anywhere rounded-lg px-3 py-2 text-left text-sm ${
                   message.mine
                     ? "bg-(--color-accent) text-white"
                     : "bg-(--color-surface-raised) border border-(--color-border-subtle)"

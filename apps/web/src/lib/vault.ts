@@ -20,9 +20,33 @@
  * Combien de messages chaque compte archive, et quand. Il savait déjà qui parle à qui ; ceci
  * ajoute un volume et une chronologie. L'éviter demanderait du padding et des dépôts factices.
  */
-import type { Api } from "./api";
-import * as content from "./content";
+import * as content from "./content.ts";
 import type { Message } from "./session";
+
+/**
+ * Ce que le coffre attend du transport, et rien de plus.
+ *
+ * Déclaré ici plutôt qu'importé depuis `api.ts` pour que le découpage et la pagination
+ * ci-dessous soient testables sans réseau : c'est exactement le genre de logique qui échoue en
+ * silence si personne ne la vérifie.
+ */
+export interface VaultApi {
+  storeVault(
+    groupId: Uint8Array,
+    entries: { seq: number; payload: Uint8Array }[],
+  ): Promise<{ stored: number }>;
+  fetchVault(groupId: Uint8Array, after: number): Promise<{ seq: number; payload: Uint8Array }[]>;
+}
+
+/**
+ * Taille d'un lot, en dépôt comme en relève.
+ *
+ * **Doit rester égale à `MAX_VAULT_ENTRIES` côté serveur** (`crates/server/src/routes.rs`), qui
+ * borne les deux : un dépôt plus gros est refusé par un 400, une relève plus longue est tronquée
+ * — sans erreur, ce qui est le pire des deux. Tant que le coffre était optionnel, les deux cas
+ * restaient rares ; ils deviennent le cas nominal du premier démarrage.
+ */
+const PAGE = 200;
 
 /** Voir la note sur `buffer` dans `keys.ts`. */
 function buffer(bytes: Uint8Array): BufferSource {
@@ -90,23 +114,46 @@ export async function decryptEntry(
   };
 }
 
-/** Dépose des messages dans le coffre. Idempotent côté serveur. */
+/**
+ * Dépose des messages dans le coffre. Idempotent côté serveur.
+ *
+ * Découpé en lots : un appareil qui rattrape un retard peut avoir bien plus de `PAGE` messages
+ * à archiver d'un coup, et le serveur refuse le lot entier au-delà. En série et non en
+ * parallèle — l'archivage est du travail de fond, rien ne justifie d'ouvrir dix requêtes
+ * concurrentes pour lui.
+ */
 export async function store(
-  api: Api,
+  api: VaultApi,
   key: CryptoKey,
   groupId: Uint8Array,
   messages: Message[],
 ): Promise<void> {
-  if (messages.length === 0) return;
+  for (let debut = 0; debut < messages.length; debut += PAGE) {
+    const lot = messages.slice(debut, debut + PAGE);
 
-  const entries = await Promise.all(
-    messages.map(async (message) => ({
-      seq: message.seq,
-      payload: await encryptEntry(key, message),
-    })),
-  );
+    const entries = await Promise.all(
+      lot.map(async (message) => ({
+        seq: message.seq,
+        payload: await encryptEntry(key, message),
+      })),
+    );
 
-  await api.storeVault(groupId, entries);
+    await api.storeVault(groupId, entries);
+  }
+}
+
+/** Ce qu'une restauration rapporte, y compris ce qu'elle n'a pas su lire. */
+export interface Restored {
+  messages: Message[];
+  /**
+   * Entrées qu'on n'a pas su déchiffrer.
+   *
+   * Remonté plutôt que compté en silence : si **toutes** les entrées d'une conversation sont
+   * illisibles, ce n'est pas un vieux format, c'est une rotation de compte — la clé du coffre
+   * dérive de la phrase de récupération, et la tourner rend le passé archivé définitivement
+   * inaccessible. Un fil vide sans explication serait le pire des deux comportements.
+   */
+  illisibles: number;
 }
 
 /**
@@ -117,19 +164,45 @@ export async function store(
  * une réaction disproportionnée.
  */
 export async function restore(
-  api: Api,
+  api: VaultApi,
   key: CryptoKey,
   groupId: Uint8Array,
-): Promise<Message[]> {
-  const rows = await api.fetchVault(groupId, 0);
+): Promise<Restored> {
   const messages: Message[] = [];
+  let illisibles = 0;
+  let after = 0;
 
-  for (const row of rows) {
-    try {
-      messages.push(await decryptEntry(key, row.seq, row.payload));
-    } catch (error) {
-      console.warn(`entrée de coffre ${row.seq} illisible`, error);
+  // Le serveur sert au plus `PAGE` lignes par appel, triées par `seq` croissant. Une seule
+  // requête tronquait donc l'historique **sans erreur** au-delà de deux cents messages : le fil
+  // paraissait simplement plus court, et rien ne le signalait.
+  for (;;) {
+    const rows = await api.fetchVault(groupId, after);
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      try {
+        messages.push(await decryptEntry(key, row.seq, row.payload));
+      } catch (error) {
+        illisibles += 1;
+        console.warn(`entrée de coffre ${row.seq} illisible`, error);
+      }
     }
+
+    if (rows.length < PAGE) break;
+    after = rows[rows.length - 1].seq;
   }
-  return messages;
+
+  return { messages, illisibles };
+}
+
+/**
+ * Fusionne un historique restauré dans un fil déjà peuplé, sans doublon.
+ *
+ * Extrait de `Session` pour être testable : la fusion est une règle métier — le `seq` identifie
+ * un message —, pas un détail d'affichage, et `session.ts` n'est pas testable en l'état (WASM,
+ * IndexedDB).
+ */
+export function merge(existants: Message[], archives: Message[]): Message[] {
+  const connus = new Set(existants.map((message) => message.seq));
+  return archives.filter((message) => !connus.has(message.seq));
 }

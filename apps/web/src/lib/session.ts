@@ -510,9 +510,16 @@ export class Session {
   async restoreHistory(view: ConversationView): Promise<number> {
     if (!this.vaultCipher) return 0;
 
-    const archived = await vault.restore(this.api, this.vaultCipher, view.groupId);
-    const connus = new Set(view.messages.map((m) => m.seq));
-    const nouveaux = archived.filter((m) => !connus.has(m.seq));
+    const { messages, illisibles } = await vault.restore(this.api, this.vaultCipher, view.groupId);
+    const nouveaux = vault.merge(view.messages, messages);
+
+    // Rien de lisible alors qu'il y avait des entrées : la clé du coffre n'est plus la bonne,
+    // c'est-à-dire que le compte a été tourné. Le dire plutôt que de rendre un fil vide.
+    if (messages.length === 0 && illisibles > 0) {
+      throw new Error(
+        "L'historique archivé n'est plus lisible : la phrase de récupération a changé.",
+      );
+    }
 
     view.messages.push(...nouveaux);
     return nouveaux.length;

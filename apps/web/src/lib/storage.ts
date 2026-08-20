@@ -236,8 +236,10 @@ class IndexedDbStore implements SessionStore {
  */
 export function sessionStore(): SessionStore {
   if (isTauri()) {
-    // À remplacer par le store natif. En attendant, le comportement est celui d'aujourd'hui :
-    // l'application de bureau n'est pas exposée à l'éviction, seul le mobile l'est.
+    // Le store natif existe — voir `storage-native.ts` — mais n'est pas branché : il suppose des
+    // clés natives, et une installation existante ne peut pas y déplacer les siennes. En
+    // attendant la migration, le comportement est celui d'aujourd'hui : l'application de bureau
+    // n'est pas exposée à l'éviction, seul le mobile l'est.
     return new IndexedDbStore();
   }
 

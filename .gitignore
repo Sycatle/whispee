@@ -5,3 +5,4 @@ node_modules/
 pkg/
 .next/
 .claude/scheduled_tasks.lock
+.worktrees/

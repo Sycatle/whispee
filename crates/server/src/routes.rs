@@ -53,6 +53,7 @@ const MAX_ENVELOPES_PER_PAGE: i64 = 200;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/stream", get(stream))
+        .route("/v1/gateway", get(crate::gateway::handler))
         .route("/v1/presence", post(read_presence))
         .route("/v1/presence/optout", post(set_presence_optout))
         .route("/v1/accounts", post(create_account))
@@ -96,7 +97,7 @@ fn decode_b64(value: &str) -> ApiResult<Vec<u8>> {
         .map_err(|_| ApiError::BadRequest("base64 invalide"))
 }
 
-fn decode_group_id(value: &str) -> ApiResult<Vec<u8>> {
+pub(crate) fn decode_group_id(value: &str) -> ApiResult<Vec<u8>> {
     let bytes = hex::decode(value).map_err(|_| ApiError::BadRequest("group_id invalide"))?;
     if bytes.is_empty() || bytes.len() > 64 {
         return Err(ApiError::BadRequest("longueur de group_id invalide"));
@@ -210,7 +211,7 @@ async fn stream(
 /// Un indicateur de frappe chiffré tient en quelques dizaines d'octets ; ce plafond n'est pas
 /// une contrainte de format mais la borne qui empêche ce chemin — qui lit le corps lui-même,
 /// hors de la couche HTTP — d'être le seul non borné du serveur.
-const MAX_SIGNAL_BYTES: usize = 4096;
+pub(crate) const MAX_SIGNAL_BYTES: usize = 4096;
 
 /// Vérifie un MAC d'appartenance sur un message canonique déjà construit.
 ///
@@ -253,8 +254,6 @@ async fn post_signal(
     Path(group_id): Path<String>,
     request: axum::extract::Request,
 ) -> ApiResult<axum::http::StatusCode> {
-    use sha2::{Digest, Sha256};
-
     let group_id = decode_group_id(&group_id)?;
 
     // Extraction possédée avant le premier `await` : voir la note d'`anonymous_body`.
@@ -271,31 +270,59 @@ async fn post_signal(
         (header(HEADER_NONCE)?, header(HEADER_MAC)?)
     };
 
-    if nonce.len() != 16 {
-        return Err(ApiError::BadRequest("nonce de signal invalide"));
-    }
-
-    let (posting_key,): (Option<Vec<u8>>,) =
-        sqlx::query_as("SELECT posting_key FROM groups WHERE id = $1")
-            .bind(&group_id)
-            .fetch_optional(&pool)
-            .await?
-            .ok_or(ApiError::NotFound)?;
-
-    let posting_key = posting_key.ok_or(ApiError::Forbidden)?;
-
     let body = axum::body::to_bytes(request.into_body(), MAX_SIGNAL_BYTES)
         .await
         .map_err(|_| ApiError::BadRequest("corps illisible"))?;
 
-    let message = attest::signal_message(&group_id, &nonce, &Sha256::digest(&body))
-        .map_err(|_| ApiError::BadRequest("signal mal formé"))?;
-
-    verify_group_mac(&posting_key, &message, &mac)?;
+    verify_signal(&pool, &group_id, &nonce, &mac, &body).await?;
 
     hub.publish(Notice::Signal { group_id, payload: body.to_vec() });
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Vérifie qu'un signal éphémère émane d'un membre du groupe, sans apprendre lequel.
+///
+/// Extraite pour que le chemin HTTP et la trame `signal` de la gateway partagent **exactement**
+/// la même vérification. C'est le même argument que celui qui a fait extraire
+/// [`verify_group_mac`] : deux copies divergent, et c'est celle qu'on a oublié de corriger qui
+/// devient la faille.
+///
+/// Ne publie rien : l'appelant décide de la diffusion, parce que la gateway et la route HTTP
+/// n'ont pas la même façon de tenir le hub.
+pub(crate) async fn verify_signal(
+    pool: &PgPool,
+    group_id: &[u8],
+    nonce: &[u8],
+    mac: &[u8],
+    body: &[u8],
+) -> ApiResult<()> {
+    use sha2::{Digest, Sha256};
+
+    if nonce.len() != 16 {
+        return Err(ApiError::BadRequest("nonce de signal invalide"));
+    }
+
+    if body.len() > MAX_SIGNAL_BYTES {
+        return Err(ApiError::BadRequest("signal trop volumineux"));
+    }
+
+    let (posting_key,): (Option<Vec<u8>>,) =
+        sqlx::query_as("SELECT posting_key FROM groups WHERE id = $1")
+            .bind(group_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+
+    // Un groupe sans clé de dépôt n'a pas encore migré vers le chemin anonyme : refuser plutôt
+    // que de retomber sur une vérification par identité, qui ferait de la gateway le seul
+    // endroit du serveur où un signal révèle son auteur.
+    let posting_key = posting_key.ok_or(ApiError::Forbidden)?;
+
+    let message = attest::signal_message(group_id, nonce, &Sha256::digest(body))
+        .map_err(|_| ApiError::BadRequest("signal mal formé"))?;
+
+    verify_group_mac(&posting_key, &message, mac)
 }
 
 /// Vérifie que l'appelant est membre du groupe.
@@ -322,6 +349,23 @@ async fn require_membership(pool: &PgPool, group_id: &[u8], device_id: &str) -> 
     .await?;
 
     member.map(|_| ()).ok_or(ApiError::Forbidden)
+}
+
+/// Même question, posée par un appelant qui n'échoue pas sur un refus.
+///
+/// La gateway répond à un `subscribe` refusé par une trame d'erreur et garde la session
+/// ouverte, là où une route HTTP renvoie un statut et s'arrête. Le contrôle reste celui de
+/// [`require_membership`] — une seule requête, une seule définition de « membre ».
+pub(crate) async fn is_member(
+    pool: &PgPool,
+    group_id: &[u8],
+    device_id: &str,
+) -> ApiResult<bool> {
+    match require_membership(pool, group_id, device_id).await {
+        Ok(()) => Ok(true),
+        Err(ApiError::Forbidden) => Ok(false),
+        Err(other) => Err(other),
+    }
 }
 
 #[derive(Deserialize)]

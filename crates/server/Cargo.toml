@@ -7,7 +7,7 @@ publish.workspace = true
 
 [dependencies]
 attest = { path = "../attest" }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 ed25519-dalek.workspace = true
 hex.workspace = true

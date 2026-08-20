@@ -1,0 +1,106 @@
+name: iOS build
+
+# Construit l'application iOS sur un runner macOS.
+#
+# # Pourquoi ce workflow ne se déclenche jamais tout seul
+#
+# **Une minute de runner macOS est facturée dix fois une minute de runner Linux.** C'est le
+# poste de dépense décisif du dépôt, très loin devant tout le reste : une construction iOS
+# automatique à chaque poussée sur `main` consommerait à elle seule l'essentiel du quota.
+#
+# Il n'y a donc qu'une entrée, `workflow_dispatch`, et c'est délibéré. Obtenir un binaire iOS
+# est une décision, pas un effet de bord d'une poussée. Ajouter ici un déclencheur `push` — même
+# restreint par `paths` — reviendrait à choisir de dépenser dix fois plus sans que personne ne
+# l'ait demandé.
+#
+# # Ce qui n'est pas fait
+#
+# Aucune signature, donc aucun binaire installable sur un appareil réel : cela demande un compte
+# développeur Apple, un profil de provisionnement et un certificat. Ce workflow construit pour le
+# simulateur et vérifie que la chaîne tient — ce qui est déjà ce qu'on ne peut pas faire ailleurs,
+# puisque iOS est hors d'atteinte sous Linux.
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Construire pour un appareil réel plutôt que pour le simulateur (exige une signature)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      # Le cache compte double ici : il économise des minutes facturées dix fois.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Cache the Tauri CLI
+        id: cache-tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-v2-${{ runner.os }}
+
+      - name: Install Tauri CLI
+        if: steps.cache-tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+
+      # Même choix que pour Android : le projet Xcode est généré à chaque construction plutôt que
+      # versionné, pour qu'il ne puisse pas dériver de `tauri.conf.json`.
+      - name: Generate the Xcode project
+        working-directory: apps/desktop
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
+        run: cargo tauri ios init
+
+      - name: Build for the simulator
+        if: ${{ !inputs.device }}
+        working-directory: apps/desktop
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
+        run: cargo tauri ios build --debug --target aarch64-sim
+
+      - name: Build for a device
+        if: ${{ inputs.device }}
+        working-directory: apps/desktop
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
+        run: cargo tauri ios build --debug
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ios-build
+          path: apps/desktop/gen/apple/build/**
+          if-no-files-found: error
+          retention-days: 7

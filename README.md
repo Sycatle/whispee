@@ -18,14 +18,14 @@ intermédiaires que personne n'installe. Le travail s'y valide en local, par `ca
 | Déclencheur | Ce qui tourne | Coût |
 |---|---|---|
 | Poussée sur `dev` | rien | — |
-| Poussée sur `main` | build Android, si  ou  a changé | runner Ubuntu |
+| Poussée sur `main` | build Android, si `apps/` ou `Cargo.lock` a changé | runner Ubuntu |
 | Déclenchement manuel | Android ou iOS, au choix | selon la cible |
 
 Le déclenchement manuel est la voie normale pour obtenir un binaire mobile. **iOS ne tourne
 jamais automatiquement** : un runner macOS coûte dix fois les minutes d'un runner Linux, ce qui
 en fait le poste de dépense décisif.
 
-Les constructions concurrentes s'annulent ( avec ) : une poussée
+Les constructions concurrentes s'annulent (`concurrency` avec `cancel-in-progress`) : une poussée
 qui en suit une autre rend la précédente sans objet, et la laisser finir paierait un runner pour
 un artefact que personne ne prendra.
 

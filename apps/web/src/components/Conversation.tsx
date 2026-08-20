@@ -107,7 +107,7 @@ export function Conversation({
             type="button"
             onClick={onBack}
             aria-label="Revenir aux conversations"
-            className="-ml-2 shrink-0 self-center px-2 py-1 text-(--color-ink-muted) tactile:min-h-11"
+            className="-ml-2 shrink-0 self-center px-2 py-1 text-xl leading-none text-(--color-ink-muted) tactile:min-h-11"
           >
             ‹
           </button>

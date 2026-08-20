@@ -255,7 +255,13 @@ export function App() {
       // le dernier message.
       className="safe-cotes safe-haut mx-auto flex h-dvh max-w-5xl flex-col"
     >
-      <Header session={session} onForget={() => session.forget().then(() => location.reload())} />
+      {/* À un panneau, l'en-tête ne s'affiche que sur la liste. Dans la conversation il coûtait
+          un sixième de la hauteur pour répéter une identité que l'utilisateur connaît, alors
+          que l'écran porte déjà son propre en-tête — celui du correspondant, qui lui est
+          utile. L'avertissement reste lisible : la liste est l'écran d'accueil. */}
+      {(duo || !current) && (
+        <Header session={session} onForget={() => session.forget().then(() => location.reload())} />
+      )}
 
       {/*
         Les anomalies du journal de clés sont affichées au niveau de l'application, pas d'une

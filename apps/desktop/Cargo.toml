@@ -34,6 +34,16 @@ aes-gcm.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
 zeroize.workspace = true
+# L'invite biométrique n'a d'implémentation que sur Android et iOS, mais la dépendance est
+# déclarée **sans condition de cible**, à rebours de ce que suggèrent les exemples de Tauri.
+#
+# La raison est le script de construction : il compile pour l'hôte, donc `cfg(target_os =
+# "android")` y est faux même lorsqu'on croise vers Android. Une dépendance conditionnelle par
+# cible reste alors invisible de `tauri-build`, qui refuse la permission `biometric:default`
+# faute de savoir d'où elle viendrait — après plusieurs minutes de compilation, et sur un
+# message qui parle de permissions plutôt que de dépendances.
+tauri-plugin-biometric = "2"
+
 
 [features]
 # **Ce drapeau décide d'où vient l'interface**, et non le profil de compilation.

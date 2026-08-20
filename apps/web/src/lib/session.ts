@@ -33,7 +33,7 @@ import {
   sealTyping,
   without,
 } from "./signals";
-import { Stream } from "./stream";
+import { Gateway } from "./gateway";
 import * as vault from "./vault";
 import * as log from "./transparency";
 import * as padding from "./padding";
@@ -212,21 +212,8 @@ export class Session {
     private signals: SignalSettings = { readReceipts: true, typingIndicator: true, presence: true },
   ) {}
 
-  /** Flux temps réel, quand il est ouvert. Sa panne ne retire aucune fonctionnalité. */
-  private stream?: Stream;
-
-  /** Rappel de rafraîchissement, conservé pour pouvoir rouvrir le flux sans le redemander. */
-  private onStreamChange?: () => void;
-
-  /**
-   * Groupes couverts par le flux actuellement ouvert.
-   *
-   * Sans cette mémoire, chaque appel de `rescopeStream` rouvre une connexion — et l'ancienne
-   * met un instant à se fermer côté serveur, le temps que la coupure TCP se propage. Deux
-   * flux se recouvrent alors, et chaque événement arrive en double. Inoffensif (la relève est
-   * idempotente) mais parfaitement inutile.
-   */
-  private streamScope = "";
+  /** Session temps réel, quand elle est ouverte. Sa panne ne retire aucune fonctionnalité. */
+  private gateway?: Gateway;
 
   /**
    * Dernière tête de journal acceptée.
@@ -883,6 +870,29 @@ export class Session {
   }
 
   /**
+   * Émet un signal éphémère par la session, ou par HTTP si elle est fermée.
+   *
+   * Les deux chemins sont **anonymes** : le serveur vérifie le même MAC de groupe et apprend
+   * qu'un membre écrit, jamais lequel. La session ne fait que rendre le trajet moins cher — une
+   * trame au lieu d'une requête, pour un événement qui se produit à chaque frappe.
+   *
+   * Le repli n'est donc pas une dégradation de confidentialité, et c'est ce qui permet de le
+   * prendre sans hésiter plutôt que de renoncer au signal.
+   */
+  private async emitSignal(
+    groupId: Uint8Array,
+    payload: Uint8Array,
+    posting: { key: Uint8Array; mac: PostMac },
+  ): Promise<void> {
+    const nonce = crypto.getRandomValues(new Uint8Array(16));
+    const mac = posting.mac(posting.key, groupId, nonce, payload);
+
+    if (this.gateway?.signal(groupId, nonce, mac, payload)) return;
+
+    await this.api.postSignal(groupId, payload, posting);
+  }
+
+  /**
    * Transmet la clé de dépôt aux autres membres d'un groupe.
    *
    * Émise une fois par session et par groupe, par celui qui la détient. Un membre qui ne l'a
@@ -1054,7 +1064,7 @@ export class Session {
     };
 
     this.conversations.set(view.key, view);
-    this.rescopeStream();
+    this.syncScope();
     await this.persist();
     return view;
   }
@@ -1615,7 +1625,7 @@ export class Session {
 
     const key = this.client.signalKey(view.groupId);
     const payload = await sealTyping(key, this.handle);
-    await this.api.postSignal(view.groupId, payload, posting);
+    await this.emitSignal(view.groupId, payload, posting);
   }
 
   /**
@@ -1735,51 +1745,55 @@ export class Session {
    * transport au-dessus du transport.
    */
   startStream(onChange: () => void): void {
-    this.stream?.close();
-    this.onStreamChange = onChange;
-    this.streamScope = this.scopeOf();
+    this.gateway?.close();
 
-    this.stream = new Stream(this.api, {
-      onEnvelope: (groupId) => {
-        // On ne se fie pas au numéro annoncé : on relève par le chemin normal, qui revérifie
-        // l'appartenance et fait avancer le curseur d'une seule main.
-        if (!this.conversations.has(toHex(groupId))) return;
-        void this.poll().then(onChange).catch(() => {});
+    this.gateway = new Gateway(
+      this.api,
+      {
+        onEnvelope: (groupId) => {
+          // On ne se fie pas au numéro annoncé : on relève par le chemin normal, qui revérifie
+          // l'appartenance et fait avancer le curseur d'une seule main.
+          if (!this.conversations.has(toHex(groupId))) return;
+          void this.poll().then(onChange).catch(() => {});
+        },
+        onSignal: (groupId, payload) => {
+          void this.absorbSignal(groupId, payload).then(onChange).catch(() => {});
+        },
       },
-      onSignal: (groupId, payload) => {
-        void this.absorbSignal(groupId, payload).then(onChange).catch(() => {});
-      },
-    });
+      // Évalués à chaque (re)connexion, jamais figés : entre deux tentatives, la relève a pu
+      // avancer, et un curseur périmé ferait réannoncer des séquences déjà lues.
+      () =>
+        [...this.conversations.values()].map((view) => ({
+          groupId: view.groupId,
+          seq: view.cursor,
+        })),
+      this.crypto.gatewayChallenge,
+    );
 
-    this.stream.start();
+    this.gateway.start();
+    this.syncScope();
   }
 
   stopStream(): void {
-    this.stream?.close();
-    this.stream = undefined;
+    this.gateway?.close();
+    this.gateway = undefined;
   }
 
   /**
-   * Rouvre le flux pour qu'il couvre les conversations actuelles.
+   * Aligne la portée de la session sur les conversations connues.
    *
-   * Le serveur fige la liste des groupes écoutés à l'ouverture — la rendre dynamique
-   * demanderait au flux de réévaluer l'appartenance en continu, c'est-à-dire de refaire le
-   * contrôle d'accès à chaque événement. Rouvrir est plus simple et se produit rarement :
-   * seulement quand la composition change.
+   * Remplace la réouverture complète qu'imposait le flux SSE, dont le serveur figeait la liste
+   * à la connexion. L'ajustement est incrémental : une conversation découverte coûte une trame,
+   * plus une reconnexion avec son défi, sa signature et son rattrapage.
    *
-   * Sans appel : une conversation créée après l'ouverture du flux n'y est jamais abonnée, et
-   * ses indicateurs de frappe n'arrivent pas — panne silencieuse, puisque tout le reste
-   * continue de fonctionner par la relève.
+   * Sans appel : une conversation créée après l'ouverture n'est jamais abonnée, et ses
+   * indicateurs de frappe n'arrivent pas — panne silencieuse, puisque tout le reste continue
+   * de fonctionner par la relève.
    */
-  private rescopeStream(): void {
-    if (!this.stream) return;
-    if (this.scopeOf() === this.streamScope) return;
-    this.startStream(this.onStreamChange ?? (() => {}));
-  }
+  private syncScope(): void {
+    if (!this.gateway) return;
 
-  /** Empreinte de l'ensemble des conversations, pour détecter un vrai changement de portée. */
-  private scopeOf(): string {
-    return [...this.conversations.keys()].sort().join(",");
+    for (const view of this.conversations.values()) this.gateway.subscribe(view.groupId);
   }
 
   poll(): Promise<void> {
@@ -1802,10 +1816,10 @@ export class Session {
     const connues = this.conversations.size;
     await this.discoverNewConversations();
 
-    // Le serveur fige la portée du flux à son ouverture : un groupe rejoint depuis n'y est pas
-    // abonné. Le rouvrir est le seul moyen de l'y faire entrer, et c'est bon marché — cela
-    // n'arrive qu'à la découverte d'une conversation.
-    if (this.conversations.size !== connues) this.rescopeStream();
+    // Une conversation découverte doit entrer dans la portée de la session, faute de quoi ses
+    // indicateurs de frappe n'arriveraient jamais. `subscribe` étant idempotent, on peut
+    // resynchroniser sans comparer.
+    if (this.conversations.size !== connues) this.syncScope();
 
     // Rattrape les appareils du compte absents d'une conversation. Idempotent : sans ce
     // rattrapage, une propagation interrompue laisserait un appareil sourd indéfiniment.

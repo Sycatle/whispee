@@ -19,6 +19,7 @@ import type {
   verifyTreeHead,
   postMac,
   signalMac,
+  gatewayChallenge,
 } from "./generated/crypto_wasm";
 
 /**
@@ -42,6 +43,7 @@ export interface Crypto {
   verifyTreeHead: typeof verifyTreeHead;
   postMac: typeof postMac;
   signalMac: typeof signalMac;
+  gatewayChallenge: typeof gatewayChallenge;
   accountFingerprint: typeof accountFingerprint;
 }
 
@@ -69,6 +71,7 @@ export function loadCrypto(): Promise<Crypto> {
       verifyTreeHead: module.verifyTreeHead,
       postMac: module.postMac,
       signalMac: module.signalMac,
+      gatewayChallenge: module.gatewayChallenge,
       accountFingerprint: module.accountFingerprint,
     };
   });

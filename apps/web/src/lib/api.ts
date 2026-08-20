@@ -41,7 +41,13 @@ async function signingPayload(
 
 export class Api {
   constructor(
-    private readonly deviceId: string,
+    /**
+     * Identifiant de cet appareil.
+     *
+     * Public : la trame `identify` de la gateway doit le nommer explicitement, le handshake
+     * WebSocket ne portant aucun en-tête pour le dire avant.
+     */
+    readonly deviceId: string,
     private readonly keys: DeviceKeys,
   ) {}
 
@@ -435,27 +441,25 @@ export class Api {
   }
 
   /**
-   * En-têtes signés pour l'ouverture du flux temps réel.
+   * Signe le défi émis par le serveur à l'ouverture d'une session gateway.
    *
-   * # Pourquoi le flux n'utilise pas `EventSource`
+   * # Pourquoi un défi, là où le HTTP se contente d'un horodatage
    *
-   * L'API `EventSource` du navigateur n'accepte **aucun en-tête**. La seule façon d'y
-   * authentifier serait de mettre la signature dans l'URL, où elle atterrirait dans les
-   * journaux d'accès de tout intermédiaire. Le flux passe donc par `fetch`, qui accepte les
-   * en-têtes, au prix d'une reconnexion à réimplémenter.
+   * L'API `WebSocket` du navigateur n'accepte **aucun en-tête**, pas plus qu'`EventSource`. On
+   * ne peut donc pas authentifier le handshake sans mettre la signature dans l'URL, où elle
+   * atterrirait dans les journaux d'accès de tout intermédiaire. La socket s'ouvre donc sans
+   * identité, et rien n'est servi avant cette signature.
    *
-   * Exposé ici plutôt que dupliqué dans `stream.ts` : le format du message signé est le même
-   * que pour toute autre requête, et deux copies divergeraient.
+   * Le nonce venant du serveur et n'étant valable qu'une fois, il n'y a ici aucune fenêtre de
+   * rejeu — contrairement aux soixante secondes que laisse l'authentification HTTP.
+   *
+   * Le message signé est construit par le module WebAssembly — son format canonique vit dans la
+   * crate `attest`, et le réécrire en TypeScript le dupliquerait. Il est passé en paramètre
+   * plutôt qu'importé, pour la même raison que [`PostMac`] : ce module ne doit pas dépendre du
+   * chargement du WASM, qui est asynchrone et n'a pas lieu au même moment.
    */
-  async streamHeaders(): Promise<Record<string, string>> {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payload = await signingPayload("GET", "/v1/stream", timestamp, new Uint8Array());
-
-    return {
-      "x-device-id": this.deviceId,
-      "x-timestamp": String(timestamp),
-      "x-signature": await sign(this.keys, payload),
-    };
+  signGatewayChallenge(nonce: Uint8Array, format: GatewayChallenge): Promise<string> {
+    return sign(this.keys, format(this.deviceId, nonce));
   }
 
   /** Dépose un signal éphémère. Le serveur le relaie et l'oublie : rien n'est stocké. */
@@ -539,3 +543,11 @@ export type PostMac = (
   nonce: Uint8Array,
   body: Uint8Array,
 ) => Uint8Array;
+
+/**
+ * Construction du message signé à l'ouverture d'une session gateway.
+ *
+ * Fourni par le module WebAssembly, pour la même raison que [`PostMac`] : le format canonique
+ * vit dans la crate `attest` et ne doit exister qu'en un seul exemplaire.
+ */
+export type GatewayChallenge = (deviceId: string, nonce: Uint8Array) => Uint8Array;

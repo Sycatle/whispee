@@ -205,6 +205,13 @@ s'il n'y en a pas. C'est le CLI `tauri build` qui l'ajoute d'ordinaire ; ce proj
 ce CLI, `apps/desktop/Cargo.toml` la déclare **activée par défaut**, à rebours de la convention :
 le cas courant est de lancer l'application, pas de travailler sur son interface.
 
+**Piège de chemins dans `tauri.conf.json`**, qui a coûté une construction : `frontendDist` est
+résolu depuis le fichier de configuration — donc depuis `apps/desktop` — tandis que
+`beforeBuildCommand` et `beforeDevCommand` s'exécutent depuis `apps/`. Les deux ne s'écrivent
+donc pas avec le même préfixe. Le JSON n'acceptant pas de commentaire, c'est écrit ici. Une
+compilation par `cargo build` n'exécute jamais ces commandes : le défaut ne se voit qu'à travers
+le CLI Tauri, c'est-à-dire en intégration continue.
+
 Pour ce dernier cas, avec rechargement à chaud :
 
 ```sh

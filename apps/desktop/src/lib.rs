@@ -35,6 +35,7 @@
 //! reste à faire. Tant que ce n'est pas fait, l'écrire ici évite de croire la propriété acquise.
 
 pub mod cipher;
+pub mod commands;
 pub mod store;
 
 /// Démarre l'application.
@@ -45,6 +46,18 @@ pub mod store;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            commands::device_public_key,
+            commands::device_sign,
+            commands::state_seal,
+            commands::state_open,
+            commands::session_load,
+            commands::session_save,
+            commands::session_clear,
+        ])
+        // Le coffre est ouvert au démarrage et son échec est fatal : une application qui démarre
+        // sans pouvoir persister semble fonctionner et perd tout au premier redémarrage.
+        .setup(|app| commands::installer(app))
         .run(tauri::generate_context!())
         .expect("l'application n'a pas pu démarrer");
 }

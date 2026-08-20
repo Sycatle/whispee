@@ -24,6 +24,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# L'IPC de Tauri sérialise en JSON : un Vec<u8> y deviendrait un tableau de nombres, plus de six
+# octets par octet utile. Le base64 en coûte un tiers.
+base64 = "0.22"
 # Les mêmes primitives que le reste du projet : AES-256-GCM pour l'état au repos, Ed25519 pour
 # les requêtes. Reprendre celles du workspace évite qu'un jour deux versions de la même courbe
 # cohabitent dans le même binaire.

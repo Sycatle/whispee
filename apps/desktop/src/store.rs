@@ -32,10 +32,10 @@
 //!
 //! # Deux fichiers, pas un
 //!
-//! `state.bin` porte le blob chiffré — gros, réécrit à chaque tour. `meta.json` porte les
-//! curseurs, les empreintes vérifiées et les réglages — petit, et dont **rien n'est secret**.
-//! Les séparer évite de réécrire des dizaines de kilooctets pour changer un booléen, et rend le
-//! second inspectable en cas d'incident sans rien exposer.
+//! `session.bin` porte la session chiffrée, réécrite à chaque sauvegarde. `secrets.bin` porte
+//! les clés de l'appareil, écrites une fois. Les séparer permet d'effacer l'une sans l'autre, ce
+//! dont `session_clear` a besoin : oublier une session ne doit pas détruire une identité que le
+//! serveur connaît encore.
 
 use std::fs;
 use std::io::Write;
@@ -87,12 +87,18 @@ impl Emplacement {
         Self { racine }
     }
 
-    pub fn etat(&self) -> PathBuf {
-        self.racine.join("state.bin")
+    /// La session chiffrée. Réécrite à chaque sauvegarde.
+    pub fn session(&self) -> PathBuf {
+        self.racine.join("session.bin")
     }
 
-    pub fn meta(&self) -> PathBuf {
-        self.racine.join("meta.json")
+    /// Les clés de l'appareil. Écrites une fois, au premier lancement.
+    ///
+    /// Séparées de la session parce que leurs durées de vie et leurs conséquences diffèrent :
+    /// effacer la session laisse un appareil enregistré qui repart de zéro, effacer les secrets
+    /// laisse une identité que le serveur connaît encore mais que plus personne ne peut prouver.
+    pub fn secrets(&self) -> PathBuf {
+        self.racine.join("secrets.bin")
     }
 
     /// Lit un fichier, ou `None` s'il n'existe pas.
@@ -125,10 +131,10 @@ mod tests {
         let racine = repertoire_temporaire("relire");
         let emplacement = Emplacement::new(racine.clone());
 
-        ecrire_atomiquement(&emplacement.etat(), b"un etat chiffre").unwrap();
+        ecrire_atomiquement(&emplacement.session(), b"un etat chiffre").unwrap();
 
         assert_eq!(
-            Emplacement::lire(&emplacement.etat()).unwrap().as_deref(),
+            Emplacement::lire(&emplacement.session()).unwrap().as_deref(),
             Some(b"un etat chiffre".as_slice()),
         );
 
@@ -145,11 +151,11 @@ mod tests {
         let racine = repertoire_temporaire("residu");
         let emplacement = Emplacement::new(racine.clone());
 
-        ecrire_atomiquement(&emplacement.etat(), b"un contenu tres long a remplacer").unwrap();
-        ecrire_atomiquement(&emplacement.etat(), b"court").unwrap();
+        ecrire_atomiquement(&emplacement.session(), b"un contenu tres long a remplacer").unwrap();
+        ecrire_atomiquement(&emplacement.session(), b"court").unwrap();
 
         assert_eq!(
-            Emplacement::lire(&emplacement.etat()).unwrap().as_deref(),
+            Emplacement::lire(&emplacement.session()).unwrap().as_deref(),
             Some(b"court".as_slice()),
             "la queue de l'ancien contenu a survécu",
         );
@@ -165,7 +171,7 @@ mod tests {
     fn un_fichier_absent_se_distingue_d_une_erreur() {
         let emplacement = Emplacement::new(repertoire_temporaire("absent"));
 
-        assert!(Emplacement::lire(&emplacement.etat()).unwrap().is_none());
+        assert!(Emplacement::lire(&emplacement.session()).unwrap().is_none());
     }
 
     /// Le répertoire est créé au besoin : au premier lancement, il n'existe pas.
@@ -174,9 +180,9 @@ mod tests {
         let racine = repertoire_temporaire("cree").join("un").join("deux");
         let emplacement = Emplacement::new(racine.clone());
 
-        ecrire_atomiquement(&emplacement.meta(), b"{}").unwrap();
+        ecrire_atomiquement(&emplacement.secrets(), b"{}").unwrap();
 
-        assert!(emplacement.meta().exists());
+        assert!(emplacement.secrets().exists());
         fs::remove_dir_all(racine.parent().unwrap().parent().unwrap()).unwrap();
     }
 
@@ -189,9 +195,9 @@ mod tests {
         let racine = repertoire_temporaire("temporaire");
         let emplacement = Emplacement::new(racine.clone());
 
-        ecrire_atomiquement(&emplacement.etat(), b"contenu").unwrap();
+        ecrire_atomiquement(&emplacement.session(), b"contenu").unwrap();
 
-        assert!(!emplacement.etat().with_extension("tmp").exists());
+        assert!(!emplacement.session().with_extension("tmp").exists());
         fs::remove_dir_all(&racine).unwrap();
     }
 }

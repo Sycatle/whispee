@@ -75,6 +75,63 @@ pub async fn start_with_claim_quota(quota: u32) -> TestServer {
     demarrer_avec(pool, server::throttle::Throttle::par_minute(0), server::throttle::Claims::par_minute(quota)).await
 }
 
+/// Un émetteur de réveil qui retient ce qu'on lui confie.
+///
+/// Ce que le serveur envoie au fournisseur — et surtout **à qui** — est une propriété de
+/// confidentialité. La vérifier demande de voir passer les adresses.
+#[derive(Default)]
+pub struct ReveilEspion(pub std::sync::Mutex<Vec<server::push::Adresse>>);
+
+impl server::push::Emetteur for ReveilEspion {
+    fn reveiller(&self, adresses: Vec<server::push::Adresse>) {
+        self.0.lock().expect("espion empoisonné").extend(adresses);
+    }
+}
+
+impl ReveilEspion {
+    /// Attend que le réveil détaché ait eu lieu, ou renonce.
+    ///
+    /// Le réveil part dans une tâche à part pour ne pas retarder la réponse à l'expéditeur : il
+    /// n'y a donc rien à attendre côté HTTP. Une attente bornée vaut mieux qu'un délai fixe, qui
+    /// serait soit trop court sur une machine chargée, soit du temps perdu à chaque exécution.
+    pub async fn attendre(&self, combien: usize) -> Vec<server::push::Adresse> {
+        for _ in 0..100 {
+            {
+                let vues = self.0.lock().expect("espion empoisonné");
+                if vues.len() >= combien {
+                    return vues.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        self.0.lock().expect("espion empoisonné").clone()
+    }
+}
+
+/// Un serveur dont on observe les réveils.
+pub async fn start_avec_reveil() -> (TestServer, std::sync::Arc<ReveilEspion>) {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL requis pour les tests");
+    let pool = server::connect(&database_url).await.unwrap();
+    let espion = std::sync::Arc::new(ReveilEspion::default());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = server::app_avec_reveil(
+        pool.clone(),
+        server::throttle::Throttle::par_minute(0),
+        server::throttle::Claims::par_minute(0),
+        espion.clone(),
+    )
+    .into_make_service_with_connect_info::<std::net::SocketAddr>();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (TestServer { base_url: format!("http://{addr}"), pool }, espion)
+}
+
 async fn demarrer_avec(
     pool: PgPool,
     throttle: server::throttle::Throttle,

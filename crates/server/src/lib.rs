@@ -19,6 +19,7 @@ pub mod error;
 pub mod gateway;
 pub mod log;
 pub mod presence;
+pub mod push;
 pub mod routes;
 pub mod stream;
 pub mod throttle;
@@ -46,6 +47,12 @@ pub struct AppState {
     /// borne unique serait soit trop lâche pour protéger un stock, soit trop serrée pour laisser
     /// quelqu'un s'inscrire.
     pub claims: Arc<throttle::Claims>,
+    /// Ce qui réveille les appareils endormis.
+    ///
+    /// [`push::Silencieux`] par défaut, et c'est un choix de conception, pas un provisoire : un
+    /// déploiement qui ne parle ni à Apple ni à Google doit rester pleinement fonctionnel. Voir
+    /// `push` pour ce que ce réveil coûte en métadonnées.
+    pub push: Arc<dyn push::Emetteur>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -63,6 +70,12 @@ impl FromRef<AppState> for Arc<stream::Hub> {
 impl FromRef<AppState> for Arc<throttle::Throttle> {
     fn from_ref(state: &AppState) -> Self {
         state.throttle.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn push::Emetteur> {
+    fn from_ref(state: &AppState) -> Self {
+        state.push.clone()
     }
 }
 
@@ -232,6 +245,20 @@ pub fn app_with(
     throttle: throttle::Throttle,
     claims: throttle::Claims,
 ) -> axum::Router {
+    app_avec_reveil(pool, throttle, claims, Arc::new(push::Silencieux))
+}
+
+/// La même application, avec un émetteur de réveil choisi.
+///
+/// Existe pour les tests : ce que le serveur envoie au fournisseur — et surtout **à qui** — est
+/// une propriété de confidentialité, pas un détail d'acheminement. La vérifier demande de voir
+/// passer les adresses, donc de pouvoir substituer l'émetteur.
+pub fn app_avec_reveil(
+    pool: PgPool,
+    throttle: throttle::Throttle,
+    claims: throttle::Claims,
+    push: Arc<dyn push::Emetteur>,
+) -> axum::Router {
     use tower_http::limit::RequestBodyLimitLayer;
     use tower_http::trace::TraceLayer;
 
@@ -243,6 +270,10 @@ pub fn app_with(
         hub: stream::Hub::new(),
         throttle: Arc::new(throttle),
         claims: Arc::new(claims),
+        // Le défaut est `Silencieux`, posé par `app_with` : brancher Apple ou Google demande
+        // des secrets qu'un déploiement doit fournir sciemment, après avoir lu ce que le réveil
+        // laisse fuir.
+        push,
     };
 
     // Branche le hub sur Postgres, ce qui permet de faire tourner plusieurs instances sans que

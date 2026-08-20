@@ -2559,3 +2559,104 @@ async fn le_detail_par_appareil_n_est_servi_qu_a_son_proprietaire() {
         "un tiers obtient l'activité appareil par appareil",
     );
 }
+
+// ---------------------------------------------------------------- réveil
+
+/// **Le test qui porte la propriété du module de réveil.**
+///
+/// Deux choses, et la seconde compte plus que la première : le membre endormi est réveillé, et ce
+/// qui part vers le fournisseur ne contient **que** son adresse. Ni texte, ni expéditeur, ni
+/// identifiant de groupe — le type l'interdit déjà, ce test fige l'usage.
+#[tokio::test]
+async fn un_depot_reveille_les_membres_qui_ont_un_jeton() {
+    let (server, reveils) = common::start_avec_reveil().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let bob = Device::register(&server, &unique("bob")).await;
+
+    let group_id = unique("groupe").into_bytes();
+    alice
+        .post(
+            &group_path(&group_id, "/members"),
+            serde_json::json!({ "device_ids": [alice.id, bob.id] }),
+        )
+        .await;
+
+    let enregistrement = bob
+        .post("/v1/push/token", serde_json::json!({ "provider": "fcm", "token": "jeton-de-bob" }))
+        .await;
+    assert_eq!(enregistrement.status(), 200);
+
+    alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([7u8]) }),
+        )
+        .await;
+
+    let vus = reveils.attendre(1).await;
+    assert_eq!(vus.len(), 1, "un seul appareil a un jeton");
+    assert_eq!(vus[0].token, "jeton-de-bob");
+    assert_eq!(vus[0].provider, "fcm");
+}
+
+/// L'expéditeur ne se réveille pas lui-même.
+///
+/// Un téléphone qui vibre pour le message qu'il vient d'écrire n'est pas seulement inélégant :
+/// c'est une notification de plus envoyée à Google ou Apple, donc une trace de plus, pour rien.
+#[tokio::test]
+async fn l_expediteur_connu_n_est_pas_reveille() {
+    let (server, reveils) = common::start_avec_reveil().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+
+    let group_id = unique("groupe").into_bytes();
+    alice
+        .post(&group_path(&group_id, "/members"), serde_json::json!({ "device_ids": [alice.id] }))
+        .await;
+    alice
+        .post("/v1/push/token", serde_json::json!({ "provider": "fcm", "token": "jeton-d-alice" }))
+        .await;
+
+    alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([1u8]) }),
+        )
+        .await;
+
+    // Laisse au réveil détaché le temps d'avoir tort.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(reveils.0.lock().unwrap().is_empty(), "l'expéditeur a été réveillé");
+}
+
+/// Retirer le jeton coupe le réveil, et retire l'adresse.
+///
+/// Un réglage « désactivé » qui garderait la ligne laisserait au serveur une adresse dont il n'a
+/// plus l'usage : ce qui n'est pas stocké ne peut ni être exigé plus tard, ni fuiter avec la base.
+#[tokio::test]
+async fn un_jeton_retire_ne_reveille_plus() {
+    let (server, reveils) = common::start_avec_reveil().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let bob = Device::register(&server, &unique("bob")).await;
+
+    let group_id = unique("groupe").into_bytes();
+    alice
+        .post(
+            &group_path(&group_id, "/members"),
+            serde_json::json!({ "device_ids": [alice.id, bob.id] }),
+        )
+        .await;
+
+    bob.post("/v1/push/token", serde_json::json!({ "provider": "fcm", "token": "jeton" })).await;
+    let retrait = bob.post("/v1/push/forget", serde_json::json!({})).await;
+    assert_eq!(retrait.status(), 200);
+
+    alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([2u8]) }),
+        )
+        .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(reveils.0.lock().unwrap().is_empty(), "un jeton retiré a servi");
+}

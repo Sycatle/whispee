@@ -72,6 +72,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/gateway", get(crate::gateway::handler))
         .route("/v1/presence", post(read_presence))
         .route("/v1/presence/optout", post(set_presence_optout))
+        .route("/v1/push/token", post(set_push_token))
+        .route("/v1/push/forget", post(forget_push_token))
         .route("/v1/accounts/{handle}/devices", get(list_account_devices))
         .route("/v1/accounts/{handle}/rotate", post(rotate_account))
         .route("/v1/log/sth", get(log_head))
@@ -1484,15 +1486,52 @@ const HEADER_MAC: &str = "x-group-mac";
 /// Les deux aboutissent à la même enveloppe : l'expéditeur réel est authentifié **par MLS**, à
 /// l'intérieur du chiffré, et les destinataires le lisent. Ce qui disparaît, c'est ce que le
 /// serveur en sait.
+#[derive(Deserialize)]
+struct PushToken {
+    provider: String,
+    token: String,
+}
+
+/// Enregistre le jeton de réveil de l'appareil appelant.
+///
+/// Signé, donc rattaché à un appareil déjà connu : sans cela, n'importe qui pourrait faire
+/// vibrer le téléphone d'autrui en devinant un identifiant.
+///
+/// Le fournisseur est repris tel quel et non vérifié contre une liste : le serveur n'a rien à
+/// décider ici, et une liste fermée obligerait à le redéployer le jour où une plateforme change
+/// de nom. Un jeton adressé à un fournisseur non branché est simplement ignoré à l'émission.
+async fn set_push_token(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
+    let payload: PushToken = signed.json()?;
+
+    if payload.token.is_empty() || payload.provider.is_empty() {
+        return Err(ApiError::BadRequest("jeton de réveil vide"));
+    }
+
+    crate::push::enregistrer(&pool, &signed.device_id, &payload.provider, &payload.token).await?;
+    Ok(())
+}
+
+/// Retire le jeton. L'appareil cesse d'être réveillé, et le serveur cesse d'avoir une adresse.
+///
+/// Distinct d'un réglage « désactivé » qui garderait la ligne : ce qui n'est pas stocké ne peut
+/// pas être exigé plus tard, ni fuiter avec une base.
+async fn forget_push_token(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
+    crate::push::oublier(&pool, &signed.device_id).await?;
+    Ok(())
+}
+
 async fn post_envelope(
     State(pool): State<PgPool>,
     State(hub): State<Arc<Hub>>,
+    State(reveil): State<Arc<dyn crate::push::Emetteur>>,
     Path(group_id): Path<String>,
     request: axum::extract::Request,
 ) -> ApiResult<Json<EnvelopePosted>> {
     let group_id = decode_group_id(&group_id)?;
 
     let anonyme = request.headers().contains_key(HEADER_MAC);
+
+    let mut expediteur = None;
 
     let blob = if anonyme {
         anonymous_body(&pool, &group_id, request).await?
@@ -1501,6 +1540,7 @@ async fn post_envelope(
             .await?;
         let payload: PostEnvelope = signed.json()?;
         require_membership(&pool, &group_id, &signed.device_id).await?;
+        expediteur = Some(signed.device_id.clone());
         decode_b64(&payload.payload)?
     };
 
@@ -1527,7 +1567,17 @@ async fn post_envelope(
 
     // Après le commit, jamais avant : annoncer une enveloppe qu'une transaction annulée aurait
     // fait disparaître enverrait les clients chercher un `seq` inexistant.
-    hub.publish(Notice::Envelope { group_id, seq });
+    hub.publish(Notice::Envelope { group_id: group_id.clone(), seq });
+
+    // Le réveil ne concerne que les appareils **non connectés** : ceux qui le sont viennent
+    // d'être servis par la ligne au-dessus. Le serveur ne sait pas lesquels le sont, donc il les
+    // réveille tous — un réveil de trop coûte une notification silencieuse, un réveil manquant
+    // coûte un message qui n'arrive pas.
+    //
+    // `expediteur` est `None` sur un dépôt anonyme : le sealed sender a retiré au serveur le
+    // pouvoir de savoir qui dépose, et il n'est pas question de le lui rendre pour économiser
+    // une notification.
+    crate::push::reveiller_detache(pool.clone(), reveil, group_id, expediteur);
 
     Ok(Json(EnvelopePosted { seq }))
 }

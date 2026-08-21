@@ -17,6 +17,7 @@
 pub mod auth;
 pub mod error;
 pub mod gateway;
+pub mod handle;
 pub mod log;
 pub mod presence;
 pub mod push;

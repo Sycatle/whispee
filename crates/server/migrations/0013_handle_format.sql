@@ -1,0 +1,44 @@
+-- Handles get a shape: `^[a-z0-9_]{3,32}$`.
+--
+-- # What had no shape, and what that cost
+--
+-- Until now `create_account` checked that a handle was non-empty and at most 64 bytes, and that
+-- was the whole of it. Two consequences, both concrete rather than theoretical.
+--
+-- `crypto_core::roles` compares handle strings to decide who administers a group. With case
+-- free, `Alice` and `alice` are two rows, two accounts, two identities that render identically
+-- in every list on every screen — and the second one can be registered after the first, on
+-- purpose, by someone who read the first. That is an impersonation primitive pointed straight at
+-- an authorisation check.
+--
+-- Device ids are `handle:name`, and the prefix used to be checked with `starts_with`. A handle
+-- allowed to contain `:` makes that check ambiguous: the id `alice:phone:laptop` is prefixed by
+-- the handle `alice` and equally by the handle `alice:phone`, so whoever registered the second
+-- one got a foothold in the first one's device namespace. `routes::register_device` now splits
+-- on the first `:` instead, and it is this constraint that makes the split unambiguous.
+--
+-- # This constraint will fail on a database holding handles outside the format
+--
+-- Stated up front because it is intended, not an accident to be worked around. There is no
+-- migration of existing rows, no `NOT VALID`, no grandfather clause: a legacy handle is exactly
+-- the thing the format exists to eliminate, and keeping one alive would keep the defect alive
+-- with it. The development database is disposable — drop it and let the migrations rebuild it.
+-- A deployment with real accounts outside the format is a decision for whoever operates it, and
+-- it is a decision about those accounts, not about this constraint.
+--
+-- # This is a belt, and Rust is the truth
+--
+-- The authority on the format is `crate::handle::validate`. It runs before any statement is
+-- issued, it produces the error message the client reads, and the web client mirrors it in
+-- `apps/web/src/lib/handle.ts` so the field can refuse a bad handle before a request is sent.
+-- This CHECK exists so that a future insert path written without going through that function
+-- fails loudly instead of quietly widening the format.
+--
+-- The two copies must stay in agreement, and there is no mechanism that makes them: it is a
+-- duplicated rule, held in three languages, kept aligned by whoever changes one of them. If they
+-- ever disagree, the Rust function is right and the one that drifted is the bug. The alternative
+-- — trusting a single copy — means either a database that accepts what the server refuses, or a
+-- server whose error messages are Postgres constraint violations.
+
+ALTER TABLE accounts
+    ADD CONSTRAINT handle_is_canonical CHECK (handle ~ '^[a-z0-9_]{3,32}$');

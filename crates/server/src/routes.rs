@@ -149,10 +149,14 @@ fn verify_group_mac(posting_key: &[u8], message: &[u8], mac: &[u8]) -> ApiResult
 ///
 /// # Why a route separate from envelope posting
 ///
-/// Because `envelopes` is never purged, and cannot be: each envelope consumes a generation of
-/// the MLS application ratchet, and too wide a gap would break decryption of what follows.
-/// Routing a typing indicator through that path would keep, forever, the trace of who hesitated
-/// before answering.
+/// Because an envelope is kept, and kept for a long time: `crate::purge_once` only deletes one
+/// past thirty days and five hundred sequences behind the group's head, and a quiet conversation
+/// never reaches that second condition at all. Routing a typing indicator through that path
+/// would keep the trace of who hesitated before answering for a month in a busy group and
+/// forever in a calm one.
+///
+/// The retention does not soften the reason, it only renames it: what used to be "kept forever"
+/// is now "kept long enough that keeping it is the same mistake".
 ///
 /// This path has no table. The signal exists for the duration of a relay, then no longer exists.
 ///
@@ -1710,14 +1714,44 @@ struct Envelope {
     payload: String,
 }
 
+/// A page of the mailbox, and where the mailbox now begins.
+///
+/// # Why this is not a bare array any more
+///
+/// Since `crate::purge_once` deletes envelopes, an empty page has become ambiguous: it means
+/// either "nothing new" or "everything you had not read is gone". A client that cannot tell them
+/// apart concludes the first, waits, and stays silently stuck on an MLS ratchet that will never
+/// advance again — the "would break silently" that `migrations/0009_partitioning.sql` refused to
+/// risk, and the reason a purge without this field would be a corruption rather than a deletion.
+///
+/// `oldest` is the smallest sequence the group still holds. The client compares it to its own
+/// cursor: `cursor < oldest - 1` means the envelopes in between no longer exist. It is then in a
+/// position to say so, stop trying to decrypt, and ask to be re-added — none of which it can do
+/// while it believes it is up to date.
+///
+/// **This is an unversioned breaking change to the response body**, taken deliberately rather
+/// than added as an optional sibling field: an optional field is one a client can keep ignoring,
+/// and a client that ignores this one is exactly the failure being fixed.
+///
+/// What it does not solve: it reports that a gap exists, never what was in it. The content, if
+/// the account archives, comes back from the vault; the MLS state does not come back at all and
+/// the device has to be re-introduced to the group.
+#[derive(Serialize)]
+struct EnvelopePage {
+    oldest: i64,
+    envelopes: Vec<Envelope>,
+}
+
 async fn fetch_envelopes(
     State(pool): State<PgPool>,
     Path(group_id): Path<String>,
     Query(query): Query<FetchQuery>,
     signed: Signed,
-) -> ApiResult<Json<Vec<Envelope>>> {
+) -> ApiResult<Json<EnvelopePage>> {
     let group_id = decode_group_id(&group_id)?;
     require_membership(&pool, &group_id, &signed.device_id).await?;
+
+    let oldest = oldest_surviving(&pool, &group_id).await?;
 
     let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
         "SELECT seq, payload FROM envelopes
@@ -1731,11 +1765,43 @@ async fn fetch_envelopes(
     .fetch_all(&pool)
     .await?;
 
-    Ok(Json(
-        rows.into_iter()
+    Ok(Json(EnvelopePage {
+        oldest,
+        envelopes: rows
+            .into_iter()
             .map(|(seq, payload)| Envelope { seq, payload: BASE64_STANDARD.encode(payload) })
             .collect(),
-    ))
+    }))
+}
+
+/// Smallest sequence a group still holds, or the first one it has yet to hand out.
+///
+/// Shared by the HTTP fetch and by the gateway's catch-up so the two cannot drift: a gap detected
+/// on one path and not the other would be worse than no detection at all, since the client would
+/// then have a source telling it everything is fine.
+///
+/// The fallback for a group with no envelope left is `next_seq + 1`, and it is not cosmetic. For
+/// a brand new group `next_seq` is 0, so `oldest` is 1 and a client at cursor 0 — the value that
+/// means "I know nothing" — computes no gap, which is right: it has missed nothing. For a group
+/// whose entire history was purged, `oldest` sits one past the last sequence ever issued, so
+/// every cursor behind it reports a gap, which is also right. Returning 0 in both cases would
+/// have made the empty group a permanent false negative.
+///
+/// One statement rather than a `MIN` plus a `next_seq` read: two round trips could straddle a
+/// concurrent post and report an `oldest` no consistent snapshot ever had.
+pub(crate) async fn oldest_surviving(pool: &PgPool, group_id: &[u8]) -> ApiResult<i64> {
+    let (oldest,): (i64,) = sqlx::query_as(
+        "SELECT COALESCE(
+             (SELECT MIN(seq) FROM envelopes WHERE group_id = $1),
+             g.next_seq + 1
+         )
+         FROM groups g WHERE g.id = $1",
+    )
+    .bind(group_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(oldest)
 }
 
 /// Cap on handles per presence request.

@@ -217,7 +217,11 @@ export function GroupPanel({
       )}
 
       {roles !== null && (
-        <div className="border-t border-(--color-border-subtle) pt-snug">
+        // Leaving is not another row of the roster, so it does not sit at roster distance: the
+        // extra `pt-gutter` on top of the list's `space-y-snug` is what says the subject changed.
+        // It stays a word rather than a glyph, by the rule at the top of `ui/IconButton.tsx` —
+        // rare, and undone only by somebody else's commit.
+        <div className="pt-gutter">
           <Button variant="quiet" size="sm" onClick={() => setLeaving(true)}>
             Leave the group
           </Button>

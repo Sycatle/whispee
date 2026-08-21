@@ -35,6 +35,25 @@ import { useNavigate, useRoute } from "@/routes/Router";
  * somebody clicks a name. Switching conversation, on the other hand, *keeps* the suffix — the
  * open column is a mode the user is in, and Discord's behaviour here is the one people expect.
  *
+ * # Sections are separated by space, and by nothing else
+ *
+ * The column is five blocks stacked — identity, proof, nickname, devices, and either the member
+ * list or the group controls. Each used to end in a `border-b`, so the panel was five hairlines
+ * tall, and a reader scrolling it saw a ruled form rather than a document. They are gone. Each
+ * section still carries `p-pane`, so two adjacent ones put a full `2rem` between their contents
+ * against `0.5rem` inside them — a four-to-one ratio, which is a wider margin than the hairline
+ * ever drew and is read the same way for the same reason: things that belong together sit
+ * closer.
+ *
+ * The one rule that stays is under the sticky header, and it is doing a different job. See the
+ * comment at the header itself.
+ *
+ * What this does not solve: it assumes every section keeps `p-pane`. A future section written
+ * with tighter padding would collapse into its neighbour with nothing to catch it, because
+ * nothing here enforces the ratio — the separation lives in each section's own class list rather
+ * than in a `gap` on the container, since the container also holds the header, which must not be
+ * pushed away from the content it covers.
+ *
  * # How it closes, and why the rules differ by width
  *
  * - `[✕]` everywhere. It is the control that always works and the one a mouse looks for.
@@ -154,7 +173,7 @@ function Petname({ handle }: { handle: string }) {
   }
 
   return (
-    <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
+    <section className="space-y-snug p-pane">
       <SectionTitle>Nickname</SectionTitle>
       <form
         className="space-y-snug"
@@ -206,7 +225,7 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
 
   return (
     <>
-      <section className="flex flex-col items-center gap-snug border-b border-(--color-border-subtle) p-pane text-center">
+      <section className="flex flex-col items-center gap-snug p-pane text-center">
         <Avatar
           seed={account.fingerprint}
           label={name.primary}
@@ -234,7 +253,7 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
         thing here that says *who this is*. That ordering is the section's whole argument, and it
         is why the strip never appears without the digits below it.
       */}
-      <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
+      <section className="space-y-snug p-pane">
         <SectionTitle>Proof</SectionTitle>
         <ProofStrip
           fingerprint={account.fingerprint}
@@ -269,7 +288,7 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
 
       <Petname key={account.handle} handle={account.handle} />
 
-      <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
+      <section className="space-y-snug p-pane">
         <SectionTitle>Devices</SectionTitle>
         {/* The count, then the identifiers. The fingerprint covers the account and does not move
             when a device is added, so this list is the only place a change of hardware is
@@ -367,9 +386,20 @@ export function DetailPanel({ view }: { view: ConversationView }) {
       ref={panel}
       id={DETAIL_PANEL_ID}
       aria-label="Conversation details"
-      className="safe-sides flex h-full min-h-0 w-full flex-col overflow-y-auto bg-(--color-surface-sunken)"
+      className="safe-sides flex h-full min-h-0 w-full flex-col overflow-y-auto bg-(--color-surface)"
     >
-      <header className="safe-top sticky top-0 z-(--z-index-sticky) flex items-center gap-snug border-b border-(--color-border-subtle) bg-(--color-surface-sunken) px-pane py-snug">
+      {/*
+        The header keeps its hairline while the sections below have lost theirs, and the two are
+        not the same kind of line. A section boundary separates two blocks that are simply next to
+        each other, and space says that better than a rule. This one separates a bar that stays
+        put from content that slides underneath it: the scrolled sentence has to stop somewhere
+        visible, and without the rule it fades into the identically coloured bar mid-word.
+
+        The fill has to be opaque and has to match the panel exactly, which is why it is repeated
+        here rather than inherited — a sticky element with no background of its own shows whatever
+        is passing behind it.
+      */}
+      <header className="safe-top sticky top-0 z-(--z-index-sticky) flex items-center gap-snug border-b border-(--color-border-subtle) bg-(--color-surface) px-pane py-snug">
         {!duo && (
           <IconButton
             label="Back to the conversation"
@@ -393,7 +423,7 @@ export function DetailPanel({ view }: { view: ConversationView }) {
       {/* A group that has not singled anybody out lists its members; picking one is a navigation,
           so the back gesture collapses the card and leaves the column open. */}
       {focused === undefined && (
-        <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
+        <section className="space-y-snug p-pane">
           <SectionTitle>Members</SectionTitle>
           <ul className="space-y-tight">
             {view.accounts.map((account) => {
@@ -410,7 +440,7 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                       detail: { handle: account.handle },
                     })
                   }
-                  className="flex w-full items-center gap-snug rounded-control p-snug text-left text-body hover:bg-(--color-surface) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
+                  className="flex w-full items-center gap-snug rounded-control p-snug text-left text-body hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
                 >
                   <Avatar
                     seed={account.fingerprint}

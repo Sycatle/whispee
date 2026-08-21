@@ -19,6 +19,28 @@ import { cn } from "./cn.ts";
  * `<h2>` and not a configurable level: these all sit under one screen title, and a prop for it
  * would only be a way to get the order wrong.
  *
+ * # A surface, not a control
+ *
+ * This used to be `rounded-control border bg-(--color-surface)`: a hairline drawn around a block
+ * that was already the same colour as the settings pane it sits on. The border was doing the
+ * whole job of saying "this is a thing", which is the wrong way round — a panel is a surface the
+ * reader stands on, not a control they operate, and a surface is told apart by what it is made
+ * of rather than by a line drawn around it. So the fill changed to `--color-surface-raised`, one
+ * step above the pane, the hairline went, and the corner moved to `--radius-surface`, which is
+ * twice `--radius-control` because a corner has to scale with the box it turns.
+ *
+ * The settings pane stacks six of these. Six hairlines in a column read as a table with no data
+ * in it; six raised blocks separated by `--spacing-pane` read as six things, which is what they
+ * are.
+ *
+ * What this does not solve, and it is worth being plain about it: in the light palette
+ * `--color-surface-raised` is `oklch(1 0 0)` against a pane of `oklch(0.985 0.003 265)`. That is
+ * a one-and-a-half percent step, and on a dim or badly calibrated screen the edge of a panel is
+ * effectively invisible — the spacing and the heading carry it alone. The dark palette has five
+ * times that separation and is not in question. Putting the hairline back would fix the light
+ * case and undo the point of the change; the real fix is a light `--color-surface` that steps
+ * further down, which is a palette decision and not this component's to make.
+ *
  * # `tone="danger"` is a border, not a colour scheme
  *
  * The destructive panels — remove the lock, forget this identity — are marked by their edge and
@@ -27,14 +49,18 @@ import { cn } from "./cn.ts";
  * must be read. Same doctrine as `Verification.tsx`: emphasis is spent where it changes a
  * decision.
  *
+ * The danger edge survives the change above, and now it is the only edge in the file. That is an
+ * improvement rather than an inconsistency: when every panel had a hairline, the red one was a
+ * hairline in a different colour; now a border on a panel means exactly one thing.
+ *
  * What this does not solve: it does not confirm anything. A panel that deletes data still needs
  * a dialog in front of the action, and the tone here is a warning, not a guard.
  */
-const panel = cva("rounded-control border bg-(--color-surface) p-pane", {
+const panel = cva("rounded-surface bg-(--color-surface-raised) p-pane", {
   variants: {
     tone: {
-      default: "border-(--color-border-subtle)",
-      danger: "border-(--color-danger)",
+      default: "",
+      danger: "border border-(--color-danger)",
     },
   },
   defaultVariants: { tone: "default" },

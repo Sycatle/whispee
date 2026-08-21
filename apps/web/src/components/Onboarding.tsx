@@ -325,6 +325,24 @@ export function Onboarding({
  * What it does not solve: `pair` is not really a peer of the other two, since choosing it
  * replaces the whole screen instead of reshaping this form. The control shows it as a peer
  * because that is how the user thinks about it — three ways to end up signed in.
+ *
+ * # This one keeps its hairlines, against the rule everywhere else
+ *
+ * Section boundaries elsewhere in the client have given up their `border-b` for space, because a
+ * rule between two blocks that merely follow one another is a line drawn where nothing happens.
+ * This is not that case, and the distinction is worth stating so the next pass does not
+ * "finish the job" here.
+ *
+ * These three are rows of one control, not sections of a page. They share a border box, they are
+ * flush against each other by design — the segments have to touch, or they stop reading as one
+ * choice with three positions and start reading as three separate buttons — and the only thing
+ * marking where one option's two lines end and the next one's begin is the rule between them.
+ * Take it away and the group becomes six lines of text in a box, with the reader counting to
+ * work out which caption belongs to which name.
+ *
+ * So: a rule between two blocks of different natures is noise; a rule between two rows of the
+ * same nature in a dense list is doing work. `last:border-b-0` keeps the final row from drawing
+ * a second line on top of the container's own edge.
  */
 function ModeChoice({ mode, onChoose }: { mode: Mode; onChoose: (mode: Mode) => void }) {
   return (

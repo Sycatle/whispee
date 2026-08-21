@@ -7,6 +7,7 @@ import { Banner } from "@/ui/Banner";
 import { Button } from "@/ui/Button";
 import { Field } from "@/ui/Field";
 import { Icon } from "@/ui/Icon";
+import { IconButton } from "@/ui/IconButton";
 import { Panel } from "@/ui/Panel";
 import { Textarea } from "@/ui/Textarea";
 
@@ -86,10 +87,22 @@ export function PairDevice({ onDone }: { onDone: () => void }) {
       <Panel
         title="Confirmation code"
         description="This code must be identical on both screens. If it differs, stop: the device you are pairing is not the one you think it is."
+        // "Done" here has exactly one effect — it closes this panel — so it becomes a glyph by
+        // the rule at the top of `ui/IconButton.tsx`: frequent, reversible, and ✕ is the one
+        // picture nobody has to be taught. The accessible name stays "Done", because that is
+        // what the reader is agreeing to: the two codes matched.
+        //
+        // What this does not solve: the glyph is a cross and the name is an affirmation, and
+        // those do not say the same thing. A check mark would, and there is none in the icon
+        // inventory (`ui/Icon.tsx`), which is closed on purpose. Until one is added this control
+        // reads as dismissal to the eye and as acknowledgement to a screen reader.
         actions={
-          <Button variant="primary" onClick={onDone}>
-            Done
-          </Button>
+          <IconButton
+            label="Done"
+            variant="primary"
+            icon={<Icon name="close" />}
+            onClick={onDone}
+          />
         }
       >
         {/* The one string on this screen a human is asked to compare character by character, so
@@ -109,11 +122,7 @@ export function PairDevice({ onDone }: { onDone: () => void }) {
     <Panel
       title="Add a device"
       description="On the new device, choose “Add this device to an account”, then scan its square or copy its code here. This code holds no secret: it is only an ephemeral public key, useless to anyone who intercepts it."
-      actions={
-        <Button variant="quiet" size="sm" onClick={onDone}>
-          Close
-        </Button>
-      }
+      actions={<IconButton label="Close" icon={<Icon name="close" />} onClick={onDone} />}
     >
       <p className="text-caption text-(--color-ink-muted)">
         Only scan the screen you are holding: that is the one thing telling your device apart from
@@ -236,7 +245,11 @@ export function ShowPairingCode({
       <div className="flex flex-col gap-snug">
         {/* The text stays, under the square: not every platform can scan, and a desktop computer
             often has no camera pointed at the other screen. */}
-        <p className="break-all rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-gutter font-(--font-evidence) text-caption text-(--color-ink)">
+        {/* Sunken, not raised: the panel around it is now `--color-surface-raised` itself, so the
+            code block was about to become an outline with no fill of its own. A block of evidence
+            set into the panel reads as a thing to copy out, which is what it is — and it matches
+            the recovery phrase in `Devices.tsx`, which is the same kind of block. */}
+        <p className="break-all rounded-control border border-(--color-border-subtle) bg-(--color-surface-sunken) p-gutter font-(--font-evidence) text-caption text-(--color-ink)">
           {code}
         </p>
         {/*

@@ -6,6 +6,8 @@ import { useReport } from "@/state/report";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
 import { Button } from "@/ui/Button";
+import { Icon } from "@/ui/Icon";
+import { IconButton } from "@/ui/IconButton";
 import { Panel } from "@/ui/Panel";
 import { Spinner } from "@/ui/Spinner";
 
@@ -118,9 +120,7 @@ export function DeviceSettings({ onClose }: { onClose: () => void }) {
       title="Your devices"
       description="All your devices have exactly the same access, everywhere. There is no primary device."
       actions={
-        <Button variant="quiet" size="sm" onClick={onClose}>
-          Close
-        </Button>
+        <IconButton label="Close" icon={<Icon name="close" />} onClick={onClose} />
       }
     >
       {account === null ? (
@@ -185,7 +185,11 @@ export function DeviceSettings({ onClose }: { onClose: () => void }) {
         </ul>
       )}
 
-      <div className="mt-pane border-t border-(--color-border-subtle) pt-gutter">
+      {/* The list above and the explanation below are two different kinds of thing — a roster
+          and an argument about what revoking costs — so the change of subject is carried by the
+          distance rather than by a rule. `mt-section` is a step above the `gap-snug` between the
+          device rows, which is what makes the break read as a break at all. */}
+      <div className="mt-section">
         <p className="text-caption text-(--color-ink-muted)">
           <strong>Revoking</strong> is the right answer for a device that is lost or out of
           service: it stops receiving, and no longer decrypts the rest of your conversations.

@@ -119,6 +119,26 @@ Note what this harness cannot reach: `node --test` has no DOM, so neither Indexe
 Tauri IPC is covered. Anything touching native storage or migration is verified by hand, and a
 patch there should say in its description how it was exercised.
 
+### What the tooling structurally cannot see
+
+Typecheck, lint and the suites catch a great deal and share a blind spot: **they check that the
+code is consistent with itself, never that it is consistent with what it claims.** Four defects
+found in one week, none of them by a tool, all of them by a second reader:
+
+- **Two names for one condition.** A slice invented its own error type where the caller was
+  already catching another by `instanceof`. Both compile, the `catch` silently stops matching.
+- **A `catch` on a promise that cannot reject.** Dead code whose comment asserted a failure mode
+  that does not exist — the worse half, in a repository where the argument is the deliverable.
+- **A rule applied to one call site out of two.** If the other site is left alone, the rule was a
+  justification found after the fact rather than a rule.
+- **A comment that outlived its subject.** "This handle cannot be changed" stayed true-sounding
+  for exactly as long as nobody changed it.
+
+There is no linter for any of these. What catches them is somebody reading the sentence next to
+the code and asking whether it is still true — which is the reason the next section asks for
+comments that argue rather than describe. A description ages quietly; an argument fails loudly,
+because you can check whether its premise still holds.
+
 ## Commits
 
 [Conventional Commits](https://www.conventionalcommits.org). The history already follows it,

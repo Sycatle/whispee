@@ -72,7 +72,7 @@ const GROUPS: { heading: string; entries: Entry[] }[] = [
   },
 ];
 
-const TITLES: Record<SettingsSection, string> = {
+export const TITLES: Record<SettingsSection, string> = {
   profile: "Name and handle",
   devices: "Your devices",
   pairing: "Add a device",

@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 
 import { PresenceDot } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
-import { compactNameOf, nameMatches, nameOf } from "@/lib/naming";
+import { nameMatches, nameOf, titleOf } from "@/lib/naming";
 import { useBinding, useRunBinding } from "@/app/Shortcuts";
 import { roster } from "@/lib/roster";
 import { useRoving } from "@/lib/useRoving";
@@ -400,12 +400,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                 looks at this list. So the name shown here has to be able to stand alone, which
                 is precisely what `compactNameOf` refuses to let it do when it cannot.
               */
-              const title =
-                view.accounts.map((a) => compactNameOf(a.handle, names, rendered)).join(", ") ||
-                [...new Set(view.peers.map((p) => p.name))]
-                  .map((n) => compactNameOf(n, names, rendered))
-                  .join(", ") ||
-                "empty conversation";
+              const title = titleOf(view, names, rendered);
 
               return (
                 <li key={view.key}>

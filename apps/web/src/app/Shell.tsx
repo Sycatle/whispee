@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
-import { COMPOSER_ID, Conversation } from "@/components/Conversation";
+import { COMPOSER_ID, Conversation, membersOf } from "@/components/Conversation";
 import { useDuo, useTrio } from "@/lib/duo";
+import { titleOf } from "@/lib/naming";
+import { useNames } from "@/state/names";
 import { useRevision, useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
 import { ConversationHeader } from "./ConversationHeader";
@@ -9,7 +11,8 @@ import { DetailPanel } from "./DetailPanel";
 import { EmptyCenter } from "./EmptyCenter";
 import { NewConversation } from "./NewConversation";
 import { Rail } from "./Rail";
-import { SettingsScreen } from "./SettingsScreen";
+import { TITLES, SettingsScreen } from "./SettingsScreen";
+import { RouteAnnouncer } from "./RouteAnnouncer";
 import { useBinding } from "./Shortcuts";
 import { ShortcutsHelp } from "./ShortcutsHelp";
 
@@ -134,6 +137,28 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
   }, [duo, route, session, navigate, revision]);
 
   const [helping, setHelping] = useState(false);
+  const names = useNames();
+
+  /**
+   * The name of the screen, for the announcement.
+   *
+   * Computed here rather than inside each screen because the region that says it has to be
+   * mounted above all of them — see `RouteAnnouncer`. `titleOf` is the same function the bar and
+   * the rail use, so the conversation is announced by the name it is displayed under; a second
+   * expression here would eventually announce "Charlie" for a row labelled "@charlie8295".
+   */
+  const announced = (): string => {
+    switch (route.kind) {
+      case "home":
+        return "Home";
+      case "new":
+        return "New conversation";
+      case "settings":
+        return route.section === null ? "Settings" : `Settings, ${TITLES[route.section]}`;
+      case "conversation":
+        return view === null ? "Conversation" : titleOf(view, names, membersOf(view));
+    }
+  };
 
   /**
    * The two bindings that belong to the shell rather than to a panel.
@@ -204,6 +229,7 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
           </main>
         )}
 
+        <RouteAnnouncer label={announced()} />
         <ShortcutsHelp open={helping} onOpenChange={setHelping} />
       </div>
     );
@@ -283,6 +309,7 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
         </div>
       </div>
 
+      <RouteAnnouncer label={announced()} />
       <ShortcutsHelp open={helping} onOpenChange={setHelping} />
     </div>
   );

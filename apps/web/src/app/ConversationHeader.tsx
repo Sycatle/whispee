@@ -5,7 +5,7 @@ import { membersOf } from "@/components/Conversation";
 import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
 import { useDuo, useTrio } from "@/lib/duo";
 import { normalize, validate } from "@/lib/handle";
-import { compactNameOf } from "@/lib/naming";
+import { compactNameOf, titleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { Button } from "@/ui/Button";
 import { cn } from "@/ui/cn";
@@ -101,13 +101,9 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
     member's. The full two-line form is in the detail column, which is where somebody goes when
     they want to know exactly who is in the room.
   */
+  // Still needed below: the typing line names people against the same set the title does.
   const members = membersOf(view);
-  const title =
-    view.accounts.map((a) => compactNameOf(a.handle, names, members)).join(", ") ||
-    [...new Set(view.peers.map((p) => p.name))]
-      .map((n) => compactNameOf(n, names, members))
-      .join(", ") ||
-    "empty conversation";
+  const title = titleOf(view, names, members);
 
   const isTyping = session.typingIn(view);
 

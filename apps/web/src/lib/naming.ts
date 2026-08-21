@@ -173,3 +173,46 @@ export function nameMatches(handle: string, sources: NameSources, term: string):
   const candidates = [handle, sources.petnames[handle], sources.profiles[handle]?.name];
   return candidates.some((candidate) => candidate !== undefined && fold(candidate).includes(needle));
 }
+
+/**
+ * The little a conversation needs to be named.
+ *
+ * Structural rather than an import of `ConversationView`, which is the rule `lib/thread.ts`
+ * follows for the same reason: this module is pure, and typing it against the session's shape
+ * would drag the whole conversation graph into a test that wants two objects.
+ */
+export interface Named {
+  accounts: readonly { handle: string }[];
+  peers: readonly { name: string }[];
+}
+
+/**
+ * What a conversation is called, in one line.
+ *
+ * This was written out twice — once in the bar above the thread, once for every row of the rail
+ * — as the same four-line expression with a different `among`. A third copy was about to be
+ * written for the announcement made when the conversation changes, and three copies of a rule
+ * about *which name is safe to show* is how one screen ends up calling somebody Charlie while
+ * another calls them @charlie8295.
+ *
+ * `among` stays a parameter because it is the one thing that genuinely differs, and it is not a
+ * detail: it is the set a name has to be unambiguous *within*. The bar compares against the
+ * members of the conversation, the rail against every handle it draws — a display name that
+ * could be mistaken for somebody in another conversation is ambiguous in a list of conversations
+ * and perfectly clear inside one of them.
+ *
+ * Falls back to the handles the peers are known by, and then to a phrase, so a conversation is
+ * never nameless: an empty title in the rail would be a row that cannot be described, and in the
+ * announcement it would be silence where a name was expected.
+ */
+export function titleOf(view: Named, sources: NameSources, among: Iterable<string>): string {
+  const listed = [...among];
+
+  return (
+    view.accounts.map((account) => compactNameOf(account.handle, sources, listed)).join(", ") ||
+    [...new Set(view.peers.map((peer) => peer.name))]
+      .map((name) => compactNameOf(name, sources, listed))
+      .join(", ") ||
+    "empty conversation"
+  );
+}

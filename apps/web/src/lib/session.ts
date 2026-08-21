@@ -18,6 +18,7 @@ import * as envelope from "./envelope";
 import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
 import * as derive from "./conversation-view.ts";
+import { PresenceTracker } from "./session-presence.ts";
 import { composeStored } from "./session-persist.ts";
 import { fromBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
@@ -608,30 +609,22 @@ export class Session {
   }
 
   /**
-   * Last known activity of each peer, in milliseconds.
+   * Who was last seen when.
    *
-   * **Never persisted**, for the same reason as receipts and typing indicators: presence
-   * restored across sessions would show as online someone nobody has seen since. It comes back
-   * on its own at the first poll.
+   * **Never persisted**, for the same reason as receipts and typing indicators: presence restored
+   * across sessions would show as online someone nobody has seen since. It comes back on its own
+   * at the first poll — which is why it could leave without `persist` changing at all.
    */
-  private presence = new Map<string, number>();
-
-  /**
-   * Server clock at the last presence poll.
-   *
-   * Kept because freshness is judged by comparing two timestamps, and the browser's can be
-   * anything at all.
-   */
-  private presenceNow = 0;
+  private readonly presence = new PresenceTracker();
 
   /** Last activity of an account, or `undefined` if the server has nothing to say about it. */
   presenceOf(handle: string): number | undefined {
-    return this.presence.get(handle);
+    return this.presence.lastSeen(handle);
   }
 
   /** Server clock at the last poll: the reference for judging freshness. */
   get presenceClock(): number {
-    return this.presenceNow;
+    return this.presence.clock;
   }
 
   /** Is the vault on for this account? */
@@ -2123,7 +2116,7 @@ export class Session {
     if (key === "presence") {
       await this.api.setPresenceOptout(!value);
       // What the server has just erased must not stay on screen until the next poll.
-      this.presence = new Map();
+      this.presence.clear();
     }
 
     this.signals[key] = value;
@@ -2415,14 +2408,7 @@ export class Session {
           .filter((handle) => handle !== this.handle),
       ),
     ];
-    if (handles.length === 0) return;
-
-    // The server caps at 64 per request. Beyond that we poll the first ones: a visible limit beats
-    // a silent 400, and an address book that size would need a different split anyway.
-    const { now, accounts } = await this.api.presence(handles.slice(0, 64));
-
-    this.presenceNow = now * 1000;
-    this.presence = new Map(accounts.map((entry) => [entry.handle, entry.last_seen * 1000]));
+    await this.presence.refresh(this.api, handles);
   }
 
   /**

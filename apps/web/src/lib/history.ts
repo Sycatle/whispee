@@ -67,12 +67,23 @@ interface StoredHistory {
    * for a message the server has numbered.
    */
   outbox?: Record<string, Pending[]>;
+  /**
+   * How far the user had actually read, per conversation.
+   *
+   * Persisted, while the receipts beside it are not, and the difference is the point: a receipt
+   * is a claim made **to someone else** and means "as of then", so replaying it across sessions
+   * would assert a reading nobody has confirmed since. This is a fact about this screen, for this
+   * person. Now that the thread survives a reload, forgetting it would mark a conversation you
+   * read yesterday as entirely unread today.
+   */
+  read?: Record<string, number>;
 }
 
 /** What a conversation contributes to the cache. */
 export interface Cached {
   messages: Message[];
   outbox: Pending[];
+  readCursor: number;
 }
 
 /**
@@ -85,8 +96,10 @@ export interface Cached {
 export function encodeHistory(conversations: Map<string, Cached>): Uint8Array {
   const out: Record<string, StoredMessage[]> = {};
   const queued: Record<string, Pending[]> = {};
+  const read: Record<string, number> = {};
 
-  for (const [key, { messages, outbox }] of conversations) {
+  for (const [key, { messages, outbox, readCursor }] of conversations) {
+    if (readCursor > 0) read[key] = readCursor;
     const recent = messages
       .slice()
       .sort((a, b) => a.seq - b.seq)
@@ -107,7 +120,7 @@ export function encodeHistory(conversations: Map<string, Cached>): Uint8Array {
     if (outbox.length > 0) queued[key] = outbox;
   }
 
-  const payload: StoredHistory = { v: 1, conversations: out, outbox: queued };
+  const payload: StoredHistory = { v: 1, conversations: out, outbox: queued, read };
   return new TextEncoder().encode(JSON.stringify(payload));
 }
 
@@ -134,7 +147,7 @@ export function decodeHistory(bytes: Uint8Array): Map<string, Cached> {
   const at = (key: string): Cached => {
     const existing = restored.get(key);
     if (existing) return existing;
-    const fresh: Cached = { messages: [], outbox: [] };
+    const fresh: Cached = { messages: [], outbox: [], readCursor: 0 };
     restored.set(key, fresh);
     return fresh;
   };
@@ -174,6 +187,10 @@ export function decodeHistory(bytes: Uint8Array): Map<string, Cached> {
         state: "failed",
       });
     }
+  }
+
+  for (const [key, cursor] of Object.entries(payload.read ?? {})) {
+    if (typeof cursor === "number" && restored.has(key)) at(key).readCursor = cursor;
   }
 
   for (const [key, cached] of restored) {

@@ -669,6 +669,9 @@ export class Session {
         // After the spread: `freshSignalState` starts every conversation with an empty outbox,
         // and this is the one part of that state that must not be forgotten between sessions.
         outbox: cached.get(toHex(groupId))?.outbox ?? [],
+        // Also after the spread, and for the same reason: what the user has already read is a
+        // fact about this screen, not a claim made to anyone, so it belongs across sessions.
+        readCursor: cached.get(toHex(groupId))?.readCursor ?? 0,
       });
     }
 
@@ -986,7 +989,7 @@ export class Session {
           new Map(
             [...this.conversations].map(([key, view]) => [
               key,
-              { messages: view.messages, outbox: view.outbox },
+              { messages: view.messages, outbox: view.outbox, readCursor: view.readCursor },
             ]),
           ),
         ),
@@ -1940,7 +1943,39 @@ export class Session {
    * The receipt itself goes out on the next pass, with the others.
    */
   markRead(view: ConversationView): void {
+    const advanced = view.contentCursor > view.readCursor;
     view.readCursor = Math.max(view.readCursor, view.contentCursor);
+
+    // Written only when it moves. This runs on every render of an open thread and on every tab
+    // focus; persisting each time would re-seal the whole state for a number that did not change.
+    if (advanced) void this.persist();
+  }
+
+  /**
+   * How many messages have arrived in this conversation since the user last looked.
+   *
+   * Counted from the thread rather than from the difference between two cursors, because the
+   * cursors advance on **envelopes** and a run of receipts would otherwise read as unread
+   * messages. Our own are excluded: nobody is behind on what they wrote themselves.
+   */
+  unreadIn(view: ConversationView): number {
+    return view.messages.filter((message) => !message.mine && message.seq > view.readCursor).length;
+  }
+
+  /**
+   * When this conversation last had something in it, for ordering the list.
+   *
+   * The declared stamp when there is one, and `0` otherwise — an older thread with no stamps
+   * sinks rather than floating to the top on a value invented for it. A queued message counts:
+   * the conversation you just wrote in is the one you are in.
+   */
+  lastActivityIn(view: ConversationView): number {
+    const written = view.outbox.reduce((latest, entry) => Math.max(latest, entry.sentAt), 0);
+    const received = view.messages.reduce(
+      (latest, message) => Math.max(latest, message.sentAt ?? 0),
+      0,
+    );
+    return Math.max(written, received);
   }
 
   /** State to show on a message we sent: sent, delivered, read. */

@@ -69,6 +69,21 @@ export function Messages({
   // per message would let a thread rendered across midnight label two neighbours inconsistently.
   const now = Date.now();
 
+  /**
+   * Where the "new messages" line goes, frozen when the conversation opens.
+   *
+   * Read from a ref rather than from `view.readCursor`, because the effect below moves that
+   * cursor to the end the moment the thread is on screen — so a line drawn from the live value
+   * would appear and vanish in the same frame. What the reader wants is the boundary as it was
+   * when they arrived, staying put while they scroll up to it.
+   */
+  const boundary = useRef(view.readCursor);
+  useEffect(() => {
+    boundary.current = view.readCursor;
+    // Deliberately keyed on the conversation and nothing else: re-running it when the cursor
+    // moves is exactly the disappearing line described above.
+  }, [view.key]);
+
   // The outbox counts: a message the user just wrote appears there first, and not scrolling to it
   // would hide the very thing they are waiting to see.
   useEffect(() => {
@@ -130,6 +145,13 @@ export function Messages({
           const grouped =
             before !== undefined &&
             continues(authorOf(message), message.sentAt, authorOf(before), before.sentAt);
+          // The first message past the boundary, and only if something precedes it: a line above
+          // the very first message of a thread marks nothing.
+          const opensUnread =
+            !message.mine &&
+            before !== undefined &&
+            message.seq > boundary.current &&
+            before.seq <= boundary.current;
 
           // Extracted before the JSX: type narrowing is lost inside a closure, and working
           // around it inline made the render unreadable.
@@ -146,6 +168,17 @@ export function Messages({
                 `role="separator"` rather than a heading level: it divides the list, it does not
                 introduce a section a reader would want to navigate to.
               */}
+              {opensUnread && (
+                <li
+                  role="separator"
+                  className="flex items-center gap-2 py-1 text-xs text-(--color-accent)"
+                >
+                  <span className="h-px flex-1 bg-(--color-accent)/40" />
+                  New messages
+                  <span className="h-px flex-1 bg-(--color-accent)/40" />
+                </li>
+              )}
+
               {heading !== undefined && (
                 <li role="separator" className="py-2 text-center">
                   <span className="rounded-full bg-(--color-surface-raised) px-3 py-1 text-xs text-(--color-ink-muted)">

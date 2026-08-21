@@ -181,7 +181,8 @@ function encodeBody(body: Content): Uint8Array {
  *
  * A receipt carries "up to this number", not "this message". A reading session therefore costs
  * one envelope instead of one per bubble — otherwise opening a conversation two hundred messages
- * behind would produce two hundred of them, in a table that is never purged.
+ * behind would produce two hundred of them, in a table the server only prunes past thirty days
+ * and five hundred sequences — which is to say, not soon enough to matter here.
  */
 export function encodeReceipt(state: ReceiptState, seq: number): Uint8Array {
   const out = new Uint8Array(1 + 1 + 8);

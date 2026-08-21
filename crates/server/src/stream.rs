@@ -22,8 +22,12 @@
 //! # Nothing is stored
 //!
 //! Ephemeral signals (typing indicator) go through this hub **and never reach the disk**. That
-//! is the property justifying its existence: `envelopes` is never purged, and it cannot be
-//! purged after the fact without punching a hole in the application ratchet.
+//! is the property justifying its existence, and the arrival of a retention policy does not
+//! weaken it — it sharpens it. `envelopes` is now purged, but only past thirty days and only
+//! five hundred sequences behind the group's head (`crate::purge_once`): a typing indicator
+//! routed through that table would therefore be kept for a month, and kept forever in any
+//! conversation quiet enough never to reach five hundred envelopes. "Deleted eventually, in some
+//! groups" is not the same property as "never written".
 //!
 //! One reservation since [`Hub::attach`]: inter-instance fanout makes signals travel through
 //! `pg_notify`. They are not written to a table there — the notification queue lives in shared

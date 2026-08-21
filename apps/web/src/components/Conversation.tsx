@@ -54,9 +54,18 @@ export function Conversation({
     setText("");
     const cite = replyTo;
     setReplyTo(null);
+
+    // A plain message cannot fail here any more: `send` queues it, shows it, and reports a
+    // failure on the bubble itself. A reply still can — it points at a sequence number, which is
+    // exactly what a queued message has not got — so that one keeps the banner.
+    if (cite === null) {
+      await session.send(view, body);
+      onChanged();
+      return;
+    }
+
     try {
-      if (cite !== null) await session.replyTo(view, cite, body);
-      else await session.send(view, body);
+      await session.replyTo(view, cite, body);
       onChanged();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));

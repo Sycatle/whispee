@@ -12,7 +12,7 @@ import { type PairingCode, awaitPairing, decodePairingCode, encodePairingCode } 
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
 import * as envelope from "./envelope";
-import { decodeHistory, encodeHistory } from "./history";
+import { type Cached, decodeHistory, encodeHistory } from "./history";
 import { fromBase64, toBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
@@ -87,6 +87,42 @@ export type VerificationState =
   | { status: "verified" }
   /** The fingerprint changed since verification: a reinstall, or a substitution. */
   | { status: "changed"; previous: string };
+
+/**
+ * A message written but not yet accepted by the server.
+ *
+ * # Why these live beside `messages` and not inside it
+ *
+ * A `Message` is identified by `seq`, which the **server** assigns. Everything downstream depends
+ * on that: `view.mine` skips our own envelopes by sequence, receipts acknowledge up to a number,
+ * a reply points at one. A message that has not been posted has no such number, and inventing a
+ * placeholder would put a fake one into all of it — the kind of value that leaks into a receipt
+ * and acknowledges a message nobody sent.
+ *
+ * So they are kept apart, rendered after the thread, and moved into it under the number the
+ * server gives them.
+ *
+ * # What is deliberately not queued
+ *
+ * Attachments, reactions and replies. An attachment has to upload before its descriptor can be
+ * written, so "queued" would mean holding a file in the outbox and re-uploading it later —
+ * a different feature with its own failure modes. A reaction that fails costs a tap. A reply
+ * points at a `seq`, and a `seq` is exactly what an unsent message does not have.
+ */
+export interface Pending {
+  /** Ours, not the server's. Stable across a reload, which is what makes retrying possible. */
+  localId: string;
+  text: string;
+  sentAt: number;
+  /**
+   * `sending` while a request is in flight, `failed` once one has come back badly.
+   *
+   * A reload turns `sending` into `failed`: a request whose answer we did not see may or may not
+   * have arrived, and the honest thing is to say it did not go rather than to retry silently and
+   * risk a double. The user decides.
+   */
+  state: "sending" | "failed";
+}
 
 /** Group roles: a single admin, with moderators under them. */
 export interface Roles {
@@ -171,6 +207,14 @@ export interface ConversationView {
   typing: Typing[];
   /** Last time we emitted a typing indicator, for the debounce. */
   typingSentAt?: number;
+  /**
+   * Written here, not yet accepted by the server.
+   *
+   * Persisted, unlike the rest of the ephemeral state: a message the user typed is the one thing
+   * on this screen they would be angry to lose, and losing it silently on a reload is exactly
+   * what happened before.
+   */
+  outbox: Pending[];
 }
 
 /**
@@ -181,9 +225,9 @@ export interface ConversationView {
  */
 function freshSignalState(): Pick<
   ConversationView,
-  "receipts" | "contentCursor" | "readCursor" | "typing"
+  "receipts" | "contentCursor" | "readCursor" | "typing" | "outbox"
 > {
-  return { receipts: new Map(), contentCursor: 0, readCursor: 0, typing: [] };
+  return { receipts: new Map(), contentCursor: 0, readCursor: 0, typing: [], outbox: [] };
 }
 
 /**
@@ -600,14 +644,16 @@ export class Session {
 
     // Decrypted before the views are built, so each one opens with its thread already in it
     // rather than with an empty list the network fills in a moment later.
-    const cached = stored.history ? decodeHistory(await atRest.open(stored.history)) : new Map();
+    const cached = stored.history
+      ? decodeHistory(await atRest.open(stored.history))
+      : new Map<string, Cached>();
 
     const conversations = new Map<string, ConversationView>();
     for (const groupId of stored.groupIds) {
       conversations.set(toHex(groupId), {
         groupId,
         key: toHex(groupId),
-        messages: cached.get(toHex(groupId)) ?? [],
+        messages: cached.get(toHex(groupId))?.messages ?? [],
         peers: client.peerFingerprints(groupId) as Peer[],
         accounts: [],
         epoch: client.epoch(groupId),
@@ -620,6 +666,9 @@ export class Session {
           ? fromBase64(stored.postingKeys[toHex(groupId)])
           : undefined,
         ...freshSignalState(),
+        // After the spread: `freshSignalState` starts every conversation with an empty outbox,
+        // and this is the one part of that state that must not be forgotten between sessions.
+        outbox: cached.get(toHex(groupId))?.outbox ?? [],
       });
     }
 
@@ -934,7 +983,12 @@ export class Session {
       ),
       history: await this.atRest.seal(
         encodeHistory(
-          new Map([...this.conversations].map(([key, view]) => [key, view.messages])),
+          new Map(
+            [...this.conversations].map(([key, view]) => [
+              key,
+              { messages: view.messages, outbox: view.outbox },
+            ]),
+          ),
         ),
       ),
       ...(this.seenHead
@@ -1780,8 +1834,87 @@ export class Session {
     return fresh;
   }
 
+  /**
+   * Sends a message, showing it before the server has agreed to it.
+   *
+   * # Why the bubble appears first
+   *
+   * It used to appear last: the field emptied, the request went out, and the text existed nowhere
+   * until the answer came back. On a slow network that was a message the user had written and
+   * could no longer see; on a failure it was a red banner at the bottom of the application and
+   * the text gone for good.
+   *
+   * # Why this cannot throw
+   *
+   * A failure is now a state of the message, not an exception at the call site. The composer has
+   * nothing left to do about it — the text is safe in the outbox, the bubble says it did not go,
+   * and the retry belongs next to the bubble rather than in a banner that names no message.
+   */
   async send(view: ConversationView, text: string): Promise<void> {
-    await this.sendContent(view, { kind: "text", text });
+    const entry: Pending = {
+      // `randomUUID` rather than a counter: the outbox survives a reload, and a counter restarting
+      // at zero would collide with what is already in it.
+      localId: crypto.randomUUID(),
+      text,
+      sentAt: Date.now(),
+      state: "sending",
+    };
+
+    view.outbox.push(entry);
+    await this.persist();
+    await this.flush(view, entry);
+  }
+
+  /**
+   * Tries one queued message.
+   *
+   * The stamp is the one taken when it was written, not now: a message composed offline and sent
+   * twenty minutes later was written twenty minutes ago, and dating it to the moment the network
+   * came back would misreport the only thing the stamp is for.
+   */
+  private async flush(view: ConversationView, entry: Pending): Promise<void> {
+    entry.state = "sending";
+
+    try {
+      await this.sendContent(view, { kind: "text", text: entry.text }, entry.sentAt);
+      view.outbox = view.outbox.filter((queued) => queued.localId !== entry.localId);
+    } catch (error) {
+      entry.state = "failed";
+      console.warn("message not sent", error);
+    }
+
+    await this.persist();
+  }
+
+  /** Retries one message the user asked to send again. */
+  async retry(view: ConversationView, localId: string): Promise<void> {
+    const entry = view.outbox.find((queued) => queued.localId === localId);
+    if (entry) await this.flush(view, entry);
+  }
+
+  /** Drops one, when the user would rather rewrite it than send it. */
+  async discard(view: ConversationView, localId: string): Promise<void> {
+    view.outbox = view.outbox.filter((queued) => queued.localId !== localId);
+    await this.persist();
+  }
+
+  /**
+   * Retries everything queued, in order.
+   *
+   * Called when the network comes back rather than on a timer: retrying on a schedule would keep
+   * hammering a server that is down, and the events that matter — a reconnection, a resume — are
+   * already reported by `lifecycle.ts`.
+   *
+   * Serially, and stopping at the first failure: the order of a conversation is the order it was
+   * written in, and pushing on past a failure would let the second message overtake the first.
+   */
+  async flushOutbox(): Promise<void> {
+    for (const view of this.conversations.values()) {
+      for (const entry of [...view.outbox]) {
+        await this.flush(view, entry);
+        if (entry.state === "failed") break;
+      }
+    }
   }
 
   /**
@@ -1921,12 +2054,21 @@ export class Session {
     await this.persist();
   }
 
-  private async sendContent(view: ConversationView, body: content.Content): Promise<void> {
-    // Stamped from this device's clock, which is the only one available: the server's is not
-    // asked for, precisely so it learns nothing more than it already does, and a clock that is
-    // wrong here shows as wrong to the recipient rather than being silently corrected. `encode`
-    // drops the stamp for control traffic on its own.
-    const sentAt = Date.now();
+  private async sendContent(
+    view: ConversationView,
+    body: content.Content,
+    /**
+     * When it was written, if that is not now.
+     *
+     * Passed in for a queued message: one composed offline and sent twenty minutes later was
+     * written twenty minutes ago. Defaulted otherwise — this device's clock is the only one
+     * available, the server's is deliberately not asked for, and a clock that is wrong here shows
+     * as wrong to the recipient rather than being silently corrected. `encode` drops the stamp for
+     * control traffic on its own.
+     */
+    writtenAt?: number,
+  ): Promise<void> {
+    const sentAt = writtenAt ?? Date.now();
 
     // Padded **before** encryption: it is the plaintext size that determines the ciphertext size.
     // Padding afterwards would hide nothing more and cost as much.

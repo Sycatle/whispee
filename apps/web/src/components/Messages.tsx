@@ -69,9 +69,11 @@ export function Messages({
   // per message would let a thread rendered across midnight label two neighbours inconsistently.
   const now = Date.now();
 
+  // The outbox counts: a message the user just wrote appears there first, and not scrolling to it
+  // would hide the very thing they are waiting to see.
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
-  }, [visible.length]);
+  }, [visible.length, view.outbox.length]);
 
   // "Read" means **shown to someone**. So it is decided here, in the component that renders the
   // thread — not in the poll loop, which runs even with the window closed.
@@ -233,6 +235,49 @@ export function Messages({
             </Fragment>
           );
         })}
+        {/*
+          Written, not yet accepted. Rendered after the thread and never inside it: these have no
+          sequence number, and the whole reason they are kept apart is that nothing downstream can
+          mistake one for a message the server has numbered.
+        */}
+        {view.outbox.map((entry) => (
+          <li key={entry.localId} className="text-right">
+            <div
+              className={`inline-block max-w-[75%] wrap-anywhere rounded-lg px-3 py-2 text-left text-sm text-white ${
+                entry.state === "failed" ? "bg-(--color-danger)" : "bg-(--color-accent) opacity-60"
+              }`}
+            >
+              {entry.text}
+              <span className="mt-0.5 flex items-center justify-end gap-2 text-xs">
+                <time dateTime={new Date(entry.sentAt).toISOString()}>{timeOf(entry.sentAt)}</time>
+                {entry.state === "sending" ? (
+                  <span aria-label="sending">…</span>
+                ) : (
+                  <>
+                    {/* Named next to the message rather than in a banner: a banner at the bottom
+                        of the application says something failed without saying which. */}
+                    <span>not sent</span>
+                    <button
+                      type="button"
+                      onClick={() => void session.retry(view, entry.localId).then(onChanged)}
+                      className="underline"
+                    >
+                      Retry
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void session.discard(view, entry.localId).then(onChanged)}
+                      className="underline opacity-80"
+                    >
+                      Discard
+                    </button>
+                  </>
+                )}
+              </span>
+            </div>
+          </li>
+        ))}
+
         <div ref={bottom} />
       </ol>
 

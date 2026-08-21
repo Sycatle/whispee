@@ -36,7 +36,7 @@
  * the same guarantee the MLS state has always had, applied now to something more legible.
  */
 import * as content from "./content.ts";
-import type { Message } from "./session";
+import type { Message, Pending } from "./session";
 
 /**
  * Messages kept per conversation.
@@ -59,6 +59,20 @@ interface StoredMessage {
 interface StoredHistory {
   v: 1;
   conversations: Record<string, StoredMessage[]>;
+  /**
+   * What was written and not yet accepted.
+   *
+   * Stored beside the thread rather than in it, exactly as it is held in memory: these have no
+   * `seq`, and the whole point of keeping them apart is that nothing downstream can mistake one
+   * for a message the server has numbered.
+   */
+  outbox?: Record<string, Pending[]>;
+}
+
+/** What a conversation contributes to the cache. */
+export interface Cached {
+  messages: Message[];
+  outbox: Pending[];
 }
 
 /**
@@ -68,26 +82,32 @@ interface StoredHistory {
  * unbounded log, and the symptom — sends getting slower the longer you have used the
  * application — is one nobody attributes to this.
  */
-export function encodeHistory(conversations: Map<string, Message[]>): Uint8Array {
+export function encodeHistory(conversations: Map<string, Cached>): Uint8Array {
   const out: Record<string, StoredMessage[]> = {};
+  const queued: Record<string, Pending[]> = {};
 
-  for (const [key, messages] of conversations) {
+  for (const [key, { messages, outbox }] of conversations) {
     const recent = messages
       .slice()
       .sort((a, b) => a.seq - b.seq)
       .slice(-RECENT_PER_CONVERSATION);
 
-    if (recent.length === 0) continue;
+    if (recent.length > 0) {
+      out[key] = recent.map((message) => ({
+        seq: message.seq,
+        sender: message.sender,
+        mine: message.mine,
+        body: [...content.encode(message.content, message.sentAt)],
+      }));
+    }
 
-    out[key] = recent.map((message) => ({
-      seq: message.seq,
-      sender: message.sender,
-      mine: message.mine,
-      body: [...content.encode(message.content, message.sentAt)],
-    }));
+    // The outbox is **not** capped. It is not a cache: nothing else holds these, and dropping the
+    // oldest would silently lose a message the user wrote. It is also bounded by the only thing
+    // that fills it — a person typing while the network is down.
+    if (outbox.length > 0) queued[key] = outbox;
   }
 
-  const payload: StoredHistory = { v: 1, conversations: out };
+  const payload: StoredHistory = { v: 1, conversations: out, outbox: queued };
   return new TextEncoder().encode(JSON.stringify(payload));
 }
 
@@ -99,8 +119,8 @@ export function encodeHistory(conversations: Map<string, Message[]>): Uint8Array
  * opposite choice — refusing to start on a corrupt cache — would turn a cosmetic loss into a
  * device that cannot open, for data whose whole purpose is to be redundant.
  */
-export function decodeHistory(bytes: Uint8Array): Map<string, Message[]> {
-  const restored = new Map<string, Message[]>();
+export function decodeHistory(bytes: Uint8Array): Map<string, Cached> {
+  const restored = new Map<string, Cached>();
 
   let payload: StoredHistory;
   try {
@@ -111,14 +131,21 @@ export function decodeHistory(bytes: Uint8Array): Map<string, Message[]> {
 
   if (payload?.v !== 1 || typeof payload.conversations !== "object") return restored;
 
+  const at = (key: string): Cached => {
+    const existing = restored.get(key);
+    if (existing) return existing;
+    const fresh: Cached = { messages: [], outbox: [] };
+    restored.set(key, fresh);
+    return fresh;
+  };
+
   for (const [key, stored] of Object.entries(payload.conversations)) {
     if (!Array.isArray(stored)) continue;
 
-    const messages: Message[] = [];
     for (const entry of stored) {
       try {
         const { body, sentAt } = content.decode(new Uint8Array(entry.body));
-        messages.push({
+        at(key).messages.push({
           seq: entry.seq,
           sender: entry.sender,
           mine: entry.mine,
@@ -129,8 +156,28 @@ export function decodeHistory(bytes: Uint8Array): Map<string, Message[]> {
         // One unreadable entry, not one unreadable conversation.
       }
     }
+  }
 
-    if (messages.length > 0) restored.set(key, messages);
+  for (const [key, stored] of Object.entries(payload.outbox ?? {})) {
+    if (!Array.isArray(stored)) continue;
+
+    for (const entry of stored) {
+      if (typeof entry?.localId !== "string" || typeof entry.text !== "string") continue;
+
+      at(key).outbox.push({
+        localId: entry.localId,
+        text: entry.text,
+        sentAt: typeof entry.sentAt === "number" ? entry.sentAt : 0,
+        // Anything that was in flight when the tab closed comes back as failed. We never saw the
+        // answer, so it may or may not have arrived; saying it did not go and letting the user
+        // decide beats retrying silently and posting it twice.
+        state: "failed",
+      });
+    }
+  }
+
+  for (const [key, cached] of restored) {
+    if (cached.messages.length === 0 && cached.outbox.length === 0) restored.delete(key);
   }
 
   return restored;

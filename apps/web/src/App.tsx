@@ -125,6 +125,11 @@ export function App() {
           refresh();
         })
         .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+
+      // Anything written while the network was gone goes out now. On a transition, not on a
+      // timer: retrying on a schedule keeps hammering a server that is down, and the two moments
+      // that actually change the answer — a reconnection, a resume — are reported right here.
+      void session.flushOutbox().then(refresh);
     });
 
     const lost = () => setOffline(true);

@@ -15,10 +15,13 @@
  * holding the avatar, the name and the hour spelled out at the top of each turn, and the text
  * running the full width underneath.
  *
- * What that costs is the instant read of "mine" that alignment gave for free. It is paid back by
- * a very slight tint over our own rows, and that tint is deliberately **not** the accent: the
- * accent is rationed to selection, focus and "you are here", and a thread of our own messages
- * would spend the whole budget in one screen.
+ * What that costs is the instant read of "mine" that alignment gave for free, and it is not paid
+ * back. A tint over our own rows was tried and removed: at rest it striped the conversation into
+ * bands, and a column of text asks to be read, not parsed. The avatar and the name identify every
+ * turn including ours, which is the same answer everybody else's messages get.
+ *
+ * No row carries a fill at rest. One appears under the pointer, where it has something to say —
+ * it is the line the buttons in the corner belong to.
  *
  * # It reads the session rather than receiving it
  *
@@ -178,8 +181,15 @@ export function Messages({
    * `undefined` is a supported answer, not a failure: `Avatar` then draws the neutral
    * placeholder rather than guessing from the handle, which is the whole argument in that file.
    */
-  const seedOf = (handle: string | null) =>
-    handle === null ? undefined : view.accounts.find((a) => a.handle === handle)?.fingerprint;
+  const seedOf = (handle: string | null) => {
+    if (handle === null) return undefined;
+    // Our own account is not in `view.accounts` — that list is the people on the other side — so
+    // the lookup below would miss it and every message we sent would draw the neutral
+    // placeholder. It went unnoticed while bubbles put our messages on the right with no avatar
+    // at all; one column per author is what made the gap visible.
+    if (handle === session.handle) return session.accountFingerprint();
+    return view.accounts.find((a) => a.handle === handle)?.fingerprint;
+  };
 
   // Read once for the whole render: `dayLabel` compares calendar days, and asking the clock again
   // per message would let a thread rendered across midnight label two neighbours inconsistently.
@@ -385,12 +395,26 @@ export function Messages({
                   // The air goes above the first line of a turn, so a burst of three sentences
                   // reads as one paragraph and the next speaker is visibly a new one.
                   !continues && "mt-snug",
-                  // Ours, said without the accent and without the axis. Derived from the ink
-                  // rather than written as a colour, which is what makes it behave in both
-                  // themes for free: the ink is dark over a light ground and light over a dark
-                  // one, so five percent of it darkens the row in one theme and lifts it in the
-                  // other, by the same barely-there amount.
-                  message.mine && "rounded-control bg-(--color-ink)/5",
+                  // No fill at rest, on any row. A thread is a column of text and every band of
+                  // tint laid under it is one more edge the eye has to sort out before it can
+                  // read; a tint on every one of our own turns striped the whole conversation.
+                  // The row lights up under the pointer instead, which is the moment the fill is
+                  // actually saying something — this is the line the buttons in the corner
+                  // belong to.
+                  //
+                  // Derived from the ink rather than written as a colour, which is what makes it
+                  // behave in both themes for free: the ink is dark over a light ground and light
+                  // over a dark one, so a few percent of it darkens the row in one theme and
+                  // lifts it in the other, by the same amount.
+                  //
+                  // What this does not solve: with the fill gone, nothing distinguishes our own
+                  // messages at rest. The avatar and the name do it now, as they do for everybody
+                  // else, and the alignment that used to say it was dropped with the bubbles.
+                  // `hover:` and not `group-hover:`: this element *is* the group, and
+                  // `group-hover:` only ever matches a descendant of one. Written the other way
+                  // it compiles to a selector nothing satisfies — no error, no warning, just a
+                  // row that never lights up.
+                  "rounded-control hover:bg-(--color-ink)/5",
                 )}
               >
                 {/*
@@ -427,8 +451,8 @@ export function Messages({
                     )
                   ) : (
                     <Avatar
-                      seed={seedOf(message.sender)}
-                      label={nameOfAuthor(message.sender)}
+                      seed={seedOf(authorOf(message))}
+                      label={nameOfAuthor(authorOf(message))}
                       size="sm"
                       className={AVATAR_40}
                     />
@@ -441,7 +465,7 @@ export function Messages({
                   {!continues && (
                     <div className="flex items-baseline gap-snug">
                       <span className="truncate text-body font-medium">
-                        {nameOfAuthor(message.sender)}
+                        {nameOfAuthor(authorOf(message))}
                       </span>
                       {/*
                         `<time>` with a machine-readable `dateTime`, so a screen reader announces

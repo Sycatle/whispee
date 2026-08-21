@@ -1,5 +1,11 @@
 import { useState } from "react";
-import type { ConversationView, Session } from "@/lib/session";
+
+import { useReport } from "@/state/report";
+import { useBump, useSession } from "@/state/SessionProvider";
+import { Banner } from "@/ui/Banner";
+import { Button } from "@/ui/Button";
+import { Checkbox } from "@/ui/Checkbox";
+import { Panel } from "@/ui/Panel";
 
 /**
  * History vault settings, **on by default**.
@@ -11,160 +17,178 @@ import type { ConversationView, Session } from "@/lib/session";
  * Hence the shape: the warning stays on screen, in the present tense, while archiving is on,
  * rather than only on an activation screen nobody will ever see again. A trade-off that
  * becomes the default is exactly the one you stop saying out loud unless you take care to.
+ *
+ * # What turning it off is about to start costing
+ *
+ * The stated counterpart used to be that the server does not keep your message bodies. Retention
+ * is being built on the server side, and once envelopes past a window are discarded the sentence
+ * becomes stronger and harder: nobody keeps them. A message old enough to have been collected
+ * then exists nowhere — not on the server, not on a device that only holds the thread in memory.
+ * The copy in both branches says so now, in the present of the decision and without a date,
+ * because a date we do not control is the kind of promise this screen exists not to make.
+ *
+ * What that does not solve: nothing here deletes anything. Saying the future is lossier is not
+ * the same as offering the erasure of what is already archived, which this screen still cannot
+ * do and still says it cannot.
+ *
+ * # Why one busy value and not one flag per button
+ *
+ * Three actions share this screen and at most one of them runs at a time. A single boolean would
+ * put a spinner in every button whenever any of them was working, which is a false statement
+ * about two of the three; naming the running action instead lets the button that is waiting say
+ * so and the others merely go inert.
  */
-export function VaultSettings({
-  session,
-  active,
-  onDone,
-}: {
-  session: Session;
-  active: ConversationView | null;
-  onDone: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
+type Running = "restore" | "switch" | null;
+
+export function VaultSettings() {
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
+  const [running, setRunning] = useState<Running>(null);
   const [understood, setUnderstood] = useState(false);
-  const [restored, setRestored] = useState<number | null>(null);
 
   const toggle = async () => {
-    setBusy(true);
+    setRunning("switch");
     try {
       if (session.archiving) {
         await session.disableVault();
+        report.done("Backup is off. Messages from now on will not be archived.");
       } else {
         await session.enableVault();
+        report.done("Backup is on. Messages from now on will be archived.");
       }
-      onDone();
+      bump();
+    } catch (e: unknown) {
+      report.error(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setRunning(null);
     }
   };
 
+  /**
+   * Pulls every conversation's archive back in.
+   *
+   * It used to take the conversation the list had open, as a prop. This screen is reached from
+   * the settings route, where there is no open conversation to take — a button that could only
+   * ever be disabled here would be worse than no button, and the vault is an account-wide thing
+   * anyway. So it sweeps `session.conversations`, which is the same operation applied to each.
+   *
+   * Sequentially, not `Promise.all`: each restore is a round trip that decrypts entry by entry,
+   * and firing one per conversation at once turns a settings click into a burst the server has
+   * no reason to absorb.
+   *
+   * What this does not solve: a failure part way through keeps whatever was already merged and
+   * reports only the error, so the count of what did come back is lost. Restoring is idempotent
+   * — `vault.merge` drops what the thread already holds — so pressing it again is the recovery,
+   * and that is cheaper than a per-conversation result list nobody would read.
+   */
   const restore = async () => {
-    if (!active) return;
-    setBusy(true);
+    setRunning("restore");
     try {
-      setRestored(await session.restoreHistory(active));
+      let added = 0;
+      for (const view of session.conversations.values()) {
+        added += await session.restoreHistory(view);
+      }
+      bump();
+      report.done(
+        added === 0
+          ? "Nothing left to restore: your conversations already hold everything the vault has."
+          : `${added} message${added === 1 ? "" : "s"} restored.`,
+      );
+    } catch (e: unknown) {
+      report.error(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setRunning(null);
     }
   };
 
   if (session.archiving) {
     return (
-      <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-        <div className="flex items-baseline justify-between gap-4">
-          <h2 className="font-medium">History backup</h2>
-          <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
-            Close
-          </button>
-        </div>
-
-        <p className="mt-2 text-(--color-ink-muted)">
-          Your messages are archived, encrypted under a key derived from your recovery phrase.
-          The server cannot read them, and your history comes back on its own when you open a
-          conversation.
-        </p>
-
-        <div className="mt-3 rounded-md border border-(--color-danger) bg-(--color-danger)/10 p-3">
-          <p className="font-medium text-(--color-danger)">What you gave up</p>
-          <p className="mt-1 text-(--color-ink-muted)">
+      <Panel
+        title="History backup"
+        description="Your messages are archived, encrypted under a key derived from your recovery phrase. The server cannot read them, and your history comes back on its own when you open a conversation."
+        actions={
+          <>
+            <Button
+              variant="primary"
+              onClick={restore}
+              busy={running === "restore"}
+              disabled={running !== null}
+            >
+              Reload from the vault
+            </Button>
+            <Button onClick={toggle} busy={running === "switch"} disabled={running !== null}>
+              Stop backing up
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-pane">
+          <Banner tone="danger" title="What you gave up">
             The archive is encrypted under a key derived from your recovery phrase, so
             <strong> the same key forever</strong>. If that phrase ever gets away from you, the
-            whole of your backed-up past becomes readable — retroactively. Without the backup,
-            that past would have stayed out of reach: that is forward secrecy, and it is real
+            whole of your backed-up past becomes readable — retroactively. Without the backup, that
+            past would have stayed out of reach: that is forward secrecy, and it is real
             protection.
+          </Banner>
+
+          <p className="text-caption text-(--color-ink-muted)">
+            Stopping the backup does not erase what has already been archived: the server keeps
+            those entries, and the key that opens them stays derivable from your phrase. Promising
+            a deletion we do not control would be dishonest. Nor does it give back the forward
+            secrecy the already-archived past has lost — while the messages that follow will be
+            unrecoverable on a new device. Retention is being built on the server side, and once it
+            lands the counterpart is no longer only that the server forgets your message bodies:
+            nobody keeps them, and a message old enough to have been collected exists nowhere at
+            all. We are not promising a date for that.
           </p>
         </div>
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={restore}
-            disabled={busy || !active}
-            className="rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
-          >
-            {busy ? "…" : "Reload from the vault"}
-          </button>
-          <button
-            type="button"
-            onClick={toggle}
-            disabled={busy}
-            className="rounded-md border border-(--color-border-subtle) px-3 py-1.5 disabled:opacity-50"
-          >
-            Stop backing up
-          </button>
-        </div>
-
-        {restored !== null && (
-          <p className="mt-2 text-(--color-ok)">
-            {restored === 0
-              ? "Nothing to restore for this conversation."
-              : `${restored} message${restored === 1 ? "" : "s"} restored.`}
-          </p>
-        )}
-
-        <p className="mt-3 text-xs text-(--color-ink-muted)">
-          Stopping the backup does not erase what has already been archived: the server keeps
-          those entries, and the key that opens them stays derivable from your phrase. Promising
-          a deletion we do not control would be dishonest. Nor does it give back the forward
-          secrecy the already-archived past has lost — while the messages that follow will be
-          unrecoverable on a new device.
-        </p>
-      </div>
+      </Panel>
     );
   }
 
   return (
-    <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-      <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Backup off</h2>
-        <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
-          Close
-        </button>
-      </div>
-
-      <p className="mt-2 text-(--color-ink-muted)">
-        You turned the backup off. Your messages therefore disappear when the application
-        closes, and a new device starts from an empty conversation. This is not a failure: it is
-        forward secrecy, which keeps the past unreadable even to someone who gets hold of the
-        server later on.
-      </p>
-
-      <div className="mt-3 rounded-md border border-(--color-danger) bg-(--color-danger)/10 p-3">
-        <p className="font-medium text-(--color-danger)">What you would give up</p>
-        <p className="mt-1 text-(--color-ink-muted)">
+    <Panel
+      title="Backup off"
+      description="You turned the backup off. Your messages therefore disappear when the application closes, and a new device starts from an empty conversation. This is not a failure: it is forward secrecy, which keeps the past unreadable even to someone who gets hold of the server later on."
+      actions={
+        <Button
+          variant="primary"
+          onClick={toggle}
+          busy={running === "switch"}
+          disabled={running !== null || !understood}
+        >
+          Turn the backup back on
+        </Button>
+      }
+    >
+      <div className="space-y-pane">
+        <Banner tone="danger" title="What you would give up">
           The archive is encrypted under a key derived from your recovery phrase, so
-          <strong> the same key forever</strong>. If that phrase ever gets away from you, the
-          whole of your backed-up past becomes readable — retroactively. Without the backup,
-          that past would have stayed out of reach.
+          <strong> the same key forever</strong>. If that phrase ever gets away from you, the whole
+          of your backed-up past becomes readable — retroactively. Without the backup, that past
+          would have stayed out of reach.
+        </Banner>
+
+        <p className="text-caption text-(--color-ink-muted)">
+          Archiving would resume from now on and does not reach back in time: the messages
+          exchanged while it was off had their keys destroyed, and nothing can reconstruct them.
+          Retention is being built on the server side, and once it lands those messages are gone
+          from the server too: with the backup off, one old enough to have been collected exists
+          nowhere at all, here included. We are not promising a date for that.
         </p>
-      </div>
 
-      <p className="mt-3 text-xs text-(--color-ink-muted)">
-        Archiving would resume from now on and does not reach back in time: the messages
-        exchanged while it was off had their keys destroyed, and nothing can reconstruct them.
-      </p>
-
-      <label className="mt-3 flex items-start gap-2">
-        <input
-          type="checkbox"
+        {/*
+          A checkbox and not a switch: this states an understanding that the button below acts on,
+          and it changes nothing by itself. A switch would promise that flipping it already did
+          something. `Switch.tsx` draws the same line from the other side.
+        */}
+        <Checkbox
+          label="I understand that my history will no longer be protected by forward secrecy."
           checked={understood}
           onChange={(e) => setUnderstood(e.target.checked)}
-          className="mt-1"
         />
-        <span>
-          I understand that my history will no longer be protected by forward secrecy.
-        </span>
-      </label>
-
-      <button
-        type="button"
-        onClick={toggle}
-        disabled={busy || !understood}
-        className="mt-3 rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
-      >
-        {busy ? "…" : "Turn the backup back on"}
-      </button>
-    </div>
+      </div>
+    </Panel>
   );
 }

@@ -564,10 +564,18 @@ struct SignedHead {
     log_key: String,
 }
 
-async fn signed_head(pool: &PgPool) -> ApiResult<(SignedHead, Vec<transparency::Hash>)> {
+/// The signed head, and the tree it was computed from.
+///
+/// Both come out of a single [`crate::log::snapshot`] rather than two reads: a head signed over
+/// one state of the table and a proof built from another would be a proof that does not verify
+/// against the head shipped beside it — the kind of inconsistency a client is right to read as a
+/// forked log.
+async fn signed_head(
+    pool: &PgPool,
+) -> ApiResult<(SignedHead, Arc<crate::log::Snapshot>)> {
     let key = crate::log::signing_key(pool).await?;
-    let leaves = crate::log::leaves(pool).await?;
-    let (head, signature) = crate::log::head(&leaves, &key);
+    let snapshot = crate::log::snapshot(pool).await?;
+    let (head, signature) = crate::log::head(&snapshot, &key);
 
     Ok((
         SignedHead {
@@ -577,7 +585,7 @@ async fn signed_head(pool: &PgPool) -> ApiResult<(SignedHead, Vec<transparency::
             signature: BASE64_STANDARD.encode(signature),
             log_key: BASE64_STANDARD.encode(key.verifying_key().to_bytes()),
         },
-        leaves,
+        snapshot,
     ))
 }
 
@@ -610,13 +618,13 @@ async fn log_proof(
     Path(handle): Path<String>,
     _signed: Signed,
 ) -> ApiResult<Json<InclusionProof>> {
-    let (head, leaves) = signed_head(&pool).await?;
+    let (head, snapshot) = signed_head(&pool).await?;
 
     let (seq, identity_key) =
         crate::log::latest(&pool, &handle).await?.ok_or(ApiError::NotFound)?;
     let index = crate::log::index_of(&pool, seq).await?;
 
-    let proof = transparency::inclusion_proof(&leaves, index)
+    let proof = transparency::inclusion_proof(&snapshot.leaves, index)
         .map_err(|_| ApiError::BadRequest("index outside the log"))?;
 
     Ok(Json(InclusionProof {
@@ -649,9 +657,9 @@ async fn log_consistency(
     Query(query): Query<ConsistencyQuery>,
     _signed: Signed,
 ) -> ApiResult<Json<ConsistencyProof>> {
-    let (head, leaves) = signed_head(&pool).await?;
+    let (head, snapshot) = signed_head(&pool).await?;
 
-    let proof = transparency::consistency_proof(&leaves, query.from)
+    let proof = transparency::consistency_proof(&snapshot.leaves, query.from)
         .map_err(|_| ApiError::BadRequest("invalid log size"))?;
 
     Ok(Json(ConsistencyProof {

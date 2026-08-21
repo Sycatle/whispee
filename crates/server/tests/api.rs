@@ -2873,3 +2873,69 @@ async fn a_full_attachment_quota_does_not_stop_a_message() {
 
     assert!(message.status().is_success(), "a full attachment quota silenced the account");
 }
+
+// ---------------------------------------------------------------- log head cache
+
+/// **The test that pins down the head cache.**
+///
+/// `/v1/log/sth`, `/v1/log/proof/{handle}` and `/v1/log/consistency` used to read every row of
+/// `log_entries` and re-hash the whole tree, on every call, with no quota in front of them. The
+/// cache they now share is only allowed to exist if it is invisible: the head served after an
+/// append has to be the head a fresh recomputation gives.
+///
+/// The recomputation reads exactly the first `size` leaves in `seq` order rather than all of
+/// them. The database is shared with whatever else is running, and a head of size N covers the
+/// first N leaves of an append-only log — comparing against the whole table would make the test
+/// fail on somebody else's account creation.
+#[tokio::test]
+async fn the_cached_head_matches_a_recomputation_after_an_append() {
+    let server = start().await;
+    let reader = Device::register(&server, &unique("reader")).await;
+
+    // Warms the cache, so that what follows is served from it or not at all.
+    let before: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+    let size_before = before["size"].as_u64().unwrap();
+
+    // An account creation appends a leaf, inside the transaction that writes the account.
+    TestAccount::create(&server, &unique("newcomer")).await;
+
+    let after: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+    let size_after = after["size"].as_u64().unwrap();
+
+    assert!(size_after > size_before, "the cache survived an append it should have noticed");
+
+    let rows: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT leaf FROM log_entries ORDER BY seq LIMIT $1")
+            .bind(size_after as i64)
+            .fetch_all(&server.pool)
+            .await
+            .unwrap();
+
+    let leaves: Vec<transparency::Hash> =
+        rows.into_iter().map(|(leaf,)| leaf.try_into().unwrap()).collect();
+    assert_eq!(leaves.len() as u64, size_after, "the log lost rows under the test");
+
+    let served = BASE64_STANDARD.decode(after["root"].as_str().unwrap()).unwrap();
+    assert_eq!(served, transparency::root(&leaves), "the served root is not the log's root");
+}
+
+/// The head served twice in a row without an append is the same head.
+///
+/// Not a performance assertion — the timestamp changes, so the two responses differ — but the
+/// property that makes the cache safe to reuse: an unchanged table must not produce a moving
+/// root, or every client watching for a fork would find one.
+#[tokio::test]
+async fn an_unchanged_log_keeps_serving_the_same_root() {
+    let server = start().await;
+    let reader = Device::register(&server, &unique("reader")).await;
+
+    let first: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+    let second: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+
+    // Only when nothing was appended in between. The database is shared, so the assertion is
+    // conditional rather than unconditional — a size that moved means another test created an
+    // account, which is not a failure of anything here.
+    if first["size"] == second["size"] {
+        assert_eq!(first["root"], second["root"], "the same log produced two roots");
+    }
+}

@@ -1,3 +1,4 @@
+import { SESSION_LOCK, claim } from "@/lib/singleton";
 import { StoredSessionTooOld } from "@/lib/session-types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -127,6 +128,29 @@ function Boot() {
     setLocked(true);
   }, []);
 
+  /**
+   * Whether this tab is the one allowed to run a session.
+   *
+   * `undefined` until the claim settles, so the startup screen does not flash before the answer.
+   */
+  const [alone, setAlone] = useState<boolean | undefined>(undefined);
+
+  useEffect(() => {
+    /*
+      Claimed before anything is read, and held for as long as this tab lives.
+
+      Two tabs of one account do not merely duplicate a screen: each holds its own copy of the MLS
+      ratchet and persists over the other, and decrypting a message *consumes* the key for its
+      generation. So the tab that loses the race asks for a secret the other has already spent,
+      OpenMLS answers that it was deleted to preserve forward secrecy, and the message is gone for
+      good. See `lib/singleton.ts`, and the `crypto-core` test that pins the underlying rule.
+
+      Never released explicitly: the browser drops it when the tab does, which is the property that
+      made this mechanism the right one.
+    */
+    void claim(SESSION_LOCK).then((held) => setAlone(held.held));
+  }, []);
+
   useEffect(() => {
     // The lock is detected before any restore attempt: without a password the state is
     // unreadable, and treating that as a decryption error would erase the distinction between
@@ -170,7 +194,33 @@ function Boot() {
       .finally(() => setBusy(false));
   }, [report]);
 
-  if (busy) return <Centered>Loading…</Centered>;
+  if (busy || alone === undefined) return <Centered>Loading…</Centered>;
+
+  /*
+    The second tab is stopped here rather than allowed to read anything.
+
+    It is not a warning that can be dismissed. A tab that carried on would consume message keys
+    the other tab needs, and the loss is silent and permanent — there is no state in which showing
+    this screen and letting the session run underneath it would be honest.
+  */
+  if (!alone) {
+    return (
+      <Centered>
+        <div className="flex max-w-prose flex-col gap-snug text-center">
+          <p className="text-title">Whispee is already open</p>
+          <p className="text-body text-(--color-ink-muted)">
+            Another tab of this browser is running your account. Only one may: two would read the
+            same messages against two copies of the same encryption state, and a message read twice
+            cannot be read again — that is what forward secrecy costs.
+          </p>
+          <p className="text-body text-(--color-ink-muted)">
+            Close the other tab, then reload this one.
+          </p>
+        </div>
+      </Centered>
+    );
+  }
+
 
   if (locked && !store) {
     return (

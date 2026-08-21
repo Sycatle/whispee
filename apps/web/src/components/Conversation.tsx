@@ -6,6 +6,7 @@ import { Messages } from "@/components/Messages";
 import { Verification } from "@/components/Verification";
 import { compactNameOf, type NameSources } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
+import { textOf } from "@/lib/thread";
 import { useOcclusion } from "@/lib/viewport";
 import { EmojiText } from "@/ui/Emoji";
 import { Icon } from "@/ui/Icon";
@@ -60,29 +61,6 @@ function spoken(view: ConversationView, names: NameSources): string | null {
   if (content.kind === "text" || content.kind === "reply") return `${who}: ${content.text}`;
   if (content.kind === "attachment") return `${who} sent ${content.ref.name}`;
   return null;
-}
-
-/**
- * What the reply banner shows of the message being answered.
- *
- * The same rule as the quote inside a bubble in `Messages.tsx`: the text for anything textual,
- * the file name for an attachment, and a placeholder when the sequence number points at nothing
- * we hold. It is duplicated rather than shared because the two live on opposite sides of the
- * thread — one renders inside a bubble that already knows its own message, this one starts from
- * a bare number the reply bar was handed — and a shared helper would have to take the message
- * list from one and the number from the other to say the same three lines.
- *
- * What this does not solve: a message that has not been hydrated yet is genuinely unavailable
- * here, so replying to something far up an unloaded history shows the placeholder until the
- * archive comes back.
- */
-function excerptOf(view: ConversationView, seq: number): string {
-  const target = view.messages.find((message) => message.seq === seq);
-  if (!target) return "message unavailable";
-  const { content } = target;
-  if (content.kind === "text" || content.kind === "reply") return content.text;
-  if (content.kind === "attachment") return content.ref.name;
-  return "…";
 }
 
 /**
@@ -437,7 +415,7 @@ export function Conversation({ view }: { view: ConversationView }) {
                   <span className="flex min-w-0 items-baseline gap-tight">
                     <span className="shrink-0 font-medium text-(--color-ink)">{citedName}</span>
                     <span className="truncate">
-                      <EmojiText text={excerptOf(view, replyTo)} />
+                      <EmojiText text={textOf(view.messages, replyTo)} />
                     </span>
                   </span>
                   <IconButton

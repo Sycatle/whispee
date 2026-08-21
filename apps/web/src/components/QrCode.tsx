@@ -1,6 +1,26 @@
 import qrcode from "qrcode-generator";
 
 /**
+ * Modules of blank margin on every side, mandated by the QR standard.
+ *
+ * Four is the specified minimum, not a stylistic choice: a reader locates the three finder
+ * patterns by their light surround, and without it many scans fail with no feedback at all —
+ * the camera simply never locks on. It is expressed once here and used twice below, because the
+ * viewBox and the cell offsets have to agree or the margin silently lands on two sides only.
+ */
+const QUIET_ZONE = 4;
+
+/**
+ * Rendered edge, in CSS pixels.
+ *
+ * Not one of the `--spacing-*` tokens, and it should not become one: those describe distances
+ * between interface elements, and this is the size at which a camera has to resolve individual
+ * modules across a room. 240 keeps a typical 25-module version at roughly 8 px a module, which
+ * is comfortably above what a phone camera needs at arm's length.
+ */
+const DEFAULT_SIZE = 240;
+
+/**
  * The pairing code, as a square to scan.
  *
  * # Why a dependency here, in a project that distrusts them
@@ -19,7 +39,7 @@ import qrcode from "qrcode-generator";
  * canvas would have to be sized by hand to avoid a blurry square on a dense display, precisely
  * where scanning has to work.
  */
-export function QrCode({ value, size = 240 }: { value: string; size?: number }) {
+export function QrCode({ value, size = DEFAULT_SIZE }: { value: string; size?: number }) {
   // Version 0: the library picks the smallest one that fits the data. Correction level "M", the
   // usual trade-off — a QR shown on a clean screen does not need "H", which would densify the
   // modules and make scanning harder from a distance.
@@ -28,14 +48,14 @@ export function QrCode({ value, size = 240 }: { value: string; size?: number }) 
   qr.make();
 
   const modules = qr.getModuleCount();
-  // A four-module quiet zone is required by the standard: without it, a reader cannot tell the
-  // pattern from the background and many scans fail silently.
-  const side = modules + 8;
+  const side = modules + QUIET_ZONE * 2;
 
   const cells: string[] = [];
   for (let row = 0; row < modules; row += 1) {
     for (let column = 0; column < modules; column += 1) {
-      if (qr.isDark(row, column)) cells.push(`M${column + 4},${row + 4}h1v1h-1z`);
+      if (qr.isDark(row, column)) {
+        cells.push(`M${column + QUIET_ZONE},${row + QUIET_ZONE}h1v1h-1z`);
+      }
     }
   }
 
@@ -49,7 +69,13 @@ export function QrCode({ value, size = 240 }: { value: string; size?: number }) 
       // White background and black modules hardcoded, outside the theme: a reader expects
       // contrast, and black on white. A QR in dark-theme colors is unreadable to many cameras,
       // which would make a display flaw look like a pairing failure.
-      className="rounded-md bg-white"
+      //
+      // The background is on the `<svg>` itself and not on a wrapper, which is what makes the
+      // quiet zone survive the dark palette: the margin is white because the element under it is
+      // white, in both themes, whatever the pane behind it happens to be. Painting the modules
+      // on a transparent square would leave the margin the colour of the surface, and a QR with
+      // a dark margin is as unscannable as one with dark modules.
+      className="rounded-control bg-white"
     >
       <path d={cells.join("")} fill="#000" shapeRendering="crispEdges" />
     </svg>

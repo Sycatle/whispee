@@ -1,9 +1,8 @@
-//! RNG déterministe réservé aux tests.
+//! Deterministic RNG, for tests only.
 //!
-//! Il implémente `CryptoRng`, qui est un simple marqueur : rien dans le compilateur ne
-//! vérifie cette promesse. Ce générateur n'est évidemment pas cryptographiquement sûr —
-//! c'est tout l'intérêt, puisqu'on veut des exécutions reproductibles. Il ne doit exister
-//! que dans `tests/`.
+//! It implements `CryptoRng`, which is a bare marker: nothing in the compiler checks the
+//! promise. This generator is obviously not cryptographically secure — that is the point,
+//! since the runs have to be reproducible. It must never exist outside `tests/`.
 
 use rand_core::{CryptoRng, Error, RngCore};
 use sha2::{Digest, Sha256};

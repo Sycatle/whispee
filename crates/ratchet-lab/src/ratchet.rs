@@ -1,14 +1,14 @@
 //! Double Ratchet.
 //!
-//! Deux ratchets s'imbriquent :
+//! Two ratchets are nested:
 //!
-//! * le **ratchet symétrique** avance d'un cran par message et donne une clé unique par
-//!   message, détruite après usage → forward secrecy ;
-//! * le **ratchet DH** régénère une paire éphémère à chaque changement de sens de la
-//!   conversation et réamorce la clé racine → post-compromise security.
+//! * the **symmetric ratchet** advances one step per message and yields a unique key per
+//!   message, destroyed after use → forward secrecy;
+//! * the **DH ratchet** regenerates an ephemeral pair every time the conversation changes
+//!   direction and reseeds the root key → post-compromise security.
 //!
-//! Le second est ce qui distingue vraiment le Double Ratchet : un attaquant ayant volé
-//! l'état complet perd l'accès dès qu'un aller-retour lui échappe.
+//! The second is what really sets the Double Ratchet apart: an attacker who stole the whole
+//! state loses access as soon as one round trip escapes them.
 
 use std::collections::HashMap;
 
@@ -22,20 +22,20 @@ use crate::error::RatchetError;
 use crate::kdf::{ChainKey, MessageKey, RootKey, derive_message_keys, kdf_ck, kdf_rk};
 use crate::keys::EphemeralKeyPair;
 
-/// Plafond de messages sautés conservés. Sans plafond, un pair malveillant annonce
-/// `n = u32::MAX` et force l'allocation de milliards de clés : déni de service trivial.
+/// Cap on how many skipped messages are kept. Without a cap, a malicious peer announces
+/// `n = u32::MAX` and forces the allocation of billions of keys: trivial denial of service.
 const MAX_SKIP: u32 = 1_000;
 
-/// En clair dans le message : le destinataire en a besoin avant de pouvoir déchiffrer.
-/// Le header est authentifié par l'AEAD, donc non modifiable, mais il est lisible par le
-/// serveur — il fait partie des métadonnées que le E2EE ne protège pas.
+/// In the clear inside the message: the recipient needs it before they can decrypt. The
+/// header is authenticated by the AEAD, so it cannot be modified, but it is readable by the
+/// server — it is part of the metadata E2EE does not protect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
     pub dh: PublicKey,
-    /// Longueur de la chaîne d'envoi précédente : dit au destinataire combien de clés
-    /// sauter avant de tourner le ratchet.
+    /// Length of the previous sending chain: tells the recipient how many keys to skip
+    /// before turning the ratchet.
     pub pn: u32,
-    /// Position dans la chaîne courante.
+    /// Position in the current chain.
     pub n: u32,
 }
 
@@ -52,7 +52,7 @@ impl Header {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, RatchetError> {
         if bytes.len() != Self::LEN {
-            return Err(RatchetError::Malformed("taille de header invalide"));
+            return Err(RatchetError::Malformed("invalid header size"));
         }
         let mut dh = [0u8; 32];
         dh.copy_from_slice(&bytes[..32]);
@@ -71,9 +71,9 @@ pub struct Message {
 }
 
 pub struct DoubleRatchet {
-    /// Notre paire de ratchet courante.
+    /// Our current ratchet pair.
     dhs: EphemeralKeyPair,
-    /// Celle du pair. `None` tant qu'on n'a rien reçu.
+    /// The peer's. `None` until something has been received.
     dhr: Option<PublicKey>,
     rk: RootKey,
     cks: Option<ChainKey>,
@@ -81,16 +81,16 @@ pub struct DoubleRatchet {
     ns: u32,
     nr: u32,
     pn: u32,
-    /// Clés des messages arrivés hors-ordre ou pas encore arrivés. Indexées par
-    /// (clé de ratchet de l'émetteur, index). Chaque entrée est une clé vivante :
-    /// c'est du matériel sensible, et sa durée de vie doit rester bornée.
+    /// Keys for messages that arrived out of order or have not arrived yet. Indexed by
+    /// (sender's ratchet key, index). Every entry is a live key: sensitive material whose
+    /// lifetime must stay bounded.
     skipped: HashMap<([u8; 32], u32), MessageKey>,
     ad: Vec<u8>,
 }
 
 impl DoubleRatchet {
-    /// Côté initiateur. Alice connaît déjà la clé publique de ratchet de Bob — c'est sa
-    /// signed prekey — donc elle peut tourner le ratchet DH immédiatement et écrire en premier.
+    /// Initiator side. Alice already knows Bob's ratchet public key — it is his signed
+    /// prekey — so she can turn the DH ratchet immediately and write first.
     pub fn init_initiator<R: RngCore + CryptoRng>(
         rng: &mut R,
         shared_secret: RootKey,
@@ -115,9 +115,9 @@ impl DoubleRatchet {
         }
     }
 
-    /// Côté répondeur. Bob n'a pas encore vu de clé de ratchet d'Alice : il n'a pas de
-    /// chaîne d'envoi et ne peut donc pas écrire avant d'avoir reçu. La première réception
-    /// déclenche le premier ratchet DH.
+    /// Responder side. Bob has not seen a ratchet key from Alice yet: he has no sending
+    /// chain and therefore cannot write before receiving. The first reception triggers the
+    /// first DH ratchet.
     pub fn init_responder(
         shared_secret: RootKey,
         associated_data: Vec<u8>,
@@ -160,7 +160,7 @@ impl DoubleRatchet {
         rng: &mut R,
         message: &Message,
     ) -> Result<Vec<u8>, RatchetError> {
-        // Cas 1 : le message avait été sauté. Sa clé nous attend.
+        // Case 1: the message had been skipped. Its key is waiting for us.
         if let Some(mut mk) = self.skipped.remove(&(*message.header.dh.as_bytes(), message.header.n))
         {
             let plaintext = aead_open(&mk, &message.ciphertext, &self.aad_for(&message.header))?;
@@ -168,13 +168,13 @@ impl DoubleRatchet {
             return Ok(plaintext);
         }
 
-        // Cas 2 : le pair a tourné son ratchet. On solde l'ancienne chaîne avant de suivre.
+        // Case 2: the peer turned their ratchet. Settle the old chain before following.
         if self.dhr.as_ref().map(|k| k.as_bytes()) != Some(message.header.dh.as_bytes()) {
             self.skip_message_keys(message.header.pn)?;
             self.dh_ratchet(rng, &message.header);
         }
 
-        // Cas 3 : chaîne courante, éventuellement en avance sur nous.
+        // Case 3: current chain, possibly ahead of us.
         self.skip_message_keys(message.header.n)?;
 
         let ckr = self.ckr.as_ref().ok_or(RatchetError::NoSession)?;
@@ -187,14 +187,14 @@ impl DoubleRatchet {
         Ok(plaintext)
     }
 
-    /// Nombre de clés en attente. Exposé pour que les tests puissent vérifier que les clés
-    /// sautées sont bien consommées et non accumulées indéfiniment.
+    /// Number of pending keys. Exposed so tests can check that skipped keys really are
+    /// consumed and not accumulated indefinitely.
     pub fn skipped_count(&self) -> usize {
         self.skipped.len()
     }
 
-    /// Empreinte de la clé de ratchet courante. Sert uniquement au débogage : l'empreinte
-    /// affichée à l'utilisateur doit porter sur l'identité long terme, pas sur celle-ci.
+    /// Fingerprint of the current ratchet key. For debugging only: the fingerprint shown to
+    /// the user must cover the long-term identity, not this one.
     pub fn ratchet_public(&self) -> PublicKey {
         self.dhs.public()
     }
@@ -206,12 +206,12 @@ impl DoubleRatchet {
         aad
     }
 
-    /// Avance la chaîne de réception jusqu'à `until` en mettant les clés de côté, pour que
-    /// les messages en retard restent déchiffrables à leur arrivée.
+    /// Advances the receiving chain up to `until`, setting the keys aside so late messages
+    /// stay decryptable when they arrive.
     fn skip_message_keys(&mut self, until: u32) -> Result<(), RatchetError> {
         let Some(ckr) = self.ckr.as_ref() else {
-            // Pas encore de chaîne de réception : rien à sauter. Ce n'est une erreur que si
-            // le pair prétend qu'on a déjà reçu des messages.
+            // No receiving chain yet: nothing to skip. This is only an error if the peer
+            // claims we have already received messages.
             return if until == 0 {
                 Ok(())
             } else {
@@ -220,8 +220,8 @@ impl DoubleRatchet {
         };
 
         if until < self.nr {
-            // Le message est antérieur à la position courante et n'était pas en attente :
-            // sa clé a déjà été consommée et détruite. Rejeu ou doublon.
+            // The message predates the current position and was not pending: its key has
+            // already been consumed and destroyed. Replay or duplicate.
             return Err(RatchetError::MessageKeyGone);
         }
 
@@ -243,8 +243,8 @@ impl DoubleRatchet {
         Ok(())
     }
 
-    /// Le ratchet DH proprement dit : deux dérivations de racine, une pour la chaîne de
-    /// réception (avec l'ancienne paire), une pour la chaîne d'envoi (avec la nouvelle).
+    /// The DH ratchet proper: two root derivations, one for the receiving chain (with the old
+    /// pair), one for the sending chain (with the new one).
     fn dh_ratchet<R: RngCore + CryptoRng>(&mut self, rng: &mut R, header: &Header) {
         self.pn = self.ns;
         self.ns = 0;
@@ -278,12 +278,11 @@ fn aead_open(mk: &MessageKey, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, 
         .map_err(|_| RatchetError::DecryptionFailed)
 }
 
-/// Debug volontairement muet sur l'état secret.
+/// A `Debug` deliberately silent about the secret state.
 ///
-/// Dériver `Debug` ici recracherait clés racine, clés de chaîne et clés de message dans le
-/// premier `dbg!` ou la première ligne de log venue. C'est une façon banale et discrète de
-/// réduire à néant tout le protocole, et elle passe les revues de code parce que personne
-/// ne regarde un derive.
+/// Deriving `Debug` here would spit root keys, chain keys and message keys into the first
+/// stray `dbg!` or log line. That is a mundane, quiet way to reduce the whole protocol to
+/// nothing, and it passes code review because nobody looks at a derive.
 impl std::fmt::Debug for DoubleRatchet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DoubleRatchet")

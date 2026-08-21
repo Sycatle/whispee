@@ -1,79 +1,77 @@
-//! Journal auditable des clés de compte.
+//! Auditable log of account keys.
 //!
-//! # Le trou que cette crate ferme
+//! # The gap this crate closes
 //!
-//! Les attestations (crate `attest`) empêchent le serveur d'**ajouter** un appareil à un
-//! compte. Elles ne l'empêchent pas de mentir sur la clé du compte **au premier contact** :
-//! quand Alice demande le compte de Bob pour la première fois, elle n'a rien à quoi comparer.
-//! Le serveur peut servir sa propre clé, relayer en clair entre deux sessions parfaitement
-//! chiffrées, et rien ne le détecte — sauf une comparaison d'empreintes de vive voix, que
-//! presque personne ne fait.
+//! Attestations (the `attest` crate) stop the server from **adding** a device to an account. They
+//! do not stop it from lying about the account key **on first contact**: when Alice asks for
+//! Bob's account for the first time, she has nothing to compare against. The server can serve its
+//! own key, relay in the clear between two perfectly encrypted sessions, and nothing detects it —
+//! except comparing fingerprints out loud, which almost nobody does.
 //!
-//! C'est le *trust on first use*, et c'est le dernier vrai trou cryptographique du projet.
+//! That is *trust on first use*, and it is the last real cryptographic gap in the project.
 //!
-//! # Ce qu'un journal apporte, et ce qu'il n'apporte pas
+//! # What a log brings, and what it does not
 //!
-//! Chaque clé de compte est ajoutée à un arbre de Merkle **append-only**. Le serveur publie une
-//! tête signée (STH) et, à la demande, une preuve que telle clé figure bien dans l'arbre. Le
-//! client vérifie deux choses :
+//! Every account key is appended to an **append-only** Merkle tree. The server publishes a signed
+//! tree head (STH) and, on request, a proof that a given key really is in the tree. The client
+//! checks two things:
 //!
-//! - **l'inclusion** : la clé qu'on me sert est bien celle du journal ;
-//! - **la cohérence** : le journal d'aujourd'hui prolonge celui d'hier, sans réécriture.
+//! - **inclusion**: the key I am served really is the one in the log;
+//! - **consistency**: today's log extends yesterday's, with no rewriting.
 //!
-//! Cela réduit le mensonge à une seule forme, mais ne l'élimine pas : un serveur peut tenir
-//! **deux journaux** et servir l'un à Alice, l'autre à Bob. Chacun voit un journal cohérent.
-//! Seule la comparaison des têtes entre clients — le *gossip* — attrape cette bifurcation, et
-//! il se fait hors de cette crate, dans les messages chiffrés que le serveur ne peut pas
-//! falsifier.
+//! This reduces the lie to a single form, but does not eliminate it: a server can keep **two
+//! logs** and serve one to Alice and the other to Bob. Each sees a consistent log. Only comparing
+//! heads between clients — *gossip* — catches that fork, and it happens outside this crate, in
+//! the encrypted messages the server cannot forge.
 //!
-//! # Pourquoi RFC 6962 et pas un arbre maison
+//! # Why RFC 6962 and not a homemade tree
 //!
-//! Les préfixes de domaine `0x00` (feuille) et `0x01` (nœud interne) empêchent une **attaque
-//! par seconde préimage** : sans eux, le hash d'un nœud interne pourrait être présenté comme
-//! celui d'une feuille, et un attaquant fabriquerait une preuve d'inclusion pour une entrée
-//! qu'il choisit. C'est la partie qu'on ne devine pas et qu'il ne faut pas réinventer.
+//! The domain prefixes `0x00` (leaf) and `0x01` (internal node) prevent a **second-preimage
+//! attack**: without them the hash of an internal node could be presented as that of a leaf, and
+//! an attacker would forge an inclusion proof for an entry of their choosing. That is the part
+//! nobody guesses and nobody should reinvent.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-/// Préfixe des feuilles. Voir la note du module : sans séparation feuille/nœud, un hash
-/// interne peut être rejoué comme feuille.
+/// Leaf prefix. See the module note: without leaf/node separation, an internal hash can be
+/// replayed as a leaf.
 const LEAF_PREFIX: u8 = 0x00;
 
-/// Préfixe des nœuds internes.
+/// Internal node prefix.
 const NODE_PREFIX: u8 = 0x01;
 
-/// Séparation de domaine des têtes signées, distincte de celles de la crate `attest`.
+/// Domain separation for signed tree heads, distinct from those of the `attest` crate.
 const STH_DOMAIN: &[u8] = b"wac-sth-v1";
 
 pub type Hash = [u8; 32];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LogError {
-    /// L'indice demandé dépasse la taille de l'arbre.
+    /// The requested index is beyond the size of the tree.
     OutOfRange,
-    /// La preuve ne reconstruit pas la racine annoncée.
+    /// The proof does not rebuild the announced root.
     BadProof,
-    /// Les deux tailles ne peuvent pas être reliées : `from` doit être non nul et ≤ `to`.
+    /// The two sizes cannot be related: `from` must be non-zero and ≤ `to`.
     BadRange,
-    /// La signature de la tête ne vérifie pas.
+    /// The head signature does not verify.
     BadSignature,
 }
 
 impl std::fmt::Display for LogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OutOfRange => write!(f, "indice hors de l'arbre"),
-            Self::BadProof => write!(f, "preuve invalide"),
-            Self::BadRange => write!(f, "intervalle de cohérence invalide"),
-            Self::BadSignature => write!(f, "tête de journal non signée par le journal"),
+            Self::OutOfRange => write!(f, "index outside the tree"),
+            Self::BadProof => write!(f, "invalid proof"),
+            Self::BadRange => write!(f, "invalid consistency range"),
+            Self::BadSignature => write!(f, "tree head not signed by the log"),
         }
     }
 }
 
 impl std::error::Error for LogError {}
 
-/// Hash d'une feuille : `SHA256(0x00 ‖ contenu)`.
+/// Leaf hash: `SHA256(0x00 ‖ contents)`.
 pub fn leaf_hash(contents: &[u8]) -> Hash {
     let mut hasher = Sha256::new();
     hasher.update([LEAF_PREFIX]);
@@ -81,7 +79,7 @@ pub fn leaf_hash(contents: &[u8]) -> Hash {
     hasher.finalize().into()
 }
 
-/// Hash d'un nœud interne : `SHA256(0x01 ‖ gauche ‖ droite)`.
+/// Internal node hash: `SHA256(0x01 ‖ left ‖ right)`.
 pub fn node_hash(left: &Hash, right: &Hash) -> Hash {
     let mut hasher = Sha256::new();
     hasher.update([NODE_PREFIX]);
@@ -90,10 +88,10 @@ pub fn node_hash(left: &Hash, right: &Hash) -> Hash {
     hasher.finalize().into()
 }
 
-/// Contenu canonique d'une entrée du journal.
+/// Canonical contents of a log entry.
 ///
-/// Longueur-préfixé comme dans `attest`, et pour la même raison : sans préfixe,
-/// `("ab", clé)` et `("a", "b"‖clé)` produiraient les mêmes octets, donc la même feuille.
+/// Length-prefixed as in `attest`, and for the same reason: without prefixes, `("ab", key)` and
+/// `("a", "b"‖key)` would produce the same bytes, hence the same leaf.
 pub fn entry(handle: &str, identity_key: &[u8]) -> Vec<u8> {
     let handle = handle.as_bytes();
     let mut out = Vec::with_capacity(4 + handle.len() + identity_key.len());
@@ -104,11 +102,11 @@ pub fn entry(handle: &str, identity_key: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Racine d'un arbre de Merkle sur `leaves`, selon RFC 6962.
+/// Root of a Merkle tree over `leaves`, per RFC 6962.
 ///
-/// L'arbre n'est pas complété jusqu'à une puissance de deux : un sous-arbre isolé remonte tel
-/// quel. Compléter par des feuilles vides ferait qu'un arbre de 3 feuilles et un arbre de 4
-/// dont la dernière est vide auraient la même racine.
+/// The tree is not padded up to a power of two: an isolated subtree is carried up as is. Padding
+/// with empty leaves would make a 3-leaf tree and a 4-leaf tree whose last leaf is empty share
+/// the same root.
 pub fn root(leaves: &[Hash]) -> Hash {
     match leaves.len() {
         0 => Sha256::digest([]).into(),
@@ -120,12 +118,11 @@ pub fn root(leaves: &[Hash]) -> Hash {
     }
 }
 
-/// Point de découpe : la plus grande puissance de deux **strictement** inférieure à `n`.
+/// Split point: the largest power of two **strictly** below `n`.
 ///
-/// C'est ce qui rend l'arbre *append-only* : ajouter une feuille ne redécoupe jamais la partie
-/// gauche, donc les sous-arbres déjà calculés restent valides. Un découpage au milieu
-/// (`n / 2`) réorganiserait l'arbre à chaque ajout et rendrait toute preuve de cohérence
-/// impossible.
+/// This is what makes the tree *append-only*: appending a leaf never re-splits the left part, so
+/// the subtrees already computed stay valid. Splitting in the middle (`n / 2`) would reorganise
+/// the tree on every append and make any consistency proof impossible.
 fn split_point(n: usize) -> usize {
     let mut k = 1;
     while k * 2 < n {
@@ -134,7 +131,7 @@ fn split_point(n: usize) -> usize {
     k
 }
 
-/// Preuve qu'une feuille figure dans l'arbre : le chemin d'audit, de bas en haut.
+/// Proof that a leaf is in the tree: the audit path, bottom-up.
 pub fn inclusion_proof(leaves: &[Hash], index: usize) -> Result<Vec<Hash>, LogError> {
     if index >= leaves.len() {
         return Err(LogError::OutOfRange);
@@ -157,19 +154,18 @@ pub fn inclusion_proof(leaves: &[Hash], index: usize) -> Result<Vec<Hash>, LogEr
     Ok(proof)
 }
 
-/// Vérifie qu'une feuille figure bien dans l'arbre de racine `root`.
+/// Checks that a leaf really is in the tree with root `root`.
 ///
-/// Fonction libre et sans état : le client la rappelle sur ce que le serveur lui sert, sans
-/// jamais se fier au verdict de ce dernier.
+/// Free and stateless: the client redoes it on whatever the server serves, never trusting the
+/// latter's verdict.
 ///
-/// # L'ordre, qui n'est pas un détail
+/// # The order, which is not a detail
 ///
-/// [`inclusion_proof`] produit le chemin **de bas en haut** : le premier élément est le frère
-/// le plus profond. La vérification doit donc reconstituer le chemin dans le même sens.
-/// Décider de la direction à chaque niveau *en descendant* — ce qui semble naturel — associe
-/// le frère le plus profond à la décision du sommet, et combine les hashs dans le mauvais
-/// ordre. L'erreur ne se voit que sur les arbres de taille non puissance de deux, où les deux
-/// parcours cessent de coïncider.
+/// [`inclusion_proof`] produces the path **bottom-up**: the first element is the deepest sibling.
+/// Verification must therefore rebuild the path in the same direction. Deciding the direction at
+/// each level *on the way down* — which feels natural — pairs the deepest sibling with the
+/// decision taken at the top, and combines the hashes in the wrong order. The mistake only shows
+/// on trees whose size is not a power of two, where the two traversals stop coinciding.
 pub fn verify_inclusion(
     leaf: &Hash,
     index: usize,
@@ -181,7 +177,7 @@ pub fn verify_inclusion(
         return Err(LogError::OutOfRange);
     }
 
-    // Descente : à chaque niveau, notre feuille est-elle dans la moitié droite ?
+    // Descent: at each level, is our leaf in the right half?
     let mut directions = Vec::new();
     let mut index = index;
     let mut size = size;
@@ -201,7 +197,7 @@ pub fn verify_inclusion(
         return Err(LogError::BadProof);
     }
 
-    // Remontée : le frère le plus profond va avec la décision la plus profonde.
+    // Climb back up: the deepest sibling goes with the deepest decision.
     let mut hash = *leaf;
     for (sibling, from_right) in proof.iter().zip(directions.iter().rev()) {
         hash = if *from_right { node_hash(sibling, &hash) } else { node_hash(&hash, sibling) };
@@ -213,11 +209,10 @@ pub fn verify_inclusion(
     Ok(())
 }
 
-/// Preuve que l'arbre de taille `to` prolonge celui de taille `from` **sans réécriture**.
+/// Proof that the tree of size `to` extends the one of size `from` **without rewriting**.
 ///
-/// C'est la propriété qui distingue un journal auditable d'une simple base : le serveur ne peut
-/// pas revenir en arrière et remplacer une clé déjà publiée sans que tous ceux qui ont vu
-/// l'ancienne tête le constatent.
+/// This is the property that separates an auditable log from a plain database: the server cannot
+/// go back and replace an already published key without everyone who saw the old head noticing.
 pub fn consistency_proof(leaves: &[Hash], from: usize) -> Result<Vec<Hash>, LogError> {
     let to = leaves.len();
     if from == 0 || from > to {
@@ -229,15 +224,15 @@ pub fn consistency_proof(leaves: &[Hash], from: usize) -> Result<Vec<Hash>, LogE
     Ok(subtree_proof(leaves, from, true))
 }
 
-/// Cœur de la preuve de cohérence.
+/// Core of the consistency proof.
 ///
-/// `complete` indique que le sous-arbre couvrant les `from` premières feuilles est exactement
-/// un nœud déjà connu du vérificateur — auquel cas il n'a pas besoin qu'on le lui redonne.
+/// `complete` means the subtree covering the first `from` leaves is exactly a node the verifier
+/// already knows — in which case it does not need to be given back to them.
 fn subtree_proof(leaves: &[Hash], from: usize, complete: bool) -> Vec<Hash> {
     let n = leaves.len();
     if from == n {
-        // Le vérificateur connaît déjà ce nœud s'il était complet ; sinon il faut le lui
-        // fournir pour qu'il recalcule sa propre ancienne racine.
+        // The verifier already knows this node if it was complete; otherwise it must be supplied
+        // so they can recompute their own old root.
         return if complete { Vec::new() } else { vec![root(leaves)] };
     }
 
@@ -253,14 +248,14 @@ fn subtree_proof(leaves: &[Hash], from: usize, complete: bool) -> Vec<Hash> {
     }
 }
 
-/// Vérifie qu'un arbre en prolonge un autre.
+/// Checks that one tree extends another.
 ///
-/// Reconstruit **les deux** racines à partir de la même preuve : accepter sans recalculer
-/// l'ancienne reviendrait à croire le serveur sur ce qu'il publiait hier.
+/// Rebuilds **both** roots from the same proof: accepting without recomputing the old one would
+/// amount to believing the server about what it published yesterday.
 ///
-/// L'algorithme est celui de la RFC 6962, transcrit tel quel. Il travaille sur les indices des
-/// dernières feuilles (`from - 1`, `to - 1`) et lit leurs bits pour retrouver la découpe des
-/// sous-arbres — une gymnastique qu'il vaut mieux ne pas réinventer.
+/// The algorithm is RFC 6962's, transcribed as is. It works on the indices of the last leaves
+/// (`from - 1`, `to - 1`) and reads their bits to recover the subtree splits — gymnastics best
+/// not reinvented.
 pub fn verify_consistency(
     from: usize,
     old_root: &Hash,
@@ -282,15 +277,15 @@ pub fn verify_consistency(
     let mut fnode = from - 1;
     let mut snode = to - 1;
 
-    // Remonte tant que l'ancien arbre finit sur une feuille droite : ces niveaux sont communs
-    // aux deux arbres et n'apparaissent pas dans la preuve.
+    // Climb while the old tree ends on a right leaf: those levels are common to both trees and do
+    // not appear in the proof.
     while fnode & 1 == 1 {
         fnode >>= 1;
         snode >>= 1;
     }
 
-    // `fnode == 0` signifie que l'ancien arbre est un sous-arbre complet : le vérificateur en
-    // connaît déjà la racine, la preuve ne la contient donc pas. Sinon elle l'ouvre.
+    // `fnode == 0` means the old tree is a complete subtree: the verifier already knows its root,
+    // so the proof does not contain it. Otherwise the proof opens it.
     let (seed, rest) = if fnode == 0 {
         (*old_root, proof)
     } else {
@@ -327,19 +322,19 @@ pub fn verify_consistency(
     Ok(())
 }
 
-/// Tête de journal signée : ce que le serveur publie, et ce que les clients s'échangent.
+/// Signed tree head: what the server publishes, and what clients exchange with each other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TreeHead {
     pub size: u64,
     pub root: Hash,
-    /// Secondes Unix. Dans le message signé : sans lui, une vieille tête pourrait être
-    /// rejouée indéfiniment pour masquer les ajouts qui ont suivi.
+    /// Unix seconds. Inside the signed message: without it, an old head could be replayed forever
+    /// to hide the appends that followed.
     pub timestamp: u64,
 }
 
 impl TreeHead {
-    /// Message canonique signé. Domaine distinct de ceux d'`attest` : une signature de tête ne
-    /// doit valoir dans aucun autre contexte.
+    /// Canonical signed message. Domain distinct from `attest`'s: a head signature must hold in
+    /// no other context.
     pub fn message(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(STH_DOMAIN.len() + 8 + 32 + 8);
         out.extend_from_slice(STH_DOMAIN);
@@ -353,11 +348,11 @@ impl TreeHead {
         key.sign(&self.message()).to_bytes()
     }
 
-    /// Vérifie la signature du journal.
+    /// Verifies the log's signature.
     ///
-    /// **Ce que cela prouve est étroit** : que la tête vient bien du journal. Pas qu'elle soit
-    /// la seule qu'il ait émise. Un journal qui bifurque signe deux têtes également valides ;
-    /// seul le gossip entre clients l'attrape.
+    /// **What this proves is narrow**: that the head does come from the log. Not that it is the
+    /// only one it issued. A forking log signs two equally valid heads; only gossip between
+    /// clients catches it.
     pub fn verify(&self, log_key: &[u8], signature: &[u8]) -> Result<(), LogError> {
         let log_key: [u8; 32] = log_key.try_into().map_err(|_| LogError::BadSignature)?;
         let verifying = VerifyingKey::from_bytes(&log_key).map_err(|_| LogError::BadSignature)?;

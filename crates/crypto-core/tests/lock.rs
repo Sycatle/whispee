@@ -1,47 +1,48 @@
-//! Le verrou est ce qui sépare un état chiffré au repos d'un état lisible par quiconque
-//! obtient le disque. Ces tests figent son comportement.
+//! The lock is what separates state encrypted at rest from state readable by anyone who gets
+//! hold of the disk. These tests freeze its behaviour.
 
 use crypto_core::lock::{SALT_LEN, derive_unlock_key};
 
-const SEL: [u8; SALT_LEN] = [7u8; SALT_LEN];
+const SALT: [u8; SALT_LEN] = [7u8; SALT_LEN];
 
 #[test]
-fn la_derivation_est_deterministe() {
-    let a = derive_unlock_key("un mot de passe assez long", &SEL).unwrap();
-    let b = derive_unlock_key("un mot de passe assez long", &SEL).unwrap();
+fn the_derivation_is_deterministic() {
+    let a = derive_unlock_key("a sufficiently long password", &SALT).unwrap();
+    let b = derive_unlock_key("a sufficiently long password", &SALT).unwrap();
     assert_eq!(a, b);
 }
 
 #[test]
-fn deux_mots_de_passe_donnent_des_cles_differentes() {
-    let a = derive_unlock_key("un mot de passe assez long", &SEL).unwrap();
-    let b = derive_unlock_key("un mot de passe assez longs", &SEL).unwrap();
+fn two_passwords_yield_different_keys() {
+    let a = derive_unlock_key("a sufficiently long password", &SALT).unwrap();
+    let b = derive_unlock_key("a sufficiently long passphrase", &SALT).unwrap();
     assert_ne!(a, b);
 }
 
-/// Le sel interdit les tables précalculées : le même mot de passe sur deux appareils ne doit
-/// pas produire la même clé, sinon casser l'un revient à casser tous les autres.
+/// The salt rules out precomputed tables: the same password on two devices must not produce the
+/// same key, otherwise breaking one amounts to breaking all the others.
 #[test]
-fn le_sel_separe_les_appareils() {
-    let a = derive_unlock_key("un mot de passe assez long", &SEL).unwrap();
-    let b = derive_unlock_key("un mot de passe assez long", &[9u8; SALT_LEN]).unwrap();
+fn the_salt_separates_devices() {
+    let a = derive_unlock_key("a sufficiently long password", &SALT).unwrap();
+    let b = derive_unlock_key("a sufficiently long password", &[9u8; SALT_LEN]).unwrap();
     assert_ne!(a, b);
 }
 
 #[test]
-fn un_sel_de_mauvaise_taille_est_refuse() {
-    assert!(derive_unlock_key("peu importe", &[0u8; 8]).is_err());
+fn a_salt_of_the_wrong_size_is_rejected() {
+    assert!(derive_unlock_key("does not matter", &[0u8; 8]).is_err());
 }
 
-/// Non-régression sur les paramètres.
+/// Non-regression on the parameters.
 ///
-/// Ce n'est pas un vecteur de conformité — c'est un garde-fou. Si ce test casse, le coût de
-/// dérivation a changé, et **tous les états chiffrés existants deviennent illisibles** : leur
-/// clé ne sera plus la même. Baisser ces paramètres affaiblit silencieusement chaque appareil
-/// déjà déployé ; les augmenter casse le déverrouillage. Les deux méritent une décision
-/// explicite, pas une mise à jour distraite de ce test.
+/// This is not a conformance vector — it is a guard rail. If this test breaks, the derivation
+/// cost changed and **every existing encrypted state becomes unreadable**: its key will no
+/// longer be the same. Lowering these parameters silently weakens every device already
+/// deployed; raising them breaks unlocking. Both deserve an explicit decision, not an
+/// absent-minded update of this test.
 #[test]
-fn les_parametres_sont_figes() {
-    let key = derive_unlock_key("mot de passe de reference", &SEL).unwrap();
+fn the_parameters_are_frozen() {
+    // The password stays as it is: it is the input of a frozen vector, not prose.
+    let key = derive_unlock_key("mot de passe de reference", &SALT).unwrap();
     assert_eq!(hex::encode(key), "593cf6a8b414b58943847e366561d9a4004a8da42869d0c549a9bb4ffe1a9dcc");
 }

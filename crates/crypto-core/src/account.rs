@@ -1,16 +1,16 @@
-//! Compte pseudonyme, et son unique secret racine.
+//! Pseudonymous account, and its single root secret.
 //!
-//! Un compte est une clé Ed25519 — l'*account identity key*, AIK — et un pseudonyme. C'est
-//! l'AIK qui signe les attestations d'appareil (voir la crate [`attest`]), donc elle qui
-//! décide quels appareils peuvent lire les conversations du compte.
+//! An account is an Ed25519 key — the *account identity key*, AIK — plus a handle. The AIK
+//! signs device attestations (see the [`attest`] crate), so it decides which devices may read
+//! the account's conversations.
 //!
-//! # Ce que ce module ne fait pas
+//! # What this module does not do
 //!
-//! Il ne stocke rien. Le secret vit en mémoire le temps d'une session et c'est à l'appelant
-//! de décider où il le range — trousseau système, IndexedDB chiffré, ou nulle part.
+//! It stores nothing. The secret lives in memory for the length of a session and it is up to
+//! the caller to decide where it goes — system keychain, encrypted IndexedDB, or nowhere.
 //!
-//! Il ne connaît pas non plus les appareils du compte : la liste vient du serveur et se
-//! revérifie à chaque lecture. Un compte n'est pas un annuaire, c'est une clé de signature.
+//! It does not know the account's devices either: that list comes from the server and is
+//! re-verified on every read. An account is not a directory, it is a signing key.
 
 use bip39::{Language, Mnemonic};
 use ed25519_dalek::{Signer, SigningKey};
@@ -21,28 +21,28 @@ use zeroize::Zeroize;
 
 use crate::error::{CryptoError, Result};
 
-/// Nombre de mots de la phrase de récupération.
+/// Number of words in the recovery phrase.
 ///
-/// Douze mots valent 128 bits d'entropie. Vingt-quatre en vaudraient 256, ce qui ne protège
-/// contre rien de plus : 128 bits sont déjà hors d'atteinte, et la seule différence mesurable
-/// serait le nombre d'utilisateurs qui recopient la phrase de travers.
+/// Twelve words are 128 bits of entropy. Twenty-four would be 256, which protects against
+/// nothing more: 128 bits are already out of reach, and the only measurable difference would
+/// be how many users copy the phrase down wrong.
 pub const PHRASE_WORDS: usize = 12;
 
-/// Entropie correspondante, en octets.
+/// The matching entropy, in bytes.
 const ENTROPY_BYTES: usize = 16;
 
-/// Étiquettes de dérivation.
+/// Derivation labels.
 ///
-/// Deux clés issues de la même graine doivent être indépendantes : connaître la clé du coffre
-/// ne doit rien apprendre sur la clé d'identité. C'est ce que garantit HKDF **à condition**
-/// que les `info` diffèrent — d'où ces constantes, plutôt que des littéraux dispersés.
+/// Two keys from the same seed must be independent: knowing the vault key must teach nothing
+/// about the identity key. HKDF guarantees that **provided** the `info` values differ — hence
+/// these constants rather than literals scattered around.
 const INFO_IDENTITY: &[u8] = b"wac-account-identity-v1";
 const INFO_VAULT: &[u8] = b"wac-vault-v1";
 
-/// Clé racine d'un compte.
+/// An account's root key.
 ///
-/// `Zeroize` est manuel plutôt que dérivé : `SigningKey` ne l'implémente pas, et le laisser
-/// traîner dans la pile après un `drop` irait à l'encontre de tout le reste.
+/// `Zeroize` is manual rather than derived: `SigningKey` does not implement it, and leaving it
+/// lying on the stack after a `drop` would undo everything else.
 pub struct Account {
     signing: SigningKey,
     seed: [u8; 64],
@@ -54,8 +54,8 @@ impl Drop for Account {
     }
 }
 
-/// Volontairement redigé. Dériver `Debug` recopierait la clé privée dans le premier
-/// `println!` de débogage venu, et de là dans les journaux.
+/// Deliberately redacted. Deriving `Debug` would copy the private key into the first debug
+/// `println!` that comes along, and from there into the logs.
 impl std::fmt::Debug for Account {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Account").field("identity_key", &self.fingerprint()).finish_non_exhaustive()
@@ -63,12 +63,11 @@ impl std::fmt::Debug for Account {
 }
 
 impl Account {
-    /// Crée un compte et retourne la phrase de récupération qui le reconstruit.
+    /// Creates an account and returns the recovery phrase that rebuilds it.
     ///
-    /// **C'est le seul moment où la phrase existe.** Elle n'est pas conservée : la redemander
-    /// plus tard est impossible par construction, ce qui est le comportement voulu — une
-    /// phrase qu'on peut réafficher est une phrase qu'un attaquant ayant l'appareil déverrouillé
-    /// peut réafficher aussi.
+    /// **This is the only moment the phrase exists.** It is not kept: asking for it again later
+    /// is impossible by construction, which is the intended behaviour — a phrase that can be
+    /// shown again is a phrase an attacker holding the unlocked device can show again too.
     pub fn generate() -> Result<(Self, String)> {
         let mut entropy = [0u8; ENTROPY_BYTES];
         rand_core::OsRng.fill_bytes(&mut entropy);
@@ -81,31 +80,31 @@ impl Account {
         Ok((Self::from_mnemonic(&mnemonic), phrase))
     }
 
-    /// Reconstruit un compte depuis sa phrase de récupération.
+    /// Rebuilds an account from its recovery phrase.
     ///
-    /// La phrase porte sa propre somme de contrôle : un mot mal recopié est refusé ici plutôt
-    /// que de produire silencieusement un compte différent et vide.
+    /// The phrase carries its own checksum: a mistyped word is rejected here rather than
+    /// silently producing a different, empty account.
     pub fn from_phrase(phrase: &str) -> Result<Self> {
         let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase.trim())
-            .map_err(|_| CryptoError::Malformed("phrase de récupération invalide"))?;
+            .map_err(|_| CryptoError::Malformed("invalid recovery phrase"))?;
 
         if mnemonic.word_count() != PHRASE_WORDS {
-            return Err(CryptoError::Malformed("phrase de récupération de longueur inattendue"));
+            return Err(CryptoError::Malformed("recovery phrase of unexpected length"));
         }
 
         Ok(Self::from_mnemonic(&mnemonic))
     }
 
     fn from_mnemonic(mnemonic: &Mnemonic) -> Self {
-        // `to_seed` applique PBKDF2-HMAC-SHA512, 2048 itérations. Ce n'est pas un durcissement
-        // utile ici — la graine a déjà 128 bits, il n'y a rien à brute-forcer — mais c'est le
-        // format standard, et s'en écarter n'apporterait rien qu'une incompatibilité.
+        // `to_seed` applies PBKDF2-HMAC-SHA512, 2048 iterations. That is no useful hardening
+        // here — the seed already has 128 bits, there is nothing to brute-force — but it is
+        // the standard format, and departing from it would buy nothing but incompatibility.
         let seed = mnemonic.to_seed_normalized("");
 
         let mut identity = [0u8; 32];
         Hkdf::<Sha256>::new(None, &seed)
             .expand(INFO_IDENTITY, &mut identity)
-            .expect("32 octets est une longueur valide pour HKDF-SHA256");
+            .expect("32 bytes is a valid length for HKDF-SHA256");
 
         let signing = SigningKey::from_bytes(&identity);
         identity.zeroize();
@@ -113,20 +112,20 @@ impl Account {
         Self { signing, seed }
     }
 
-    /// Clé publique du compte : ce que les autres vérifient, et ce que le serveur publie.
+    /// The account's public key: what others verify, and what the server publishes.
     pub fn identity_key(&self) -> [u8; 32] {
         self.signing.verifying_key().to_bytes()
     }
 
-    /// Empreinte à comparer hors bande avec son correspondant.
+    /// Fingerprint to compare out of band with your peer.
     pub fn fingerprint(&self) -> String {
         attest::fingerprint(&self.identity_key())
     }
 
-    /// Signe l'appartenance d'un appareil à ce compte.
+    /// Signs a device's membership of this account.
     ///
-    /// Le résultat est ce qui empêche le serveur d'inventer un appareil : il ne détient pas
-    /// l'AIK et ne peut donc pas produire cette signature.
+    /// The result is what stops the server inventing a device: it does not hold the AIK and so
+    /// cannot produce this signature.
     pub fn attest(
         &self,
         handle: &str,
@@ -135,34 +134,32 @@ impl Account {
         mls_key: &[u8],
     ) -> Result<[u8; 64]> {
         let claim = attest::DeviceClaim { handle, device_id, auth_key, mls_key };
-        let message = attest::message(&claim).map_err(|_| CryptoError::Malformed("champ trop long"))?;
+        let message = attest::message(&claim).map_err(|_| CryptoError::Malformed("field too long"))?;
         Ok(self.signing.sign(&message).to_bytes())
     }
 
-    /// Signe la révocation d'un appareil de ce compte.
+    /// Signs the revocation of a device of this account.
     ///
-    /// Jumeau d'[`Account::attest`], et son contraire exact : l'attestation fait entrer un
-    /// appareil, le certificat de révocation le fait sortir. Les deux sont vérifiables par
-    /// n'importe qui détenant la clé publique du compte, ce qui est la condition pour qu'un
-    /// **autre** membre d'un groupe puisse commiter le retrait sans croire le serveur sur
-    /// parole.
+    /// Twin of [`Account::attest`] and its exact opposite: the attestation lets a device in,
+    /// the revocation certificate puts it out. Both are verifiable by anyone holding the
+    /// account's public key, which is what lets **another** group member commit the removal
+    /// without taking the server's word for it.
     ///
-    /// `revoked_at` est en secondes Unix et entre dans le message signé. L'appelant doit y
-    /// mettre l'heure courante : elle sert au serveur à rejeter les certificats fabriqués à
-    /// l'avance, et aux autres clients à ordonner les révocations successives d'un même
-    /// appareil.
+    /// `revoked_at` is in Unix seconds and enters the signed message. The caller must put the
+    /// current time there: the server uses it to reject certificates forged ahead of time, and
+    /// other clients use it to order successive revocations of the same device.
     pub fn revoke(&self, handle: &str, device_id: &str, revoked_at: u64) -> Result<[u8; 64]> {
         let claim = attest::RevocationClaim { handle, device_id, revoked_at };
         let message =
-            attest::revocation_message(&claim).map_err(|_| CryptoError::Malformed("champ trop long"))?;
+            attest::revocation_message(&claim).map_err(|_| CryptoError::Malformed("field too long"))?;
         Ok(self.signing.sign(&message).to_bytes())
     }
 
-    /// Signe le passage de ce compte à une nouvelle clé d'identité.
+    /// Signs this account's move to a new identity key.
     ///
-    /// À appeler sur l'**ancien** compte : c'est lui qui désigne son successeur. Voir
-    /// [`attest::RotationClaim`] pour ce que cette signature prouve, et surtout ce qu'elle ne
-    /// prouve pas.
+    /// Call it on the **old** account: it is the one that names its successor. See
+    /// [`attest::RotationClaim`] for what this signature proves, and above all what it does
+    /// not.
     pub fn rotate(
         &self,
         handle: &str,
@@ -171,43 +168,43 @@ impl Account {
     ) -> Result<[u8; 64]> {
         let claim = attest::RotationClaim { handle, new_identity_key, rotated_at };
         let message =
-            attest::rotation_message(&claim).map_err(|_| CryptoError::Malformed("champ trop long"))?;
+            attest::rotation_message(&claim).map_err(|_| CryptoError::Malformed("field too long"))?;
         Ok(self.signing.sign(&message).to_bytes())
     }
 
-    /// Clé symétrique du coffre de sauvegarde.
+    /// Symmetric key of the backup vault.
     ///
-    /// Dérivée à la demande et jamais persistée : tant que l'utilisateur n'active pas le
-    /// coffre, cette clé n'existe nulle part. Sa seule existence changerait le modèle de
-    /// menace — un coffre chiffré par une clé long-terme n'est plus protégé par la forward
-    /// secrecy, et la fuite de la phrase devient rétroactivement totale.
+    /// Derived on demand and never persisted: as long as the user does not turn the vault on,
+    /// this key exists nowhere. Its mere existence would change the threat model — a vault
+    /// encrypted under a long-term key is no longer protected by forward secrecy, and a leaked
+    /// phrase becomes retroactively total.
     pub fn vault_key(&self) -> [u8; 32] {
         let mut key = [0u8; 32];
         Hkdf::<Sha256>::new(None, &self.seed)
             .expand(INFO_VAULT, &mut key)
-            .expect("32 octets est une longueur valide pour HKDF-SHA256");
+            .expect("32 bytes is a valid length for HKDF-SHA256");
         key
     }
 
-    /// Exporte la graine, pour la transmettre à un appareil qu'on appaire.
+    /// Exports the seed, to hand it to a device being paired.
     ///
-    /// **Ces octets valent le compte entier.** Ils ne doivent traverser qu'un canal déjà
-    /// chiffré et authentifié — en pratique le blob d'appairage scellé sous le secret X25519
-    /// partagé par le QR code, jamais le serveur en clair, jamais un journal.
+    /// **These bytes are worth the whole account.** They must only cross an already encrypted
+    /// and authenticated channel — in practice the pairing blob sealed under the X25519 secret
+    /// shared by the QR code, never the server in the clear, never a log.
     ///
-    /// C'est la graine et non la phrase qui circule : l'appareil appairé obtient exactement le
-    /// même pouvoir, sans qu'un secret lisible par un humain — donc photographiable — soit
-    /// reconstitué une seconde fois.
+    /// It is the seed and not the phrase that travels: the paired device gains exactly the same
+    /// power, without a human-readable — hence photographable — secret being reconstituted a
+    /// second time.
     pub fn export_seed(&self) -> [u8; 64] {
         self.seed
     }
 
-    /// Reconstruit un compte depuis une graine reçue lors d'un appairage.
+    /// Rebuilds an account from a seed received during pairing.
     pub fn from_seed(seed: [u8; 64]) -> Self {
         let mut identity = [0u8; 32];
         Hkdf::<Sha256>::new(None, &seed)
             .expand(INFO_IDENTITY, &mut identity)
-            .expect("32 octets est une longueur valide pour HKDF-SHA256");
+            .expect("32 bytes is a valid length for HKDF-SHA256");
 
         let signing = SigningKey::from_bytes(&identity);
         identity.zeroize();
@@ -216,7 +213,7 @@ impl Account {
     }
 }
 
-/// `bip39::Error` n'est pas `'static` sous forme de `&str` ; on ne conserve que la catégorie.
+/// `bip39::Error` is not `'static` as a `&str`; we keep the category only.
 fn leak(_: bip39::Error) -> &'static str {
-    "entropie invalide pour une phrase de récupération"
+    "invalid entropy for a recovery phrase"
 }

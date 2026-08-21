@@ -1,110 +1,110 @@
-//! Tests de bout en bout d'une session : établissement, conversation, désynchronisation.
+//! End-to-end tests of a session: establishment, conversation, desynchronisation.
 
 mod common;
 
 use common::TestRng;
 use ratchet_lab::{IdentityKeyPair, PreKeyStore, RatchetError, Session, safety_number};
 
-/// Monte une session Alice → Bob prête à l'emploi.
+/// Sets up a ready-to-use Alice → Bob session.
 fn pair(with_one_time: bool) -> (TestRng, Session, Session, PreKeyStore) {
     let mut rng = TestRng::seed("session");
     let alice_identity = IdentityKeyPair::generate(&mut rng);
     let bob_store = PreKeyStore::generate(&mut rng, with_one_time);
 
     let (alice, initial) =
-        Session::initiate(&mut rng, &alice_identity, &bob_store.bundle()).expect("bundle valide");
-    let bob = Session::accept(&bob_store, &initial).expect("X3DH rejoué");
+        Session::initiate(&mut rng, &alice_identity, &bob_store.bundle()).expect("valid bundle");
+    let bob = Session::accept(&bob_store, &initial).expect("X3DH replayed");
 
     (rng, alice, bob, bob_store)
 }
 
 #[test]
-fn premier_message_dans_les_deux_sens() {
+fn first_message_in_both_directions() {
     let (mut rng, mut alice, mut bob, _) = pair(true);
 
-    let msg = alice.encrypt("salut Bob".as_bytes()).unwrap();
-    assert_eq!(bob.decrypt(&mut rng, &msg).unwrap(), "salut Bob".as_bytes());
+    let msg = alice.encrypt("hi Bob".as_bytes()).unwrap();
+    assert_eq!(bob.decrypt(&mut rng, &msg).unwrap(), "hi Bob".as_bytes());
 
-    // Bob ne peut répondre qu'après avoir reçu : c'est sa première réception qui lui donne
-    // une chaîne d'envoi.
-    let reply = bob.encrypt("salut Alice".as_bytes()).unwrap();
-    assert_eq!(alice.decrypt(&mut rng, &reply).unwrap(), "salut Alice".as_bytes());
+    // Bob can only reply after receiving: it is his first reception that gives him a sending
+    // chain.
+    let reply = bob.encrypt("hi Alice".as_bytes()).unwrap();
+    assert_eq!(alice.decrypt(&mut rng, &reply).unwrap(), "hi Alice".as_bytes());
 }
 
 #[test]
-fn bob_ne_peut_pas_ecrire_avant_de_recevoir() {
+fn bob_cannot_write_before_receiving() {
     let (_, _, mut bob, _) = pair(true);
-    assert_eq!(bob.encrypt("trop tôt".as_bytes()).unwrap_err(), RatchetError::NoSession);
+    assert_eq!(bob.encrypt("too early".as_bytes()).unwrap_err(), RatchetError::NoSession);
 }
 
 #[test]
-fn session_sans_one_time_prekey() {
-    // Cas réel : le stock de one-time prekeys de Bob est épuisé. La session doit tout de même
-    // s'établir, avec une forward secrecy légèrement dégradée sur le premier message.
+fn session_without_one_time_prekey() {
+    // A real case: Bob's stock of one-time prekeys is exhausted. The session must still be
+    // established, with slightly degraded forward secrecy on the first message.
     let (mut rng, mut alice, mut bob, _) = pair(false);
-    let msg = alice.encrypt("stock épuisé".as_bytes()).unwrap();
-    assert_eq!(bob.decrypt(&mut rng, &msg).unwrap(), "stock épuisé".as_bytes());
+    let msg = alice.encrypt("stock exhausted".as_bytes()).unwrap();
+    assert_eq!(bob.decrypt(&mut rng, &msg).unwrap(), "stock exhausted".as_bytes());
 }
 
 #[test]
-fn conversation_alternee_tourne_le_ratchet_dh() {
+fn an_alternating_conversation_turns_the_dh_ratchet() {
     let (mut rng, mut alice, mut bob, _) = pair(true);
 
-    let mut previous = alice.encrypt("tour 0".as_bytes()).unwrap().header.dh;
-    bob.decrypt(&mut rng, &alice.encrypt("amorce".as_bytes()).unwrap()).ok();
+    let mut previous = alice.encrypt("round 0".as_bytes()).unwrap().header.dh;
+    bob.decrypt(&mut rng, &alice.encrypt("bootstrap".as_bytes()).unwrap()).ok();
 
-    for tour in 0..10u32 {
-        let from_alice = alice.encrypt(format!("A{tour}").as_bytes()).unwrap();
-        assert_eq!(bob.decrypt(&mut rng, &from_alice).unwrap(), format!("A{tour}").as_bytes());
+    for round in 0..10u32 {
+        let from_alice = alice.encrypt(format!("A{round}").as_bytes()).unwrap();
+        assert_eq!(bob.decrypt(&mut rng, &from_alice).unwrap(), format!("A{round}").as_bytes());
 
-        let from_bob = bob.encrypt(format!("B{tour}").as_bytes()).unwrap();
-        // Chaque changement de sens doit produire une nouvelle clé de ratchet : c'est
-        // exactement ce qui donne la post-compromise security.
+        let from_bob = bob.encrypt(format!("B{round}").as_bytes()).unwrap();
+        // Every change of direction must produce a new ratchet key: that is exactly what
+        // gives post-compromise security.
         assert_ne!(from_bob.header.dh.as_bytes(), previous.as_bytes());
         previous = from_bob.header.dh;
 
-        assert_eq!(alice.decrypt(&mut rng, &from_bob).unwrap(), format!("B{tour}").as_bytes());
+        assert_eq!(alice.decrypt(&mut rng, &from_bob).unwrap(), format!("B{round}").as_bytes());
     }
 }
 
 #[test]
-fn messages_hors_ordre() {
+fn out_of_order_messages() {
     let (mut rng, mut alice, mut bob, _) = pair(true);
 
-    let m0 = alice.encrypt("zéro".as_bytes()).unwrap();
-    let m1 = alice.encrypt("un".as_bytes()).unwrap();
-    let m2 = alice.encrypt("deux".as_bytes()).unwrap();
+    let m0 = alice.encrypt("zero".as_bytes()).unwrap();
+    let m1 = alice.encrypt("one".as_bytes()).unwrap();
+    let m2 = alice.encrypt("two".as_bytes()).unwrap();
 
-    // Le réseau les livre à l'envers.
-    assert_eq!(bob.decrypt(&mut rng, &m2).unwrap(), "deux".as_bytes());
-    assert_eq!(bob.skipped_count(), 2, "les clés de m0 et m1 doivent être mises de côté");
+    // The network delivers them backwards.
+    assert_eq!(bob.decrypt(&mut rng, &m2).unwrap(), "two".as_bytes());
+    assert_eq!(bob.skipped_count(), 2, "the keys of m0 and m1 must be set aside");
 
-    assert_eq!(bob.decrypt(&mut rng, &m0).unwrap(), "zéro".as_bytes());
-    assert_eq!(bob.decrypt(&mut rng, &m1).unwrap(), "un".as_bytes());
-    assert_eq!(bob.skipped_count(), 0, "toutes les clés en attente doivent être consommées");
+    assert_eq!(bob.decrypt(&mut rng, &m0).unwrap(), "zero".as_bytes());
+    assert_eq!(bob.decrypt(&mut rng, &m1).unwrap(), "one".as_bytes());
+    assert_eq!(bob.skipped_count(), 0, "every pending key must be consumed");
 }
 
 #[test]
-fn message_definitivement_perdu_ne_bloque_pas_la_suite() {
+fn a_permanently_lost_message_does_not_block_what_follows() {
     let (mut rng, mut alice, mut bob, _) = pair(true);
 
-    let _perdu = alice.encrypt("jamais livré".as_bytes()).unwrap();
-    let suivant = alice.encrypt("celui-ci arrive".as_bytes()).unwrap();
+    let _lost = alice.encrypt("never delivered".as_bytes()).unwrap();
+    let next_one = alice.encrypt("this one arrives".as_bytes()).unwrap();
 
-    assert_eq!(bob.decrypt(&mut rng, &suivant).unwrap(), "celui-ci arrive".as_bytes());
-    // La clé du message perdu reste en attente indéfiniment. C'est le compromis du Double
-    // Ratchet : la robustesse au réseau se paie en clés vivantes conservées en mémoire.
+    assert_eq!(bob.decrypt(&mut rng, &next_one).unwrap(), "this one arrives".as_bytes());
+    // The lost message's key stays pending indefinitely. That is the Double Ratchet's
+    // trade-off: robustness to the network is paid for in live keys kept in memory.
     assert_eq!(bob.skipped_count(), 1);
 }
 
 #[test]
-fn rejeu_refuse() {
+fn a_replay_is_refused() {
     let (mut rng, mut alice, mut bob, _) = pair(true);
 
-    let msg = alice.encrypt("une seule fois".as_bytes()).unwrap();
-    assert_eq!(bob.decrypt(&mut rng, &msg).unwrap(), "une seule fois".as_bytes());
+    let msg = alice.encrypt("only once".as_bytes()).unwrap();
+    assert_eq!(bob.decrypt(&mut rng, &msg).unwrap(), "only once".as_bytes());
 
-    // La clé a été consommée puis détruite : le même chiffré ne doit plus jamais passer.
+    // The key was consumed and then destroyed: the same ciphertext must never pass again.
     assert_eq!(
         bob.decrypt(&mut rng, &msg).unwrap_err(),
         RatchetError::MessageKeyGone
@@ -112,12 +112,12 @@ fn rejeu_refuse() {
 }
 
 #[test]
-fn saut_excessif_refuse() {
+fn an_excessive_skip_is_refused() {
     let (mut rng, mut alice, mut bob, _) = pair(true);
 
-    let mut msg = alice.encrypt("charge".as_bytes()).unwrap();
-    // Un pair malveillant annonce un index absurde pour forcer l'allocation de milliards
-    // de clés. Le plafond MAX_SKIP doit couper.
+    let mut msg = alice.encrypt("payload".as_bytes()).unwrap();
+    // A malicious peer announces an absurd index to force the allocation of billions of keys.
+    // The MAX_SKIP cap must cut it off.
     msg.header.n = 500_000;
 
     assert!(matches!(
@@ -127,15 +127,15 @@ fn saut_excessif_refuse() {
 }
 
 #[test]
-fn header_altere_rejete() {
+fn an_altered_header_is_rejected() {
     let (mut rng, mut alice, mut bob, _) = pair(true);
 
-    let m0 = alice.encrypt("zéro".as_bytes()).unwrap();
-    let mut m1 = alice.encrypt("un".as_bytes()).unwrap();
+    let m0 = alice.encrypt("zero".as_bytes()).unwrap();
+    let mut m1 = alice.encrypt("one".as_bytes()).unwrap();
     bob.decrypt(&mut rng, &m0).unwrap();
 
-    // Le header est en clair mais authentifié par l'AEAD : le modifier doit casser le
-    // déchiffrement, pas produire un autre texte.
+    // The header is in the clear but authenticated by the AEAD: modifying it must break
+    // decryption, not produce a different text.
     m1.header.pn = m1.header.pn.wrapping_add(1);
     assert_eq!(
         bob.decrypt(&mut rng, &m1).unwrap_err(),
@@ -144,10 +144,10 @@ fn header_altere_rejete() {
 }
 
 #[test]
-fn ciphertext_altere_rejete() {
+fn an_altered_ciphertext_is_rejected() {
     let (mut rng, mut alice, mut bob, _) = pair(true);
 
-    let mut msg = alice.encrypt("intègre".as_bytes()).unwrap();
+    let mut msg = alice.encrypt("intact".as_bytes()).unwrap();
     msg.ciphertext[0] ^= 0x01;
     assert_eq!(
         bob.decrypt(&mut rng, &msg).unwrap_err(),
@@ -156,16 +156,16 @@ fn ciphertext_altere_rejete() {
 }
 
 #[test]
-fn bundle_mal_signe_refuse() {
+fn a_badly_signed_bundle_is_refused() {
     let mut rng = TestRng::seed("mitm");
     let alice_identity = IdentityKeyPair::generate(&mut rng);
     let bob_store = PreKeyStore::generate(&mut rng, true);
-    let attaquant = PreKeyStore::generate(&mut rng, true);
+    let attacker = PreKeyStore::generate(&mut rng, true);
 
-    // Le serveur substitue la signed prekey de Bob par celle d'un attaquant, en gardant
-    // l'identité de Bob. La signature ne colle plus.
+    // The server swaps Bob's signed prekey for an attacker's, keeping Bob's identity. The
+    // signature no longer matches.
     let mut bundle = bob_store.bundle();
-    bundle.signed_prekey = attaquant.signed_prekey.public();
+    bundle.signed_prekey = attacker.signed_prekey.public();
 
     assert_eq!(
         Session::initiate(&mut rng, &alice_identity, &bundle).unwrap_err(),
@@ -174,25 +174,25 @@ fn bundle_mal_signe_refuse() {
 }
 
 #[test]
-fn safety_number_identique_des_deux_cotes() {
-    let mut rng = TestRng::seed("empreinte");
+fn the_safety_number_is_identical_on_both_sides() {
+    let mut rng = TestRng::seed("fingerprint");
     let alice = IdentityKeyPair::generate(&mut rng).public();
     let bob = IdentityKeyPair::generate(&mut rng).public();
 
-    // Les deux écrans doivent afficher la même chaîne, sans quoi la comparaison hors bande
-    // est impossible.
+    // Both screens must show the same string, otherwise the out-of-band comparison is
+    // impossible.
     assert_eq!(safety_number(&alice, &bob), safety_number(&bob, &alice));
     assert_eq!(safety_number(&alice, &bob).chars().filter(|c| c.is_ascii_digit()).count(), 60);
 }
 
 #[test]
-fn safety_number_change_si_lidentite_change() {
-    let mut rng = TestRng::seed("empreinte-mitm");
+fn the_safety_number_changes_if_the_identity_changes() {
+    let mut rng = TestRng::seed("fingerprint-mitm");
     let alice = IdentityKeyPair::generate(&mut rng).public();
     let bob = IdentityKeyPair::generate(&mut rng).public();
-    let attaquant = IdentityKeyPair::generate(&mut rng).public();
+    let attacker = IdentityKeyPair::generate(&mut rng).public();
 
-    // C'est la propriété qui rend la vérification utile : si le serveur substitue une
-    // identité, l'empreinte affichée diffère et la comparaison hors bande le révèle.
-    assert_ne!(safety_number(&alice, &bob), safety_number(&alice, &attaquant));
+    // This is the property that makes verification useful: if the server substitutes an
+    // identity, the displayed fingerprint differs and the out-of-band comparison reveals it.
+    assert_ne!(safety_number(&alice, &bob), safety_number(&alice, &attacker));
 }

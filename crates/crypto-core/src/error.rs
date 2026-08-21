@@ -2,37 +2,37 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
-    /// Erreur remontée par OpenMLS. Le détail est aplati en chaîne : les variantes d'erreur
-    /// d'OpenMLS sont nombreuses et instables entre versions mineures, et les distinguer
-    /// n'apporterait rien au code appelant, qui ne peut de toute façon que rejeter le message.
-    #[error("opération MLS refusée : {0}")]
+    /// Error surfaced by OpenMLS. Flattened to a string: OpenMLS has many error variants and
+    /// they are unstable across minor versions, and telling them apart would gain the caller
+    /// nothing — it can only reject the message either way.
+    #[error("MLS operation refused: {0}")]
     Mls(String),
 
-    #[error("message mal formé : {0}")]
+    #[error("malformed message: {0}")]
     Malformed(&'static str),
 
-    /// Reçu un type de message MLS là où un autre était attendu. Peut être bénin (message
-    /// en retard) comme hostile (tentative de confusion de type).
-    #[error("type de message inattendu")]
+    /// Got one kind of MLS message where another was expected. May be benign (a late message)
+    /// or hostile (a type-confusion attempt).
+    #[error("unexpected message type")]
     UnexpectedMessage,
 
-    #[error("état de session illisible : {0}")]
+    #[error("unreadable session state: {0}")]
     Storage(String),
 
-    /// Le membre visé n'est pas dans l'arbre du groupe.
+    /// The target member is not in the group tree.
     ///
-    /// Cas courant et bénin : deux membres retirent le même appareil en même temps, le second
-    /// commit arrive après que le premier a déjà été appliqué. L'appelant doit le traiter
-    /// comme un succès — l'état voulu est atteint — et non comme une erreur à réessayer.
-    #[error("membre absent du groupe")]
+    /// Common and benign: two members remove the same device at once, and the second commit
+    /// arrives after the first has been applied. The caller must treat this as a success —
+    /// the intended state holds — not as an error to retry.
+    #[error("member not in group")]
     UnknownMember,
 
-    /// Le commit reçu est cryptographiquement valide mais viole la politique du groupe.
+    /// The received commit is cryptographically valid but violates group policy.
     ///
-    /// Distincte de [`CryptoError::Mls`] parce qu'elle ne dit pas la même chose : MLS a
-    /// accepté le message, c'est **nous** qui refusons de l'appliquer. Le groupe est intact,
-    /// et l'émetteur se retrouve seul avec son epoch. Voir `roles.rs`.
-    #[error("commit refusé par la politique du groupe : {0}")]
+    /// Distinct from [`CryptoError::Mls`] because it says something else: MLS accepted the
+    /// message, it is **we** who refuse to apply it. The group is intact, and the sender is
+    /// left alone on its own epoch. See `roles.rs`.
+    #[error("commit refused by group policy: {0}")]
     PolicyViolation(&'static str),
 }
 

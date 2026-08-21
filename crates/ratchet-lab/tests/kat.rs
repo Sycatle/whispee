@@ -1,14 +1,13 @@
-//! Tests de non-régression sur les dérivations et le format des messages.
+//! Regression tests on the derivations and on the message format.
 //!
-//! **Ces vecteurs ne sont pas des vecteurs de conformité.** Il n'existe pas de vecteurs
-//! officiels publiés pour X3DH et le Double Ratchet, et les chaînes `info` utilisées ici
-//! sont propres au projet : aucun vecteur externe ne pourrait s'y appliquer. Ils ne
-//! démontrent donc pas la correction du protocole, seulement sa **stabilité** — toute
-//! modification involontaire d'une KDF, d'une chaîne `info` ou d'un encodage casse ces
-//! tests, ce qui est exactement leur rôle.
+//! **These vectors are not conformance vectors.** No official published vectors exist for
+//! X3DH and the Double Ratchet, and the `info` strings used here are specific to this
+//! project: no external vector could apply to them. They therefore do not demonstrate that
+//! the protocol is correct, only that it is **stable** — any unintended change to a KDF, to
+//! an `info` string or to an encoding breaks these tests, which is exactly their job.
 //!
-//! Une modification volontaire du protocole rend ces valeurs obsolètes : il faut alors les
-//! régénérer *et* considérer que les sessions existantes deviennent indéchiffrables.
+//! A deliberate protocol change makes these values obsolete: they must then be regenerated
+//! *and* existing sessions must be considered undecryptable.
 
 mod common;
 
@@ -36,7 +35,7 @@ fn kdf_rk_stable() {
         hex::encode(ck),
         "5e4124e85c7c0b11e72e9d213f3a415d55328c960291f86ff2f6a632056eeec2"
     );
-    // La racine et la chaîne sortent du même HKDF : elles doivent être indépendantes.
+    // The root and the chain come out of the same HKDF: they must be independent.
     assert_ne!(rk, ck);
 }
 
@@ -51,8 +50,8 @@ fn kdf_ck_stable() {
         hex::encode(mk),
         "0d8b1b5bd928a4cfab6708b6af6fe15d5d41b3268e6dd8ed9c5b0ecde10ca4a2"
     );
-    // Les constantes 0x01/0x02 doivent séparer les deux sorties. Si elles se confondaient,
-    // la clé de message serait la chaîne suivante et toute la forward secrecy tomberait.
+    // The 0x01/0x02 constants must keep the two outputs apart. If they ever coincided, the
+    // message key would be the next chain and all forward secrecy would collapse.
     assert_ne!(next, mk);
 }
 
@@ -67,11 +66,11 @@ fn derive_message_keys_stable() {
 }
 
 #[test]
-fn nonce_unique_par_cle_de_message() {
-    // AES-GCM casse catastrophiquement si un nonce est réutilisé sous la même clé. Ici le
-    // nonce est dérivé de la clé de message, et chaque clé de message est utilisée une seule
-    // fois : la réutilisation est structurellement impossible. Ce test verrouille la partie
-    // vérifiable de cet argument — deux clés distinctes ne doivent pas colliding.
+fn nonce_unique_per_message_key() {
+    // AES-GCM fails catastrophically if a nonce is reused under the same key. Here the nonce
+    // is derived from the message key, and each message key is used exactly once: reuse is
+    // structurally impossible. This test locks down the verifiable part of that argument —
+    // two distinct keys must not collide.
     let (k1, n1) = derive_message_keys(&[1u8; 32]);
     let (k2, n2) = derive_message_keys(&[2u8; 32]);
     assert_ne!(k1, k2);
@@ -79,7 +78,7 @@ fn nonce_unique_par_cle_de_message() {
 }
 
 #[test]
-fn format_de_message_stable() {
+fn message_format_stable() {
     let mut rng = TestRng::seed("kat-v1");
     let alice_identity = IdentityKeyPair::generate(&mut rng);
     let bob_store = PreKeyStore::generate(&mut rng, true);
@@ -95,8 +94,8 @@ fn format_de_message_stable() {
     );
     assert_eq!(hex::encode(&msg.ciphertext), "85896d65b928dbc47efc42c029484dda1d1f5f");
 
-    // 3 octets de clair + 16 octets de tag GCM. La longueur du clair fuit : c'est une
-    // métadonnée que seul du padding masquerait.
+    // 3 bytes of plaintext + 16 bytes of GCM tag. The plaintext length leaks: a metadata that
+    // only padding would mask.
     assert_eq!(msg.ciphertext.len(), 3 + 16);
 
     assert_eq!(bob.decrypt(&mut rng, &msg).unwrap(), b"kat");

@@ -19,9 +19,9 @@ zeroize = { version = "1", features = ["derive"] }
 thiserror = "2"
 hex = "0.4"
 
-# Le binaire WASM part sur le réseau à chaque chargement de page : sa taille est un coût
-# utilisateur direct. `opt-level` reste à 3 — abaisser l'optimisation d'une bibliothèque
-# cryptographique pour gagner quelques kilooctets est un mauvais échange.
+# The WASM binary crosses the network on every page load: its size is a direct cost to the
+# user. `opt-level` stays at 3 — lowering the optimisation of a cryptographic library to save a
+# few kilobytes is a bad trade.
 [profile.release]
 lto = true
 codegen-units = 1

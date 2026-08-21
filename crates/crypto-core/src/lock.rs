@@ -1,61 +1,61 @@
-//! Verrou local : dérivation d'une clé à partir d'un mot de passe.
+//! Local lock: deriving a key from a password.
 //!
-//! # Ce que ce verrou protège, et ce qu'il ne protège pas
+//! # What this lock protects, and what it does not
 //!
-//! Il protège l'état au repos sur **cet appareil** : sans le mot de passe, l'état MLS et la
-//! graine du compte restent des octets illisibles, y compris pour qui obtient la base
-//! IndexedDB ou le disque.
+//! It protects state at rest on **this device**: without the password, the MLS state and the
+//! account seed stay unreadable bytes, including to whoever obtains the IndexedDB database or
+//! the disk.
 //!
-//! Il ne protège **pas** contre un appareil compromis pendant qu'il est déverrouillé, et il
-//! n'est **pas** un facteur de récupération : l'oublier ne fait rien perdre, la phrase de
-//! douze mots reste le seul chemin de restauration. C'est délibéré — faire du mot de passe un
-//! second facteur du coffre doublerait la surface de perte pour un gain nul contre le serveur.
+//! It does **not** protect a device compromised while unlocked, and it is **not** a recovery
+//! factor: forgetting it loses nothing, the twelve-word phrase remains the only restore path.
+//! That is deliberate — making the password a second vault factor would double the surface for
+//! loss with no gain against the server.
 //!
-//! # Pourquoi Argon2id plutôt que PBKDF2
+//! # Why Argon2id rather than PBKDF2
 //!
-//! Un mot de passe humain a rarement plus de 40 bits d'entropie. La seule défense est de
-//! rendre chaque essai coûteux — et coûteux **en mémoire**, sinon un attaquant parallélise sur
-//! GPU pour quelques centimes le milliard d'essais. PBKDF2, disponible dans WebCrypto, ne
-//! coûte que du calcul : c'est précisément ce que le matériel dédié fait le mieux.
+//! A human password rarely holds more than 40 bits of entropy. The only defence is to make
+//! each attempt expensive — expensive **in memory**, or an attacker parallelises on GPUs for
+//! pennies per billion attempts. PBKDF2, available in WebCrypto, costs only compute: exactly
+//! what dedicated hardware does best.
 //!
-//! Argon2id impose 64 Mio par essai, ce qui ramène un GPU au niveau d'un processeur. Il
-//! n'existe pas dans WebCrypto, d'où cette dérivation côté Rust.
+//! Argon2id forces 64 MiB per attempt, which brings a GPU back down to CPU level. It does not
+//! exist in WebCrypto, hence this Rust-side derivation.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 
 use crate::error::{CryptoError, Result};
 
-/// Coût mémoire, en kibioctets. 64 Mio : le seuil au-delà duquel une attaque GPU perd son
-/// avantage, et qui reste supportable sur un téléphone d'entrée de gamme.
+/// Memory cost, in kibibytes. 64 MiB: the threshold beyond which a GPU attack loses its edge,
+/// and still bearable on a low-end phone.
 const MEMORY_KIB: u32 = 64 * 1024;
 
-/// Nombre de passes. Trois est la recommandation du RFC 9106 pour ce coût mémoire.
+/// Number of passes. Three is RFC 9106's recommendation at this memory cost.
 const ITERATIONS: u32 = 3;
 
-/// Parallélisme. Un seul brin : WebAssembly n'a pas de threads par défaut, et en annoncer
-/// plusieurs produirait une dérivation différente de celle effectivement calculée.
+/// Parallelism. A single lane: WebAssembly has no threads by default, and announcing several
+/// would produce a derivation different from the one actually computed.
 const LANES: u32 = 1;
 
-/// Longueur du sel. Aléatoire par appareil, stocké en clair à côté de l'état : son rôle est
-/// d'interdire les tables précalculées, pas de rester secret.
+/// Salt length. Random per device, stored in the clear next to the state: its job is to rule
+/// out precomputed tables, not to stay secret.
 pub const SALT_LEN: usize = 16;
 
-/// Dérive la clé de déverrouillage depuis un mot de passe.
+/// Derives the unlock key from a password.
 ///
-/// Coûte environ une seconde et 64 Mio. C'est voulu : ce coût est payé une fois par
-/// déverrouillage par l'utilisateur, et à chaque essai par un attaquant.
+/// Costs roughly one second and 64 MiB. That is the point: the user pays it once per unlock,
+/// an attacker pays it on every attempt.
 pub fn derive_unlock_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     if salt.len() != SALT_LEN {
-        return Err(CryptoError::Malformed("sel de longueur inattendue"));
+        return Err(CryptoError::Malformed("unexpected salt length"));
     }
 
     let params = Params::new(MEMORY_KIB, ITERATIONS, LANES, Some(32))
-        .map_err(|_| CryptoError::Malformed("paramètres Argon2 invalides"))?;
+        .map_err(|_| CryptoError::Malformed("invalid Argon2 parameters"))?;
 
     let mut key = [0u8; 32];
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(password.as_bytes(), salt, &mut key)
-        .map_err(|_| CryptoError::Malformed("dérivation du verrou impossible"))?;
+        .map_err(|_| CryptoError::Malformed("lock derivation failed"))?;
 
     Ok(key)
 }

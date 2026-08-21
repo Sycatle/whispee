@@ -1,10 +1,10 @@
-//! Cycle complet d'une conversation 1-to-1 : publication, invitation, échange, persistance.
+//! Full life cycle of a 1-to-1 conversation: publication, invitation, exchange, persistence.
 
 use crypto_core::{Conversation, Identity, Incoming, fingerprint};
 
-/// Monte une conversation à deux membres, comme le ferait le vrai flux :
-/// Bob publie un KeyPackage, Alice crée le groupe et l'invite, Bob rejoint via le Welcome.
-fn conversation_a_deux() -> (Identity, Identity, Conversation, Conversation) {
+/// Stands up a two-member conversation the way the real flow would: Bob publishes a KeyPackage,
+/// Alice creates the group and invites him, Bob joins through the Welcome.
+fn two_member_conversation() -> (Identity, Identity, Conversation, Conversation) {
     let alice = Identity::create("alice@device-1").unwrap();
     let bob = Identity::create("bob@device-1").unwrap();
 
@@ -12,76 +12,76 @@ fn conversation_a_deux() -> (Identity, Identity, Conversation, Conversation) {
 
     let mut alice_group = Conversation::create(&alice).unwrap();
     let invitation = alice_group.invite(&alice, &bob_key_package).unwrap();
-    let arbre = alice_group.apply_pending(&alice).unwrap();
+    let tree = alice_group.apply_pending(&alice).unwrap();
 
     let bob_group =
-        Conversation::join(&bob, &invitation.welcome, &arbre).unwrap();
+        Conversation::join(&bob, &invitation.welcome, &tree).unwrap();
 
     (alice, bob, alice_group, bob_group)
 }
 
 #[test]
-fn cycle_complet_1_to_1() {
-    let (alice, bob, mut alice_group, mut bob_group) = conversation_a_deux();
+fn full_1_to_1_cycle() {
+    let (alice, bob, mut alice_group, mut bob_group) = two_member_conversation();
 
     assert_eq!(alice_group.member_count(), 2);
     assert_eq!(bob_group.member_count(), 2);
-    // Les deux doivent être à la même epoch, sans quoi rien ne se déchiffre.
+    // Both must sit at the same epoch, otherwise nothing decrypts.
     assert_eq!(alice_group.epoch(), bob_group.epoch());
     assert_eq!(alice_group.id(), bob_group.id());
 
-    let ciphertext = alice_group.encrypt(&alice, b"salut Bob").unwrap();
+    let ciphertext = alice_group.encrypt(&alice, b"hi Bob").unwrap();
     match bob_group.process(&bob, &ciphertext, &Default::default()).unwrap() {
         Incoming::Application { sender, plaintext } => {
-            assert_eq!(plaintext, b"salut Bob");
+            assert_eq!(plaintext, b"hi Bob");
             assert_eq!(sender.as_deref(), Some("alice@device-1"));
         }
-        other => panic!("attendu un message applicatif, reçu {other:?}"),
+        other => panic!("expected an application message, got {other:?}"),
     }
 
-    let reply = bob_group.encrypt(&bob, b"salut Alice").unwrap();
+    let reply = bob_group.encrypt(&bob, b"hi Alice").unwrap();
     match alice_group.process(&alice, &reply, &Default::default()).unwrap() {
         Incoming::Application { sender, plaintext } => {
-            assert_eq!(plaintext, b"salut Alice");
+            assert_eq!(plaintext, b"hi Alice");
             assert_eq!(sender.as_deref(), Some("bob@device-1"));
         }
-        other => panic!("attendu un message applicatif, reçu {other:?}"),
+        other => panic!("expected an application message, got {other:?}"),
     }
 }
 
 #[test]
-fn le_transport_ne_voit_rien() {
-    // C'est *le* test qui compte : le blob qui transite ne doit contenir aucune trace du
-    // clair. Tout le reste du protocole n'a de valeur que si celui-ci passe.
-    let (alice, _bob, mut alice_group, _bob_group) = conversation_a_deux();
+fn the_transport_sees_nothing() {
+    // This is *the* test that matters: the blob that travels must carry no trace of the
+    // plaintext. Everything else in the protocol is only worth something if this one passes.
+    let (alice, _bob, mut alice_group, _bob_group) = two_member_conversation();
 
-    let secret = b"le code du coffre est 4815162342";
+    let secret = b"the vault code is 4815162342";
     let ciphertext = alice_group.encrypt(&alice, secret).unwrap();
 
     assert!(
         !ciphertext.windows(secret.len()).any(|w| w == secret),
-        "le clair apparaît dans le message transporté"
+        "the plaintext appears in the transported message"
     );
     assert!(
         !ciphertext.windows(5).any(|w| w == b"alice"),
-        "l'identité de l'expéditeur apparaît en clair dans le message"
+        "the sender identity appears in the clear in the message"
     );
 }
 
-/// OpenMLS 0.8.1 exécute un `debug_assert!(false)` avant de retourner l'erreur de
-/// déchiffrement (`framing/private_message_in.rs:136`). En build debug, un message altéré
-/// fait donc **paniquer** le processus au lieu d'être rejeté — un déni de service à distance
-/// trivial pour qui peut modifier un octet en transit.
+/// OpenMLS 0.8.1 runs a `debug_assert!(false)` before returning the decryption error
+/// (`framing/private_message_in.rs:136`). In a debug build a tampered message therefore
+/// **panics** the process instead of being rejected — a trivial remote denial of service for
+/// anyone able to flip a byte in transit.
 ///
-/// En release, `debug_assert!` disparaît et l'erreur remonte correctement. Le test est donc
-/// vérifié en release uniquement. **Conséquence opérationnelle : ne jamais déployer de build
-/// debug de ce code**, et traiter cette contrainte comme un invariant de la CI.
+/// In release, `debug_assert!` disappears and the error propagates correctly. The test is thus
+/// only checked in release. **Operational consequence: never deploy a debug build of this
+/// code**, and treat that constraint as a CI invariant.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "OpenMLS panique via debug_assert! ; lancer avec --release")]
-fn ciphertext_altere_rejete() {
-    let (alice, bob, mut alice_group, mut bob_group) = conversation_a_deux();
+#[cfg_attr(debug_assertions, ignore = "OpenMLS panics through debug_assert!; run with --release")]
+fn tampered_ciphertext_is_rejected() {
+    let (alice, bob, mut alice_group, mut bob_group) = two_member_conversation();
 
-    let mut ciphertext = alice_group.encrypt(&alice, "intègre".as_bytes()).unwrap();
+    let mut ciphertext = alice_group.encrypt(&alice, "intact".as_bytes()).unwrap();
     let last = ciphertext.len() - 1;
     ciphertext[last] ^= 0x01;
 
@@ -89,104 +89,104 @@ fn ciphertext_altere_rejete() {
 }
 
 #[test]
-fn rejeu_refuse() {
-    let (alice, bob, mut alice_group, mut bob_group) = conversation_a_deux();
+fn replay_is_rejected() {
+    let (alice, bob, mut alice_group, mut bob_group) = two_member_conversation();
 
-    let ciphertext = alice_group.encrypt(&alice, b"une seule fois").unwrap();
+    let ciphertext = alice_group.encrypt(&alice, b"once only").unwrap();
     assert!(bob_group.process(&bob, &ciphertext, &Default::default()).is_ok());
 
-    // La clé de message a été consommée : le même chiffré ne doit plus passer.
+    // The message key has been consumed: the same ciphertext must not go through again.
     assert!(bob_group.process(&bob, &ciphertext, &Default::default()).is_err());
 }
 
 #[test]
-fn empreintes_croisees_coherentes() {
-    let (alice, bob, alice_group, bob_group) = conversation_a_deux();
+fn cross_fingerprints_are_consistent() {
+    let (alice, bob, alice_group, bob_group) = two_member_conversation();
 
-    let vue_alice = alice_group.peer_fingerprints(&alice);
-    let vue_bob = bob_group.peer_fingerprints(&bob);
+    let alice_view = alice_group.peer_fingerprints(&alice);
+    let bob_view = bob_group.peer_fingerprints(&bob);
 
-    assert_eq!(vue_alice.len(), 1);
-    assert_eq!(vue_bob.len(), 1);
-    assert_eq!(vue_alice[0].0, "bob@device-1");
-    assert_eq!(vue_bob[0].0, "alice@device-1");
+    assert_eq!(alice_view.len(), 1);
+    assert_eq!(bob_view.len(), 1);
+    assert_eq!(alice_view[0].0, "bob@device-1");
+    assert_eq!(bob_view[0].0, "alice@device-1");
 
-    // Chacun doit voir l'empreinte réelle de l'autre : c'est ce qui rend la comparaison
-    // hors bande capable de détecter une substitution par le serveur.
-    assert_eq!(vue_alice[0].1, fingerprint(bob.signature_key()));
-    assert_eq!(vue_bob[0].1, fingerprint(alice.signature_key()));
-    assert_ne!(vue_alice[0].1, vue_bob[0].1);
+    // Each must see the other's real fingerprint: that is what makes the out-of-band comparison
+    // able to detect a substitution by the server.
+    assert_eq!(alice_view[0].1, fingerprint(bob.signature_key()));
+    assert_eq!(bob_view[0].1, fingerprint(alice.signature_key()));
+    assert_ne!(alice_view[0].1, bob_view[0].1);
 }
 
-/// La non-réutilisation des KeyPackages est une responsabilité du **serveur**, pas de la
-/// bibliothèque : OpenMLS accepte de réutiliser le même KeyPackage pour deux groupes.
+/// Not reusing KeyPackages is the **server's** responsibility, not the library's: OpenMLS is
+/// happy to reuse the same KeyPackage for two groups.
 ///
-/// La clé d'initialisation d'un KeyPackage est pourtant à usage unique. La resservir fait
-/// partager le même secret d'entrée à deux groupes distincts, ce qui détruit la forward
-/// secrecy de l'ajout. Le serveur doit donc retirer chaque KeyPackage du stock dès qu'il
-/// est servi, et signaler l'épuisement du stock d'un appareil.
+/// A KeyPackage init key is nevertheless single-use. Serving it twice makes two distinct groups
+/// share the same entry secret, which destroys the forward secrecy of the add. The server must
+/// therefore take each KeyPackage out of the stock as soon as it is served, and report when a
+/// device's stock runs out.
 ///
-/// Ce test verrouille cette exigence : s'il se met à échouer, c'est qu'une version
-/// d'OpenMLS a commencé à refuser la réutilisation — bonne nouvelle, mais la contrainte
-/// côté serveur reste nécessaire pour les versions antérieures.
+/// This test locks that requirement in: if it starts failing, some OpenMLS version has begun
+/// refusing reuse — good news, but the server-side constraint stays necessary for earlier
+/// versions.
 #[test]
-fn la_reutilisation_de_key_package_doit_etre_empechee_par_le_serveur() {
+fn key_package_reuse_must_be_prevented_by_the_server() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
     let key_package = bob.publish_key_package().unwrap();
 
-    let mut premier = Conversation::create(&alice).unwrap();
-    premier.invite(&alice, &key_package).unwrap();
+    let mut first = Conversation::create(&alice).unwrap();
+    first.invite(&alice, &key_package).unwrap();
 
     let mut second = Conversation::create(&alice).unwrap();
     assert!(
         second.invite(&alice, &key_package).is_ok(),
-        "OpenMLS refuse désormais la réutilisation : mettre à jour la note ci-dessus"
+        "OpenMLS now refuses reuse: update the note above"
     );
 }
 
 #[test]
-fn key_package_illisible_refuse() {
+fn an_unreadable_key_package_is_rejected() {
     let alice = Identity::create("alice").unwrap();
-    let mut groupe = Conversation::create(&alice).unwrap();
+    let mut group = Conversation::create(&alice).unwrap();
 
-    assert!(groupe.invite(&alice, b"ceci n'est pas un key package").is_err());
+    assert!(group.invite(&alice, b"this is not a key package").is_err());
 }
 
 #[test]
-fn etat_persiste_et_recharge() {
-    let (alice, bob, mut alice_group, mut bob_group) = conversation_a_deux();
+fn the_state_is_persisted_and_reloaded() {
+    let (alice, bob, mut alice_group, mut bob_group) = two_member_conversation();
 
-    let ciphertext = alice_group.encrypt(&alice, "avant redémarrage".as_bytes()).unwrap();
+    let ciphertext = alice_group.encrypt(&alice, "before restart".as_bytes()).unwrap();
     bob_group.process(&bob, &ciphertext, &Default::default()).unwrap();
 
-    // L'état exporté est en clair : il doit être chiffré au repos par la plateforme.
+    // The exported state is in the clear: the platform must encrypt it at rest.
     let state = bob.export_state().unwrap();
     assert!(!state.is_empty());
 
-    // Il contient bien du matériel de session, pas une coquille vide.
-    assert!(state.len() > 100, "état suspicieusement petit : {} octets", state.len());
+    // And it does hold session material, not an empty shell.
+    assert!(state.len() > 100, "suspiciously small state: {} bytes", state.len());
 
     let group_id = bob_group.id();
-    let recharge = Conversation::load(&bob, &group_id).unwrap();
-    assert_eq!(recharge.epoch(), bob_group.epoch());
-    assert_eq!(recharge.member_count(), 2);
+    let reloaded = Conversation::load(&bob, &group_id).unwrap();
+    assert_eq!(reloaded.epoch(), bob_group.epoch());
+    assert_eq!(reloaded.member_count(), 2);
 }
 
 #[test]
-fn groupe_inexistant_refuse() {
+fn a_missing_group_is_rejected() {
     let alice = Identity::create("alice").unwrap();
-    assert!(Conversation::load(&alice, b"groupe-inexistant").is_err());
+    assert!(Conversation::load(&alice, b"nonexistent-group").is_err());
 }
 
 #[test]
-fn identite_et_conversation_survivent_a_un_redemarrage() {
-    let (alice, bob, mut alice_group, mut bob_group) = conversation_a_deux();
+fn the_identity_and_the_conversation_survive_a_restart() {
+    let (alice, bob, mut alice_group, mut bob_group) = two_member_conversation();
 
-    let premier = alice_group.encrypt(&alice, "avant".as_bytes()).unwrap();
-    bob_group.process(&bob, &premier, &Default::default()).unwrap();
+    let first = alice_group.encrypt(&alice, "before".as_bytes()).unwrap();
+    bob_group.process(&bob, &first, &Default::default()).unwrap();
 
-    // Simule la fermeture de l'application : tout l'état passe par le blob exporté.
+    // Simulates closing the application: the whole state goes through the exported blob.
     let state = bob.export_state().unwrap();
     let group_id = bob_group.id();
     drop(bob);
@@ -198,666 +198,667 @@ fn identite_et_conversation_survivent_a_un_redemarrage() {
     let mut bob_group = Conversation::load(&bob, &group_id).unwrap();
     assert_eq!(bob_group.member_count(), 2);
 
-    // La session doit rester utilisable dans les deux sens après restauration.
-    let second = alice_group.encrypt(&alice, "après".as_bytes()).unwrap();
+    // The session must stay usable in both directions after the restore.
+    let second = alice_group.encrypt(&alice, "after".as_bytes()).unwrap();
     match bob_group.process(&bob, &second, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, "après".as_bytes()),
-        other => panic!("attendu un message applicatif, reçu {other:?}"),
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, "after".as_bytes()),
+        other => panic!("expected an application message, got {other:?}"),
     }
 
-    let reponse = bob_group.encrypt(&bob, "je suis revenu".as_bytes()).unwrap();
-    match alice_group.process(&alice, &reponse, &Default::default()).unwrap() {
+    let response = bob_group.encrypt(&bob, "I am back".as_bytes()).unwrap();
+    match alice_group.process(&alice, &response, &Default::default()).unwrap() {
         Incoming::Application { plaintext, sender } => {
-            assert_eq!(plaintext, "je suis revenu".as_bytes());
+            assert_eq!(plaintext, "I am back".as_bytes());
             assert_eq!(sender.as_deref(), Some("bob@device-1"));
         }
-        other => panic!("attendu un message applicatif, reçu {other:?}"),
+        other => panic!("expected an application message, got {other:?}"),
     }
 }
 
 #[test]
-fn etat_tronque_refuse() {
-    let (_, bob, _, _) = conversation_a_deux();
+fn a_truncated_state_is_rejected() {
+    let (_, bob, _, _) = two_member_conversation();
     let state = bob.export_state().unwrap();
 
-    // Un état corrompu ou tronqué doit produire une erreur, jamais une panique : ces octets
-    // viennent du disque et peuvent avoir été altérés.
-    for taille in [0, 4, 8, state.len() / 2, state.len() - 1] {
+    // A corrupted or truncated state must produce an error, never a panic: those bytes come
+    // from disk and may have been tampered with.
+    for size in [0, 4, 8, state.len() / 2, state.len() - 1] {
         assert!(
-            Identity::restore(&state[..taille]).is_err(),
-            "état tronqué à {taille} octets accepté"
+            Identity::restore(&state[..size]).is_err(),
+            "state truncated to {size} bytes accepted"
         );
     }
 }
 
-/// Ajouter un troisième membre à un groupe existant impose de livrer le **commit** aux membres
-/// déjà présents, pas seulement le Welcome au nouveau.
+/// Adding a third member to an existing group requires delivering the **commit** to the members
+/// already present, not only the Welcome to the newcomer.
 ///
-/// Le cas est passé inaperçu tant qu'un compte n'avait qu'un appareil : le groupe était neuf
-/// au moment de l'invitation, et le commit n'avait personne à informer. Dès qu'un compte en a
-/// deux, l'oublier fige le correspondant à l'ancienne epoch — plus personne ne déchiffre rien,
-/// en silence.
+/// The case went unnoticed as long as an account had a single device: the group was brand new at
+/// invitation time, and the commit had nobody to inform. As soon as an account has two,
+/// forgetting it freezes the peer at the old epoch — nobody decrypts anything any more, in
+/// silence.
 #[test]
-fn ajouter_un_membre_impose_de_livrer_le_commit_aux_presents() {
+fn adding_a_member_requires_delivering_the_commit_to_those_present() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
-    let tablette = Identity::create("alice-tablette").unwrap();
+    let tablet = Identity::create("alice-tablet").unwrap();
 
-    let mut groupe = Conversation::create(&alice).unwrap();
-    let invitation = groupe.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = groupe.apply_pending(&alice).unwrap();
+    let mut group = Conversation::create(&alice).unwrap();
+    let invitation = group.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = group.apply_pending(&alice).unwrap();
 
-    let mut chez_bob =
-        Conversation::join(&bob, &invitation.welcome, &arbre).unwrap();
+    let mut bob_side =
+        Conversation::join(&bob, &invitation.welcome, &tree).unwrap();
 
-    // Alice ajoute sa tablette. Le groupe avance d'epoch.
-    let seconde = groupe.invite(&alice, &tablette.publish_key_package().unwrap()).unwrap();
-    let arbre = groupe.apply_pending(&alice).unwrap();
-    let mut chez_tablette =
-        Conversation::join(&tablette, &seconde.welcome, &arbre).unwrap();
+    // Alice adds her tablet. The group moves to the next epoch.
+    let second = group.invite(&alice, &tablet.publish_key_package().unwrap()).unwrap();
+    let tree = group.apply_pending(&alice).unwrap();
+    let mut tablet_side =
+        Conversation::join(&tablet, &second.welcome, &tree).unwrap();
 
-    // Sans cette ligne, Bob reste une epoch en arrière et tout ce qui suit est illisible.
-    chez_bob.process(&bob, &seconde.commit, &Default::default()).unwrap();
+    // Without this line, Bob stays one epoch behind and everything that follows is unreadable.
+    bob_side.process(&bob, &second.commit, &Default::default()).unwrap();
 
-    let chiffre = chez_bob.encrypt(&bob, b"lisible par les deux appareils").unwrap();
+    let ciphertext = bob_side.encrypt(&bob, b"readable by both devices").unwrap();
 
-    for (nom, session, identite) in
-        [("alice", &mut groupe, &alice), ("tablette", &mut chez_tablette, &tablette)]
+    for (name, session, identity) in
+        [("alice", &mut group, &alice), ("tablet", &mut tablet_side, &tablet)]
     {
-        match session.process(identite, &chiffre, &Default::default()).unwrap() {
+        match session.process(identity, &ciphertext, &Default::default()).unwrap() {
             Incoming::Application { plaintext, .. } => {
-                assert_eq!(plaintext, b"lisible par les deux appareils", "chez {nom}");
+                assert_eq!(plaintext, b"readable by both devices", "at {name}");
             }
-            autre => panic!("chez {nom} : message applicatif attendu, reçu {autre:?}"),
+            other => panic!("at {name}: expected an application message, got {other:?}"),
         }
     }
 }
 
-/// Scénario réel complet : une conversation vivante à laquelle on ajoute un second appareil.
+/// A complete real-world scenario: a live conversation to which a second device is added.
 ///
-/// Reproduit l'ordre exact des messages observé côté client, y compris le trafic **antérieur**
-/// à l'ajout — c'est ce trafic qui fait avancer le ratchet et qui manquait au test précédent.
+/// Reproduces the exact message order observed on the client side, including the traffic
+/// **before** the add — that traffic is what advances the ratchet, and it was missing from the
+/// previous test.
 #[test]
-fn un_appareil_ajoute_a_une_conversation_vivante_recoit_la_suite() {
+fn a_device_added_to_a_live_conversation_receives_what_follows() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
-    let tablette = Identity::create("alice").unwrap();
+    let tablet = Identity::create("alice").unwrap();
 
-    let mut chez_alice = Conversation::create(&alice).unwrap();
-    let inv = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &inv.welcome, &arbre).unwrap();
+    let mut alice_side = Conversation::create(&alice).unwrap();
+    let inv = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &inv.welcome, &tree).unwrap();
 
-    // Trafic avant l'ajout : c'est lui qui fait avancer le ratchet.
-    let m1 = chez_alice.encrypt(&alice, b"avant l'ajout").unwrap();
-    assert!(matches!(chez_bob.process(&bob, &m1, &Default::default()).unwrap(), Incoming::Application { .. }));
+    // Traffic before the add: that is what advances the ratchet.
+    let m1 = alice_side.encrypt(&alice, b"before the add").unwrap();
+    assert!(matches!(bob_side.process(&bob, &m1, &Default::default()).unwrap(), Incoming::Application { .. }));
 
-    // Alice ajoute sa tablette.
-    let ajout = chez_alice.invite(&alice, &tablette.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_tablette =
-        Conversation::join(&tablette, &ajout.welcome, &arbre).unwrap();
-    chez_bob.process(&bob, &ajout.commit, &Default::default()).unwrap();
+    // Alice adds her tablet.
+    let add = alice_side.invite(&alice, &tablet.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut tablet_side =
+        Conversation::join(&tablet, &add.welcome, &tree).unwrap();
+    bob_side.process(&bob, &add.commit, &Default::default()).unwrap();
 
-    // Alice relit son PROPRE commit : c'est ce que fait le client, qui relève tout ce que le
-    // serveur lui sert sans distinguer ce qu'il a lui-même déposé. L'opération doit échouer
-    // proprement — et surtout ne pas abîmer l'état du groupe.
-    assert!(chez_alice.process(&alice, &ajout.commit, &Default::default()).is_err());
+    // Alice reads back her OWN commit: that is what the client does, since it picks up
+    // everything the server serves it without telling apart what it posted itself. The
+    // operation must fail cleanly — and above all must not damage the group state.
+    assert!(alice_side.process(&alice, &add.commit, &Default::default()).is_err());
 
-    // Bob répond. Les deux appareils d'Alice doivent lire.
-    let m2 = chez_bob.encrypt(&bob, b"apres l'ajout").unwrap();
+    // Bob answers. Both of Alice's devices must read it.
+    let m2 = bob_side.encrypt(&bob, b"after the add").unwrap();
 
-    match chez_alice.process(&alice, &m2, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"apres l'ajout"),
-        autre => panic!("chez alice : {autre:?}"),
+    match alice_side.process(&alice, &m2, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"after the add"),
+        other => panic!("at alice: {other:?}"),
     }
-    match chez_tablette.process(&tablette, &m2, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"apres l'ajout"),
-        autre => panic!("chez la tablette : {autre:?}"),
+    match tablet_side.process(&tablet, &m2, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"after the add"),
+        other => panic!("at the tablet: {other:?}"),
     }
 }
 
-/// Une tentative de déchiffrement qui échoue **consomme quand même** la génération.
+/// A failed decryption attempt **still consumes** the generation.
 ///
-/// C'est le piège qui a coûté le plus cher côté client : le curseur de lecture et l'état MLS
-/// doivent avancer ensemble. Si le curseur est perdu — une erreur réseau après la boucle de
-/// relève, et la persistance qui n'a pas lieu — on relit une enveloppe que le ratchet a déjà
-/// dépassée, MLS la refuse définitivement, et le message disparaît sans que rien ne le
-/// signale.
+/// This is the trap that cost the most on the client side: the read cursor and the MLS state
+/// must advance together. If the cursor is lost — a network error after the fetch loop, and the
+/// persistence that never happens — an envelope the ratchet has already moved past gets read
+/// again, MLS rejects it for good, and the message vanishes with nothing to report it.
 ///
-/// Ce test fige le comportement d'OpenMLS sur lequel repose ce raisonnement.
+/// This test freezes the OpenMLS behaviour that reasoning rests on.
 #[test]
-fn relire_un_message_deja_traite_est_definitivement_refuse() {
+fn reading_an_already_processed_message_again_is_permanently_rejected() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
 
-    let mut chez_alice = Conversation::create(&alice).unwrap();
-    let inv = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &inv.welcome, &arbre).unwrap();
+    let mut alice_side = Conversation::create(&alice).unwrap();
+    let inv = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &inv.welcome, &tree).unwrap();
 
-    let chiffre = chez_bob.encrypt(&bob, b"une seule fois").unwrap();
+    let ciphertext = bob_side.encrypt(&bob, b"once only").unwrap();
 
-    match chez_alice.process(&alice, &chiffre, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"une seule fois"),
-        autre => panic!("message applicatif attendu, reçu {autre:?}"),
+    match alice_side.process(&alice, &ciphertext, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"once only"),
+        other => panic!("expected an application message, got {other:?}"),
     }
 
-    // La seconde lecture échoue : la clé a été détruite pour préserver la forward secrecy.
-    // Un client qui relit ses enveloppes après avoir perdu son curseur perd donc le message.
-    assert!(chez_alice.process(&alice, &chiffre, &Default::default()).is_err());
+    // The second read fails: the key was destroyed to preserve forward secrecy. A client that
+    // re-reads its envelopes after losing its cursor therefore loses the message.
+    assert!(alice_side.process(&alice, &ciphertext, &Default::default()).is_err());
 }
 
-/// Le client persiste son état après **chaque** opération et le recharge au démarrage.
-/// Ce test reproduit ce cycle autour d'un ajout d'appareil, ce que les autres ne font pas.
+/// The client persists its state after **every** operation and reloads it at startup. This test
+/// reproduces that cycle around a device add, which the others do not.
 #[test]
-fn l_ajout_d_un_appareil_survit_a_la_persistance() {
+fn adding_a_device_survives_persistence() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
 
-    let mut chez_alice = Conversation::create(&alice).unwrap();
-    let inv = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &inv.welcome, &arbre).unwrap();
+    let mut alice_side = Conversation::create(&alice).unwrap();
+    let inv = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &inv.welcome, &tree).unwrap();
 
-    let m1 = chez_alice.encrypt(&alice, b"avant").unwrap();
-    chez_bob.process(&bob, &m1, &Default::default()).unwrap();
+    let m1 = alice_side.encrypt(&alice, b"before").unwrap();
+    bob_side.process(&bob, &m1, &Default::default()).unwrap();
 
-    // Alice ajoute sa tablette, puis son état est sauvegardé et rechargé — exactement ce que
-    // fait le client entre deux relèves.
-    let tablette = Identity::create("alice").unwrap();
-    let ajout = chez_alice.invite(&alice, &tablette.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
+    // Alice adds her tablet, then her state is saved and reloaded — exactly what the client does
+    // between two fetches.
+    let tablet = Identity::create("alice").unwrap();
+    let add = alice_side.invite(&alice, &tablet.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
 
-    let groupe = chez_alice.id();
+    let group = alice_side.id();
     let alice = {
-        let etat = alice.export_state().unwrap();
-        Identity::restore(&etat).unwrap()
+        let state = alice.export_state().unwrap();
+        Identity::restore(&state).unwrap()
     };
-    let mut chez_alice = Conversation::load(&alice, &groupe).unwrap();
+    let mut alice_side = Conversation::load(&alice, &group).unwrap();
 
-    let mut chez_tablette =
-        Conversation::join(&tablette, &ajout.welcome, &arbre).unwrap();
-    chez_bob.process(&bob, &ajout.commit, &Default::default()).unwrap();
+    let mut tablet_side =
+        Conversation::join(&tablet, &add.welcome, &tree).unwrap();
+    bob_side.process(&bob, &add.commit, &Default::default()).unwrap();
 
-    let m2 = chez_bob.encrypt(&bob, b"apres").unwrap();
+    let m2 = bob_side.encrypt(&bob, b"after").unwrap();
 
-    match chez_alice.process(&alice, &m2, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"apres"),
-        autre => panic!("chez alice après rechargement : {autre:?}"),
+    match alice_side.process(&alice, &m2, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"after"),
+        other => panic!("at alice after reload: {other:?}"),
     }
-    match chez_tablette.process(&tablette, &m2, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"apres"),
-        autre => panic!("chez la tablette : {autre:?}"),
+    match tablet_side.process(&tablet, &m2, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"after"),
+        other => panic!("at the tablet: {other:?}"),
     }
 }
 
-/// Envoyer un message ne dispense pas de lire ce qui l'a précédé.
+/// Sending a message does not excuse you from reading what came before it.
 ///
-/// Le delivery service attribue un numéro de séquence à chaque enveloppe. Le client était
-/// tenté d'avancer son curseur de lecture jusqu'au numéro de son propre message — après tout,
-/// il n'a pas à se relire. C'est faux : ce numéro ne dit **rien** des enveloppes déposées
-/// entre-temps par les autres. Sauter jusque-là enjambe leurs commits, et le groupe se fige à
-/// une epoch périmée sans qu'aucune erreur ne le signale.
+/// The delivery service assigns a sequence number to every envelope. The client was tempted to
+/// advance its read cursor up to the number of its own message — after all, it need not read
+/// itself back. That is wrong: the number says **nothing** about the envelopes posted meanwhile
+/// by the others. Jumping there steps over their commits, and the group freezes at a stale epoch
+/// with no error to report it.
 ///
-/// Ici Bob écrit sans avoir appliqué le commit d'Alice : son message est illisible pour tout
-/// le monde, y compris pour l'appareil qui existait déjà.
+/// Here Bob writes without having applied Alice's commit: his message is unreadable for
+/// everyone, including the device that already existed.
 #[test]
-fn ecrire_sans_avoir_applique_le_commit_rend_le_message_illisible() {
+fn writing_without_having_applied_the_commit_makes_the_message_unreadable() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
-    let tablette = Identity::create("alice").unwrap();
+    let tablet = Identity::create("alice").unwrap();
 
-    let mut chez_alice = Conversation::create(&alice).unwrap();
-    let inv = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &inv.welcome, &arbre).unwrap();
+    let mut alice_side = Conversation::create(&alice).unwrap();
+    let inv = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &inv.welcome, &tree).unwrap();
 
-    // Alice ajoute sa tablette. Le commit part, mais Bob ne le lit pas.
-    let ajout = chez_alice.invite(&alice, &tablette.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_tablette =
-        Conversation::join(&tablette, &ajout.welcome, &arbre).unwrap();
+    // Alice adds her tablet. The commit goes out, but Bob does not read it.
+    let add = alice_side.invite(&alice, &tablet.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut tablet_side =
+        Conversation::join(&tablet, &add.welcome, &tree).unwrap();
 
-    let m = chez_bob.encrypt(&bob, b"ecrit une epoch trop tot").unwrap();
+    let m = bob_side.encrypt(&bob, b"written one epoch too early").unwrap();
 
-    assert!(chez_alice.process(&alice, &m, &Default::default()).is_err(), "alice ne devrait pas pouvoir lire");
-    assert!(chez_tablette.process(&tablette, &m, &Default::default()).is_err(), "la tablette non plus");
+    assert!(alice_side.process(&alice, &m, &Default::default()).is_err(), "alice should not be able to read it");
+    assert!(tablet_side.process(&tablet, &m, &Default::default()).is_err(), "nor should the tablet");
 
-    // Une fois le commit appliqué, la suite repasse — mais le message perdu l'est pour de bon.
-    chez_bob.process(&bob, &ajout.commit, &Default::default()).unwrap();
-    let m2 = chez_bob.encrypt(&bob, b"apres application du commit").unwrap();
+    // Once the commit is applied, what follows goes through again — but the lost message is lost
+    // for good.
+    bob_side.process(&bob, &add.commit, &Default::default()).unwrap();
+    let m2 = bob_side.encrypt(&bob, b"after applying the commit").unwrap();
 
-    match chez_alice.process(&alice, &m2, &Default::default()).unwrap() {
+    match alice_side.process(&alice, &m2, &Default::default()).unwrap() {
         Incoming::Application { plaintext, .. } => {
-            assert_eq!(plaintext, b"apres application du commit");
+            assert_eq!(plaintext, b"after applying the commit");
         }
-        autre => panic!("chez alice : {autre:?}"),
+        other => panic!("at alice: {other:?}"),
     }
 }
 
-/// Publier avant d'appliquer : si la publication échoue, le groupe doit rester utilisable.
+/// Publish before applying: if publication fails, the group must stay usable.
 ///
-/// Appliquer le commit avant de l'avoir publié est irrattrapable. L'émetteur change d'epoch
-/// pendant que les autres restent à l'ancienne, et le commit qui les aurait réconciliés
-/// n'existe plus nulle part — le groupe meurt en silence, sans qu'aucune erreur ne dise
-/// pourquoi. C'est exactement ce qui s'est produit côté client avant cette séparation.
+/// Applying the commit before publishing it is unrecoverable. The sender changes epoch while the
+/// others stay at the old one, and the commit that would have reconciled them exists nowhere any
+/// more — the group dies in silence, with no error to say why. That is exactly what happened on
+/// the client side before this separation.
 #[test]
-fn une_invitation_non_appliquee_laisse_le_groupe_intact() {
+fn an_invitation_that_was_not_applied_leaves_the_group_intact() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
-    let tablette = Identity::create("alice").unwrap();
+    let tablet = Identity::create("alice").unwrap();
 
-    let mut chez_alice = Conversation::create(&alice).unwrap();
-    let inv = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &inv.welcome, &arbre).unwrap();
+    let mut alice_side = Conversation::create(&alice).unwrap();
+    let inv = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &inv.welcome, &tree).unwrap();
 
-    let epoch_avant = chez_alice.epoch();
+    let epoch_before = alice_side.epoch();
 
-    // Alice prépare l'ajout de sa tablette, puis la publication échoue : on n'applique pas.
-    let _abandonne = chez_alice.invite(&alice, &tablette.publish_key_package().unwrap()).unwrap();
+    // Alice prepares the add of her tablet, then publication fails: we do not apply.
+    let _abandoned = alice_side.invite(&alice, &tablet.publish_key_package().unwrap()).unwrap();
 
-    assert_eq!(chez_alice.epoch(), epoch_avant, "l'epoch a bougé sans publication");
+    assert_eq!(alice_side.epoch(), epoch_before, "the epoch moved without publication");
 
-    // La conversation continue de fonctionner comme si de rien n'était.
-    let m = chez_bob.encrypt(&bob, b"toujours lisible").unwrap();
-    match chez_alice.process(&alice, &m, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"toujours lisible"),
-        autre => panic!("message applicatif attendu, reçu {autre:?}"),
+    // The conversation keeps working as if nothing had happened.
+    let m = bob_side.encrypt(&bob, b"still readable").unwrap();
+    match alice_side.process(&alice, &m, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"still readable"),
+        other => panic!("expected an application message, got {other:?}"),
     }
 }
 
 // ---------------------------------------------------------------------------------------
-// Retrait de membre et post-compromise security
+// Member removal and post-compromise security
 // ---------------------------------------------------------------------------------------
 
-/// **Le test qui compte de cette phase.**
+/// **The test that matters in this phase.**
 ///
-/// C'est la propriété pour laquelle ce projet a choisi MLS, et qu'il n'avait jamais démontrée.
+/// This is the property MLS was chosen for in this project, and the one it had never
+/// demonstrated.
 ///
-/// Le retiré n'est pas privé de ses clés : son état de groupe est intact, il détient tout ce
-/// qu'il détenait la seconde d'avant, et rien dans le test ne le lui retire. Ce qui change,
-/// c'est que le commit de retrait a re-clé l'arbre — TreeKEM, en O(log N) — et que le secret
-/// d'epoch suivant ne dérive plus de rien qu'il connaisse.
+/// The removed member is not deprived of her keys: her group state is intact, she holds
+/// everything she held a second earlier, and nothing in the test takes it away. What changes is
+/// that the removal commit re-keyed the tree — TreeKEM, in O(log N) — and that the next epoch
+/// secret no longer derives from anything she knows.
 ///
-/// Sans ce test, la révocation d'appareil est décorative : filtrer côté serveur n'empêche pas
-/// un appareil volé de déchiffrer ce qu'il intercepte autrement.
+/// Without this test, device revocation is decorative: filtering server side does not stop a
+/// stolen device from decrypting what it intercepts by other means.
 #[test]
-fn un_membre_retire_ne_dechiffre_plus_la_suite() {
+fn a_removed_member_no_longer_decrypts_what_follows() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
     let carol = Identity::create("carol").unwrap();
 
-    // Groupe à trois.
-    let mut chez_alice = Conversation::create(&alice).unwrap();
-    let vers_bob = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &vers_bob.welcome, &arbre).unwrap();
+    // Three-member group.
+    let mut alice_side = Conversation::create(&alice).unwrap();
+    let to_bob = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &to_bob.welcome, &tree).unwrap();
 
-    let vers_carol = chez_alice.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_carol = Conversation::join(&carol, &vers_carol.welcome, &arbre).unwrap();
-    chez_bob.process(&bob, &vers_carol.commit, &Default::default()).unwrap();
+    let to_carol = alice_side.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut carol_side = Conversation::join(&carol, &to_carol.welcome, &tree).unwrap();
+    bob_side.process(&bob, &to_carol.commit, &Default::default()).unwrap();
 
-    // Avant le retrait, Carol lit comme tout le monde. Sans cette assertion, le test
-    // passerait aussi si Carol n'avait jamais rien pu lire.
-    let avant = chez_alice.encrypt(&alice, b"avant le retrait").unwrap();
-    chez_bob.process(&bob, &avant, &Default::default()).unwrap();
-    match chez_carol.process(&carol, &avant, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"avant le retrait"),
-        autre => panic!("message applicatif attendu, reçu {autre:?}"),
+    // Before the removal, Carol reads like everyone else. Without this assertion the test would
+    // also pass if Carol had never been able to read anything.
+    let before = alice_side.encrypt(&alice, b"before the removal").unwrap();
+    bob_side.process(&bob, &before, &Default::default()).unwrap();
+    match carol_side.process(&carol, &before, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"before the removal"),
+        other => panic!("expected an application message, got {other:?}"),
     }
 
-    // Alice retire Carol. Discipline habituelle : préparer, publier, appliquer.
-    let retrait = chez_alice.remove(&alice, carol.signature_key()).unwrap();
-    chez_bob.process(&bob, &retrait.commit, &Default::default()).unwrap();
-    chez_alice.apply_pending(&alice).unwrap();
+    // Alice removes Carol. Usual discipline: prepare, publish, apply.
+    let removal = alice_side.remove(&alice, carol.signature_key()).unwrap();
+    bob_side.process(&bob, &removal.commit, &Default::default()).unwrap();
+    alice_side.apply_pending(&alice).unwrap();
 
-    // Carol reçoit le commit qui l'exclut — elle apprend son exclusion plutôt que de
-    // constater un silence. L'appliquer ne lui rend rien.
-    let _ = chez_carol.process(&carol, &retrait.commit, &Default::default());
+    // Carol receives the commit that excludes her — she learns of her exclusion instead of
+    // observing a silence. Applying it gives her nothing back.
+    let _ = carol_side.process(&carol, &removal.commit, &Default::default());
 
-    let apres = chez_alice.encrypt(&alice, "après le retrait".as_bytes()).unwrap();
+    let after = alice_side.encrypt(&alice, "after the removal".as_bytes()).unwrap();
 
-    // Bob, resté membre, lit toujours.
-    match chez_bob.process(&bob, &apres, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, "après le retrait".as_bytes()),
-        autre => panic!("message applicatif attendu chez Bob, reçu {autre:?}"),
+    // Bob, still a member, still reads.
+    match bob_side.process(&bob, &after, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, "after the removal".as_bytes()),
+        other => panic!("expected an application message at Bob's, got {other:?}"),
     }
 
-    // Carol, avec tout son état de groupe, ne peut plus rien en faire.
+    // Carol, with her whole group state, can no longer do anything with it.
     assert!(
-        chez_carol.process(&carol, &apres, &Default::default()).is_err(),
-        "un membre retiré déchiffre encore : la post-compromise security n'existe pas, \
-         et la révocation d'appareil ne protège de rien",
+        carol_side.process(&carol, &after, &Default::default()).is_err(),
+        "a removed member still decrypts: post-compromise security does not exist, \
+         and device revocation protects nothing",
     );
 }
 
-/// Un retrait suit la même discipline qu'une invitation : préparer, publier, appliquer.
-/// Appliquer avant d'avoir publié laisse les autres à l'ancienne epoch avec un commit qui
-/// n'existe nulle part — le groupe meurt en silence.
+/// A removal follows the same discipline as an invitation: prepare, publish, apply. Applying
+/// before publishing leaves the others at the old epoch with a commit that exists nowhere — the
+/// group dies in silence.
 #[test]
-fn un_retrait_non_applique_laisse_le_groupe_intact() {
-    let (alice, _bob, mut chez_alice, _chez_bob) = conversation_a_deux();
-    let epoch = chez_alice.epoch();
-    let membres = chez_alice.member_count();
+fn a_removal_that_was_not_applied_leaves_the_group_intact() {
+    let (alice, _bob, mut alice_side, _bob_side) = two_member_conversation();
+    let epoch = alice_side.epoch();
+    let members = alice_side.member_count();
 
-    let bob_key = chez_alice.peer_signature_keys(&alice).into_iter().next().unwrap();
-    let _retrait = chez_alice.remove(&alice, &bob_key).unwrap();
+    let bob_key = alice_side.peer_signature_keys(&alice).into_iter().next().unwrap();
+    let _removal = alice_side.remove(&alice, &bob_key).unwrap();
 
-    assert_eq!(chez_alice.epoch(), epoch, "l'epoch a avancé avant publication");
-    assert_eq!(chez_alice.member_count(), membres, "le membre a été retiré avant publication");
+    assert_eq!(alice_side.epoch(), epoch, "the epoch advanced before publication");
+    assert_eq!(alice_side.member_count(), members, "the member was removed before publication");
 }
 
-/// Deux membres peuvent retirer le même appareil en même temps. Le second commit arrive après
-/// que le premier a été appliqué : la cible n'est plus là. L'appelant doit distinguer ce cas
-/// bénin d'une vraie erreur, sinon il boucle à réessayer une opération déjà accomplie.
+/// Two members can remove the same device at the same time. The second commit arrives after the
+/// first has been applied: the target is gone. The caller must tell that benign case apart from
+/// a real error, otherwise it loops retrying an operation already carried out.
 #[test]
-fn retirer_un_membre_absent_est_signale_distinctement() {
-    let (alice, _bob, mut chez_alice, _chez_bob) = conversation_a_deux();
-    let inconnu = Identity::create("inconnu").unwrap();
+fn removing_an_absent_member_is_reported_distinctly() {
+    let (alice, _bob, mut alice_side, _bob_side) = two_member_conversation();
+    let stranger = Identity::create("stranger").unwrap();
 
     assert!(matches!(
-        chez_alice.remove(&alice, inconnu.signature_key()),
+        alice_side.remove(&alice, stranger.signature_key()),
         Err(crypto_core::CryptoError::UnknownMember),
     ));
 }
 
-/// Sortir d'un groupe passe par une proposition qu'un **autre** membre commite : la RFC 9420
-/// interdit de se retirer soi-même dans un commit qu'on génère.
+/// Leaving a group goes through a proposal that **another** member commits: RFC 9420 forbids
+/// removing yourself in a commit you generate.
 #[test]
-fn quitter_un_groupe_demande_le_commit_d_un_autre() {
-    let (alice, bob, mut chez_alice, mut chez_bob) = conversation_a_deux();
+fn leaving_a_group_requires_someone_elses_commit() {
+    let (alice, bob, mut alice_side, mut bob_side) = two_member_conversation();
 
-    let demande = chez_bob.leave(&bob).unwrap();
+    let request = bob_side.leave(&bob).unwrap();
 
-    // Tant que personne ne commite, Bob est toujours là — et lit toujours.
-    assert_eq!(chez_alice.member_count(), 2);
+    // As long as nobody commits, Bob is still there — and still reads.
+    assert_eq!(alice_side.member_count(), 2);
 
-    assert!(matches!(chez_alice.process(&alice, &demande, &Default::default()).unwrap(), Incoming::Proposal));
+    assert!(matches!(alice_side.process(&alice, &request, &Default::default()).unwrap(), Incoming::Proposal));
 
-    let depart = chez_alice.commit_pending(&alice).unwrap();
-    let _ = chez_bob.process(&bob, &depart.commit, &Default::default());
-    chez_alice.apply_pending(&alice).unwrap();
+    let departure = alice_side.commit_pending(&alice).unwrap();
+    let _ = bob_side.process(&bob, &departure.commit, &Default::default());
+    alice_side.apply_pending(&alice).unwrap();
 
-    assert_eq!(chez_alice.member_count(), 1, "Bob est encore dans l'arbre après son départ");
+    assert_eq!(alice_side.member_count(), 1, "Bob is still in the tree after leaving");
 
-    let apres = chez_alice.encrypt(&alice, b"seule").unwrap();
-    assert!(chez_bob.process(&bob, &apres, &Default::default()).is_err(), "Bob lit encore après être parti");
+    let after = alice_side.encrypt(&alice, b"alone").unwrap();
+    assert!(bob_side.process(&bob, &after, &Default::default()).is_err(), "Bob still reads after leaving");
 }
 
-/// Une proposition reçue doit être conservée jusqu'au commit qui la reprend. La jeter rendait
-/// toute demande de sortie inopérante, en silence : le partant restait dans le groupe et
-/// aucune erreur ne le signalait.
+/// A received proposal must be kept until the commit that picks it up. Dropping it made every
+/// leave request silently ineffective: the leaver stayed in the group and no error reported it.
 #[test]
-fn une_proposition_recue_est_conservee_jusqu_au_commit() {
-    let (alice, bob, mut chez_alice, mut chez_bob) = conversation_a_deux();
+fn a_received_proposal_is_kept_until_the_commit() {
+    let (alice, bob, mut alice_side, mut bob_side) = two_member_conversation();
 
-    let demande = chez_bob.leave(&bob).unwrap();
-    chez_alice.process(&alice, &demande, &Default::default()).unwrap();
+    let request = bob_side.leave(&bob).unwrap();
+    alice_side.process(&alice, &request, &Default::default()).unwrap();
 
-    // Si la proposition avait été jetée, il n'y aurait rien à commiter ici.
-    let depart = chez_alice.commit_pending(&alice).unwrap();
-    let _ = chez_bob.process(&bob, &depart.commit, &Default::default());
-    chez_alice.apply_pending(&alice).unwrap();
+    // Had the proposal been dropped, there would be nothing to commit here.
+    let departure = alice_side.commit_pending(&alice).unwrap();
+    let _ = bob_side.process(&bob, &departure.commit, &Default::default());
+    alice_side.apply_pending(&alice).unwrap();
 
-    assert_eq!(chez_alice.member_count(), 1);
+    assert_eq!(alice_side.member_count(), 1);
 }
 
 // ---------------------------------------------------------------------------------------
-// Groupes administrés
+// Administered groups
 // ---------------------------------------------------------------------------------------
 
-/// Le roster voyage dans le group context, donc dans l'état authentifié : un membre qui
-/// rejoint le lit tel qu'il est, sans que personne ait à le lui transmettre à part.
+/// The roster travels in the group context, hence in the authenticated state: a joining member
+/// reads it as it is, without anyone having to hand it over separately.
 #[test]
-fn le_roster_est_transmis_par_le_group_context() {
+fn the_roster_is_carried_by_the_group_context() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
 
-    let mut chez_alice =
+    let mut alice_side =
         Conversation::create_administered(&alice, "alice".into()).unwrap();
-    let invitation = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
+    let invitation = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
 
-    let chez_bob = Conversation::join(&bob, &invitation.welcome, &arbre).unwrap();
+    let bob_side = Conversation::join(&bob, &invitation.welcome, &tree).unwrap();
 
-    let roster = chez_bob.roster().unwrap().expect("le roster n'a pas suivi le Welcome");
+    let roster = bob_side.roster().unwrap().expect("the roster did not follow the Welcome");
     assert_eq!(roster.admin(), "alice");
     assert!(roster.moderators().is_empty());
     assert!(!roster.can_moderate("bob"));
 
-    // Une conversation plate, elle, n'en a pas — et n'en veut pas.
-    let (_, _, plate, _) = conversation_a_deux();
-    assert!(plate.roster().unwrap().is_none());
+    // A flat conversation has none — and wants none.
+    let (_, _, flat, _) = two_member_conversation();
+    assert!(flat.roster().unwrap().is_none());
 }
 
-/// **Le test qui compte pour A.4.**
+/// **The test that matters for A.4.**
 ///
-/// Bob n'est pas admin. Son commit est cryptographiquement irréprochable — MLS l'accepte, et
-/// c'est bien le problème : c'est à l'application de refuser. Alice doit le rejeter **sans
-/// avancer d'un pouce**, sinon le refus lui-même casse le groupe.
+/// Bob is not an admin. His commit is cryptographically impeccable — MLS accepts it, and that is
+/// precisely the problem: refusing it is the application's job. Alice must reject it **without
+/// moving an inch**, otherwise the refusal itself breaks the group.
 #[test]
-fn un_commit_non_autorise_est_refuse_sans_alterer_l_etat() {
+fn an_unauthorized_commit_is_rejected_without_altering_the_state() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
     let carol = Identity::create("carol").unwrap();
 
-    let mut chez_alice =
+    let mut alice_side =
         Conversation::create_administered(&alice, "alice".into()).unwrap();
 
-    let vers_bob = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &vers_bob.welcome, &arbre).unwrap();
+    let to_bob = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &to_bob.welcome, &tree).unwrap();
 
-    let vers_carol = chez_alice.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let _chez_carol = Conversation::join(&carol, &vers_carol.welcome, &arbre).unwrap();
-    chez_bob.process(&bob, &vers_carol.commit, &Default::default()).unwrap();
+    let to_carol = alice_side.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let _carol_side = Conversation::join(&carol, &to_carol.welcome, &tree).unwrap();
+    bob_side.process(&bob, &to_carol.commit, &Default::default()).unwrap();
 
-    let epoch = chez_alice.epoch();
-    let membres = chez_alice.member_count();
+    let epoch = alice_side.epoch();
+    let members = alice_side.member_count();
 
-    // Bob, simple membre, tente d'évincer Carol.
-    let tentative = chez_bob.remove(&bob, carol.signature_key()).unwrap();
+    // Bob, a plain member, tries to evict Carol.
+    let attempt = bob_side.remove(&bob, carol.signature_key()).unwrap();
 
-    let refus = chez_alice.process(&alice, &tentative.commit, &Default::default());
+    let refusal = alice_side.process(&alice, &attempt.commit, &Default::default());
     assert!(
-        matches!(refus, Err(crypto_core::CryptoError::PolicyViolation(_))),
-        "commit non autorisé accepté : la politique ne sert à rien — reçu {refus:?}",
+        matches!(refusal, Err(crypto_core::CryptoError::PolicyViolation(_))),
+        "unauthorized commit accepted: the policy is useless — got {refusal:?}",
     );
 
-    // Un refus qui aurait quand même fait avancer le ratchet serait pire que pas de politique
-    // du tout : le groupe divergerait à chaque tentative hostile.
-    assert_eq!(chez_alice.epoch(), epoch, "le refus a fait avancer l'epoch");
-    assert_eq!(chez_alice.member_count(), membres, "le refus a modifié la composition");
+    // A refusal that still advanced the ratchet would be worse than no policy at all: the group
+    // would diverge on every hostile attempt.
+    assert_eq!(alice_side.epoch(), epoch, "the refusal advanced the epoch");
+    assert_eq!(alice_side.member_count(), members, "the refusal changed the membership");
 
-    // Et le groupe fonctionne toujours normalement après.
-    let apres = chez_alice.encrypt(&alice, b"toujours vivant").unwrap();
-    match chez_bob.process(&bob, &apres, &Default::default()).unwrap() {
-        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"toujours vivant"),
-        autre => panic!("message applicatif attendu, reçu {autre:?}"),
+    // And the group still works normally afterwards.
+    let after = alice_side.encrypt(&alice, b"still alive").unwrap();
+    match bob_side.process(&bob, &after, &Default::default()).unwrap() {
+        Incoming::Application { plaintext, .. } => assert_eq!(plaintext, b"still alive"),
+        other => panic!("expected an application message, got {other:?}"),
     }
 }
 
-/// L'exception qui rend la révocation utile : Bob, non-admin, évince l'appareil volé de Carol
-/// parce qu'il détient un certificat de révocation vérifié. Sans elle, l'appareil resterait
-/// dans le groupe jusqu'au retour en ligne d'un admin.
+/// The exception that makes revocation useful: Bob, not an admin, evicts Carol's stolen device
+/// because he holds a verified revocation certificate. Without it the device would stay in the
+/// group until an admin comes back online.
 #[test]
-fn un_non_admin_evince_un_appareil_revoque() {
+fn a_non_admin_evicts_a_revoked_device() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
     let carol = Identity::create("carol").unwrap();
 
-    let mut chez_alice =
+    let mut alice_side =
         Conversation::create_administered(&alice, "alice".into()).unwrap();
-    let vers_bob = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &vers_bob.welcome, &arbre).unwrap();
+    let to_bob = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &to_bob.welcome, &tree).unwrap();
 
-    let vers_carol = chez_alice.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_carol = Conversation::join(&carol, &vers_carol.welcome, &arbre).unwrap();
-    chez_bob.process(&bob, &vers_carol.commit, &Default::default()).unwrap();
+    let to_carol = alice_side.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut carol_side = Conversation::join(&carol, &to_carol.welcome, &tree).unwrap();
+    bob_side.process(&bob, &to_carol.commit, &Default::default()).unwrap();
 
-    // Le contexte que l'appelant a construit après avoir VÉRIFIÉ le certificat servi par le
-    // serveur. `crypto-core` ne fait pas de réseau : c'est au client de le remplir.
+    // The context the caller built after having VERIFIED the certificate served by the server.
+    // `crypto-core` does no networking: filling this in is the client's job.
     let context = crypto_core::roles::Context {
         revoked: vec![carol.signature_key().to_vec()],
     };
 
-    let retrait = chez_bob.remove(&bob, carol.signature_key()).unwrap();
-    chez_alice.process(&alice, &retrait.commit, &context).unwrap();
-    chez_bob.apply_pending(&bob).unwrap();
+    let removal = bob_side.remove(&bob, carol.signature_key()).unwrap();
+    alice_side.process(&alice, &removal.commit, &context).unwrap();
+    bob_side.apply_pending(&bob).unwrap();
 
-    assert_eq!(chez_alice.member_count(), 2);
+    assert_eq!(alice_side.member_count(), 2);
 
-    let apres = chez_alice.encrypt(&alice, b"sans carol").unwrap();
-    assert!(chez_carol.process(&carol, &apres, &context).is_err());
+    let after = alice_side.encrypt(&alice, b"without carol").unwrap();
+    assert!(carol_side.process(&carol, &after, &context).is_err());
 }
 
-/// Un contexte vide n'est pas neutre : il fait refuser exactement le cas du téléphone volé.
-/// C'est le piège d'implémentation le plus probable côté client, d'où ce test.
+/// An empty context is not neutral: it makes exactly the stolen-phone case fail. That is the
+/// most likely implementation trap on the client side, hence this test.
 #[test]
-fn sans_certificat_verifie_le_meme_retrait_est_refuse() {
+fn without_a_verified_certificate_the_same_removal_is_rejected() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
     let carol = Identity::create("carol").unwrap();
 
-    let mut chez_alice =
+    let mut alice_side =
         Conversation::create_administered(&alice, "alice".into()).unwrap();
-    let vers_bob = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &vers_bob.welcome, &arbre).unwrap();
+    let to_bob = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &to_bob.welcome, &tree).unwrap();
 
-    let vers_carol = chez_alice.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let _ = Conversation::join(&carol, &vers_carol.welcome, &arbre).unwrap();
-    chez_bob.process(&bob, &vers_carol.commit, &Default::default()).unwrap();
+    let to_carol = alice_side.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let _ = Conversation::join(&carol, &to_carol.welcome, &tree).unwrap();
+    bob_side.process(&bob, &to_carol.commit, &Default::default()).unwrap();
 
-    let retrait = chez_bob.remove(&bob, carol.signature_key()).unwrap();
+    let removal = bob_side.remove(&bob, carol.signature_key()).unwrap();
 
     assert!(matches!(
-        chez_alice.process(&alice, &retrait.commit, &Default::default()),
+        alice_side.process(&alice, &removal.commit, &Default::default()),
         Err(crypto_core::CryptoError::PolicyViolation(_)),
     ));
 }
 
-/// Un admin promeut quelqu'un, qui gagne alors le droit de retirer.
+/// An admin promotes someone, who then gains the right to remove.
 #[test]
-fn une_promotion_confere_les_droits_de_moderation() {
+fn a_promotion_grants_moderation_rights() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
     let carol = Identity::create("carol").unwrap();
 
-    let mut chez_alice =
+    let mut alice_side =
         Conversation::create_administered(&alice, "alice".into()).unwrap();
-    let vers_bob = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &vers_bob.welcome, &arbre).unwrap();
+    let to_bob = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &to_bob.welcome, &tree).unwrap();
 
-    let vers_carol = chez_alice.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_carol = Conversation::join(&carol, &vers_carol.welcome, &arbre).unwrap();
-    chez_bob.process(&bob, &vers_carol.commit, &Default::default()).unwrap();
+    let to_carol = alice_side.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut carol_side = Conversation::join(&carol, &to_carol.welcome, &tree).unwrap();
+    bob_side.process(&bob, &to_carol.commit, &Default::default()).unwrap();
 
-    // Alice promeut Bob.
+    // Alice promotes Bob.
     let promotion =
-        chez_alice.set_roles(&alice, "alice".into(), vec!["bob".into()]).unwrap();
-    chez_bob.process(&bob, &promotion.commit, &Default::default()).unwrap();
-    chez_carol.process(&carol, &promotion.commit, &Default::default()).unwrap();
-    chez_alice.apply_pending(&alice).unwrap();
+        alice_side.set_roles(&alice, "alice".into(), vec!["bob".into()]).unwrap();
+    bob_side.process(&bob, &promotion.commit, &Default::default()).unwrap();
+    carol_side.process(&carol, &promotion.commit, &Default::default()).unwrap();
+    alice_side.apply_pending(&alice).unwrap();
 
-    assert!(chez_bob.roster().unwrap().unwrap().is_moderator("bob"));
+    assert!(bob_side.roster().unwrap().unwrap().is_moderator("bob"));
 
-    // Le même retrait qu'un test précédent refusait passe désormais.
-    let retrait = chez_bob.remove(&bob, carol.signature_key()).unwrap();
-    chez_alice.process(&alice, &retrait.commit, &Default::default()).unwrap();
-    chez_bob.apply_pending(&bob).unwrap();
+    // The very removal an earlier test rejected now goes through.
+    let removal = bob_side.remove(&bob, carol.signature_key()).unwrap();
+    alice_side.process(&alice, &removal.commit, &Default::default()).unwrap();
+    bob_side.apply_pending(&bob).unwrap();
 
-    assert_eq!(chez_alice.member_count(), 2);
+    assert_eq!(alice_side.member_count(), 2);
 }
 
-/// Un non-admin qui se promeut lui-même contournerait toute la politique d'un seul commit.
+/// A non-admin promoting himself would bypass the whole policy in a single commit.
 #[test]
-fn un_membre_ordinaire_ne_peut_pas_s_auto_promouvoir() {
+fn an_ordinary_member_cannot_promote_himself() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
 
-    let mut chez_alice =
+    let mut alice_side =
         Conversation::create_administered(&alice, "alice".into()).unwrap();
-    let vers_bob = chez_alice.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
-    let mut chez_bob = Conversation::join(&bob, &vers_bob.welcome, &arbre).unwrap();
+    let to_bob = alice_side.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+    let tree = alice_side.apply_pending(&alice).unwrap();
+    let mut bob_side = Conversation::join(&bob, &to_bob.welcome, &tree).unwrap();
 
-    let tentative =
-        chez_bob.set_roles(&bob, "bob".into(), Vec::new()).unwrap();
+    let attempt =
+        bob_side.set_roles(&bob, "bob".into(), Vec::new()).unwrap();
 
     assert!(matches!(
-        chez_alice.process(&alice, &tentative.commit, &Default::default()),
+        alice_side.process(&alice, &attempt.commit, &Default::default()),
         Err(crypto_core::CryptoError::PolicyViolation(_)),
     ));
-    assert_eq!(chez_alice.roster().unwrap().unwrap().admin(), "alice");
+    assert_eq!(alice_side.roster().unwrap().unwrap().admin(), "alice");
 }
 
-/// La capacité `0xF100` doit être déclarée dans les feuilles, sinon MLS refuse d'ajouter un
-/// membre à un groupe qui porte l'extension. L'erreur ne se manifesterait qu'à l'ajout, loin
-/// de sa cause.
+/// The `0xF100` capability must be declared in the leaves, otherwise MLS refuses to add a member
+/// to a group carrying the extension. The error would only show up at the add, far from its
+/// cause.
 #[test]
-fn un_membre_rejoint_bien_un_groupe_portant_l_extension() {
+fn a_member_does_join_a_group_carrying_the_extension() {
     let alice = Identity::create("alice").unwrap();
     let bob = Identity::create("bob").unwrap();
 
-    let mut chez_alice =
+    let mut alice_side =
         Conversation::create_administered(&alice, "alice".into()).unwrap();
-    let invitation = chez_alice
+    let invitation = alice_side
         .invite(&alice, &bob.publish_key_package().unwrap())
-        .expect("ajout refusé : la capacité 0xF100 manque aux KeyPackages");
-    let arbre = chez_alice.apply_pending(&alice).unwrap();
+        .expect("add refused: the KeyPackages are missing the 0xF100 capability");
+    let tree = alice_side.apply_pending(&alice).unwrap();
 
-    let mut chez_bob = Conversation::join(&bob, &invitation.welcome, &arbre).unwrap();
-    let m = chez_alice.encrypt(&alice, b"bienvenue").unwrap();
+    let mut bob_side = Conversation::join(&bob, &invitation.welcome, &tree).unwrap();
+    let m = alice_side.encrypt(&alice, b"welcome").unwrap();
     assert!(matches!(
-        chez_bob.process(&bob, &m, &Default::default()).unwrap(),
+        bob_side.process(&bob, &m, &Default::default()).unwrap(),
         Incoming::Application { .. },
     ));
 }
 
-/// Les deux membres dérivent la même clé de canal éphémère, sans échanger quoi que ce soit.
+/// Both members derive the same ephemeral channel key without exchanging anything.
 ///
-/// C'est ce qui permet à l'indicateur de frappe de ne rien coûter au protocole : aucune clé à
-/// distribuer, aucun message supplémentaire.
+/// That is what makes the typing indicator cost the protocol nothing: no key to distribute, no
+/// extra message.
 #[test]
-fn la_cle_de_signal_est_partagee_par_les_membres() {
-    let (alice, bob, alice_group, bob_group) = conversation_a_deux();
+fn the_signal_key_is_shared_by_the_members() {
+    let (alice, bob, alice_group, bob_group) = two_member_conversation();
 
-    let cote_alice = alice_group.signal_key(&alice).unwrap();
-    let cote_bob = bob_group.signal_key(&bob).unwrap();
+    let alice_side = alice_group.signal_key(&alice).unwrap();
+    let bob_side = bob_group.signal_key(&bob).unwrap();
 
-    assert_eq!(cote_alice.len(), 32);
-    assert_eq!(cote_alice, cote_bob, "sans accord, les signaux seraient illisibles");
+    assert_eq!(alice_side.len(), 32);
+    assert_eq!(alice_side, bob_side, "without agreement the signals would be unreadable");
 }
 
-/// **La PCS s'applique au canal éphémère sans une ligne de code supplémentaire.**
+/// **PCS applies to the ephemeral channel without a single extra line of code.**
 ///
-/// La clé est dérivée du secret d'export de l'epoch : tout commit la change. Un membre retiré
-/// perd donc l'indicateur de frappe au même instant qu'il perd les messages — ce qu'il aurait
-/// fallu implémenter à la main si le canal avait porté sa propre clé long-terme.
+/// The key derives from the epoch export secret: any commit changes it. A removed member
+/// therefore loses the typing indicator at the very moment he loses the messages — which would
+/// have had to be implemented by hand had the channel carried its own long-term key.
 #[test]
-fn la_cle_de_signal_change_a_chaque_epoch() {
-    let (alice, _bob, mut alice_group, _bob_group) = conversation_a_deux();
+fn the_signal_key_changes_every_epoch() {
+    let (alice, _bob, mut alice_group, _bob_group) = two_member_conversation();
 
-    let avant = alice_group.signal_key(&alice).unwrap();
-    let epoch_avant = alice_group.epoch();
+    let before = alice_group.signal_key(&alice).unwrap();
+    let epoch_before = alice_group.epoch();
 
-    // Un ajout suffit à faire tourner l'arbre : c'est le commit qui compte, pas sa nature.
+    // An add is enough to turn the tree: what counts is the commit, not its nature.
     let carol = Identity::create("carol@device-1").unwrap();
     alice_group.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
     alice_group.apply_pending(&alice).unwrap();
 
-    let apres = alice_group.signal_key(&alice).unwrap();
+    let after = alice_group.signal_key(&alice).unwrap();
 
-    assert_ne!(epoch_avant, alice_group.epoch());
-    assert_ne!(avant, apres, "sinon un membre retiré continuerait de lire le canal éphémère");
+    assert_ne!(epoch_before, alice_group.epoch());
+    assert_ne!(before, after, "otherwise a removed member would keep reading the ephemeral channel");
 }

@@ -5,17 +5,17 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# INVARIANT — cette crate ne doit JAMAIS dépendre de `ratchet-lab`.
-# `ratchet-lab` est du code pédagogique non audité ; `crypto-core` est le seul chemin
-# de production. Toute PR ajoutant cette dépendance doit être rejetée.
+# INVARIANT — this crate must NEVER depend on `ratchet-lab`.
+# `ratchet-lab` is unaudited teaching code; `crypto-core` is the only production path.
+# Any PR adding that dependency must be rejected.
 
 [dependencies]
 aes-gcm.workspace = true
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 attest = { path = "../attest" }
-# CC0-1.0 : domaine public, donc compatible avec la contrainte de code propriétaire qui a
-# écarté libsignal. `default-features = false` retire la normalisation Unicode, inutile pour
-# la seule liste anglaise et non négligeable dans un binaire WASM.
+# CC0-1.0: public domain, so compatible with the proprietary-code constraint that ruled out
+# libsignal. `default-features = false` drops Unicode normalisation, useless for the English
+# wordlist alone and far from free in a WASM binary.
 bip39 = { version = "2", default-features = false, features = ["alloc"] }
 ed25519-dalek.workspace = true
 hkdf.workspace = true

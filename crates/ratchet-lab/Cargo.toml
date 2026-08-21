@@ -5,12 +5,12 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# ATTENTION — crate pédagogique.
+# WARNING — teaching crate.
 #
-# Cette crate réimplémente X3DH et le Double Ratchet à la main dans le but de les
-# comprendre. Elle n'a reçu aucun audit, ne résiste pas aux attaques par canal auxiliaire
-# et ne doit JAMAIS être importée par `crypto-core` ni par aucun code exécuté par un
-# utilisateur. Le chemin de production passe exclusivement par OpenMLS.
+# This crate reimplements X3DH and the Double Ratchet by hand for the sake of understanding
+# them. It is not audited, it does not resist side-channel attacks, and it must NEVER be
+# imported by `crypto-core` nor by any code a user runs. The production path goes exclusively
+# through OpenMLS.
 
 [dependencies]
 x25519-dalek.workspace = true

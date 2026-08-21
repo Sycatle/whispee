@@ -1,132 +1,129 @@
-//! Attestation d'appartenance d'un appareil à un compte.
+//! Attestation that a device belongs to an account.
 //!
-//! # Le problème que cette crate résout
+//! # The problem this crate solves
 //!
-//! En MLS, l'unité d'appartenance à un groupe est l'appareil. Un compte multi-appareils est
-//! donc, du point de vue du protocole, un ensemble d'appareils sans lien entre eux. Quelqu'un
-//! doit déclarer que ces appareils forment un compte — et c'est ce « quelqu'un » qui décide,
-//! en pratique, qui peut lire les conversations.
+//! In MLS the unit of group membership is the device. A multi-device account is therefore, as
+//! far as the protocol is concerned, a set of unrelated devices. Someone has to declare that
+//! those devices form an account — and that "someone" is, in practice, who decides who can read
+//! the conversations.
 //!
-//! Si c'est le serveur, il lui suffit d'ajouter un appareil qu'il contrôle à la liste de Bob
-//! pour être invité dans toutes ses conversations. Aucune ligne de cryptographie n'est cassée :
-//! le message est chiffré de bout en bout, simplement l'une des bouts est le serveur. C'est
-//! l'attaque reprochée à WhatsApp en 2019, et elle est indétectable sans la présente crate.
+//! If it is the server, it only has to add a device it controls to Bob's list to be invited into
+//! every conversation he has. No cryptography is broken: the message is still end-to-end
+//! encrypted, one of the ends simply happens to be the server. That is the attack WhatsApp was
+//! accused of in 2019, and it is undetectable without this crate.
 //!
-//! Ici, c'est le **compte** qui signe ses appareils, avec une clé que le serveur ne détient
-//! pas. Le serveur ne peut donc plus qu'**omettre** un appareil de la liste — de la censure,
-//! visible et sans intérêt pour un espion — mais jamais en **ajouter** un.
+//! Here the **account** signs its own devices, with a key the server does not hold. The server
+//! can then only **omit** a device from the list — censorship, visible and useless to an
+//! eavesdropper — never **add** one.
 //!
-//! # Pourquoi une crate séparée
+//! # Why a separate crate
 //!
-//! Le signataire est `crypto-core`, le vérificateur est `server`. Deux implémentations du
-//! format canonique divergeraient tôt ou tard, et la divergence bénigne (signatures refusées)
-//! n'est pas la seule possible : c'est aussi ainsi qu'on introduit une confusion de champs.
-//! Une seule définition, ici, testée ici.
+//! The signer is `crypto-core`, the verifier is `server`. Two implementations of the canonical
+//! format would diverge sooner or later, and the benign divergence (rejected signatures) is not
+//! the only possible one: that is also how field confusion gets introduced. One definition,
+//! here, tested here.
 //!
-//! `server` ne parle pas MLS et ne doit pas commencer : cette crate ne dépend donc pas
-//! d'OpenMLS.
+//! `server` does not speak MLS and must not start: this crate therefore does not depend on
+//! OpenMLS.
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-/// Étiquette de séparation de domaine.
+/// Domain separation label.
 ///
-/// Elle garantit qu'une signature produite ici ne peut pas être rejouée comme signature
-/// valide dans un autre contexte du projet, et réciproquement. La version dans l'étiquette
-/// est ce qui permettra de faire évoluer le format sans qu'une ancienne signature reste
-/// acceptable sous les nouvelles règles.
+/// It guarantees a signature produced here cannot be replayed as a valid signature in another
+/// context of the project, and vice versa. The version in the label is what will allow the
+/// format to evolve without an old signature staying acceptable under the new rules.
 const DOMAIN: &[u8] = b"wac-attest-v1";
 
-/// Domaine de la révocation, distinct de celui de l'attestation.
+/// Revocation domain, distinct from the attestation one.
 ///
-/// C'est cette distinction qui interdit qu'une attestation, obtenue légitimement, soit
-/// représentée comme un certificat de révocation du même appareil — ce qui permettrait à
-/// n'importe qui de faire évincer n'importe quel appareil déjà attesté.
+/// This distinction is what stops a legitimately obtained attestation from being presented as a
+/// revocation certificate for the same device — which would let anyone get any already attested
+/// device evicted.
 const DOMAIN_REVOKE: &[u8] = b"wac-revoke-v1";
 
-/// Domaine de la rotation de compte.
+/// Account rotation domain.
 ///
-/// Encore un domaine distinct, pour la même raison que les deux précédents : une signature
-/// produite pour révoquer un appareil ne doit pas pouvoir servir à changer la clé du compte,
-/// ce qui reviendrait à en prendre le contrôle.
+/// Another distinct domain, for the same reason as the previous two: a signature produced to
+/// revoke a device must not be usable to change the account key, which would amount to taking
+/// the account over.
 const DOMAIN_ROTATE: &[u8] = b"wac-rotate-v1";
 
-/// Domaine du dépôt anonyme d'enveloppe.
+/// Domain of the anonymous envelope post.
 ///
-/// Distinct des trois autres, et pour une raison qui n'est pas théorique : ce message est
-/// authentifié par un **MAC symétrique** dont la clé est partagée avec le serveur, là où les
-/// autres portent des signatures que le serveur ne peut pas produire. Confondre les domaines
-/// laisserait le détenteur de la clé de dépôt fabriquer ce qu'il veut ailleurs.
+/// Distinct from the other three, and for a reason that is not theoretical: this message is
+/// authenticated by a **symmetric MAC** whose key is shared with the server, where the others
+/// carry signatures the server cannot produce. Conflating the domains would let whoever holds
+/// the post key forge whatever it wants elsewhere.
 const DOMAIN_POST: &[u8] = b"wac-post-v1";
 
-/// Domaine du MAC accompagnant un **signal éphémère** (indicateur de frappe).
+/// Domain of the MAC accompanying an **ephemeral signal** (typing indicator).
 ///
-/// Distinct de [`DOMAIN_POST`] bien que la clé soit la même : sans cette séparation, un MAC
-/// capté sur un signal — qui n'a pas d'anti-rejeu, parce qu'un signal périmé est sans effet —
-/// pourrait être présenté comme le MAC d'un dépôt d'enveloppe. Le format du corps diffère
-/// suffisamment pour que l'attaque échoue en pratique, ce qui est exactement le genre de
-/// raisonnement qui cesse d'être vrai à la première évolution du format.
+/// Distinct from [`DOMAIN_POST`] even though the key is the same: without this separation a MAC
+/// captured on a signal — which has no replay protection, because a stale signal has no effect —
+/// could be presented as the MAC of an envelope post. The body formats differ enough for the
+/// attack to fail in practice, which is exactly the kind of reasoning that stops being true at
+/// the first change to the format.
 const DOMAIN_SIGNAL: &[u8] = b"wac-signal-mac-v1";
 
-/// Domaine de l'ouverture d'une session gateway.
+/// Domain for opening a gateway session.
 ///
-/// Distinct de tous les précédents, et surtout de ce que signe [`crate::message`] : la
-/// signature d'ouverture prouve la possession de la clé d'authentification d'un appareil, la
-/// même que celle qui signe les requêtes HTTP. Sans séparation de domaine, une signature
-/// captée sur une requête HTTP ouvrirait une session, et réciproquement — ce qui rendrait
-/// inutile le nonce dont c'est précisément la raison d'être.
+/// Distinct from all the previous ones, and above all from what [`crate::message`] signs: the
+/// opening signature proves possession of a device's authentication key, the same one that signs
+/// HTTP requests. Without domain separation a signature captured on an HTTP request would open a
+/// session, and vice versa — making the nonce, whose whole purpose is precisely that, useless.
 const DOMAIN_GATEWAY: &[u8] = b"wac-gateway-v1";
 
-/// Longueur maximale acceptée pour un champ de longueur variable.
+/// Maximum accepted length for a variable-length field.
 ///
-/// Le préfixe de longueur est un `u16` : au-delà, la sérialisation tronquerait silencieusement,
-/// ce qui rendrait deux entrées distinctes indiscernables.
+/// The length prefix is a `u16`: beyond that, serialisation would silently truncate, making two
+/// distinct entries indistinguishable.
 pub const MAX_FIELD_LEN: usize = u16::MAX as usize;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttestError {
-    /// Un champ dépasse ce qu'un préfixe `u16` peut décrire.
+    /// A field exceeds what a `u16` prefix can describe.
     FieldTooLong,
-    /// La clé publique du compte n'est pas une clé Ed25519 valide.
+    /// The account public key is not a valid Ed25519 key.
     BadIdentityKey,
-    /// La signature n'a pas la bonne taille, ou ne vérifie pas.
+    /// The signature has the wrong size, or does not verify.
     BadSignature,
 }
 
 impl std::fmt::Display for AttestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::FieldTooLong => write!(f, "champ trop long pour être attesté"),
-            Self::BadIdentityKey => write!(f, "clé d'identité de compte invalide"),
-            Self::BadSignature => write!(f, "attestation invalide"),
+            Self::FieldTooLong => write!(f, "field too long to be attested"),
+            Self::BadIdentityKey => write!(f, "invalid account identity key"),
+            Self::BadSignature => write!(f, "invalid attestation"),
         }
     }
 }
 
 impl std::error::Error for AttestError {}
 
-/// Ce qu'un appareil revendique : appartenir à `handle`, avec ces deux clés publiques.
+/// What a device claims: belonging to `handle`, with these two public keys.
 ///
-/// Les deux clés sont attestées ensemble et non séparément. Les séparer permettrait de
-/// recombiner l'attestation d'une clé d'authentification avec la clé MLS d'un autre appareil.
+/// Both keys are attested together, not separately. Separating them would allow recombining the
+/// attestation of one authentication key with the MLS key of another device.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceClaim<'a> {
-    /// Pseudonyme du compte. Transporté en clair, comme l'est déjà le credential MLS.
+    /// Account handle. Carried in the clear, as the MLS credential already is.
     pub handle: &'a str,
     pub device_id: &'a str,
-    /// Clé Ed25519 d'authentification HTTP (32 octets).
+    /// Ed25519 HTTP authentication key (32 bytes).
     pub auth_key: &'a [u8],
-    /// Clé publique de signature MLS de cet appareil.
+    /// This device's MLS signature public key.
     pub mls_key: &'a [u8],
 }
 
-/// Sérialise la revendication sous la forme exacte qui est signée.
+/// Serialises the claim into the exact form that is signed.
 ///
-/// Chaque champ de longueur variable est précédé de sa longueur. Sans ces préfixes,
-/// `handle="ab", device_id="c"` et `handle="a", device_id="bc"` produiraient des octets
-/// identiques : une attestation obtenue pour l'un vaudrait pour l'autre. C'est exactement le
-/// genre de faille qui ne se voit pas à la relecture et que le test
-/// `deux_decoupages_differents_ne_collisionnent_pas` fige.
+/// Every variable-length field is preceded by its length. Without those prefixes,
+/// `handle="ab", device_id="c"` and `handle="a", device_id="bc"` would produce identical bytes:
+/// an attestation obtained for one would hold for the other. That is exactly the kind of flaw
+/// that review does not catch, and that the `two_different_splits_do_not_collide` test pins down.
 pub fn message(claim: &DeviceClaim<'_>) -> Result<Vec<u8>, AttestError> {
     encode(
         DOMAIN,
@@ -134,15 +131,14 @@ pub fn message(claim: &DeviceClaim<'_>) -> Result<Vec<u8>, AttestError> {
     )
 }
 
-/// Sérialisation canonique commune à tous les messages signés de cette crate.
+/// Canonical serialisation shared by every signed message of this crate.
 ///
-/// Une seule implémentation du préfixage, partagée par l'attestation et la révocation. Deux
-/// copies divergeraient : c'est la raison d'être de la crate, il serait absurde de reproduire
-/// le problème en son sein.
+/// One implementation of the prefixing, shared by attestation and revocation. Two copies would
+/// diverge: that is the whole point of this crate, reproducing the problem inside it would be
+/// absurd.
 ///
-/// L'étiquette de domaine ouvre le message, donc aucun message d'un type ne peut être lu
-/// comme un message d'un autre type — c'est ce qui interdit de rejouer une attestation comme
-/// révocation.
+/// The domain label opens the message, so no message of one kind can be read as a message of
+/// another kind — that is what forbids replaying an attestation as a revocation.
 fn encode(domain: &[u8], parts: &[&[u8]]) -> Result<Vec<u8>, AttestError> {
     if parts.iter().any(|part| part.len() > MAX_FIELD_LEN) {
         return Err(AttestError::FieldTooLong);
@@ -157,8 +153,8 @@ fn encode(domain: &[u8], parts: &[&[u8]]) -> Result<Vec<u8>, AttestError> {
     Ok(out)
 }
 
-/// Vérification Ed25519 commune. Voir la note de [`verify`] sur la confiance à accorder au
-/// résultat produit par le serveur.
+/// Shared Ed25519 verification. See the note on [`verify`] about how much to trust the result
+/// produced by the server.
 fn verify_signature(identity_key: &[u8], message: &[u8], sig: &[u8]) -> Result<(), AttestError> {
     let identity_key: [u8; 32] = identity_key.try_into().map_err(|_| AttestError::BadIdentityKey)?;
     let verifying =
@@ -171,15 +167,14 @@ fn verify_signature(identity_key: &[u8], message: &[u8], sig: &[u8]) -> Result<(
         .map_err(|_| AttestError::BadSignature)
 }
 
-/// Vérifie qu'une attestation a bien été produite par le compte.
+/// Checks that an attestation was indeed produced by the account.
 ///
-/// Fonction libre et sans état : elle ne demande aucun secret, ce qui permet au serveur de
-/// l'appeler comme contrôle d'accès et au client de la rappeler pour son propre compte.
+/// Free and stateless: it needs no secret, which lets the server call it as an access control
+/// and the client redo it for itself.
 ///
-/// **Le client ne doit jamais se fier à la vérification faite par le serveur.** Un serveur
-/// qui ment sur le résultat est précisément le scénario contre lequel tout ceci existe : la
-/// vérification côté serveur n'est là que pour refuser tôt ce qui est de toute façon
-/// inutilisable, pas pour constituer une garantie.
+/// **The client must never rely on the verification done by the server.** A server that lies
+/// about the result is precisely the scenario all of this exists against: server-side
+/// verification only rejects early what is unusable anyway, it is not a guarantee.
 pub fn verify(
     identity_key: &[u8],
     claim: &DeviceClaim<'_>,
@@ -188,33 +183,33 @@ pub fn verify(
     verify_signature(identity_key, &message(claim)?, attestation)
 }
 
-/// Ce qu'un compte déclare en révoquant l'un de ses appareils.
+/// What an account declares when revoking one of its devices.
 ///
-/// # Pourquoi un certificat, et pas simplement une ligne en base
+/// # Why a certificate, and not just a row in the database
 ///
-/// Retirer un appareil d'un groupe MLS est un acte que **d'autres comptes** doivent poser :
-/// si Alice perd son téléphone, c'est Bob, présent dans le groupe, qui commite le retrait. Sans
-/// certificat, Bob n'a pour seule source que le serveur — qui retrouve donc exactement le
-/// pouvoir que [`verify`] lui refuse, celui de décider qui appartient à un compte, à ceci près
-/// qu'il s'exerce dans l'autre sens : faire évincer plutôt que faire entrer.
+/// Removing a device from an MLS group is an act **other accounts** have to perform: if Alice
+/// loses her phone, it is Bob, present in the group, who commits the removal. Without a
+/// certificate Bob's only source is the server — which then regains exactly the power [`verify`]
+/// denies it, deciding who belongs to an account, except that it works the other way round:
+/// getting someone evicted rather than let in.
 ///
-/// Le certificat rend la révocation vérifiable par n'importe qui détenant la clé du compte.
-/// Le serveur peut toujours *taire* une révocation ; il ne peut plus en *inventer* une.
+/// The certificate makes revocation verifiable by anyone holding the account key. The server can
+/// still *withhold* a revocation; it can no longer *invent* one.
 #[derive(Debug, Clone, Copy)]
 pub struct RevocationClaim<'a> {
     pub handle: &'a str,
     pub device_id: &'a str,
-    /// Instant de la révocation, en secondes Unix.
+    /// Revocation instant, in Unix seconds.
     ///
-    /// Il est **dans le message signé**, donc le serveur ne peut pas antidater une révocation
-    /// authentique pour prétendre qu'un appareil était déjà écarté au moment d'un message.
+    /// It is **inside the signed message**, so the server cannot backdate a genuine revocation to
+    /// pretend a device was already excluded at the time of a message.
     pub revoked_at: u64,
 }
 
-/// Sérialise la révocation sous la forme exacte qui est signée.
+/// Serialises the revocation into the exact form that is signed.
 ///
-/// L'horodatage passe par le même préfixage que le reste bien que sa longueur soit fixe :
-/// une exception au format serait une occasion de divergence pour rien.
+/// The timestamp goes through the same prefixing as the rest even though its length is fixed:
+/// an exception to the format would be an opportunity to diverge for nothing.
 pub fn revocation_message(claim: &RevocationClaim<'_>) -> Result<Vec<u8>, AttestError> {
     encode(
         DOMAIN_REVOKE,
@@ -222,11 +217,10 @@ pub fn revocation_message(claim: &RevocationClaim<'_>) -> Result<Vec<u8>, Attest
     )
 }
 
-/// Vérifie qu'un certificat de révocation émane bien du compte propriétaire de l'appareil.
+/// Checks that a revocation certificate really comes from the account owning the device.
 ///
-/// Comme [`verify`], elle ne demande aucun secret : c'est ce qui permet à un tiers — un autre
-/// membre du groupe — de constater la révocation sans faire confiance au serveur qui la lui
-/// transmet.
+/// Like [`verify`], it needs no secret: that is what lets a third party — another group member —
+/// observe the revocation without trusting the server relaying it.
 pub fn verify_revocation(
     identity_key: &[u8],
     claim: &RevocationClaim<'_>,
@@ -235,33 +229,33 @@ pub fn verify_revocation(
     verify_signature(identity_key, &revocation_message(claim)?, revocation)
 }
 
-/// Ce qu'un compte déclare en changeant de clé d'identité.
+/// What an account declares when changing its identity key.
 ///
-/// # Pourquoi la rotation existe
+/// # Why rotation exists
 ///
-/// Tous les appareils d'un compte détiennent la graine — c'est la condition de la **parité** :
-/// chaque appareil peut attester, révoquer et lire comme les autres, sans hiérarchie. La
-/// contrepartie est qu'un appareil volé détient le compte entier. Le révoquer ne sert alors à
-/// rien : son porteur en atteste un nouveau dans la foulée.
+/// Every device of an account holds the seed — that is the condition for **parity**: each device
+/// can attest, revoke and read like the others, with no hierarchy. The counterpart is that a
+/// stolen device holds the whole account. Revoking it is then pointless: whoever carries it
+/// attests a new one right away.
 ///
-/// La seule réponse est de changer la clé du compte. Elle a un effet mécanique qui dispense de
-/// toute autre mesure : **toutes les attestations existantes deviennent invérifiables**,
-/// puisque les clients les vérifient contre la clé courante. La révocation totale n'est pas un
-/// mécanisme séparé, c'est une conséquence.
+/// The only answer is to change the account key. It has a mechanical effect that makes any other
+/// measure unnecessary: **all existing attestations become unverifiable**, since clients check
+/// them against the current key. Total revocation is not a separate mechanism, it is a
+/// consequence.
 ///
-/// # Ce que la signature par l'ancienne clé prouve, et ne prouve pas
+/// # What signing with the old key proves, and what it does not
 ///
-/// Elle prouve la continuité : sans elle, n'importe qui reprendrait le handle d'autrui. Elle
-/// ne prouve **pas** que la rotation est légitime — le voleur détient la même clé et peut
-/// tourner le premier. C'est une course, et elle est inhérente : rien dans le protocole ne
-/// distingue le propriétaire du porteur. D'où l'importance de l'alerte de changement
-/// d'empreinte chez les correspondants, qui est ici le seul recours.
+/// It proves continuity: without it, anyone could take over someone else's handle. It does
+/// **not** prove the rotation is legitimate — the thief holds the same key and can rotate first.
+/// It is a race, and an inherent one: nothing in the protocol distinguishes the owner from the
+/// bearer. Hence the importance of the fingerprint-change alert on the other side, which is the
+/// only recourse here.
 #[derive(Debug, Clone, Copy)]
 pub struct RotationClaim<'a> {
     pub handle: &'a str,
-    /// Nouvelle clé publique du compte (32 octets).
+    /// New account public key (32 bytes).
     pub new_identity_key: &'a [u8],
-    /// Instant de la rotation, en secondes Unix.
+    /// Rotation instant, in Unix seconds.
     pub rotated_at: u64,
 }
 
@@ -272,11 +266,11 @@ pub fn rotation_message(claim: &RotationClaim<'_>) -> Result<Vec<u8>, AttestErro
     )
 }
 
-/// Vérifie une rotation contre l'**ancienne** clé du compte.
+/// Verifies a rotation against the **old** account key.
 ///
-/// C'est bien l'ancienne : la signature atteste que le détenteur de la clé sortante désigne la
-/// clé entrante. Vérifier contre la nouvelle ne prouverait que la possession de celle-ci,
-/// c'est-à-dire rien.
+/// The old one indeed: the signature attests that the holder of the outgoing key designates the
+/// incoming one. Verifying against the new key would only prove possession of it, that is,
+/// nothing.
 pub fn verify_rotation(
     previous_identity_key: &[u8],
     claim: &RotationClaim<'_>,
@@ -285,27 +279,27 @@ pub fn verify_rotation(
     verify_signature(previous_identity_key, &rotation_message(claim)?, rotation)
 }
 
-/// Message authentifié lors d'un dépôt anonyme d'enveloppe.
+/// Message authenticated when anonymously posting an envelope.
 ///
-/// # Ce que ce MAC prouve, et ce qu'il ne prouve pas
+/// # What this MAC proves, and what it does not
 ///
-/// Il prouve que le déposant **détient la clé du groupe**, donc qu'il en est membre. Il ne dit
-/// rien de qui il est, et c'est précisément l'objectif : le serveur n'a pas besoin de savoir
-/// qui poste, seulement qu'il a le droit de le faire.
+/// It proves the poster **holds the group key**, hence is a member. It says nothing about who
+/// they are, and that is exactly the point: the server does not need to know who posts, only
+/// that they are allowed to.
 ///
-/// Le nonce rend chaque dépôt unique et permet au serveur de refuser les rejeux. Sans lui, un
-/// MAC intercepté resterait valide indéfiniment.
+/// The nonce makes each post unique and lets the server reject replays. Without it, an
+/// intercepted MAC would stay valid forever.
 ///
-/// L'empreinte du corps est incluse plutôt que le corps : un attaquant qui pourrait modifier
-/// l'enveloppe après coup déposerait ce qu'il veut sous un MAC légitime.
+/// The body digest is included rather than the body: an attacker able to modify the envelope
+/// afterwards would post whatever it wanted under a legitimate MAC.
 pub fn post_message(group_id: &[u8], nonce: &[u8], body_digest: &[u8]) -> Result<Vec<u8>, AttestError> {
     encode(DOMAIN_POST, &[group_id, nonce, body_digest])
 }
 
-/// Message authentifié lors du dépôt d'un signal éphémère.
+/// Message authenticated when posting an ephemeral signal.
 ///
-/// Jumeau de [`post_message`], au domaine près. Il prouve la même chose — l'appartenance au
-/// groupe, pas l'identité — pour un contenu qui, lui, ne sera jamais écrit sur disque.
+/// Twin of [`post_message`], up to the domain. It proves the same thing — group membership, not
+/// identity — for content that will never be written to disk.
 pub fn signal_message(
     group_id: &[u8],
     nonce: &[u8],
@@ -314,33 +308,31 @@ pub fn signal_message(
     encode(DOMAIN_SIGNAL, &[group_id, nonce, body_digest])
 }
 
-/// Message signé pour ouvrir une session gateway.
+/// Message signed to open a gateway session.
 ///
-/// # Pourquoi un défi, là où le HTTP se contente d'un horodatage
+/// # Why a challenge, where HTTP settles for a timestamp
 ///
-/// L'authentification HTTP de ce projet accepte toute signature dont l'horodatage tient dans
-/// une fenêtre de soixante secondes, faute de mémoriser les nonces déjà vus — c'est la limite
-/// que documente `server::auth`. Une signature captée y reste donc rejouable pendant une
-/// minute.
+/// This project's HTTP authentication accepts any signature whose timestamp falls within a
+/// sixty-second window, for lack of remembering the nonces already seen — the limit documented in
+/// `server::auth`. A captured signature therefore stays replayable there for a minute.
 ///
-/// Ici le nonce est **émis par le serveur** et consommé à la première utilisation : il n'y a
-/// pas de fenêtre. Ce n'est pas un raffinement gratuit, c'est la contrepartie d'un changement
-/// de modèle — une session gateway s'authentifie une fois puis vit longtemps, là où une requête
-/// HTTP s'authentifie à chaque appel. Un rejeu y coûterait beaucoup plus cher.
+/// Here the nonce is **issued by the server** and consumed on first use: there is no window. This
+/// is not gratuitous refinement, it is the counterpart of a change of model — a gateway session
+/// authenticates once then lives long, where an HTTP request authenticates on every call. A
+/// replay would cost far more.
 ///
-/// L'identifiant d'appareil est dans le message signé : sans lui, un nonce servi à Alice
-/// pourrait être renvoyé accompagné de la signature de Bob captée ailleurs.
+/// The device identifier is in the signed message: without it, a nonce served to Alice could be
+/// returned along with Bob's signature captured elsewhere.
 pub fn gateway_message(device_id: &str, nonce: &[u8]) -> Result<Vec<u8>, AttestError> {
     encode(DOMAIN_GATEWAY, &[device_id.as_bytes(), nonce])
 }
 
-/// Empreinte du compte, à comparer hors bande avec son correspondant.
+/// Account fingerprint, to be compared out of band with the other party.
 ///
-/// Calculée sur la seule clé d'identité, donc **stable quand le compte gagne ou perd un
-/// appareil**. C'est délibéré : une empreinte qui changerait à chaque appareil ajouté
-/// obligerait à revérifier après chaque événement légitime, et serait ignorée en quelques
-/// semaines. La détection d'un appareil hostile passe par la notification d'ajout, pas par
-/// l'empreinte.
+/// Computed on the identity key alone, hence **stable when the account gains or loses a
+/// device**. That is deliberate: a fingerprint changing on every added device would force a
+/// re-check after every legitimate event, and would be ignored within weeks. Detecting a hostile
+/// device goes through the add notification, not the fingerprint.
 pub fn fingerprint(identity_key: &[u8]) -> String {
     let digest = Sha256::digest(identity_key);
     digest[..16]

@@ -1,8 +1,8 @@
-//! Identité d'un appareil et matériel publié sur le serveur.
+//! Device identity and the material published to the server.
 //!
-//! En MLS, l'unité d'appartenance à un groupe est l'**appareil**, pas l'utilisateur. Un
-//! utilisateur avec trois appareils est trois membres. C'est ce qui rend le multi-device
-//! natif, là où la stack Signal exige une couche dédiée (Sesame).
+//! In MLS the unit of group membership is the **device**, not the user. A user with three
+//! devices is three members. That is what makes multi-device native here, where the Signal
+//! stack needs a dedicated layer (Sesame).
 
 use openmls::prelude::tls_codec::{Deserialize, Serialize};
 use openmls::prelude::*;
@@ -13,20 +13,20 @@ use sha2::{Digest, Sha256};
 use crate::error::{CryptoError, Result, mls};
 use crate::provider::Provider;
 
-/// Ciphersuite du projet : la seule que le RFC 9420 rend obligatoire, donc celle sur
-/// laquelle toutes les implémentations interopèrent.
+/// The project's ciphersuite: the only one RFC 9420 makes mandatory, hence the one every
+/// implementation interoperates on.
 ///
-/// ChaCha20-Poly1305 serait préférable en WASM, où l'absence d'AES-NI rend AES à la fois
-/// plus lent et plus difficile à garder constant-time. L'interopérabilité l'emporte ici,
-/// mais le choix mérite d'être réexaminé si le web devient la plateforme principale.
-/// Capacités déclarées par chaque feuille de l'arbre.
+/// ChaCha20-Poly1305 would be preferable in WASM, where the lack of AES-NI makes AES both
+/// slower and harder to keep constant-time. Interoperability wins here, but the choice is
+/// worth revisiting if the web becomes the primary platform.
+/// Capabilities declared by every leaf in the tree.
 ///
-/// Elles doivent couvrir `ROSTER_EXTENSION`, faute de quoi MLS refuse toute feuille dans un
-/// groupe administré. Deux endroits les consomment et doivent rester d'accord : les
-/// KeyPackages, pour les membres qu'on ajoute, et la config de création, pour le créateur —
-/// qui n'a pas de KeyPackage. D'où cette fonction plutôt que deux littéraux.
+/// They must cover `ROSTER_EXTENSION`, or MLS rejects any leaf in an administered group. Two
+/// places consume them and must agree: KeyPackages, for members we add, and the creation
+/// config, for the creator — who has no KeyPackage. Hence this function rather than two
+/// literals.
 ///
-/// Les KeyPackages publiés avant cette version ne la portent pas et doivent être republiés.
+/// KeyPackages published before this version do not carry it and must be republished.
 pub fn capabilities() -> Capabilities {
     Capabilities::new(
         None,
@@ -43,17 +43,17 @@ pub struct Identity {
     pub(crate) provider: Provider,
     pub(crate) credential: CredentialWithKey,
     pub(crate) signer: SignatureKeyPair,
-    /// Conservé explicitement : il faut le nom pour reconstruire le credential à la
-    /// restauration, et l'extraire du credential demanderait de le désassembler.
+    /// Kept explicitly: the name is needed to rebuild the credential on restore, and pulling
+    /// it back out of the credential would mean taking the credential apart.
     name: String,
 }
 
 impl Identity {
-    /// Crée une identité d'appareil.
+    /// Creates a device identity.
     ///
-    /// `name` est un identifiant applicatif opaque (id d'appareil, id d'utilisateur). Il est
-    /// transporté en clair dans le credential et visible de tous les membres du groupe **et**
-    /// du serveur : n'y mettez rien que vous ne souhaitiez pas divulguer.
+    /// `name` is an opaque application identifier (device id, user id). It travels in the
+    /// clear inside the credential and is visible to every group member **and** to the
+    /// server: put nothing in it you would not want disclosed.
     pub fn create(name: &str) -> Result<Self> {
         let provider = Provider::default();
         let signer = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).map_err(mls)?;
@@ -67,22 +67,19 @@ impl Identity {
         Ok(Self { provider, credential, signer, name: name.to_owned() })
     }
 
-    /// Produit un KeyPackage à publier sur le serveur, sérialisé au format TLS.
+    /// Produces a KeyPackage to publish on the server, serialised in TLS format.
     ///
-    /// C'est l'équivalent MLS du prekey bundle de X3DH : il permet à quelqu'un de nous
-    /// ajouter à un groupe alors que nous sommes hors ligne. **Chaque KeyPackage est à usage
-    /// unique** — sa clé d'initialisation est consommée à l'ajout. Le serveur doit en tenir
-    /// un stock par appareil et signaler l'épuisement, faute de quoi personne ne peut plus
-    /// nous joindre.
+    /// This is the MLS equivalent of X3DH's prekey bundle: it lets someone add us to a group
+    /// while we are offline. **Each KeyPackage is single-use** — its init key is consumed on
+    /// add. The server must keep a stock per device and report exhaustion, or nobody can
+    /// reach us any more.
     pub fn publish_key_package(&self) -> Result<Vec<u8>> {
-        // La capacité `ROSTER_EXTENSION` doit être déclarée ici, dans la feuille, et pas
-        // seulement posée dans le group context : MLS refuse d'ajouter un membre qui ne
-        // déclare pas supporter les extensions requises par le groupe. Sans cette ligne, un
-        // appareil ne pourrait rejoindre aucun groupe administré — et l'erreur ne se
-        // manifesterait qu'à l'ajout, loin d'ici.
+        // The `ROSTER_EXTENSION` capability must be declared here, in the leaf, and not only
+        // set in the group context: MLS refuses to add a member that does not declare support
+        // for the extensions the group requires. Without this line a device could join no
+        // administered group — and the error would only show up at add time, far from here.
         //
-        // Les KeyPackages publiés avant cette version ne la portent pas : ils doivent être
-        // republiés.
+        // KeyPackages published before this version do not carry it: they must be republished.
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(capabilities())
             .build(CIPHERSUITE, &self.provider, &self.signer, self.credential.clone())
@@ -93,10 +90,10 @@ impl Identity {
             .map_err(mls)
     }
 
-    /// Empreinte de la clé de signature, à afficher pour vérification hors bande.
+    /// Fingerprint of the signature key, to display for out-of-band verification.
     ///
-    /// Voir [`crate::conversation::Conversation::verify_peer`] pour ce que cette empreinte
-    /// protège réellement — et ce qu'elle ne protège pas.
+    /// See [`crate::conversation::Conversation::verify_peer`] for what this fingerprint
+    /// actually protects — and what it does not.
     pub fn fingerprint(&self) -> String {
         fingerprint(self.signer.public())
     }
@@ -105,14 +102,14 @@ impl Identity {
         self.signer.public()
     }
 
-    /// Sérialise tout ce qu'il faut pour reconstruire cette identité : le nom, la clé
-    /// publique de signature, et l'état du provider.
+    /// Serialises everything needed to rebuild this identity: the name, the public signature
+    /// key, and the provider state.
     ///
-    /// Le nom et la clé publique sont indispensables et ne se déduisent pas du blob de
-    /// stockage seul : `SignatureKeyPair::read` a besoin de la clé publique pour retrouver
-    /// la privée, et le credential a besoin du nom.
+    /// The name and public key are indispensable and cannot be recovered from the storage blob
+    /// alone: `SignatureKeyPair::read` needs the public key to find the private one, and the
+    /// credential needs the name.
     ///
-    /// **Ce blob contient les clés privées en clair.** Voir [`Provider::export_state`].
+    /// **This blob holds the private keys in the clear.** See [`Provider::export_state`].
     pub fn export_state(&self) -> Result<Vec<u8>> {
         let name = self.name.as_bytes();
         let public_key = self.signer.public();
@@ -128,16 +125,15 @@ impl Identity {
         Ok(out)
     }
 
-    /// Reconstruit une identité depuis [`Identity::export_state`].
+    /// Rebuilds an identity from [`Identity::export_state`].
     ///
-    /// Ne restaurez **jamais** un état plus ancien que le dernier exporté : les groupes
-    /// reculeraient d'epoch et rejoueraient des clés déjà utilisées, ce qui détruit la
-    /// forward secrecy. Un état MLS n'est pas une sauvegarde ordinaire — il ne doit exister
-    /// qu'une seule copie vivante.
+    /// **Never** restore a state older than the last exported one: groups would roll back an
+    /// epoch and replay keys already used, destroying forward secrecy. MLS state is not an
+    /// ordinary backup — only one live copy may exist.
     pub fn restore(state: &[u8]) -> Result<Self> {
         let mut reader = Reader::new(state);
         let name = String::from_utf8(reader.length_prefixed()?.to_vec())
-            .map_err(|_| CryptoError::Storage("nom d'identité illisible".into()))?;
+            .map_err(|_| CryptoError::Storage("unreadable identity name".into()))?;
         let public_key = reader.length_prefixed()?.to_vec();
         let storage = reader.length_prefixed()?;
 
@@ -146,7 +142,7 @@ impl Identity {
         let signer =
             SignatureKeyPair::read(provider.storage(), &public_key, CIPHERSUITE.signature_algorithm())
                 .ok_or_else(|| {
-                    CryptoError::Storage("clé de signature absente de l'état restauré".into())
+                    CryptoError::Storage("signature key missing from restored state".into())
                 })?;
 
         let credential = CredentialWithKey {
@@ -157,16 +153,16 @@ impl Identity {
         Ok(Self { provider, credential, signer, name })
     }
 
-    /// Identifiants des groupes présents dans l'état restauré.
+    /// Identifiers of the groups present in the restored state.
     ///
-    /// Le stockage ne fournit pas d'énumération : l'appelant doit conserver la liste des
-    /// groupes qu'il a rejoints et la passer à [`crate::Conversation::load`].
+    /// Storage offers no enumeration: the caller must keep the list of groups it joined and
+    /// pass it to [`crate::Conversation::load`].
     pub fn name(&self) -> &str {
         &self.name
     }
 }
 
-/// Lecteur longueur-préfixée tolérant aux entrées tronquées ou modifiées.
+/// Length-prefixed reader, tolerant of truncated or tampered input.
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -182,7 +178,7 @@ impl<'a> Reader<'a> {
             .pos
             .checked_add(len)
             .filter(|end| *end <= self.bytes.len())
-            .ok_or_else(|| CryptoError::Storage("état tronqué".into()))?;
+            .ok_or_else(|| CryptoError::Storage("truncated state".into()))?;
         let slice = &self.bytes[self.pos..end];
         self.pos = end;
         Ok(slice)
@@ -191,16 +187,16 @@ impl<'a> Reader<'a> {
     fn length_prefixed(&mut self) -> Result<&'a [u8]> {
         let len = u64::from_be_bytes(self.take(8)?.try_into().unwrap());
         let len = usize::try_from(len)
-            .map_err(|_| CryptoError::Storage("longueur hors limites".into()))?;
+            .map_err(|_| CryptoError::Storage("length out of range".into()))?;
         self.take(len)
     }
 }
 
-/// Empreinte affichable d'une clé publique de signature.
+/// Displayable fingerprint of a public signature key.
 ///
-/// Groupée par blocs de 4 caractères : la comparaison visuelle de deux chaînes hexadécimales
-/// continues est notoirement peu fiable, et l'attaque consiste précisément à produire une clé
-/// dont l'empreinte *ressemble* à la bonne.
+/// Grouped in blocks of 4 characters: visually comparing two continuous hex strings is
+/// notoriously unreliable, and the attack consists precisely of producing a key whose
+/// fingerprint *looks like* the right one.
 pub fn fingerprint(signature_key: &[u8]) -> String {
     let digest = Sha256::digest(signature_key);
     digest[..16]
@@ -210,16 +206,16 @@ pub fn fingerprint(signature_key: &[u8]) -> String {
         .join(" ")
 }
 
-/// Désérialise et valide un KeyPackage reçu du serveur.
+/// Deserialises and validates a KeyPackage received from the server.
 ///
-/// `validate` vérifie la signature du KeyPackage, celle de son leaf node, sa durée de vie et
-/// sa version. **Cela ne prouve rien sur l'identité derrière.** Un serveur malveillant peut
-/// fabriquer un KeyPackage parfaitement valide portant le nom « bob » avec ses propres clés :
-/// toutes ces vérifications passeront. Seule la comparaison hors bande de l'empreinte détecte
-/// cette substitution. C'est le point faible réel de tout déploiement E2EE.
+/// `validate` checks the KeyPackage's signature, its leaf node's signature, its lifetime and
+/// its version. **None of that proves anything about the identity behind it.** A malicious
+/// server can forge a perfectly valid KeyPackage carrying the name "bob" with its own keys:
+/// every one of these checks will pass. Only an out-of-band fingerprint comparison catches
+/// the substitution. This is the real weak point of any E2EE deployment.
 pub(crate) fn parse_key_package(provider: &Provider, bytes: &[u8]) -> Result<KeyPackage> {
     let message = MlsMessageIn::tls_deserialize_exact(bytes)
-        .map_err(|_| CryptoError::Malformed("key package illisible"))?;
+        .map_err(|_| CryptoError::Malformed("unreadable key package"))?;
 
     let MlsMessageBodyIn::KeyPackage(key_package_in) = message.extract() else {
         return Err(CryptoError::UnexpectedMessage);

@@ -1,44 +1,43 @@
-//! Le journal ne vaut que par ses preuves : une preuve acceptée à tort donne au serveur
-//! exactement le pouvoir qu'on cherche à lui retirer. Ces tests balaient exhaustivement les
-//! petites tailles, là où les erreurs de découpage se cachent.
+//! The log is only worth its proofs: a proof wrongly accepted hands the server exactly the power
+//! we are trying to take away from it. These tests sweep the small sizes exhaustively, where the
+//! splitting mistakes hide.
 
 use transparency::*;
 
-fn feuilles(n: usize) -> Vec<Hash> {
-    (0..n).map(|i| leaf_hash(&entry(&format!("compte{i}"), &[i as u8; 32]))).collect()
+fn leaves(n: usize) -> Vec<Hash> {
+    (0..n).map(|i| leaf_hash(&entry(&format!("account{i}"), &[i as u8; 32]))).collect()
 }
 
-/// Une racine sur une seule feuille est la feuille elle-même : sans cela, un arbre à une
-/// feuille et un arbre à deux feuilles identiques seraient confondus.
+/// A root over a single leaf is the leaf itself: without that, a one-leaf tree and a tree of two
+/// identical leaves would be confused.
 #[test]
-fn une_feuille_est_sa_propre_racine() {
-    let f = feuilles(1);
+fn a_leaf_is_its_own_root() {
+    let f = leaves(1);
     assert_eq!(root(&f), f[0]);
 }
 
-/// **Exhaustif.** Toute feuille de tout arbre jusqu'à 33 doit produire une preuve qui
-/// reconstruit la racine.
+/// **Exhaustive.** Every leaf of every tree up to 33 must produce a proof that rebuilds the root.
 #[test]
-fn toute_inclusion_se_verifie() {
+fn every_inclusion_verifies() {
     for n in 1..=33 {
-        let f = feuilles(n);
+        let f = leaves(n);
         let r = root(&f);
         for i in 0..n {
             let proof = inclusion_proof(&f, i).unwrap();
             assert_eq!(
                 verify_inclusion(&f[i], i, n, &proof, &r),
                 Ok(()),
-                "arbre de {n} feuilles, indice {i}",
+                "tree of {n} leaves, index {i}",
             );
         }
     }
 }
 
-/// **Exhaustif.** Tout arbre prolonge tout arbre plus petit.
+/// **Exhaustive.** Every tree extends every smaller tree.
 #[test]
-fn toute_coherence_se_verifie() {
+fn every_consistency_verifies() {
     for to in 1..=33 {
-        let f = feuilles(to);
+        let f = leaves(to);
         let new_root = root(&f);
         for from in 1..=to {
             let old_root = root(&f[..from]);
@@ -46,73 +45,73 @@ fn toute_coherence_se_verifie() {
             assert_eq!(
                 verify_consistency(from, &old_root, to, &new_root, &proof),
                 Ok(()),
-                "cohérence de {from} vers {to}",
+                "consistency from {from} to {to}",
             );
         }
     }
 }
 
-/// **Le test qui compte.** Un journal qui réécrit une entrée déjà publiée ne doit pas pouvoir
-/// produire de preuve de cohérence — c'est toute la différence entre un journal auditable et
-/// une base de données.
+/// **The test that counts.** A log that rewrites an already published entry must not be able to
+/// produce a consistency proof — that is the whole difference between an auditable log and a
+/// database.
 #[test]
-fn un_journal_reecrit_ne_passe_pas_la_coherence() {
-    let ancien = feuilles(5);
-    let old_root = root(&ancien);
+fn a_rewritten_log_does_not_pass_consistency() {
+    let old = leaves(5);
+    let old_root = root(&old);
 
-    // Le serveur remplace la troisième entrée, puis ajoute des feuilles par-dessus.
-    let mut reecrit = ancien.clone();
-    reecrit[2] = leaf_hash(&entry("compte2", &[0xFFu8; 32]));
-    reecrit.extend(feuilles(8).into_iter().skip(5));
+    // The server replaces the third entry, then appends leaves on top.
+    let mut rewritten = old.clone();
+    rewritten[2] = leaf_hash(&entry("account2", &[0xFFu8; 32]));
+    rewritten.extend(leaves(8).into_iter().skip(5));
 
-    let new_root = root(&reecrit);
-    let proof = consistency_proof(&reecrit, 5).unwrap();
+    let new_root = root(&rewritten);
+    let proof = consistency_proof(&rewritten, 5).unwrap();
 
     assert_eq!(
-        verify_consistency(5, &old_root, reecrit.len(), &new_root, &proof),
+        verify_consistency(5, &old_root, rewritten.len(), &new_root, &proof),
         Err(LogError::BadProof),
-        "une réécriture a produit une preuve de cohérence valide : le journal ne prouve rien",
+        "a rewrite produced a valid consistency proof: the log proves nothing",
     );
 }
 
-/// Une preuve d'inclusion pour une feuille qui n'est pas là ne doit pas passer. C'est la
-/// substitution de clé au premier contact, exactement.
+/// An inclusion proof for a leaf that is not there must not pass. This is key substitution on
+/// first contact, exactly.
 #[test]
-fn une_feuille_etrangere_ne_passe_pas() {
-    let f = feuilles(7);
+fn a_foreign_leaf_does_not_pass() {
+    let f = leaves(7);
     let r = root(&f);
     let proof = inclusion_proof(&f, 3).unwrap();
 
-    let intruse = leaf_hash(&entry("compte3", &[0xAAu8; 32]));
+    let intruder = leaf_hash(&entry("account3", &[0xAAu8; 32]));
     assert_eq!(
-        verify_inclusion(&intruse, 3, 7, &proof, &r),
+        verify_inclusion(&intruder, 3, 7, &proof, &r),
         Err(LogError::BadProof),
     );
 }
 
-/// Déplacer une preuve valide vers un autre indice ne doit pas la rendre valide ailleurs.
+/// Moving a valid proof to another index must not make it valid elsewhere.
 #[test]
-fn une_preuve_ne_vaut_que_pour_son_indice() {
-    let f = feuilles(7);
+fn a_proof_only_holds_for_its_own_index() {
+    let f = leaves(7);
     let r = root(&f);
     let proof = inclusion_proof(&f, 3).unwrap();
 
-    for autre in 0..7 {
-        if autre == 3 {
+    for other in 0..7 {
+        if other == 3 {
             continue;
         }
         assert!(
-            verify_inclusion(&f[3], autre, 7, &proof, &r).is_err(),
-            "la preuve de l'indice 3 a été acceptée à l'indice {autre}",
+            verify_inclusion(&f[3], other, 7, &proof, &r).is_err(),
+            "the proof for index 3 was accepted at index {other}",
         );
     }
 }
 
-/// Une preuve rallongée est refusée plutôt qu'ignorée : le surplus serait choisi par
-/// l'attaquant.
+/// An over-long proof is rejected rather than ignored: the surplus would be chosen by the
+/// attacker.
 #[test]
-fn une_preuve_trop_longue_est_refusee() {
-    let f = feuilles(4);
+fn an_over_long_proof_is_refused() {
+    let f = leaves(4);
     let r = root(&f);
     let mut proof = inclusion_proof(&f, 1).unwrap();
     proof.push([0u8; 32]);
@@ -121,8 +120,8 @@ fn une_preuve_trop_longue_est_refusee() {
 }
 
 #[test]
-fn une_preuve_tronquee_est_refusee() {
-    let f = feuilles(8);
+fn a_truncated_proof_is_refused() {
+    let f = leaves(8);
     let r = root(&f);
     let mut proof = inclusion_proof(&f, 5).unwrap();
     proof.pop();
@@ -130,17 +129,17 @@ fn une_preuve_tronquee_est_refusee() {
     assert_eq!(verify_inclusion(&f[5], 5, 8, &proof, &r), Err(LogError::BadProof));
 }
 
-/// **La séparation feuille/nœud de la RFC 6962.** Sans elle, le hash d'un nœud interne serait
-/// présentable comme celui d'une feuille, et un attaquant fabriquerait une preuve d'inclusion
-/// pour une entrée de son choix.
+/// **RFC 6962's leaf/node separation.** Without it, the hash of an internal node could be
+/// presented as that of a leaf, and an attacker would forge an inclusion proof for an entry of
+/// their choosing.
 #[test]
-fn un_noeud_interne_ne_peut_pas_se_faire_passer_pour_une_feuille() {
-    let f = feuilles(2);
-    let interne = node_hash(&f[0], &f[1]);
+fn an_internal_node_cannot_pass_itself_off_as_a_leaf() {
+    let f = leaves(2);
+    let internal = node_hash(&f[0], &f[1]);
 
-    // Le nœud interne existe dans l'arbre, mais comme nœud — pas comme feuille. Le contenu
-    // qui produirait cette feuille n'est pas calculable, et c'est bien l'objectif.
-    assert_ne!(leaf_hash(&[]), interne);
+    // The internal node exists in the tree, but as a node — not as a leaf. The contents that
+    // would produce that leaf are not computable, and that is precisely the goal.
+    assert_ne!(leaf_hash(&[]), internal);
     assert_ne!(root(&f), leaf_hash(&node_bytes(&f[0], &f[1])));
 }
 
@@ -151,28 +150,28 @@ fn node_bytes(left: &Hash, right: &Hash) -> Vec<u8> {
     out
 }
 
-/// Le préfixage de longueur, même raison que dans `attest` : sans lui, deux entrées distinctes
-/// produiraient la même feuille.
+/// Length prefixing, same reason as in `attest`: without it, two distinct entries would produce
+/// the same leaf.
 #[test]
-fn deux_decoupages_differents_ne_collisionnent_pas() {
+fn two_different_splits_do_not_collide() {
     assert_ne!(entry("ab", b"c"), entry("a", b"bc"));
 }
 
 #[test]
-fn un_intervalle_invalide_est_refuse() {
-    let f = feuilles(4);
+fn an_invalid_range_is_refused() {
+    let f = leaves(4);
     assert_eq!(consistency_proof(&f, 0), Err(LogError::BadRange));
     assert_eq!(consistency_proof(&f, 5), Err(LogError::BadRange));
     assert_eq!(inclusion_proof(&f, 4), Err(LogError::OutOfRange));
 }
 
-// ------------------------------------------------------------------ têtes signées
+// ------------------------------------------------------------------ signed heads
 
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 
 #[test]
-fn une_tete_signee_par_le_journal_est_acceptee() {
+fn a_head_signed_by_the_log_is_accepted() {
     let key = SigningKey::generate(&mut OsRng);
     let head = TreeHead { size: 12, root: [7u8; 32], timestamp: 1_700_000_000 };
     let sig = head.sign(&key);
@@ -180,33 +179,33 @@ fn une_tete_signee_par_le_journal_est_acceptee() {
     assert_eq!(head.verify(key.verifying_key().as_bytes(), &sig), Ok(()));
 }
 
-/// Chaque champ est couvert : altérer la taille ou la racine doit invalider la signature.
+/// Every field is covered: altering the size or the root must invalidate the signature.
 #[test]
-fn tous_les_champs_de_la_tete_sont_couverts() {
+fn every_field_of_the_head_is_covered() {
     let key = SigningKey::generate(&mut OsRng);
     let head = TreeHead { size: 12, root: [7u8; 32], timestamp: 1_700_000_000 };
     let sig = head.sign(&key);
     let pk = key.verifying_key();
     let pk = pk.as_bytes();
 
-    for altere in [
+    for altered in [
         TreeHead { size: 13, ..head },
         TreeHead { root: [8u8; 32], ..head },
         TreeHead { timestamp: 1_600_000_000, ..head },
     ] {
-        assert_eq!(altere.verify(pk, &sig), Err(LogError::BadSignature));
+        assert_eq!(altered.verify(pk, &sig), Err(LogError::BadSignature));
     }
 }
 
-/// Un tiers ne peut pas fabriquer de tête : sinon n'importe qui publierait un faux journal.
+/// A third party cannot forge a head: otherwise anyone would publish a fake log.
 #[test]
-fn un_tiers_ne_peut_pas_signer_une_tete() {
-    let journal = SigningKey::generate(&mut OsRng);
-    let intrus = SigningKey::generate(&mut OsRng);
+fn a_third_party_cannot_sign_a_head() {
+    let log = SigningKey::generate(&mut OsRng);
+    let intruder = SigningKey::generate(&mut OsRng);
     let head = TreeHead { size: 12, root: [7u8; 32], timestamp: 1_700_000_000 };
 
     assert_eq!(
-        head.verify(journal.verifying_key().as_bytes(), &head.sign(&intrus)),
+        head.verify(log.verifying_key().as_bytes(), &head.sign(&intruder)),
         Err(LogError::BadSignature),
     );
 }

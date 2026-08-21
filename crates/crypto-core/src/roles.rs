@@ -1,58 +1,57 @@
-//! Rôles d'administration d'un groupe.
+//! Group administration roles.
 //!
-//! # MLS ne fournit aucune autorisation
+//! # MLS provides no authorization
 //!
-//! C'est le point à comprendre avant de lire la suite. La RFC 9420 décrit qui peut *prouver*
-//! quoi, pas qui a le *droit* de faire quoi : n'importe quel membre peut commiter n'importe
-//! quel ajout ou retrait, et le protocole l'acceptera. « Seuls les admins peuvent retirer »
-//! est une règle applicative, et rien dans MLS ne l'impose à notre place.
+//! That is the point to grasp before reading on. RFC 9420 describes who can *prove* what, not
+//! who is *allowed* to do what: any member can commit any add or remove, and the protocol will
+//! accept it. "Only admins can remove" is an application rule, and nothing in MLS enforces it
+//! for us.
 //!
-//! Conséquence directe : **chaque client doit appliquer la règle à l'identique**. Un client
-//! qui accepte un commit que les autres refusent ne provoque pas une erreur, il provoque un
-//! *fork* — deux moitiés du groupe avancent sur des epochs différentes, chacune persuadée
-//! d'être le groupe, et plus rien ne passe entre elles. Aucun message d'erreur nulle part.
+//! Direct consequence: **every client must apply the rule identically**. A client that accepts
+//! a commit the others refuse does not cause an error, it causes a *fork* — two halves of the
+//! group move on to different epochs, each convinced it is the group, and nothing passes
+//! between them any more. No error message anywhere.
 //!
-//! C'est la raison pour laquelle la politique est ici une fonction **pure**, testée isolément,
-//! et non une suite de conditions dispersées dans le code d'appel.
+//! That is why the policy here is a **pure** function, tested in isolation, rather than a set
+//! of conditions scattered through the calling code.
 //!
-//! # Pourquoi le roster vit dans le group context
+//! # Why the roster lives in the group context
 //!
-//! Le placer dans un message applicatif le laisserait rejouable et non authentifié : un membre
-//! pourrait rediffuser un vieux roster où il était admin. Dans le group context, il est haché
-//! dans chaque commit et fait partie de l'état sur lequel tous les membres s'accordent par
-//! construction. Le modifier exige un commit, donc passe par la même politique que le reste.
+//! Putting it in an application message would leave it replayable and unauthenticated: a member
+//! could rebroadcast an old roster in which they were admin. In the group context it is hashed
+//! into every commit and is part of the state all members agree on by construction. Changing it
+//! requires a commit, so it goes through the same policy as everything else.
 //!
-//! # Pourquoi des handles, et non des clés de signature
+//! # Why handles, and not signature keys
 //!
-//! Un handle couvre tous les appareils d'un compte. Ajouter un téléphone ne demande donc pas
-//! de modifier le roster, et un admin l'est depuis n'importe lequel de ses appareils. C'est
-//! aussi ce que le credential MLS transporte déjà — aucun lien supplémentaire à établir.
+//! A handle covers all of an account's devices. Adding a phone therefore needs no roster
+//! change, and an admin is admin from any of their devices. It is also what the MLS credential
+//! already carries — no extra binding to establish.
 
 use crate::error::{CryptoError, Result};
 
-/// Type d'extension du group context portant le roster.
+/// Group context extension type carrying the roster.
 ///
-/// `0xF100` est dans la plage d'usage privé de la RFC 9420 (`0xF000`–`0xFFFF`) : aucune
-/// extension standardisée ne viendra jamais s'y heurter.
+/// `0xF100` sits in RFC 9420's private-use range (`0xF000`–`0xFFFF`): no standardised extension
+/// will ever collide with it.
 pub const ROSTER_EXTENSION: u16 = 0xF100;
 
-/// Qui administre le groupe : **un** admin, et des modérateurs sous lui.
+/// Who administers the group: **one** admin, and moderators under them.
 ///
-/// # Pourquoi un seul admin
+/// # Why a single admin
 ///
-/// Plusieurs admins de rang égal n'ont pas de départage : deux d'entre eux peuvent se
-/// rétrograder mutuellement, se retirer l'un l'autre, ou se contredire sur la composition du
-/// groupe. Rien dans le protocole ne dit lequel a raison, et le groupe se scinde. Une racine
-/// unique supprime la question : il y a toujours exactement une autorité.
+/// Several admins of equal rank have no tie-breaker: two of them can demote each other, remove
+/// each other, or contradict each other on the group's membership. Nothing in the protocol says
+/// which one is right, and the group splits. A single root removes the question: there is
+/// always exactly one authority.
 ///
-/// Les modérateurs entretiennent le groupe — ajouter, retirer des membres ordinaires — sans
-/// pouvoir toucher aux rôles. Seul l'admin distribue le pouvoir, y compris le sien.
+/// Moderators maintain the group — adding and removing ordinary members — without being able to
+/// touch roles. Only the admin hands out power, including their own.
 ///
-/// # L'absence de roster n'est pas un roster vide
+/// # No roster is not an empty roster
 ///
-/// C'est un **groupe plat**, où tout le monde peut tout faire. C'est le cas des conversations
-/// 1-to-1, où des rôles n'auraient aucun sens, et celui des groupes créés avant cette
-/// extension.
+/// It is a **flat group**, where everyone can do everything. That covers 1-to-1 conversations,
+/// where roles would make no sense, and groups created before this extension.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roster {
     admin: String,
@@ -60,11 +59,11 @@ pub struct Roster {
 }
 
 impl Roster {
-    /// Crée un roster. L'admin ne peut pas figurer parmi les modérateurs : il est déjà
-    /// au-dessus, et l'y répéter rendrait `is_moderator` ambigu à la lecture.
+    /// Creates a roster. The admin cannot appear among the moderators: they are already above,
+    /// and repeating them there would make `is_moderator` ambiguous to read.
     pub fn new(admin: String, moderators: Vec<String>) -> Result<Self> {
         if admin.is_empty() {
-            return Err(CryptoError::PolicyViolation("un groupe administré exige un admin"));
+            return Err(CryptoError::PolicyViolation("an administered group requires an admin"));
         }
         let moderators: Vec<String> = moderators.into_iter().filter(|m| *m != admin).collect();
         Ok(Self { admin, moderators })
@@ -86,28 +85,28 @@ impl Roster {
         self.moderators.iter().any(|m| m == handle)
     }
 
-    /// Peut ajouter et retirer des membres ordinaires.
+    /// May add and remove ordinary members.
     pub fn can_moderate(&self, handle: &str) -> bool {
         self.is_admin(handle) || self.is_moderator(handle)
     }
 
-    /// A un rôle, quel qu'il soit. Un porteur de rôle ne peut être retiré que par l'admin.
+    /// Holds a role, whichever it is. A role holder can only be removed by the admin.
     pub fn has_role(&self, handle: &str) -> bool {
         self.can_moderate(handle)
     }
 
-    /// Sérialisation canonique :
-    ///   `u16 len ‖ admin ‖ u16 count ‖ count × (u16 len ‖ modérateur)`
+    /// Canonical serialisation:
+    ///   `u16 len ‖ admin ‖ u16 count ‖ count × (u16 len ‖ moderator)`
     ///
-    /// Même discipline de longueur-préfixage que la crate `attest`, et pour la même raison :
-    /// deux rosters distincts ne doivent jamais produire les mêmes octets, sans quoi le hash du
-    /// group context cesserait de les distinguer.
+    /// Same length-prefixing discipline as the `attest` crate, and for the same reason: two
+    /// distinct rosters must never produce the same bytes, or the group context hash would stop
+    /// telling them apart.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         push_string(&mut out, &self.admin)?;
 
         if self.moderators.len() > u16::MAX as usize {
-            return Err(CryptoError::Malformed("trop de modérateurs"));
+            return Err(CryptoError::Malformed("too many moderators"));
         }
         out.extend_from_slice(&(self.moderators.len() as u16).to_be_bytes());
         for moderator in &self.moderators {
@@ -116,17 +115,17 @@ impl Roster {
         Ok(out)
     }
 
-    /// Lecture stricte : tout octet en trop est une erreur.
+    /// Strict reading: any leftover byte is an error.
     ///
-    /// Tolérer une queue non lue laisserait deux encodages représenter le même roster, ce qui
-    /// suffirait à faire diverger deux clients sur l'état du groupe.
+    /// Tolerating an unread tail would let two encodings represent the same roster, which is
+    /// enough to make two clients diverge on the group state.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut cursor = 0usize;
 
         let admin = take_string(bytes, &mut cursor)?;
 
         let count = u16::from_be_bytes(
-            take(bytes, &mut cursor, 2)?.try_into().expect("2 octets demandés, 2 obtenus"),
+            take(bytes, &mut cursor, 2)?.try_into().expect("2 bytes asked for, 2 obtained"),
         );
 
         let mut moderators = Vec::with_capacity(count as usize);
@@ -135,7 +134,7 @@ impl Roster {
         }
 
         if cursor != bytes.len() {
-            return Err(CryptoError::Malformed("octets excédentaires après le roster"));
+            return Err(CryptoError::Malformed("trailing bytes after the roster"));
         }
 
         Self::new(admin, moderators)
@@ -145,7 +144,7 @@ impl Roster {
 fn push_string(out: &mut Vec<u8>, value: &str) -> Result<()> {
     let bytes = value.as_bytes();
     if bytes.len() > u16::MAX as usize {
-        return Err(CryptoError::Malformed("handle trop long"));
+        return Err(CryptoError::Malformed("handle too long"));
     }
     out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
     out.extend_from_slice(bytes);
@@ -153,156 +152,156 @@ fn push_string(out: &mut Vec<u8>, value: &str) -> Result<()> {
 }
 
 fn take<'a>(bytes: &'a [u8], cursor: &mut usize, n: usize) -> Result<&'a [u8]> {
-    let fin = cursor.checked_add(n).ok_or(CryptoError::Malformed("roster tronqué"))?;
-    let part = bytes.get(*cursor..fin).ok_or(CryptoError::Malformed("roster tronqué"))?;
-    *cursor = fin;
+    let end = cursor.checked_add(n).ok_or(CryptoError::Malformed("truncated roster"))?;
+    let part = bytes.get(*cursor..end).ok_or(CryptoError::Malformed("truncated roster"))?;
+    *cursor = end;
     Ok(part)
 }
 
 fn take_string(bytes: &[u8], cursor: &mut usize) -> Result<String> {
     let len = u16::from_be_bytes(
-        take(bytes, cursor, 2)?.try_into().expect("2 octets demandés, 2 obtenus"),
+        take(bytes, cursor, 2)?.try_into().expect("2 bytes asked for, 2 obtained"),
     );
     let raw = take(bytes, cursor, len as usize)?;
     std::str::from_utf8(raw)
         .map(str::to_owned)
-        .map_err(|_| CryptoError::Malformed("handle non UTF-8 dans le roster"))
+        .map_err(|_| CryptoError::Malformed("non-UTF-8 handle in the roster"))
 }
 
-/// Ce qu'un commit entrant contient, réduit à ce dont la politique a besoin.
+/// What an incoming commit contains, reduced to what the policy needs.
 ///
-/// Ce type existe pour que la politique soit testable sans monter un groupe MLS : c'est la
-/// seule façon de couvrir les cas limites, qui sont nombreux et dont certains ne se
-/// reproduisent pas facilement avec de vraies epochs.
+/// This type exists so the policy is testable without standing up an MLS group: that is the
+/// only way to cover the edge cases, which are many and some of which do not reproduce easily
+/// with real epochs.
 #[derive(Debug, Clone)]
 pub struct CommitSummary<'a> {
-    /// Handle du committer, lu dans son credential — donc authentifié par MLS.
+    /// The committer's handle, read from its credential — hence authenticated by MLS.
     pub committer: &'a str,
-    /// Un élément par retrait proposé.
+    /// One entry per proposed removal.
     pub removals: Vec<Removal<'a>>,
-    /// Le commit ajoute-t-il des membres ?
+    /// Does the commit add members?
     pub adds: usize,
-    /// Le commit modifie-t-il les extensions du group context (donc le roster) ?
+    /// Does the commit change the group context extensions (hence the roster)?
     pub changes_roster: bool,
-    /// Handles encore représentés dans le groupe **après** application du commit.
+    /// Handles still represented in the group **after** the commit is applied.
     ///
-    /// Nécessaire parce qu'un compte a plusieurs appareils : retirer un appareil d'Alice ne
-    /// retire pas Alice. Raisonner sur les cibles des retraits ferait croire à tort qu'un
-    /// admin quitte le groupe dès qu'il y perd un téléphone, et le commit serait refusé.
+    /// Needed because an account has several devices: removing one of Alice's devices does not
+    /// remove Alice. Reasoning on removal targets would wrongly suggest an admin leaves the
+    /// group as soon as they lose a phone from it, and the commit would be refused.
     pub remaining: Vec<&'a str>,
 }
 
-/// Un retrait proposé, vu par la politique.
+/// A proposed removal, as the policy sees it.
 #[derive(Debug, Clone)]
 pub struct Removal<'a> {
-    /// Handle du compte propriétaire de l'appareil retiré.
+    /// Handle of the account owning the removed device.
     pub target: &'a str,
-    /// Clé de signature MLS de l'appareil retiré, qui l'identifie sans ambiguïté.
+    /// MLS signature key of the removed device, which identifies it unambiguously.
     pub target_key: &'a [u8],
-    /// Le retrait a-t-il été proposé par l'appareil lui-même ? Un départ volontaire.
+    /// Was the removal proposed by the device itself? A voluntary departure.
     pub self_requested: bool,
 }
 
-/// Ce que l'appelant sait de l'extérieur, et que le protocole ne peut pas lui apprendre.
+/// What the caller knows from outside, and the protocol cannot teach it.
 ///
-/// La liste des révocations vient du serveur et **doit avoir été vérifiée** par l'appelant
-/// (`attest::verify_revocation`) avant d'arriver ici. Ce module ne fait pas de réseau et ne
-/// vérifie pas de signature : c'est ce qui garde `crypto-core` sans I/O, et ce qui rend la
-/// politique testable.
+/// The revocation list comes from the server and **must have been verified** by the caller
+/// (`attest::verify_revocation`) before reaching here. This module does no networking and
+/// verifies no signature: that is what keeps `crypto-core` I/O-free, and what makes the policy
+/// testable.
 #[derive(Debug, Default, Clone)]
 pub struct Context {
-    /// Clés de signature MLS dont le certificat de révocation a été vérifié.
+    /// MLS signature keys whose revocation certificate has been verified.
     pub revoked: Vec<Vec<u8>>,
 }
 
 impl Context {
-    fn est_revoque(&self, key: &[u8]) -> bool {
+    fn is_revoked(&self, key: &[u8]) -> bool {
         self.revoked.iter().any(|k| k == key)
     }
 }
 
-/// Décide si un commit doit être appliqué.
+/// Decides whether a commit must be applied.
 ///
-/// Fonction pure : mêmes entrées, même verdict, sur tous les clients. C'est la condition pour
-/// qu'un refus ne provoque pas de fork — voir l'en-tête du module.
+/// A pure function: same inputs, same verdict, on every client. That is the condition for a
+/// refusal not to cause a fork — see the module header.
 ///
-/// # La hiérarchie
+/// # The hierarchy
 ///
-/// | Opération | Autorisée pour |
+/// | Operation | Allowed for |
 /// |---|---|
-/// | tout, dans un groupe sans roster | tout le monde |
-/// | ajouter un membre | admin, modérateur |
-/// | retirer un membre ordinaire | admin, modérateur |
-/// | retirer un modérateur | admin |
-/// | modifier le roster (nommer, révoquer, transmettre) | admin |
-/// | retirer l'admin | personne |
-/// | commiter le départ volontaire d'un membre | tout le monde |
-/// | retirer un appareil dont la révocation est vérifiée | tout le monde |
+/// | anything, in a group without a roster | everyone |
+/// | add a member | admin, moderator |
+/// | remove an ordinary member | admin, moderator |
+/// | remove a moderator | admin |
+/// | change the roster (appoint, revoke, hand over) | admin |
+/// | remove the admin | nobody |
+/// | commit a member's voluntary departure | everyone |
+/// | remove a device whose revocation is verified | everyone |
 ///
-/// # Pourquoi un modérateur ne touche pas aux autres modérateurs
+/// # Why a moderator does not touch other moderators
 ///
-/// Sinon deux modérateurs peuvent se retirer mutuellement, et le résultat dépend de qui commite
-/// le premier — une course, pas une règle. Le pouvoir sur les rôles reste indivis chez l'admin,
-/// ce qui est précisément ce qu'apporte une racine unique.
+/// Otherwise two moderators can remove each other, and the outcome depends on who commits
+/// first — a race, not a rule. Power over roles stays undivided with the admin, which is
+/// precisely what a single root buys.
 ///
-/// # Pourquoi l'admin ne peut pas être retiré
+/// # Why the admin cannot be removed
 ///
-/// Un groupe sans admin est gelé : plus personne ne peut nommer, révoquer, ni transmettre,
-/// l'extension étant sous son seul contrôle. Le départ d'un admin passe donc par une
-/// **transmission préalable** — il désigne son successeur tant qu'il en a encore le pouvoir.
+/// A group without an admin is frozen: nobody can appoint, revoke or hand over any more, the
+/// extension being under the admin's sole control. An admin's departure therefore goes through
+/// a **prior hand-over** — they name their successor while they still have the power to.
 ///
-/// # Les deux exceptions, qui ne sont pas du confort
+/// # The two exceptions, which are not conveniences
 ///
-/// **Le départ volontaire.** Un membre ne peut pas se retirer lui-même dans un commit (RFC
-/// 9420) : il propose, un autre commite. Réserver ce commit aux porteurs de rôle rendrait la
-/// sortie impossible quand aucun n'est en ligne — un groupe dont on ne peut pas sortir.
+/// **Voluntary departure.** A member cannot remove themselves in a commit (RFC 9420): they
+/// propose, someone else commits. Reserving that commit to role holders would make leaving
+/// impossible when none is online — a group you cannot get out of.
 ///
-/// **L'appareil révoqué.** Sans elle, le téléphone volé d'un membre ordinaire reste dans le
-/// groupe, à lire, jusqu'au retour en ligne d'un modérateur. C'est précisément le délai que la
-/// révocation existe pour supprimer. Le certificat étant vérifiable par tous, l'exception
-/// n'ouvre rien : seul le compte propriétaire peut la déclencher.
+/// **The revoked device.** Without it, an ordinary member's stolen phone stays in the group,
+/// reading, until a moderator comes back online. That delay is exactly what revocation exists
+/// to remove. Since the certificate is verifiable by all, the exception opens nothing: only the
+/// owning account can trigger it.
 pub fn authorize(
     roster: Option<&Roster>,
     commit: &CommitSummary<'_>,
     context: &Context,
 ) -> Result<()> {
-    // Groupe plat : aucune règle à appliquer. C'est le cas des 1-to-1 et des groupes créés
-    // avant l'introduction du roster.
+    // Flat group: no rule to apply. That covers 1-to-1s and groups created before the roster
+    // was introduced.
     let Some(roster) = roster else { return Ok(()) };
 
-    let auteur_admin = roster.is_admin(commit.committer);
-    let auteur_modere = roster.can_moderate(commit.committer);
+    let committer_is_admin = roster.is_admin(commit.committer);
+    let committer_can_moderate = roster.can_moderate(commit.committer);
 
-    if commit.changes_roster && !auteur_admin {
-        return Err(CryptoError::PolicyViolation("seul l'admin modifie les rôles"));
+    if commit.changes_roster && !committer_is_admin {
+        return Err(CryptoError::PolicyViolation("only the admin changes roles"));
     }
 
-    if commit.adds > 0 && !auteur_modere {
-        return Err(CryptoError::PolicyViolation("ajouter un membre demande un rôle"));
+    if commit.adds > 0 && !committer_can_moderate {
+        return Err(CryptoError::PolicyViolation("adding a member requires a role"));
     }
 
     for removal in &commit.removals {
-        // Les deux exceptions, applicables à n'importe qui.
-        if removal.self_requested || context.est_revoque(removal.target_key) {
+        // The two exceptions, available to anyone.
+        if removal.self_requested || context.is_revoked(removal.target_key) {
             continue;
         }
 
-        if !auteur_modere {
-            return Err(CryptoError::PolicyViolation("retirer un membre demande un rôle"));
+        if !committer_can_moderate {
+            return Err(CryptoError::PolicyViolation("removing a member requires a role"));
         }
-        if roster.is_moderator(removal.target) && !auteur_admin {
+        if roster.is_moderator(removal.target) && !committer_is_admin {
             return Err(CryptoError::PolicyViolation(
-                "seul l'admin retire un modérateur",
+                "only the admin removes a moderator",
             ));
         }
     }
 
-    // S'applique à tous, y compris à l'admin lui-même : le groupe ne doit jamais se retrouver
-    // sans autorité, quelle que soit l'intention. Le départ légitime passe par une
-    // transmission préalable, qui installe le successeur avant que le retrait n'ait lieu.
+    // Applies to everyone, the admin included: the group must never end up without an
+    // authority, whatever the intent. A legitimate departure goes through a prior hand-over,
+    // which installs the successor before the removal happens.
     if !commit.remaining.contains(&roster.admin()) {
         return Err(CryptoError::PolicyViolation(
-            "le groupe perdrait son admin : transmettez-le d'abord",
+            "the group would lose its admin: hand it over first",
         ));
     }
 

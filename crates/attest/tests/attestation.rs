@@ -1,5 +1,5 @@
-//! Le format canonique est le seul endroit du projet où une erreur de sérialisation devient
-//! une faille d'authentification. Ces tests le figent.
+//! The canonical format is the one place in the project where a serialisation mistake becomes an
+//! authentication flaw. These tests pin it down.
 
 use attest::{AttestError, DeviceClaim, message, verify};
 use ed25519_dalek::{Signer, SigningKey};
@@ -14,87 +14,87 @@ fn account() -> SigningKey {
 }
 
 #[test]
-fn une_attestation_produite_par_le_compte_est_acceptee() {
+fn an_attestation_produced_by_the_account_is_accepted() {
     let key = account();
-    let claim = claim("alice", "portable");
+    let claim = claim("alice", "laptop");
     let signature = key.sign(&message(&claim).unwrap());
 
     assert!(verify(key.verifying_key().as_bytes(), &claim, &signature.to_bytes()).is_ok());
 }
 
 #[test]
-fn un_autre_compte_ne_peut_pas_attester_a_notre_place() {
-    let legitime = account();
-    let imposteur = account();
-    let claim = claim("alice", "portable");
+fn another_account_cannot_attest_in_our_place() {
+    let legitimate = account();
+    let impostor = account();
+    let claim = claim("alice", "laptop");
 
-    let signature = imposteur.sign(&message(&claim).unwrap());
+    let signature = impostor.sign(&message(&claim).unwrap());
 
     assert_eq!(
-        verify(legitime.verifying_key().as_bytes(), &claim, &signature.to_bytes()),
+        verify(legitimate.verifying_key().as_bytes(), &claim, &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// Le cœur du sujet : une attestation obtenue pour un appareil ne doit pas valoir pour un
-/// autre. C'est ce qui empêche de recycler l'attestation d'un appareil légitime révoqué.
+/// The heart of the matter: an attestation obtained for one device must not hold for another.
+/// That is what prevents recycling the attestation of a revoked legitimate device.
 #[test]
-fn une_attestation_ne_vaut_que_pour_son_appareil() {
+fn an_attestation_only_holds_for_its_own_device() {
     let key = account();
-    let signature = key.sign(&message(&claim("alice", "portable")).unwrap());
+    let signature = key.sign(&message(&claim("alice", "laptop")).unwrap());
 
     assert_eq!(
-        verify(key.verifying_key().as_bytes(), &claim("alice", "tablette"), &signature.to_bytes()),
+        verify(key.verifying_key().as_bytes(), &claim("alice", "tablet"), &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// Une attestation pour le compte d'Alice ne doit pas valoir dans le compte de Bob, même si
-/// l'appareil est le même. Sans cela, Bob rattache à son compte un appareil d'Alice.
+/// An attestation for Alice's account must not hold in Bob's account, even if the device is the
+/// same. Without that, Bob attaches one of Alice's devices to his own account.
 #[test]
-fn une_attestation_ne_vaut_que_pour_son_compte() {
+fn an_attestation_only_holds_for_its_own_account() {
     let key = account();
-    let signature = key.sign(&message(&claim("alice", "portable")).unwrap());
+    let signature = key.sign(&message(&claim("alice", "laptop")).unwrap());
 
     assert_eq!(
-        verify(key.verifying_key().as_bytes(), &claim("bob", "portable"), &signature.to_bytes()),
+        verify(key.verifying_key().as_bytes(), &claim("bob", "laptop"), &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// La raison d'être des préfixes de longueur.
+/// The whole point of the length prefixes.
 ///
-/// Concaténés sans préfixe, `("ab", "c")` et `("a", "bc")` donnent les mêmes octets : une
-/// attestation obtenue pour l'un serait valide pour l'autre. Un attaquant choisissant son
-/// handle et son identifiant d'appareil peut fabriquer une telle collision à volonté.
+/// Concatenated without prefixes, `("ab", "c")` and `("a", "bc")` give the same bytes: an
+/// attestation obtained for one would be valid for the other. An attacker choosing their handle
+/// and device identifier can manufacture such a collision at will.
 #[test]
-fn deux_decoupages_differents_ne_collisionnent_pas() {
+fn two_different_splits_do_not_collide() {
     assert_ne!(
         message(&claim("ab", "c")).unwrap(),
         message(&claim("a", "bc")).unwrap(),
     );
 }
 
-/// Les deux clés sont attestées ensemble. Les traiter séparément permettrait de combiner la
-/// clé d'authentification d'un appareil légitime avec la clé MLS d'un appareil hostile.
+/// Both keys are attested together. Treating them separately would allow combining the
+/// authentication key of a legitimate device with the MLS key of a hostile one.
 #[test]
-fn substituer_la_cle_mls_invalide_l_attestation() {
+fn substituting_the_mls_key_invalidates_the_attestation() {
     let key = account();
-    let original = claim("alice", "portable");
+    let original = claim("alice", "laptop");
     let signature = key.sign(&message(&original).unwrap());
 
-    let substitue = DeviceClaim { mls_key: &[0xff; 32], ..original };
+    let substituted = DeviceClaim { mls_key: &[0xff; 32], ..original };
 
     assert_eq!(
-        verify(key.verifying_key().as_bytes(), &substitue, &signature.to_bytes()),
+        verify(key.verifying_key().as_bytes(), &substituted, &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
 #[test]
-fn une_signature_tronquee_est_rejetee_sans_paniquer() {
+fn a_truncated_signature_is_rejected_without_panicking() {
     let key = account();
-    let claim = claim("alice", "portable");
+    let claim = claim("alice", "laptop");
     let signature = key.sign(&message(&claim).unwrap());
 
     assert_eq!(
@@ -104,15 +104,15 @@ fn une_signature_tronquee_est_rejetee_sans_paniquer() {
 }
 
 #[test]
-fn une_cle_d_identite_mal_dimensionnee_est_rejetee_sans_paniquer() {
-    let claim = claim("alice", "portable");
+fn a_wrongly_sized_identity_key_is_rejected_without_panicking() {
+    let claim = claim("alice", "laptop");
     assert_eq!(verify(&[0u8; 31], &claim, &[0u8; 64]), Err(AttestError::BadIdentityKey));
 }
 
-/// L'empreinte ne bouge pas quand le compte gagne un appareil : c'est ce qui permet de ne pas
-/// redemander une vérification hors bande à chaque événement légitime.
+/// The fingerprint does not move when the account gains a device: that is what avoids asking for
+/// an out-of-band check again after every legitimate event.
 #[test]
-fn l_empreinte_ne_depend_que_de_la_cle_de_compte() {
+fn the_fingerprint_depends_only_on_the_account_key() {
     let key = account();
     let a = attest::fingerprint(key.verifying_key().as_bytes());
     let b = attest::fingerprint(key.verifying_key().as_bytes());
@@ -122,7 +122,7 @@ fn l_empreinte_ne_depend_que_de_la_cle_de_compte() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Certificats de révocation
+// Revocation certificates
 // ---------------------------------------------------------------------------------------
 
 use attest::{RevocationClaim, revocation_message, verify_revocation};
@@ -132,9 +132,9 @@ fn revocation<'a>(handle: &'a str, device_id: &'a str, revoked_at: u64) -> Revoc
 }
 
 #[test]
-fn un_certificat_de_revocation_produit_par_le_compte_est_accepte() {
+fn a_revocation_certificate_produced_by_the_account_is_accepted() {
     let key = account();
-    let claim = revocation("alice", "alice:portable", 1_700_000_000);
+    let claim = revocation("alice", "alice:laptop", 1_700_000_000);
     let signature = key.sign(&revocation_message(&claim).unwrap());
 
     assert_eq!(
@@ -143,85 +143,84 @@ fn un_certificat_de_revocation_produit_par_le_compte_est_accepte() {
     );
 }
 
-/// Sans quoi n'importe quel compte ferait évincer les appareils de n'importe qui.
+/// Otherwise any account could get anyone's devices evicted.
 #[test]
-fn un_autre_compte_ne_peut_pas_revoquer_a_notre_place() {
-    let victime = account();
-    let attaquant = account();
-    let claim = revocation("alice", "alice:portable", 1_700_000_000);
-    let signature = attaquant.sign(&revocation_message(&claim).unwrap());
+fn another_account_cannot_revoke_in_our_place() {
+    let victim = account();
+    let attacker = account();
+    let claim = revocation("alice", "alice:laptop", 1_700_000_000);
+    let signature = attacker.sign(&revocation_message(&claim).unwrap());
 
     assert_eq!(
-        verify_revocation(victime.verifying_key().as_bytes(), &claim, &signature.to_bytes()),
+        verify_revocation(victim.verifying_key().as_bytes(), &claim, &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// Un certificat ne vaut que pour l'appareil qu'il nomme : sinon révoquer son propre vieux
-/// téléphone permettrait d'évincer n'importe lequel de ses autres appareils.
+/// A certificate only holds for the device it names: otherwise revoking one's own old phone
+/// would allow evicting any of one's other devices.
 #[test]
-fn un_certificat_ne_vaut_que_pour_son_appareil() {
+fn a_certificate_only_holds_for_its_own_device() {
     let key = account();
-    let emis = revocation("alice", "alice:portable", 1_700_000_000);
-    let signature = key.sign(&revocation_message(&emis).unwrap());
+    let issued = revocation("alice", "alice:laptop", 1_700_000_000);
+    let signature = key.sign(&revocation_message(&issued).unwrap());
 
-    let autre = revocation("alice", "alice:desktop", 1_700_000_000);
+    let other = revocation("alice", "alice:desktop", 1_700_000_000);
     assert_eq!(
-        verify_revocation(key.verifying_key().as_bytes(), &autre, &signature.to_bytes()),
+        verify_revocation(key.verifying_key().as_bytes(), &other, &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// L'horodatage est couvert par la signature. Un serveur qui pourrait le modifier antidaterait
-/// une révocation authentique pour prétendre qu'un appareil était déjà écarté au moment où il
-/// a légitimement reçu un message.
+/// The timestamp is covered by the signature. A server able to change it would backdate a genuine
+/// revocation to pretend a device was already excluded when it legitimately received a message.
 #[test]
-fn l_horodatage_est_couvert_par_la_signature() {
+fn the_timestamp_is_covered_by_the_signature() {
     let key = account();
-    let emis = revocation("alice", "alice:portable", 1_700_000_000);
-    let signature = key.sign(&revocation_message(&emis).unwrap());
+    let issued = revocation("alice", "alice:laptop", 1_700_000_000);
+    let signature = key.sign(&revocation_message(&issued).unwrap());
 
-    let antidate = revocation("alice", "alice:portable", 1_600_000_000);
+    let backdated = revocation("alice", "alice:laptop", 1_600_000_000);
     assert_eq!(
-        verify_revocation(key.verifying_key().as_bytes(), &antidate, &signature.to_bytes()),
+        verify_revocation(key.verifying_key().as_bytes(), &backdated, &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// **Le test qui justifie la séparation de domaine.**
+/// **The test that justifies domain separation.**
 ///
-/// Sans étiquette distincte, l'attestation d'un appareil — que tout le monde détient, puisque
-/// le serveur la sert publiquement — serait présentable comme certificat de révocation du même
-/// appareil. N'importe qui pourrait alors faire évincer n'importe quel appareil du réseau.
+/// Without a distinct label, a device attestation — which everyone holds, since the server serves
+/// it publicly — could be presented as a revocation certificate for the same device. Anyone could
+/// then get any device on the network evicted.
 #[test]
-fn une_attestation_ne_peut_pas_etre_rejouee_comme_revocation() {
+fn an_attestation_cannot_be_replayed_as_a_revocation() {
     let key = account();
-    let device = claim("alice", "alice:portable");
+    let device = claim("alice", "alice:laptop");
     let attestation = key.sign(&message(&device).unwrap());
 
-    // Toutes les valeurs d'horodatage possibles échouent ; on en teste une, la structure du
-    // message suffit à l'expliquer : les octets de domaine diffèrent dès le premier.
-    let comme_revocation = revocation("alice", "alice:portable", 1_700_000_000);
+    // Every possible timestamp value fails; we test one, the structure of the message explains
+    // the rest: the domain bytes differ from the very first one.
+    let as_revocation = revocation("alice", "alice:laptop", 1_700_000_000);
     assert_eq!(
         verify_revocation(
             key.verifying_key().as_bytes(),
-            &comme_revocation,
+            &as_revocation,
             &attestation.to_bytes(),
         ),
         Err(AttestError::BadSignature),
     );
 
-    // Et la réciproque : un certificat de révocation ne vaut pas attestation.
-    let certificat = key.sign(&revocation_message(&comme_revocation).unwrap());
+    // And the converse: a revocation certificate is not an attestation.
+    let certificate = key.sign(&revocation_message(&as_revocation).unwrap());
     assert_eq!(
-        verify(key.verifying_key().as_bytes(), &device, &certificat.to_bytes()),
+        verify(key.verifying_key().as_bytes(), &device, &certificate.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// Même raison que pour l'attestation : `("ab", "c")` et `("a", "bc")` doivent différer.
+/// Same reason as for the attestation: `("ab", "c")` and `("a", "bc")` must differ.
 #[test]
-fn deux_decoupages_differents_ne_collisionnent_pas_en_revocation() {
+fn two_different_splits_do_not_collide_in_revocation() {
     assert_ne!(
         revocation_message(&revocation("ab", "c", 1)).unwrap(),
         revocation_message(&revocation("a", "bc", 1)).unwrap(),
@@ -229,84 +228,84 @@ fn deux_decoupages_differents_ne_collisionnent_pas_en_revocation() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Rotation de compte
+// Account rotation
 // ---------------------------------------------------------------------------------------
 
 use attest::{RotationClaim, rotation_message, verify_rotation};
 
-fn rotation<'a>(handle: &'a str, nouvelle: &'a [u8], at: u64) -> RotationClaim<'a> {
-    RotationClaim { handle, new_identity_key: nouvelle, rotated_at: at }
+fn rotation<'a>(handle: &'a str, new_key: &'a [u8], at: u64) -> RotationClaim<'a> {
+    RotationClaim { handle, new_identity_key: new_key, rotated_at: at }
 }
 
-/// La rotation se vérifie contre l'**ancienne** clé : c'est elle qui désigne la nouvelle.
+/// A rotation is verified against the **old** key: it is the one designating the new one.
 #[test]
-fn une_rotation_se_verifie_contre_l_ancienne_cle() {
-    let ancienne = account();
-    let nouvelle = account();
-    let nouvelle_pub = nouvelle.verifying_key().to_bytes();
+fn a_rotation_is_verified_against_the_old_key() {
+    let old = account();
+    let new_one = account();
+    let new_pub = new_one.verifying_key().to_bytes();
 
-    let claim = rotation("alice", &nouvelle_pub, 1_700_000_000);
-    let signature = ancienne.sign(&rotation_message(&claim).unwrap());
+    let claim = rotation("alice", &new_pub, 1_700_000_000);
+    let signature = old.sign(&rotation_message(&claim).unwrap());
 
     assert_eq!(
-        verify_rotation(ancienne.verifying_key().as_bytes(), &claim, &signature.to_bytes()),
+        verify_rotation(old.verifying_key().as_bytes(), &claim, &signature.to_bytes()),
         Ok(()),
     );
 
-    // Vérifier contre la nouvelle clé ne prouverait que la possession de celle-ci, soit rien.
+    // Verifying against the new key would only prove possession of it, that is, nothing.
     assert_eq!(
-        verify_rotation(&nouvelle_pub, &claim, &signature.to_bytes()),
+        verify_rotation(&new_pub, &claim, &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// Sans continuité prouvée, n'importe qui reprendrait le handle d'autrui.
+/// Without proven continuity, anyone would take over someone else's handle.
 #[test]
-fn un_tiers_ne_peut_pas_faire_tourner_un_compte() {
-    let victime = account();
-    let attaquant = account();
-    let cible = account().verifying_key().to_bytes();
+fn a_third_party_cannot_rotate_an_account() {
+    let victim = account();
+    let attacker = account();
+    let target = account().verifying_key().to_bytes();
 
-    let claim = rotation("alice", &cible, 1_700_000_000);
-    let signature = attaquant.sign(&rotation_message(&claim).unwrap());
+    let claim = rotation("alice", &target, 1_700_000_000);
+    let signature = attacker.sign(&rotation_message(&claim).unwrap());
 
     assert_eq!(
-        verify_rotation(victime.verifying_key().as_bytes(), &claim, &signature.to_bytes()),
+        verify_rotation(victim.verifying_key().as_bytes(), &claim, &signature.to_bytes()),
         Err(AttestError::BadSignature),
     );
 }
 
-/// La clé entrante est couverte par la signature : la substituer permettrait de détourner une
-/// rotation légitime vers une clé choisie par l'attaquant.
+/// The incoming key is covered by the signature: substituting it would allow diverting a
+/// legitimate rotation towards a key chosen by the attacker.
 #[test]
-fn substituer_la_cle_entrante_invalide_la_rotation() {
-    let ancienne = account();
-    let voulue = account().verifying_key().to_bytes();
-    let substituee = account().verifying_key().to_bytes();
+fn substituting_the_incoming_key_invalidates_the_rotation() {
+    let old = account();
+    let intended = account().verifying_key().to_bytes();
+    let substituted = account().verifying_key().to_bytes();
 
-    let claim = rotation("alice", &voulue, 1_700_000_000);
-    let signature = ancienne.sign(&rotation_message(&claim).unwrap());
+    let claim = rotation("alice", &intended, 1_700_000_000);
+    let signature = old.sign(&rotation_message(&claim).unwrap());
 
     assert_eq!(
         verify_rotation(
-            ancienne.verifying_key().as_bytes(),
-            &rotation("alice", &substituee, 1_700_000_000),
+            old.verifying_key().as_bytes(),
+            &rotation("alice", &substituted, 1_700_000_000),
             &signature.to_bytes(),
         ),
         Err(AttestError::BadSignature),
     );
 }
 
-/// **Les trois domaines sont étanches deux à deux.** Une signature de révocation qui vaudrait
-/// rotation permettrait à quiconque a vu passer une révocation de prendre le compte.
+/// **The three domains are pairwise watertight.** A revocation signature that also held as a
+/// rotation would let anyone who saw a revocation go by take over the account.
 #[test]
-fn les_trois_domaines_ne_se_recouvrent_pas() {
+fn the_three_domains_do_not_overlap() {
     let key = account();
-    let cible = [3u8; 32];
+    let target = [3u8; 32];
 
-    let device = claim("alice", "alice:portable");
-    let revoc = revocation("alice", "alice:portable", 1_700_000_000);
-    let rot = rotation("alice", &cible, 1_700_000_000);
+    let device = claim("alice", "alice:laptop");
+    let revoc = revocation("alice", "alice:laptop", 1_700_000_000);
+    let rot = rotation("alice", &target, 1_700_000_000);
 
     let sig_attest = key.sign(&message(&device).unwrap()).to_bytes();
     let sig_revoc = key.sign(&revocation_message(&revoc).unwrap()).to_bytes();
@@ -315,7 +314,7 @@ fn les_trois_domaines_ne_se_recouvrent_pas() {
     let pk = key.verifying_key();
     let pk = pk.as_bytes();
 
-    // Chaque signature ne vaut que dans son propre domaine.
+    // Each signature only holds in its own domain.
     assert!(verify(pk, &device, &sig_attest).is_ok());
     assert!(verify(pk, &device, &sig_revoc).is_err());
     assert!(verify(pk, &device, &sig_rot).is_err());
@@ -331,57 +330,57 @@ fn les_trois_domaines_ne_se_recouvrent_pas() {
 
 use attest::{post_message, signal_message};
 
-/// Le MAC d'un signal éphémère n'est pas rejouable en dépôt d'enveloppe.
+/// The MAC of an ephemeral signal is not replayable as an envelope post.
 ///
-/// Les signaux n'ont volontairement pas d'anti-rejeu — un indicateur de frappe périmé est sans
-/// effet. Cette dispense ne doit pas s'étendre aux enveloppes, qui, elles, sont conservées.
+/// Signals deliberately have no replay protection — a stale typing indicator has no effect. That
+/// exemption must not extend to envelopes, which are kept.
 #[test]
-fn un_signal_ne_vaut_pas_un_depot() {
-    let group_id = b"groupe";
+fn a_signal_is_not_a_post() {
+    let group_id = b"group";
     let nonce = [7u8; 16];
     let digest = [9u8; 32];
 
-    let depot = post_message(group_id, &nonce, &digest).unwrap();
+    let post = post_message(group_id, &nonce, &digest).unwrap();
     let signal = signal_message(group_id, &nonce, &digest).unwrap();
 
-    assert_ne!(depot, signal, "même clé, mêmes champs : seul le domaine les sépare");
+    assert_ne!(post, signal, "same key, same fields: only the domain separates them");
 }
 
 use attest::gateway_message;
 
-/// **Le test qui justifie le domaine gateway.**
+/// **The test that justifies the gateway domain.**
 ///
-/// Une session gateway est authentifiée par la clé d'authentification de l'appareil — la même
-/// que celle qui signe les requêtes HTTP. Sans domaine propre, il suffirait de capter la
-/// signature d'un `GET` quelconque pour ouvrir une session au nom de son auteur, et le défi
-/// émis par le serveur ne servirait à rien.
+/// A gateway session is authenticated by the device's authentication key — the same one that
+/// signs HTTP requests. Without its own domain, capturing the signature of any `GET` would be
+/// enough to open a session on behalf of its author, and the challenge issued by the server would
+/// be pointless.
 #[test]
-fn une_ouverture_de_session_ne_vaut_dans_aucun_autre_domaine() {
+fn a_session_opening_holds_in_no_other_domain() {
     let nonce = [3u8; 32];
-    let ouverture = gateway_message("appareil-a", &nonce).unwrap();
+    let opening = gateway_message("device-a", &nonce).unwrap();
 
-    // Les mêmes champs, présentés dans les autres domaines.
-    assert_ne!(ouverture, post_message(b"appareil-a", &nonce, &[]).unwrap());
-    assert_ne!(ouverture, signal_message(b"appareil-a", &nonce, &[]).unwrap());
+    // The same fields, presented in the other domains.
+    assert_ne!(opening, post_message(b"device-a", &nonce, &[]).unwrap());
+    assert_ne!(opening, signal_message(b"device-a", &nonce, &[]).unwrap());
 }
 
-/// Un défi ne vaut que pour l'appareil auquel il a été servi.
+/// A challenge only holds for the device it was served to.
 ///
-/// Sans l'identifiant dans le message signé, un nonce servi à Alice pourrait être renvoyé
-/// accompagné d'une signature de Bob captée ailleurs.
+/// Without the identifier in the signed message, a nonce served to Alice could be returned along
+/// with a signature of Bob's captured elsewhere.
 #[test]
-fn un_defi_ne_vaut_que_pour_son_appareil() {
+fn a_challenge_only_holds_for_its_own_device() {
     let nonce = [3u8; 32];
 
     assert_ne!(
-        gateway_message("appareil-a", &nonce).unwrap(),
-        gateway_message("appareil-b", &nonce).unwrap(),
+        gateway_message("device-a", &nonce).unwrap(),
+        gateway_message("device-b", &nonce).unwrap(),
     );
 }
 
-/// Deux découpages différents ne doivent pas produire les mêmes octets — sans quoi une
-/// signature obtenue pour l'un vaudrait pour l'autre.
+/// Two different splits must not produce the same bytes — otherwise a signature obtained for one
+/// would hold for the other.
 #[test]
-fn deux_decoupages_differents_ne_collisionnent_pas_en_gateway() {
+fn two_different_splits_do_not_collide_in_gateway() {
     assert_ne!(gateway_message("ab", b"cd").unwrap(), gateway_message("abc", b"d").unwrap());
 }

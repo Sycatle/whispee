@@ -1,12 +1,12 @@
-//! La politique d'administration, testée comme une fonction pure.
+//! The administration policy, tested as a pure function.
 //!
-//! Elle est isolée du protocole précisément pour être testable ainsi : couvrir ces cas en
-//! montant de vrais groupes MLS coûterait dix fois plus et en couvrirait moins. Le test
-//! d'intégration correspondant vit dans `conversation.rs` et vérifie que la traduction commit
-//! → résumé est fidèle ; c'est ici qu'on vérifie la règle elle-même.
+//! It is isolated from the protocol precisely so it can be tested this way: covering these cases
+//! by standing up real MLS groups would cost ten times as much and cover less. The matching
+//! integration test lives in `conversation.rs` and checks that the commit → summary translation
+//! is faithful; here we check the rule itself.
 //!
-//! Rappel de l'enjeu : deux clients qui n'appliquent pas la même règle ne produisent pas une
-//! erreur, ils forkent le groupe en silence.
+//! What is at stake: two clients that do not apply the same rule do not produce an error, they
+//! silently fork the group.
 
 use crypto_core::CryptoError;
 use crypto_core::roles::{CommitSummary, Context, Removal, Roster, authorize};
@@ -19,42 +19,42 @@ fn commit<'a>(committer: &'a str, remaining: Vec<&'a str>) -> CommitSummary<'a> 
     CommitSummary { committer, removals: Vec::new(), adds: 0, changes_roster: false, remaining }
 }
 
-fn retrait<'a>(target: &'a str, key: &'a [u8]) -> Removal<'a> {
+fn removal<'a>(target: &'a str, key: &'a [u8]) -> Removal<'a> {
     Removal { target, target_key: key, self_requested: false }
 }
 
-// ------------------------------------------------------------------ groupe plat
+// ------------------------------------------------------------------ flat group
 
-/// Un groupe sans roster n'a pas de rôles : c'est la forme d'un 1-to-1, et celle des groupes
-/// créés avant l'extension. Y appliquer des règles rendrait toute conversation existante
-/// illisible.
+/// A group without a roster has no roles: that is the shape of a 1-to-1, and of the groups
+/// created before the extension existed. Applying rules to them would make every existing
+/// conversation unreadable.
 #[test]
-fn sans_roster_tout_est_autorise() {
-    let mut c = commit("nimporte-qui", vec!["alice"]);
+fn without_a_roster_everything_is_allowed() {
+    let mut c = commit("anyone-at-all", vec!["alice"]);
     c.adds = 3;
     c.changes_roster = true;
-    c.removals.push(retrait("bob", &[1]));
+    c.removals.push(removal("bob", &[1]));
 
     assert!(authorize(None, &c, &Context::default()).is_ok());
 }
 
-// ------------------------------------------------------------------ l'admin
+// ------------------------------------------------------------------ the admin
 
 #[test]
-fn l_admin_peut_tout_faire() {
+fn the_admin_can_do_everything() {
     let r = roster("alice", &["bob"]);
     let mut c = commit("alice", vec!["alice", "bob"]);
     c.adds = 1;
     c.changes_roster = true;
-    c.removals.push(retrait("carol", &[9]));
+    c.removals.push(removal("carol", &[9]));
 
     assert!(authorize(Some(&r), &c, &Context::default()).is_ok());
 }
 
-/// **La règle qui donne son sens à la racine unique.** Si un modérateur pouvait modifier les
-/// rôles, il se promouvrait admin et il n'y aurait plus d'autorité — seulement une course.
+/// **The rule that gives the single root its meaning.** If a moderator could change the roles he
+/// would promote himself to admin and there would be no authority left — only a race.
 #[test]
-fn un_moderateur_ne_touche_pas_aux_roles() {
+fn a_moderator_does_not_touch_the_roles() {
     let r = roster("alice", &["bob"]);
     let mut c = commit("bob", vec!["alice", "bob"]);
     c.changes_roster = true;
@@ -65,13 +65,13 @@ fn un_moderateur_ne_touche_pas_aux_roles() {
     ));
 }
 
-/// Un groupe sans admin est définitivement gelé : plus personne ne peut nommer, révoquer, ni
-/// transmettre. Le départ légitime passe par une transmission préalable.
+/// A group without an admin is frozen for good: nobody can appoint, revoke or hand over any
+/// more. A legitimate departure goes through handing over first.
 #[test]
-fn l_admin_ne_peut_pas_etre_retire() {
+fn the_admin_cannot_be_removed() {
     let r = roster("alice", &["bob"]);
     let mut c = commit("alice", vec!["bob"]);
-    c.removals.push(retrait("alice", &[1]));
+    c.removals.push(removal("alice", &[1]));
 
     assert!(matches!(
         authorize(Some(&r), &c, &Context::default()),
@@ -79,10 +79,10 @@ fn l_admin_ne_peut_pas_etre_retire() {
     ));
 }
 
-/// La règle vaut aussi pour un départ volontaire : la cause du gel importe peu, le résultat
-/// est le même.
+/// The rule holds for a voluntary departure too: the cause of the freeze matters little, the
+/// result is the same.
 #[test]
-fn l_admin_ne_peut_pas_partir_sans_transmettre() {
+fn the_admin_cannot_leave_without_handing_over() {
     let r = roster("alice", &["bob"]);
     let mut c = commit("bob", vec!["bob"]);
     c.removals.push(Removal { target: "alice", target_key: &[1], self_requested: true });
@@ -93,37 +93,37 @@ fn l_admin_ne_peut_pas_partir_sans_transmettre() {
     ));
 }
 
-/// **Le piège évité.** Un compte a plusieurs appareils : retirer le téléphone de l'admin ne
-/// retire pas l'admin. Raisonner sur les cibles ferait refuser ce commit légitime, et l'admin
-/// ne pourrait plus révoquer son propre appareil.
+/// **The trap avoided.** An account has several devices: removing the admin's phone does not
+/// remove the admin. Reasoning about targets would reject this legitimate commit, and the admin
+/// could no longer revoke his own device.
 #[test]
-fn retirer_un_appareil_de_l_admin_ne_le_retire_pas_du_groupe() {
+fn removing_a_device_of_the_admin_does_not_remove_him_from_the_group() {
     let r = roster("alice", &[]);
     let mut c = commit("alice", vec!["alice"]);
-    c.removals.push(retrait("alice", &[2]));
+    c.removals.push(removal("alice", &[2]));
 
     assert!(authorize(Some(&r), &c, &Context::default()).is_ok());
 }
 
-// ------------------------------------------------------------------ les modérateurs
+// ------------------------------------------------------------------ the moderators
 
 #[test]
-fn un_moderateur_ajoute_et_retire_des_membres_ordinaires() {
+fn a_moderator_adds_and_removes_ordinary_members() {
     let r = roster("alice", &["bob"]);
     let mut c = commit("bob", vec!["alice", "bob"]);
     c.adds = 1;
-    c.removals.push(retrait("carol", &[9]));
+    c.removals.push(removal("carol", &[9]));
 
     assert!(authorize(Some(&r), &c, &Context::default()).is_ok());
 }
 
-/// Sinon deux modérateurs se retirent mutuellement et le résultat dépend de qui commite le
-/// premier : une course, pas une règle.
+/// Otherwise two moderators remove each other and the outcome depends on who commits first: a
+/// race, not a rule.
 #[test]
-fn un_moderateur_ne_retire_pas_un_autre_moderateur() {
+fn a_moderator_does_not_remove_another_moderator() {
     let r = roster("alice", &["bob", "carol"]);
     let mut c = commit("bob", vec!["alice", "bob", "carol"]);
-    c.removals.push(retrait("carol", &[9]));
+    c.removals.push(removal("carol", &[9]));
 
     assert!(matches!(
         authorize(Some(&r), &c, &Context::default()),
@@ -132,42 +132,42 @@ fn un_moderateur_ne_retire_pas_un_autre_moderateur() {
 }
 
 #[test]
-fn l_admin_retire_un_moderateur() {
+fn the_admin_removes_a_moderator() {
     let r = roster("alice", &["bob"]);
     let mut c = commit("alice", vec!["alice"]);
-    c.removals.push(retrait("bob", &[2]));
+    c.removals.push(removal("bob", &[2]));
 
     assert!(authorize(Some(&r), &c, &Context::default()).is_ok());
 }
 
-// ------------------------------------------------------------------ les membres ordinaires
+// ------------------------------------------------------------------ the ordinary members
 
 #[test]
-fn un_membre_ordinaire_ne_peut_ni_ajouter_ni_retirer() {
+fn an_ordinary_member_can_neither_add_nor_remove() {
     let r = roster("alice", &["bob"]);
 
-    let mut ajout = commit("carol", vec!["alice", "bob", "carol"]);
-    ajout.adds = 1;
+    let mut add = commit("carol", vec!["alice", "bob", "carol"]);
+    add.adds = 1;
     assert!(matches!(
-        authorize(Some(&r), &ajout, &Context::default()),
+        authorize(Some(&r), &add, &Context::default()),
         Err(CryptoError::PolicyViolation(_)),
     ));
 
-    let mut retirer = commit("carol", vec!["alice", "bob", "carol"]);
-    retirer.removals.push(retrait("dave", &[9]));
+    let mut remove = commit("carol", vec!["alice", "bob", "carol"]);
+    remove.removals.push(removal("dave", &[9]));
     assert!(matches!(
-        authorize(Some(&r), &retirer, &Context::default()),
+        authorize(Some(&r), &remove, &Context::default()),
         Err(CryptoError::PolicyViolation(_)),
     ));
 }
 
-// ------------------------------------------------------------------ les deux exceptions
+// ------------------------------------------------------------------ the two exceptions
 
-/// Un membre ne peut pas se retirer lui-même dans un commit (RFC 9420) : il propose, un autre
-/// commite. Réserver ce commit aux porteurs de rôle rendrait la sortie impossible quand aucun
-/// n'est en ligne — un groupe dont on ne peut pas sortir.
+/// A member cannot remove himself in a commit (RFC 9420): he proposes, someone else commits.
+/// Reserving that commit to role holders would make leaving impossible when none of them is
+/// online — a group you cannot get out of.
 #[test]
-fn n_importe_qui_peut_commiter_un_depart_volontaire() {
+fn anyone_can_commit_a_voluntary_departure() {
     let r = roster("alice", &[]);
     let mut c = commit("dave", vec!["alice", "dave"]);
     c.removals.push(Removal { target: "carol", target_key: &[9], self_requested: true });
@@ -175,28 +175,28 @@ fn n_importe_qui_peut_commiter_un_depart_volontaire() {
     assert!(authorize(Some(&r), &c, &Context::default()).is_ok());
 }
 
-/// **L'exception qui compte.** Sans elle, le téléphone volé d'un membre ordinaire reste dans
-/// le groupe, à lire, jusqu'au retour en ligne d'un modérateur — soit exactement le délai que
-/// la révocation existe pour supprimer.
+/// **The exception that matters.** Without it, an ordinary member's stolen phone stays in the
+/// group, reading, until a moderator comes back online — which is exactly the delay revocation
+/// exists to remove.
 ///
-/// Elle n'ouvre rien : le certificat n'est produisible que par le compte propriétaire.
+/// It opens nothing: the certificate can only be produced by the owning account.
 #[test]
-fn n_importe_qui_peut_retirer_un_appareil_revoque() {
+fn anyone_can_remove_a_revoked_device() {
     let r = roster("alice", &[]);
     let mut c = commit("dave", vec!["alice", "carol", "dave"]);
-    c.removals.push(retrait("carol", &[9]));
+    c.removals.push(removal("carol", &[9]));
 
     let context = Context { revoked: vec![vec![9]] };
     assert!(authorize(Some(&r), &c, &context).is_ok());
 }
 
-/// L'exception est indexée sur la clé de l'appareil, pas sur le compte : révoquer un appareil
-/// ne rend pas les autres expulsables.
+/// The exception is keyed on the device key, not on the account: revoking one device does not
+/// make the others expellable.
 #[test]
-fn la_revocation_d_un_appareil_n_expose_pas_les_autres() {
+fn revoking_one_device_does_not_expose_the_others() {
     let r = roster("alice", &[]);
     let mut c = commit("dave", vec!["alice", "carol", "dave"]);
-    c.removals.push(retrait("carol", &[8]));
+    c.removals.push(removal("carol", &[8]));
 
     let context = Context { revoked: vec![vec![9]] };
     assert!(matches!(
@@ -205,13 +205,13 @@ fn la_revocation_d_un_appareil_n_expose_pas_les_autres() {
     ));
 }
 
-/// L'exception ne contourne pas la protection de l'admin : un appareil révoqué de l'admin
-/// s'évince, mais pas l'admin lui-même.
+/// The exception does not bypass the admin protection: a revoked device of the admin is evicted,
+/// but not the admin himself.
 #[test]
-fn la_revocation_ne_permet_pas_d_evincer_l_admin() {
+fn revocation_does_not_allow_evicting_the_admin() {
     let r = roster("alice", &[]);
     let mut c = commit("dave", vec!["dave"]);
-    c.removals.push(retrait("alice", &[9]));
+    c.removals.push(removal("alice", &[9]));
 
     let context = Context { revoked: vec![vec![9]] };
     assert!(matches!(
@@ -220,48 +220,49 @@ fn la_revocation_ne_permet_pas_d_evincer_l_admin() {
     ));
 }
 
-// ------------------------------------------------------------------ sérialisation
+// ------------------------------------------------------------------ serialisation
 
 #[test]
-fn le_roster_survit_a_un_aller_retour() {
-    let r = roster("alice", &["bob-le-long-handle", "c"]);
+fn the_roster_survives_a_round_trip() {
+    let r = roster("alice", &["bob-the-long-handle", "c"]);
     assert_eq!(Roster::decode(&r.encode().unwrap()).unwrap(), r);
 }
 
 #[test]
-fn un_roster_sans_moderateur_survit_a_un_aller_retour() {
+fn a_roster_without_moderators_survives_a_round_trip() {
     let r = roster("alice", &[]);
     assert_eq!(Roster::decode(&r.encode().unwrap()).unwrap(), r);
 }
 
-/// L'admin est déjà au-dessus : l'y répéter rendrait `is_moderator` ambigu à la lecture.
+/// The admin is already above: repeating him there would make `is_moderator` ambiguous to read.
 #[test]
-fn l_admin_n_est_pas_aussi_moderateur() {
+fn the_admin_is_not_also_a_moderator() {
     let r = roster("alice", &["alice", "bob"]);
     assert_eq!(r.moderators(), ["bob"]);
     assert!(r.is_admin("alice"));
     assert!(!r.is_moderator("alice"));
 }
 
-/// Deux encodages du même roster feraient diverger le hash du group context, donc les clients.
+/// Two encodings of the same roster would make the group context hash diverge, and the clients
+/// with it.
 #[test]
-fn des_octets_excedentaires_sont_refuses() {
+fn trailing_bytes_are_rejected() {
     let mut bytes = roster("alice", &["bob"]).encode().unwrap();
     bytes.push(0);
     assert!(Roster::decode(&bytes).is_err());
 }
 
 #[test]
-fn un_roster_tronque_est_refuse_sans_paniquer() {
+fn a_truncated_roster_is_rejected_without_panicking() {
     let bytes = roster("alice", &["bob"]).encode().unwrap();
     for n in 0..bytes.len() {
-        assert!(Roster::decode(&bytes[..n]).is_err(), "longueur {n} acceptée");
+        assert!(Roster::decode(&bytes[..n]).is_err(), "length {n} accepted");
     }
 }
 
-/// Un groupe sans admin ne pourrait plus jamais être administré.
+/// A group without an admin could never be administered again.
 #[test]
-fn un_roster_sans_admin_est_refuse() {
+fn a_roster_without_an_admin_is_rejected() {
     assert!(Roster::new(String::new(), Vec::new()).is_err());
     assert!(Roster::decode(&[0, 0, 0, 0]).is_err());
 }

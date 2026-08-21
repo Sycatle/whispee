@@ -5,16 +5,15 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Crate volontairement minuscule et sans dépendance lourde.
+# Deliberately tiny crate, with no heavy dependency.
 #
-# Elle existe pour qu'il n'y ait qu'UNE seule définition du message canonique d'attestation,
-# partagée par le signataire (`crypto-core`) et le vérificateur (`server`). Deux définitions
-# qui divergent d'un octet produiraient un système où les signatures sont refusées au mieux,
-# et où une confusion de champs passe au pire — sans qu'aucun test unitaire de chaque côté
-# ne le révèle.
+# It exists so there is only ONE definition of the canonical attestation message, shared by the
+# signer (`crypto-core`) and the verifier (`server`). Two definitions differing by a single byte
+# would give a system where signatures are rejected at best, and where field confusion slips
+# through at worst — without any unit test on either side revealing it.
 #
-# C'est aussi ce qui évite de tirer OpenMLS dans le serveur : celui-ci ne parle pas MLS, et
-# ne doit pas commencer.
+# It is also what keeps OpenMLS out of the server: the server does not speak MLS, and must not
+# start.
 
 [dependencies]
 ed25519-dalek.workspace = true

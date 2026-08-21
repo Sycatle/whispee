@@ -1,14 +1,14 @@
-//! Le compte est la racine de confiance de tout le multi-appareils. Ces tests figent sa
-//! dérivation et vérifient qu'il ne peut pas signer pour autrui.
+//! The account is the root of trust for the whole multi-device story. These tests freeze its
+//! derivation and check that it cannot sign on anyone else's behalf.
 
 use crypto_core::Account;
 
-/// Phrase de test publique et notoire. **Ne jamais s'en servir ailleurs qu'ici.**
+/// Public, well-known test phrase. **Never use it anywhere but here.**
 const PHRASE: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 #[test]
-fn la_meme_phrase_redonne_le_meme_compte() {
+fn the_same_phrase_yields_the_same_account() {
     let a = Account::from_phrase(PHRASE).unwrap();
     let b = Account::from_phrase(PHRASE).unwrap();
 
@@ -16,31 +16,30 @@ fn la_meme_phrase_redonne_le_meme_compte() {
     assert_eq!(a.fingerprint(), b.fingerprint());
 }
 
-/// Non-régression sur le format de dérivation.
+/// Non-regression on the derivation format.
 ///
-/// Ce n'est **pas** un vecteur de conformité : il n'existe aucun standard pour dériver une
-/// clé d'identité de messagerie depuis une graine BIP-39. C'est un garde-fou : si ce test
-/// casse, la dérivation a changé, et tous les comptes existants sont devenus irrécupérables
-/// avec leur phrase. C'est donc un changement de format à assumer explicitement, jamais un
-/// test à mettre à jour distraitement.
+/// This is **not** a conformance vector: there is no standard for deriving a messaging identity
+/// key from a BIP-39 seed. It is a guard rail: if this test breaks, the derivation changed and
+/// every existing account has become unrecoverable from its phrase. That is a format change to
+/// own explicitly, never a test to update absent-mindedly.
 #[test]
-fn la_derivation_est_figee() {
+fn the_derivation_is_frozen() {
     let account = Account::from_phrase(PHRASE).unwrap();
     let key = hex::encode(account.identity_key());
 
     assert_eq!(key, "001cb5f77239887d8bffef1f23ecb9ff237c730419b0104fc19affe61be83acc");
 }
 
-/// La clé du coffre doit être indépendante de la clé d'identité : compromettre l'une ne doit
-/// rien apprendre sur l'autre. C'est ce que garantit la séparation des `info` HKDF.
+/// The vault key must be independent of the identity key: compromising one must teach nothing
+/// about the other. That is what the separate HKDF `info` strings guarantee.
 #[test]
-fn la_cle_du_coffre_est_distincte_de_la_cle_d_identite() {
+fn the_vault_key_is_distinct_from_the_identity_key() {
     let account = Account::from_phrase(PHRASE).unwrap();
     assert_ne!(account.vault_key(), account.identity_key());
 }
 
 #[test]
-fn deux_comptes_generes_sont_differents() {
+fn two_generated_accounts_are_different() {
     let (a, phrase_a) = Account::generate().unwrap();
     let (b, phrase_b) = Account::generate().unwrap();
 
@@ -50,45 +49,44 @@ fn deux_comptes_generes_sont_differents() {
 }
 
 #[test]
-fn la_phrase_generee_reconstruit_le_meme_compte() {
+fn the_generated_phrase_rebuilds_the_same_account() {
     let (account, phrase) = Account::generate().unwrap();
-    let restaure = Account::from_phrase(&phrase).unwrap();
+    let restored = Account::from_phrase(&phrase).unwrap();
 
-    assert_eq!(account.identity_key(), restaure.identity_key());
+    assert_eq!(account.identity_key(), restored.identity_key());
 }
 
-/// La somme de contrôle de BIP-39 attrape un mot mal recopié. Sans elle, l'utilisateur
-/// obtiendrait un compte différent, parfaitement valide et parfaitement vide — le pire des
-/// messages d'erreur possible.
+/// The BIP-39 checksum catches a mistyped word. Without it the user would get a different
+/// account, perfectly valid and perfectly empty — the worst possible error message.
 #[test]
-fn un_mot_mal_recopie_est_refuse() {
-    let faute = PHRASE.replace("about", "abandon");
-    assert!(Account::from_phrase(&faute).is_err());
+fn a_mistyped_word_is_rejected() {
+    let typo = PHRASE.replace("about", "abandon");
+    assert!(Account::from_phrase(&typo).is_err());
 }
 
 #[test]
-fn une_phrase_trop_courte_est_refusee() {
+fn a_phrase_that_is_too_short_is_rejected() {
     assert!(Account::from_phrase("abandon abandon abandon").is_err());
 }
 
-/// Les espaces en trop viennent d'un copier-coller, pas d'une attaque. Les tolérer évite un
-/// échec incompréhensible sur une phrase pourtant correcte.
+/// Stray whitespace comes from a copy-paste, not from an attack. Tolerating it avoids an
+/// incomprehensible failure on an otherwise correct phrase.
 #[test]
-fn les_espaces_superflus_sont_tolerés() {
+fn stray_whitespace_is_tolerated() {
     let account = Account::from_phrase(&format!("  {PHRASE}\n")).unwrap();
     assert_eq!(account.identity_key(), Account::from_phrase(PHRASE).unwrap().identity_key());
 }
 
 #[test]
-fn le_compte_atteste_ses_propres_appareils() {
+fn the_account_attests_its_own_devices() {
     let account = Account::from_phrase(PHRASE).unwrap();
     let auth_key = [1u8; 32];
     let mls_key = [2u8; 32];
 
-    let signature = account.attest("alice", "portable", &auth_key, &mls_key).unwrap();
+    let signature = account.attest("alice", "phone", &auth_key, &mls_key).unwrap();
     let claim = attest::DeviceClaim {
         handle: "alice",
-        device_id: "portable",
+        device_id: "phone",
         auth_key: &auth_key,
         mls_key: &mls_key,
     };
@@ -96,79 +94,79 @@ fn le_compte_atteste_ses_propres_appareils() {
     assert!(attest::verify(&account.identity_key(), &claim, &signature).is_ok());
 }
 
-/// Un compte ne peut pas attester pour un autre handle : l'attestation qu'il produit ne
-/// vérifie que sous son propre pseudonyme.
+/// An account cannot attest for another handle: the attestation it produces only verifies under
+/// its own handle.
 #[test]
-fn un_compte_ne_peut_pas_attester_pour_un_autre_handle() {
+fn an_account_cannot_attest_for_another_handle() {
     let account = Account::from_phrase(PHRASE).unwrap();
-    let signature = account.attest("alice", "portable", &[1u8; 32], &[2u8; 32]).unwrap();
+    let signature = account.attest("alice", "phone", &[1u8; 32], &[2u8; 32]).unwrap();
 
-    let usurpe = attest::DeviceClaim {
+    let impersonated = attest::DeviceClaim {
         handle: "bob",
-        device_id: "portable",
+        device_id: "phone",
         auth_key: &[1u8; 32],
         mls_key: &[2u8; 32],
     };
 
-    assert!(attest::verify(&account.identity_key(), &usurpe, &signature).is_err());
+    assert!(attest::verify(&account.identity_key(), &impersonated, &signature).is_err());
 }
 
-/// L'appairage transmet la graine, pas la phrase : l'appareil appairé doit obtenir exactement
-/// le même pouvoir, y compris celui d'attester à son tour.
+/// Pairing transfers the seed, not the phrase: the paired device must get exactly the same
+/// power, including the power to attest in turn.
 #[test]
-fn la_graine_transmise_reconstruit_un_compte_equivalent() {
+fn the_transferred_seed_rebuilds_an_equivalent_account() {
     let source = Account::from_phrase(PHRASE).unwrap();
-    let appaire = Account::from_seed(source.export_seed());
+    let paired = Account::from_seed(source.export_seed());
 
-    assert_eq!(source.identity_key(), appaire.identity_key());
-    assert_eq!(source.vault_key(), appaire.vault_key());
+    assert_eq!(source.identity_key(), paired.identity_key());
+    assert_eq!(source.vault_key(), paired.vault_key());
 
-    let signature = appaire.attest("alice", "tablette", &[3u8; 32], &[4u8; 32]).unwrap();
+    let signature = paired.attest("alice", "tablet", &[3u8; 32], &[4u8; 32]).unwrap();
     let claim = attest::DeviceClaim {
         handle: "alice",
-        device_id: "tablette",
+        device_id: "tablet",
         auth_key: &[3u8; 32],
         mls_key: &[4u8; 32],
     };
     assert!(attest::verify(&source.identity_key(), &claim, &signature).is_ok());
 }
 
-/// `Debug` ne doit jamais laisser fuir la clé privée dans un journal.
+/// `Debug` must never leak the private key into a log.
 #[test]
-fn le_debug_ne_divulgue_pas_le_secret() {
+fn debug_does_not_disclose_the_secret() {
     let account = Account::from_phrase(PHRASE).unwrap();
-    let rendu = format!("{account:?}");
+    let rendered = format!("{account:?}");
 
-    assert!(rendu.contains(&account.fingerprint()));
-    assert!(!rendu.contains(&hex::encode(account.export_seed())));
+    assert!(rendered.contains(&account.fingerprint()));
+    assert!(!rendered.contains(&hex::encode(account.export_seed())));
 }
 
-/// Le certificat de révocation produit par le compte doit être vérifiable par un tiers qui ne
-/// détient que la clé publique — c'est toute sa raison d'être : permettre à un autre membre du
-/// groupe de commiter le retrait sans croire le serveur.
+/// The revocation certificate produced by the account must be verifiable by a third party that
+/// only holds the public key — that is its whole point: letting another group member commit the
+/// removal without trusting the server.
 #[test]
-fn un_certificat_de_revocation_est_verifiable_par_un_tiers() {
+fn a_revocation_certificate_is_verifiable_by_a_third_party() {
     let (account, _) = Account::generate().unwrap();
-    let certificat = account.revoke("alice", "alice:portable", 1_700_000_000).unwrap();
+    let certificate = account.revoke("alice", "alice:phone", 1_700_000_000).unwrap();
 
     let claim =
-        attest::RevocationClaim { handle: "alice", device_id: "alice:portable", revoked_at: 1_700_000_000 };
+        attest::RevocationClaim { handle: "alice", device_id: "alice:phone", revoked_at: 1_700_000_000 };
 
-    assert!(attest::verify_revocation(&account.identity_key(), &claim, &certificat).is_ok());
+    assert!(attest::verify_revocation(&account.identity_key(), &claim, &certificate).is_ok());
 }
 
-/// Un compte ne révoque que ses propres appareils. Sans cette propriété, révoquer reviendrait
-/// à pouvoir évincer n'importe qui du réseau.
+/// An account only revokes its own devices. Without that property, revoking would amount to
+/// being able to evict anyone from the network.
 #[test]
-fn un_compte_ne_peut_pas_revoquer_pour_un_autre_handle() {
+fn an_account_cannot_revoke_for_another_handle() {
     let (alice, _) = Account::generate().unwrap();
     let (bob, _) = Account::generate().unwrap();
 
-    let certificat = alice.revoke("bob", "bob:portable", 1_700_000_000).unwrap();
+    let certificate = alice.revoke("bob", "bob:phone", 1_700_000_000).unwrap();
     let claim =
-        attest::RevocationClaim { handle: "bob", device_id: "bob:portable", revoked_at: 1_700_000_000 };
+        attest::RevocationClaim { handle: "bob", device_id: "bob:phone", revoked_at: 1_700_000_000 };
 
-    // Signé par Alice, donc invalide sous la clé de Bob : le serveur comme les autres clients
-    // vérifient contre la clé du compte *nommé* dans le certificat.
-    assert!(attest::verify_revocation(&bob.identity_key(), &claim, &certificat).is_err());
+    // Signed by Alice, hence invalid under Bob's key: the server and the other clients alike
+    // verify against the key of the account *named* in the certificate.
+    assert!(attest::verify_revocation(&bob.identity_key(), &claim, &certificate).is_err());
 }

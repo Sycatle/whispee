@@ -5,16 +5,14 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Journal auditable des clés de compte : arbre de Merkle append-only, preuves d'inclusion et
-# de cohérence.
+# Auditable log of account keys: append-only Merkle tree, inclusion and consistency proofs.
 #
-# Même raison d'être que la crate `attest` : le producteur (`server`) et le vérificateur
-# (`crypto-core`, donc le client) doivent partager **une seule** définition de la fonction de
-# hachage et de la construction de l'arbre. Deux implémentations qui divergent d'un octet
-# produisent des preuves systématiquement refusées — ou, bien pire, une preuve acceptée pour
-# un arbre différent.
+# Same reason to exist as the `attest` crate: the producer (`server`) and the verifier
+# (`crypto-core`, hence the client) must share **one** definition of the hash function and of the
+# tree construction. Two implementations differing by a single byte produce proofs that are
+# systematically rejected — or, far worse, a proof accepted for a different tree.
 #
-# Aucune dépendance à OpenMLS : le serveur ne parle pas MLS et ne doit pas commencer.
+# No dependency on OpenMLS: the server does not speak MLS and must not start.
 
 [dependencies]
 ed25519-dalek.workspace = true

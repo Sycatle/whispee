@@ -1,4 +1,4 @@
-//! Assemblage : X3DH pour établir la session, Double Ratchet pour la faire vivre.
+//! Assembly: X3DH to establish the session, Double Ratchet to keep it alive.
 
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -14,7 +14,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Alice ouvre une session à partir du seul bundle de Bob. Bob peut être hors ligne.
+    /// Alice opens a session from Bob's bundle alone. Bob may be offline.
     pub fn initiate<R: RngCore + CryptoRng>(
         rng: &mut R,
         identity: &IdentityKeyPair,
@@ -22,8 +22,8 @@ impl Session {
     ) -> Result<(Self, InitialMessage), RatchetError> {
         let (outcome, initial) = x3dh::initiate(rng, identity, bundle)?;
 
-        // La signed prekey de Bob sert de première clé de ratchet : c'est la seule clé
-        // publique de Bob qu'Alice possède déjà, ce qui lui permet d'écrire en premier.
+        // Bob's signed prekey serves as the first ratchet key: it is the only public key of
+        // Bob's that Alice already holds, which is what lets her write first.
         let ratchet = DoubleRatchet::init_initiator(
             rng,
             outcome.shared_secret,
@@ -37,10 +37,10 @@ impl Session {
         ))
     }
 
-    /// Bob accepte la session en rejouant X3DH depuis son propre matériel.
+    /// Bob accepts the session by replaying X3DH from his own material.
     ///
-    /// En production, la one-time prekey consommée doit être supprimée du store ici même :
-    /// la réutiliser annulerait la forward secrecy qu'elle apporte.
+    /// In production, the consumed one-time prekey must be deleted from the store right here:
+    /// reusing it would cancel the forward secrecy it provides.
     pub fn accept(store: &PreKeyStore, initial: &InitialMessage) -> Result<Self, RatchetError> {
         let outcome = x3dh::respond(store, initial)?;
         let ratchet = DoubleRatchet::init_responder(
@@ -73,20 +73,20 @@ impl Session {
     }
 }
 
-/// Nombre d'itérations de hachage dans le calcul d'empreinte. Signal en fait 5200 : le coût
-/// est négligeable pour l'utilisateur mais rend la recherche d'une collision partielle —
-/// une clé dont l'empreinte *ressemble* à la vraie — nettement plus chère pour un attaquant.
+/// Number of hash iterations in the fingerprint computation. Signal does 5200: the cost is
+/// negligible for the user but makes the search for a partial collision — a key whose
+/// fingerprint *looks like* the real one — markedly more expensive for an attacker.
 const FINGERPRINT_ITERATIONS: u32 = 5_200;
 
-/// Empreinte affichable d'une paire d'identités, façon « safety number ».
+/// Displayable fingerprint of a pair of identities, "safety number" style.
 ///
-/// Les deux participants comparent cette chaîne hors bande (de visu, ou par QR code). Sans
-/// cette comparaison, rien n'empêche le serveur de servir à chacun une identité qu'il contrôle
-/// et de relayer en clair : le chiffrement fonctionne parfaitement, mais avec l'attaquant au
-/// milieu. C'est le maillon faible réel de la plupart des déploiements, parce que presque
-/// personne ne fait la comparaison.
+/// The two participants compare this string out of band (by eye, or by QR code). Without that
+/// comparison, nothing stops the server from serving each of them an identity it controls and
+/// relaying in the clear: the encryption works perfectly, but with the attacker in the middle.
+/// This is the real weak link of most deployments, because almost nobody performs the
+/// comparison.
 ///
-/// Le tri rend le résultat indépendant de qui regarde : les deux écrans affichent la même chose.
+/// Sorting makes the result independent of who is looking: both screens show the same thing.
 pub fn safety_number(a: &IdentityPublic, b: &IdentityPublic) -> String {
     let (first, second) = if a.encode() <= b.encode() { (a, b) } else { (b, a) };
 
@@ -100,7 +100,7 @@ pub fn safety_number(a: &IdentityPublic, b: &IdentityPublic) -> String {
             hash = hasher.finalize().to_vec();
         }
 
-        // 6 groupes de 5 chiffres par identité, soit 60 chiffres au total pour la paire.
+        // 6 groups of 5 digits per identity, i.e. 60 digits in total for the pair.
         hash[..30]
             .chunks(5)
             .map(|chunk| {

@@ -1,8 +1,8 @@
-//! Une conversation = un groupe MLS.
+//! A conversation = an MLS group.
 //!
-//! Un 1-to-1 est un groupe de 2. C'est tout l'intérêt de MLS ici : passer aux groupes plus
-//! tard ne demandera aucune réécriture, là où la stack Signal imposerait d'ajouter Sender
-//! Keys, un mécanisme entièrement distinct du Double Ratchet.
+//! A 1-to-1 is a group of 2. That is the whole point of MLS here: moving to larger groups later
+//! needs no rewrite, where the Signal stack would force us to add Sender Keys, a mechanism
+//! entirely separate from the Double Ratchet.
 
 use openmls::prelude::tls_codec::{Deserialize, Serialize};
 use openmls::prelude::*;
@@ -12,24 +12,24 @@ use crate::error::{CryptoError, Result, mls};
 use crate::identity::{Identity, fingerprint, parse_key_package};
 use crate::roles::{self, ROSTER_EXTENSION, Roster};
 
-/// Ce que produit l'ajout d'un membre. Les trois parties partent par des chemins différents :
-/// le commit va aux membres déjà présents, le welcome au seul nouvel arrivant.
+/// What adding a member produces. The parts travel by different paths: the commit goes to the
+/// members already present, the welcome to the newcomer alone.
 pub struct Invitation {
-    /// À diffuser aux membres existants pour qu'ils avancent d'epoch.
+    /// To broadcast to existing members so they move to the next epoch.
     pub commit: Vec<u8>,
-    /// À remettre au seul invité. Contient les secrets qui lui permettent de rejoindre.
+    /// To hand to the invitee alone. Holds the secrets that let them join.
     ///
-    /// L'arbre public qui l'accompagne n'est pas ici : il n'existe qu'une fois le commit
-    /// appliqué, et sort donc de [`Conversation::apply_pending`].
+    /// The public tree that goes with it is not here: it only exists once the commit is
+    /// applied, and so comes out of [`Conversation::apply_pending`].
     pub welcome: Vec<u8>,
 }
 
-/// Un changement d'état de groupe prêt à publier : retrait, sortie commitée, changement de
-/// roster. Un seul destinataire, contrairement à [`Invitation`] : il n'y a personne à
-/// accueillir, seulement les membres à faire avancer d'epoch.
+/// A group state change ready to publish: removal, committed departure, roster change. A single
+/// recipient, unlike [`Invitation`]: there is nobody to welcome, only members to move forward an
+/// epoch.
 ///
-/// Un exclu reçoit le commit lui aussi, s'il est encore branché — c'est ainsi qu'il apprend
-/// son exclusion plutôt que de constater un silence. Il ne peut plus rien déchiffrer ensuite.
+/// An excluded member receives the commit too, if still connected — that is how they learn of
+/// their exclusion rather than noticing silence. They can decrypt nothing afterwards.
 pub struct Change {
     pub commit: Vec<u8>,
 }
@@ -38,19 +38,18 @@ pub struct Conversation {
     group: MlsGroup,
 }
 
-/// Emballe le roster dans les extensions de group context, avec la capacité qui va avec.
+/// Wraps the roster into the group context extensions, with the matching capability.
 ///
-/// # Pourquoi `RequiredCapabilities` accompagne le roster
+/// # Why `RequiredCapabilities` accompanies the roster
 ///
-/// MLS exige que toute extension du group context figure dans les capacités requises. C'est
-/// une contrainte utile plutôt qu'une formalité : elle interdit à un client qui **ne sait pas
-/// lire le roster** de rejoindre un groupe administré. Sans elle, un tel client entrerait,
-/// appliquerait une politique vide, accepterait les commits que les autres refusent — et
-/// forkerait le groupe sans que rien ne le signale.
+/// MLS requires every group context extension to appear in the required capabilities. That is
+/// a useful constraint rather than a formality: it stops a client that **cannot read the
+/// roster** from joining an administered group. Without it, such a client would join, apply an
+/// empty policy, accept commits the others refuse — and fork the group with nothing to signal
+/// it.
 ///
-/// L'erreur est propagée plutôt que supposée impossible : une constante mal choisie serait
-/// ainsi refusée à la création du groupe, et non des mois plus tard sur un changement de
-/// roster.
+/// The error is propagated rather than assumed impossible: a badly chosen constant is then
+/// rejected at group creation, and not months later on a roster change.
 fn roster_extension(roster: &Roster) -> Result<Extensions<GroupContext>> {
     Extensions::from_vec(vec![
         Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
@@ -63,8 +62,8 @@ fn roster_extension(roster: &Roster) -> Result<Extensions<GroupContext>> {
     .map_err(mls)
 }
 
-/// Handle porté par un credential MLS. Un credential non basique n'a pas de handle exploitable
-/// et ne peut donc satisfaire aucune règle : la chaîne vide n'appartient à aucun roster.
+/// Handle carried by an MLS credential. A non-basic credential has no usable handle and can
+/// therefore satisfy no rule: the empty string belongs to no roster.
 fn handle_of(credential: &Credential) -> String {
     BasicCredential::try_from(credential.clone())
         .ok()
@@ -73,28 +72,28 @@ fn handle_of(credential: &Credential) -> String {
 }
 
 impl Conversation {
-    /// Crée une conversation **plate** : aucun rôle, tout le monde peut tout faire.
+    /// Creates a **flat** conversation: no roles, everyone can do everything.
     ///
-    /// C'est la forme correcte d'un 1-to-1, où des rôles d'administration n'auraient aucun
-    /// sens. Pour un groupe administré, voir [`Conversation::create_administered`].
+    /// That is the correct shape for a 1-to-1, where admin roles would make no sense. For an
+    /// administered group, see [`Conversation::create_administered`].
     pub fn create(identity: &Identity) -> Result<Self> {
         Self::create_with(identity, None)
     }
 
-    /// Crée un groupe administré. Le créateur en est l'admin, seul et unique.
+    /// Creates an administered group. The creator is its admin, sole and only.
     ///
-    /// Le roster entre dans le **group context**, donc dans l'état authentifié et haché par
-    /// chaque commit. Voir `roles.rs` pour ce que cela implique — et pour l'avertissement
-    /// essentiel : MLS n'applique pas ces règles, ce sont les clients qui le font.
+    /// The roster goes into the **group context**, hence into the authenticated state hashed by
+    /// every commit. See `roles.rs` for what that implies — and for the essential warning: MLS
+    /// does not enforce these rules, the clients do.
     pub fn create_administered(identity: &Identity, admin: String) -> Result<Self> {
         Self::create_with(identity, Some(Roster::new(admin, Vec::new())?))
     }
 
     fn create_with(identity: &Identity, roster: Option<Roster>) -> Result<Self> {
-        // Les capacités du créateur sont configurées ICI, et non par `publish_key_package` :
-        // le créateur n'a pas de KeyPackage, sa feuille est construite depuis cette config.
-        // Les oublier fait échouer le premier ajout de membre, avec une erreur qui désigne
-        // les extensions sans dire laquelle des deux feuilles est en cause.
+        // The creator's capabilities are configured HERE, not by `publish_key_package`: the
+        // creator has no KeyPackage, its leaf is built from this config. Forgetting them makes
+        // the first member add fail, with an error that points at extensions without saying
+        // which of the two leaves is at fault.
         let mut builder = MlsGroupCreateConfig::builder()
             .ciphersuite(crate::identity::CIPHERSUITE)
             .capabilities(crate::identity::capabilities());
@@ -114,10 +113,10 @@ impl Conversation {
         Ok(Self { group })
     }
 
-    /// Roster du groupe, ou `None` si le groupe est plat.
+    /// The group's roster, or `None` if the group is flat.
     ///
-    /// Lu dans le group context, donc dans l'état authentifié : ce n'est pas une information
-    /// que le serveur ou un membre pourrait falsifier isolément.
+    /// Read from the group context, hence from authenticated state: this is not something the
+    /// server or a single member could forge.
     pub fn roster(&self) -> Result<Option<Roster>> {
         match self.group.extensions().unknown(ROSTER_EXTENSION) {
             Some(raw) => Roster::decode(&raw.0).map(Some),
@@ -125,13 +124,13 @@ impl Conversation {
         }
     }
 
-    /// Remplace le roster : admin et modérateurs. Soumis à la politique comme tout le reste —
-    /// les autres membres refuseront le commit s'il ne vient pas de l'admin en place.
+    /// Replaces the roster: admin and moderators. Subject to the policy like everything else —
+    /// the other members will refuse the commit if it does not come from the sitting admin.
     ///
-    /// Passer un `admin` différent de l'actuel **transmet le groupe**. C'est irréversible du
-    /// point de vue de l'émetteur : il ne pourra pas se le reprendre.
+    /// Passing an `admin` other than the current one **hands over the group**. That is
+    /// irreversible from the sender's point of view: they cannot take it back.
     ///
-    /// Même discipline que le reste : publier le commit avant [`Conversation::apply_pending`].
+    /// Same discipline as the rest: publish the commit before [`Conversation::apply_pending`].
     pub fn set_roles(
         &mut self,
         identity: &Identity,
@@ -152,21 +151,20 @@ impl Conversation {
         Ok(Change { commit: commit.tls_serialize_detached().map_err(mls)? })
     }
 
-    /// Ajoute un membre à partir du KeyPackage publié sur le serveur. L'invité peut être
-    /// hors ligne : c'est ce qui rend la messagerie asynchrone possible.
-    /// Prépare l'ajout d'un membre **sans l'appliquer**.
+    /// Adds a member from the KeyPackage published on the server. The invitee may be offline:
+    /// that is what makes asynchronous messaging possible.
+    /// Prepares a member add **without applying it**.
     ///
-    /// Le commit reste en attente : le groupe est encore à l'ancienne epoch tant que
-    /// [`Conversation::apply_pending`] n'a pas été appelé.
+    /// The commit stays pending: the group is still on the old epoch until
+    /// [`Conversation::apply_pending`] has been called.
     ///
-    /// Cette séparation n'est pas un raffinement. Appliquer le commit avant de l'avoir publié
-    /// est irrattrapable : si la publication échoue — réseau coupé, serveur en erreur —
-    /// l'émetteur a changé d'epoch pendant que les autres membres restent à l'ancienne, et le
-    /// commit qui les aurait réconciliés n'existe plus nulle part. Le groupe est alors mort,
-    /// silencieusement : plus personne ne déchiffre plus rien, et aucune erreur ne dit
-    /// pourquoi.
+    /// This separation is not a refinement. Applying the commit before publishing it cannot be
+    /// undone: if publication fails — network down, server error — the sender has changed epoch
+    /// while the other members stay on the old one, and the commit that would have reconciled
+    /// them no longer exists anywhere. The group is then dead, silently: nobody decrypts
+    /// anything any more, and no error says why.
     ///
-    /// L'ordre correct est donc : préparer, publier, puis seulement appliquer.
+    /// The correct order is therefore: prepare, publish, and only then apply.
     pub fn invite(&mut self, identity: &Identity, key_package: &[u8]) -> Result<Invitation> {
         let key_package = parse_key_package(&identity.provider, key_package)?;
 
@@ -181,42 +179,41 @@ impl Conversation {
         })
     }
 
-    /// Applique le commit préparé par [`Conversation::invite`], une fois celui-ci publié.
+    /// Applies the commit prepared by [`Conversation::invite`], once it has been published.
     ///
-    /// À n'appeler qu'après une publication réussie. Voir la note sur `invite` : l'inverse
-    /// casse le groupe sans recours.
-    /// Retourne l'arbre de ratchet **à jour**, à transmettre à l'invité avec son Welcome.
+    /// Only call it after a successful publication. See the note on `invite`: the other way
+    /// round breaks the group beyond repair.
+    /// Returns the **up-to-date** ratchet tree, to send to the invitee with their Welcome.
     ///
-    /// L'arbre ne peut pas être produit plus tôt : tant que le commit n'est pas appliqué, il
-    /// ne contient pas le nouveau membre, et le Welcome est alors rejeté avec une erreur de
-    /// hash d'arbre.
+    /// The tree cannot be produced earlier: until the commit is applied it does not contain the
+    /// new member, and the Welcome is then rejected with a tree hash error.
     pub fn apply_pending(&mut self, identity: &Identity) -> Result<Vec<u8>> {
         self.group.merge_pending_commit(&identity.provider).map_err(mls)?;
         self.group.export_ratchet_tree().tls_serialize_detached().map_err(mls)
     }
 
-    /// Prépare le retrait d'un membre **sans l'appliquer**.
+    /// Prepares a member removal **without applying it**.
     ///
-    /// # Ce que le retrait apporte, et que rien d'autre n'apporte
+    /// # What removal buys that nothing else does
     ///
-    /// Retirer un appareil de la liste de diffusion du serveur ne le prive de rien : il détient
-    /// les secrets du groupe et déchiffre tout ce qu'il obtient par un autre chemin. Le
-    /// `Remove` MLS, lui, re-clé l'arbre — c'est la **post-compromise security**, et c'est la
-    /// raison pour laquelle ce projet a choisi MLS. Un téléphone volé cesse effectivement de
-    /// lire à partir du commit, et pas avant.
+    /// Taking a device off the server's fan-out list deprives it of nothing: it holds the group
+    /// secrets and decrypts whatever it obtains by another route. The MLS `Remove`, on the other
+    /// hand, re-keys the tree — that is **post-compromise security**, and it is why this project
+    /// chose MLS. A stolen phone effectively stops reading from the commit onward, and not
+    /// before.
     ///
-    /// # Désignation par la clé de signature MLS
+    /// # Designation by MLS signature key
     ///
-    /// On ne peut pas désigner une feuille par son credential : il porte le *handle*, commun à
-    /// tous les appareils d'un même compte. La clé de signature, elle, est propre à l'appareil
-    /// et couverte par son attestation — le lien appareil ↔ feuille est donc authentifié de
-    /// bout en bout, sans rien devoir au serveur.
+    /// A leaf cannot be designated by its credential: that carries the *handle*, shared by all
+    /// devices of one account. The signature key is device-specific and covered by its
+    /// attestation — so the device ↔ leaf binding is authenticated end to end, owing nothing to
+    /// the server.
     ///
-    /// # Même discipline que `invite`
+    /// # Same discipline as `invite`
     ///
-    /// Le commit reste en attente. Appliquer avant d'avoir publié casse le groupe sans
-    /// recours : voir la note détaillée sur [`Conversation::invite`]. L'ordre est préparer,
-    /// publier, puis [`Conversation::apply_pending`].
+    /// The commit stays pending. Applying before publishing breaks the group beyond repair: see
+    /// the detailed note on [`Conversation::invite`]. The order is prepare, publish, then
+    /// [`Conversation::apply_pending`].
     pub fn remove(&mut self, identity: &Identity, mls_key: &[u8]) -> Result<Change> {
         let leaf = self
             .group
@@ -233,24 +230,24 @@ impl Conversation {
         Ok(Change { commit: commit.tls_serialize_detached().map_err(mls)? })
     }
 
-    /// Demande à sortir du groupe. Retourne une **proposition**, pas un commit.
+    /// Asks to leave the group. Returns a **proposal**, not a commit.
     ///
-    /// # Pourquoi on ne peut pas se retirer soi-même
+    /// # Why you cannot remove yourself
     ///
-    /// La RFC 9420 l'interdit : un membre ne peut pas figurer dans les retraits d'un commit
-    /// qu'il génère. Ce n'est pas une lacune d'OpenMLS. Le commit doit être signé sous le
-    /// secret de l'epoch qu'il produit, et cette epoch est justement celle dont l'émetteur
-    /// vient d'être exclu — il ne peut pas produire une clé qu'il n'aura plus.
+    /// RFC 9420 forbids it: a member cannot appear among the removals of a commit they generate.
+    /// This is not an OpenMLS shortcoming. The commit must be signed under the secret of the
+    /// epoch it produces, and that epoch is precisely the one the sender has just been excluded
+    /// from — they cannot produce a key they will no longer have.
     ///
-    /// La sortie passe donc par une proposition, qu'**un autre membre** doit commiter avec
+    /// Leaving therefore goes through a proposal, which **another member** must commit with
     /// [`Conversation::commit_pending`].
     ///
-    /// # La conséquence, qui n'est pas anodine
+    /// # The consequence, which is not trivial
     ///
-    /// Personne ne quitte un groupe où plus personne n'écoute. Tant qu'aucun autre membre ne
-    /// commite, le partant reste dans l'arbre et continue de recevoir. Une interface honnête
-    /// affiche « départ en attente » plutôt que de faire disparaître la conversation, sans
-    /// quoi l'utilisateur se croit sorti d'un groupe qui le lit toujours.
+    /// Nobody leaves a group where nobody is listening any more. Until another member commits,
+    /// the leaver stays in the tree and keeps receiving. An honest interface shows "departure
+    /// pending" rather than making the conversation disappear, or the user believes they left a
+    /// group that is still reading them.
     pub fn leave(&mut self, identity: &Identity) -> Result<Vec<u8>> {
         self.group
             .leave_group(&identity.provider, &identity.signer)
@@ -259,10 +256,9 @@ impl Conversation {
             .map_err(mls)
     }
 
-    /// Commite les propositions reçues et mises en file — typiquement la demande de sortie
-    /// d'un autre membre.
+    /// Commits the proposals received and queued — typically another member's request to leave.
     ///
-    /// Même discipline que le reste : le commit retourné doit être publié avant
+    /// Same discipline as the rest: the returned commit must be published before
     /// [`Conversation::apply_pending`].
     pub fn commit_pending(&mut self, identity: &Identity) -> Result<Change> {
         let (commit, _welcome, _group_info) = self
@@ -273,17 +269,17 @@ impl Conversation {
         Ok(Change { commit: commit.tls_serialize_detached().map_err(mls)? })
     }
 
-    /// Rejoint une conversation depuis un Welcome.
+    /// Joins a conversation from a Welcome.
     pub fn join(identity: &Identity, welcome: &[u8], ratchet_tree: &[u8]) -> Result<Self> {
         let message = MlsMessageIn::tls_deserialize_exact(welcome)
-            .map_err(|_| CryptoError::Malformed("welcome illisible"))?;
+            .map_err(|_| CryptoError::Malformed("unreadable welcome"))?;
 
         let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
             return Err(CryptoError::UnexpectedMessage);
         };
 
         let ratchet_tree = RatchetTreeIn::tls_deserialize_exact(ratchet_tree)
-            .map_err(|_| CryptoError::Malformed("arbre de ratchet illisible"))?;
+            .map_err(|_| CryptoError::Malformed("unreadable ratchet tree"))?;
 
         let staged = StagedWelcome::new_from_welcome(
             &identity.provider,
@@ -293,8 +289,8 @@ impl Conversation {
         )
         .map_err(mls)?;
 
-        // L'étape « staged » permet d'inspecter qui est dans le groupe avant de s'engager.
-        // On rejoint directement ici ; une UI sérieuse afficherait d'abord les membres.
+        // The "staged" step allows inspecting who is in the group before committing to it. We
+        // join straight away here; a serious UI would show the members first.
         let group = staged.into_group(&identity.provider).map_err(mls)?;
         Ok(Self { group })
     }
@@ -307,18 +303,19 @@ impl Conversation {
             .map_err(mls)
     }
 
-    /// Traite un message entrant.
+    /// Processes an incoming message.
     ///
-    /// Un flux MLS mélange messages applicatifs et messages de gestion de groupe (commits,
-    /// propositions). Le point d'entrée est donc unique, et l'appelant doit gérer les deux :
-    /// ignorer les commits ferait diverger l'epoch et rendrait toute la suite indéchiffrable.
+    /// An MLS stream mixes application messages and group management messages (commits,
+    /// proposals). There is therefore a single entry point, and the caller must handle both:
+    /// ignoring commits would make the epoch diverge and render everything after it
+    /// undecryptable.
     ///
-    /// # Le contexte de politique
+    /// # The policy context
     ///
-    /// `context` porte les révocations que **l'appelant a vérifiées** — ce module ne fait pas
-    /// de réseau. Un contexte vide n'est pas neutre : il fait refuser le retrait d'un appareil
-    /// révoqué par un non-admin, qui est précisément le cas d'un téléphone volé. L'appelant
-    /// doit donc le tenir à jour depuis la liste d'appareils du compte concerné.
+    /// `context` carries the revocations **the caller has verified** — this module does no
+    /// networking. An empty context is not neutral: it makes a non-admin's removal of a revoked
+    /// device be refused, which is exactly the stolen-phone case. The caller must therefore keep
+    /// it up to date from the device list of the account concerned.
     pub fn process(
         &mut self,
         identity: &Identity,
@@ -326,7 +323,7 @@ impl Conversation {
         context: &roles::Context,
     ) -> Result<Incoming> {
         let message = MlsMessageIn::tls_deserialize_exact(message)
-            .map_err(|_| CryptoError::Malformed("message illisible"))?;
+            .map_err(|_| CryptoError::Malformed("unreadable message"))?;
 
         let protocol_message: ProtocolMessage = match message.extract() {
             MlsMessageBodyIn::PrivateMessage(m) => m.into(),
@@ -339,9 +336,9 @@ impl Conversation {
             .process_message(&identity.provider, protocol_message)
             .map_err(mls)?;
 
-        // L'expéditeur est authentifié par MLS : cette valeur ne peut pas être falsifiée par
-        // un autre membre du groupe. Elle reste relative aux identités du groupe, dont
-        // l'authenticité dépend toujours de la vérification d'empreinte.
+        // The sender is authenticated by MLS: this value cannot be forged by another group
+        // member. It stays relative to the group's identities, whose authenticity still depends
+        // on fingerprint verification.
         let sender = match processed.credential().credential_type() {
             CredentialType::Basic => BasicCredential::try_from(processed.credential().clone())
                 .ok()
@@ -354,14 +351,13 @@ impl Conversation {
                 Ok(Incoming::Application { sender, plaintext: app.into_bytes() })
             }
             ProcessedMessageContent::StagedCommitMessage(commit) => {
-                // **Le point où la politique s'applique.** Entre la validation
-                // cryptographique, qui vient d'aboutir, et l'application, qui est
-                // irréversible.
+                // **This is where the policy applies.** Between cryptographic validation, which
+                // has just succeeded, and application, which is irreversible.
                 //
-                // Refuser fait diverger de quiconque aurait accepté. C'est acceptable parce
-                // que la règle est déterministe et dérivée d'un état authentifié : tous les
-                // clients honnêtes refusent identiquement, et seul un committer malveillant
-                // se retrouve seul avec son epoch. Voir `roles.rs`.
+                // Refusing diverges from anyone who would have accepted. That is acceptable
+                // because the rule is deterministic and derived from authenticated state: every
+                // honest client refuses identically, and only a malicious committer ends up
+                // alone on its epoch. See `roles.rs`.
                 let committer = sender.as_deref().unwrap_or_default();
                 self.authorize_commit(committer, &commit, context)?;
 
@@ -370,10 +366,10 @@ impl Conversation {
                     .map_err(mls)?;
                 Ok(Incoming::GroupChanged)
             }
-            // Une proposition n'a d'effet que si elle est CONSERVÉE jusqu'au commit qui la
-            // reprend. La jeter ici — ce que faisait la version précédente — rendait toute
-            // demande de sortie inopérante : `commit_pending` ne trouvait rien à commiter, et
-            // le partant restait indéfiniment dans le groupe sans qu'aucune erreur ne le dise.
+            // A proposal only has effect if it is KEPT until the commit that picks it up.
+            // Dropping it here — as the previous version did — made every leave request inert:
+            // `commit_pending` found nothing to commit, and the leaver stayed in the group
+            // indefinitely with no error saying so.
             ProcessedMessageContent::ProposalMessage(proposal) => {
                 self.group
                     .store_pending_proposal(identity.provider.storage(), *proposal)
@@ -384,11 +380,11 @@ impl Conversation {
         }
     }
 
-    /// Traduit un commit MLS en résumé pour la politique, puis tranche.
+    /// Translates an MLS commit into a summary for the policy, then rules on it.
     ///
-    /// Toute la traduction est ici, et la décision est ailleurs (`roles::authorize`, pure et
-    /// testée isolément). Mélanger les deux rendrait la règle intestable : il faudrait monter
-    /// un vrai groupe MLS pour couvrir chaque cas limite, et on n'en couvrirait qu'une part.
+    /// All the translation is here, and the decision is elsewhere (`roles::authorize`, pure and
+    /// tested in isolation). Mixing the two would make the rule untestable: you would have to
+    /// stand up a real MLS group to cover each edge case, and would only cover some of them.
     fn authorize_commit(
         &self,
         committer: &str,
@@ -397,9 +393,9 @@ impl Conversation {
     ) -> Result<()> {
         let Some(roster) = self.roster()? else { return Ok(()) };
 
-        // L'arbre d'AVANT le commit : c'est le roster en vigueur au moment où le committer a
-        // agi qui décide, pas celui que son commit installerait.
-        let membres: Vec<(LeafNodeIndex, String, Vec<u8>)> = self
+        // The tree from BEFORE the commit: what decides is the roster in force when the
+        // committer acted, not the one their commit would install.
+        let members: Vec<(LeafNodeIndex, String, Vec<u8>)> = self
             .group
             .members()
             .map(|m| (m.index, handle_of(&m.credential), m.signature_key.as_slice().to_vec()))
@@ -408,15 +404,15 @@ impl Conversation {
         let mut removals = Vec::new();
         for proposal in commit.remove_proposals() {
             let index = proposal.remove_proposal().removed();
-            let Some((_, target, target_key)) = membres.iter().find(|(i, _, _)| *i == index)
+            let Some((_, target, target_key)) = members.iter().find(|(i, _, _)| *i == index)
             else {
-                // Retrait d'une feuille absente de l'arbre : MLS l'aurait refusé. Par
-                // prudence on ne laisse pas passer ce qu'on ne sait pas décrire.
-                return Err(CryptoError::PolicyViolation("retrait d'un membre inconnu"));
+                // Removal of a leaf absent from the tree: MLS would have refused it. Out of
+                // caution we do not let through what we cannot describe.
+                return Err(CryptoError::PolicyViolation("removal of an unknown member"));
             };
 
-            // Un départ volontaire : la proposition vient de l'appareil lui-même. Le
-            // committer ne fait que la reprendre, ce que la politique autorise à tous.
+            // A voluntary departure: the proposal comes from the device itself. The committer
+            // only picks it up, which the policy allows anyone to do.
             let self_requested = matches!(
                 proposal.sender(),
                 Sender::Member(sender_index) if *sender_index == index
@@ -425,11 +421,11 @@ impl Conversation {
             removals.push(roles::Removal { target, target_key, self_requested });
         }
 
-        let retires: Vec<LeafNodeIndex> =
+        let removed: Vec<LeafNodeIndex> =
             commit.remove_proposals().map(|p| p.remove_proposal().removed()).collect();
-        let remaining: Vec<&str> = membres
+        let remaining: Vec<&str> = members
             .iter()
-            .filter(|(index, _, _)| !retires.contains(index))
+            .filter(|(index, _, _)| !removed.contains(index))
             .map(|(_, handle, _)| handle.as_str())
             .collect();
 
@@ -453,13 +449,13 @@ impl Conversation {
         roles::authorize(Some(&roster), &summary, context)
     }
 
-    /// Empreintes des autres membres, à comparer hors bande.
+    /// Fingerprints of the other members, to compare out of band.
     ///
-    /// **Sans cette comparaison, le E2EE est décoratif.** Le serveur distribue les
-    /// KeyPackages ; rien ne l'empêche de servir les siens en se faisant passer pour le
-    /// correspondant, puis de relayer en clair entre deux sessions parfaitement chiffrées.
-    /// Toutes les vérifications cryptographiques passeront. Seul un canal hors bande —
-    /// de visu, QR code, ou un log de transparence auditable — ferme cette faille.
+    /// **Without that comparison, E2EE is decorative.** The server distributes the KeyPackages;
+    /// nothing stops it serving its own while posing as the peer, then relaying in the clear
+    /// between two perfectly encrypted sessions. Every cryptographic check will pass. Only an
+    /// out-of-band channel — in person, QR code, or an auditable transparency log — closes this
+    /// hole.
     pub fn peer_fingerprints(&self, identity: &Identity) -> Vec<(String, String)> {
         self.group
             .members()
@@ -468,20 +464,20 @@ impl Conversation {
                 let name = BasicCredential::try_from(member.credential.clone())
                     .ok()
                     .map(|c| String::from_utf8_lossy(c.identity()).into_owned())
-                    .unwrap_or_else(|| "<credential non basique>".to_owned());
+                    .unwrap_or_else(|| "<non-basic credential>".to_owned());
                 (name, fingerprint(&member.signature_key))
             })
             .collect()
     }
 
-    /// Clés de signature MLS des autres membres.
+    /// MLS signature keys of the other members.
     ///
-    /// C'est par cette clé qu'on désigne une feuille dans [`Conversation::remove`] : le
-    /// credential ne suffit pas, il porte le handle du compte, commun à tous ses appareils.
+    /// This key is how a leaf is designated in [`Conversation::remove`]: the credential is not
+    /// enough, it carries the account handle, shared by all its devices.
     ///
-    /// La liste vient de l'arbre, donc de l'état authentifié — pas du serveur. C'est ce qui
-    /// permet au client de constater qu'un membre de l'arbre ne figure plus parmi les
-    /// appareils actifs de son compte, et donc de le retirer.
+    /// The list comes from the tree, hence from authenticated state — not from the server. That
+    /// is what lets a client observe that a member of the tree no longer appears among the
+    /// active devices of its account, and therefore remove it.
     pub fn peer_signature_keys(&self, identity: &Identity) -> Vec<Vec<u8>> {
         self.group
             .members()
@@ -490,8 +486,8 @@ impl Conversation {
             .collect()
     }
 
-    /// Epoch courante. Avance à chaque commit ; deux membres à des epochs différentes ne
-    /// peuvent pas se lire. C'est la première chose à regarder quand un message ne passe pas.
+    /// Current epoch. Advances on every commit; two members on different epochs cannot read each
+    /// other. It is the first thing to look at when a message does not get through.
     pub fn epoch(&self) -> u64 {
         self.group.epoch().as_u64()
     }
@@ -500,45 +496,44 @@ impl Conversation {
         self.group.members().count()
     }
 
-    /// Clé symétrique du canal éphémère, dérivée du secret d'export de l'epoch courante.
+    /// Symmetric key for the ephemeral channel, derived from the current epoch's exporter
+    /// secret.
     ///
-    /// # Pourquoi pas le ratchet applicatif
+    /// # Why not the application ratchet
     ///
-    /// Parce que le ratchet est fait pour ne rien perdre : chaque message consomme une
-    /// génération, et un trou trop large casse le déchiffrement de la suite. Un indicateur de
-    /// frappe, lui, est fait pour être perdu — il n'est jamais stocké, jamais réémis, et sans
-    /// valeur passées quelques secondes. Le faire passer par le ratchet ferait payer à
-    /// l'historique le prix d'un signal jetable.
+    /// Because the ratchet is built to lose nothing: every message consumes a generation, and
+    /// too wide a gap breaks decryption of what follows. A typing indicator, by contrast, is
+    /// built to be lost — never stored, never resent, and worthless after a few seconds. Routing
+    /// it through the ratchet would make the history pay the price of a disposable signal.
     ///
-    /// # Ce que cette clé ne donne pas
+    /// # What this key does not give
     ///
-    /// Pas de forward secrecy à l'intérieur d'une epoch : tous les signaux d'une même epoch
-    /// tombent ensemble si le secret fuit. C'est le bon compromis pour une donnée dont la
-    /// valeur expire en quelques secondes, mais il faut l'énoncer.
+    /// No forward secrecy within an epoch: every signal of one epoch falls together if the
+    /// secret leaks. That is the right trade-off for data whose value expires in seconds, but it
+    /// has to be stated.
     ///
-    /// Pas d'authentification de l'émetteur non plus : la clé est celle du groupe, donc tout
-    /// membre peut produire un signal qui semble venir d'un autre. Sans conséquence à deux,
-    /// à documenter au-delà.
+    /// No sender authentication either: the key belongs to the group, so any member can produce
+    /// a signal that appears to come from another. Harmless with two, to be documented beyond.
     ///
-    /// Ce qu'elle donne en revanche est réel : elle change à chaque commit. Un membre retiré
-    /// perd le canal éphémère au même instant qu'il perd le reste — la PCS s'applique ici
-    /// sans code supplémentaire.
+    /// What it does give is real: it changes on every commit. A removed member loses the
+    /// ephemeral channel at the same instant they lose the rest — PCS applies here with no extra
+    /// code.
     pub fn signal_key(&self, identity: &Identity) -> Result<Vec<u8>> {
         self.group
             .export_secret(identity.provider.crypto(), "wac-signal-key-v1", &[], 32)
-            .map_err(|e| CryptoError::Storage(format!("export du secret d'epoch : {e}")))
+            .map_err(|e| CryptoError::Storage(format!("epoch secret export: {e}")))
     }
 
-    /// Identifiant du groupe, à utiliser comme clé de routage côté serveur.
+    /// The group identifier, to use as the routing key on the server side.
     pub fn id(&self) -> Vec<u8> {
         self.group.group_id().as_slice().to_vec()
     }
 
-    /// Recharge une conversation depuis l'état persisté du provider.
+    /// Reloads a conversation from the provider's persisted state.
     pub fn load(identity: &Identity, group_id: &[u8]) -> Result<Self> {
         let group = MlsGroup::load(identity.provider.storage(), &GroupId::from_slice(group_id))
             .map_err(mls)?
-            .ok_or_else(|| CryptoError::Storage("groupe absent du stockage".into()))?;
+            .ok_or_else(|| CryptoError::Storage("group not found in storage".into()))?;
         Ok(Self { group })
     }
 }
@@ -546,8 +541,8 @@ impl Conversation {
 #[derive(Debug)]
 pub enum Incoming {
     Application { sender: Option<String>, plaintext: Vec<u8> },
-    /// Un commit a été appliqué : la composition du groupe ou les clés ont changé.
+    /// A commit was applied: group membership or keys have changed.
     GroupChanged,
-    /// Proposition en attente d'un commit. Rien à afficher.
+    /// Proposal awaiting a commit. Nothing to display.
     Proposal,
 }

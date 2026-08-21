@@ -2,21 +2,21 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RatchetError {
-    #[error("signature du signed prekey invalide")]
+    #[error("invalid signed prekey signature")]
     BadPreKeySignature,
 
-    #[error("échec du déchiffrement (clé, nonce ou données associées incorrectes)")]
+    #[error("decryption failed (wrong key, nonce or associated data)")]
     DecryptionFailed,
 
-    #[error("message trop ancien : la clé a déjà été consommée et effacée")]
+    #[error("message too old: the key has already been consumed and erased")]
     MessageKeyGone,
 
-    #[error("saut de {0} messages refusé (limite : {1})")]
+    #[error("skip of {0} messages refused (limit: {1})")]
     TooManySkipped(u32, u32),
 
-    #[error("message reçu avant l'établissement de la session")]
+    #[error("message received before the session was established")]
     NoSession,
 
-    #[error("encodage invalide : {0}")]
+    #[error("invalid encoding: {0}")]
     Malformed(&'static str),
 }

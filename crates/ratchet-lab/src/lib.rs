@@ -1,31 +1,32 @@
 //! # ratchet-lab
 //!
-//! Réimplémentation pédagogique de X3DH et du Double Ratchet.
+//! Teaching reimplementation of X3DH and the Double Ratchet.
 //!
-//! ## Pourquoi cette crate existe
+//! ## Why this crate exists
 //!
-//! Comprendre pourquoi un protocole est construit ainsi demande de l'écrire. Chaque module
-//! documente non pas ce que fait le code — ça se lit — mais quelle attaque chaque étape
-//! écarte, et ce qu'elle n'écarte pas.
+//! Understanding why a protocol is built the way it is means writing it. Each module
+//! documents not what the code does — that much is readable — but which attack each step
+//! rules out, and which it does not.
 //!
-//! ## Pourquoi elle ne doit jamais tourner en production
+//! ## Why it must NEVER run in production
 //!
-//! * aucun audit ;
-//! * aucune résistance aux canaux auxiliaires (comparaisons non constant-time hors des
-//!   primitives sous-jacentes, allocations dépendantes du secret) ;
-//! * pas de multi-device, pas de groupes, pas de résistance quantique ;
-//! * la persistance de l'état de session, où se logent la plupart des bugs exploitables,
-//!   n'est pas traitée.
+//! This code is **not audited**. Do not ship it. Do not import it from anything a user
+//! runs. Specifically:
 //!
-//! Le chemin de production du projet passe exclusivement par OpenMLS, dans `crypto-core`.
-//! Rien ici ne doit être importé par cette crate — et l'absence de dépendance vers
-//! `ratchet-lab` dans le manifeste de `crypto-core` est un invariant à préserver.
+//! * no audit, by anyone, ever;
+//! * no side-channel resistance (non constant-time comparisons outside the underlying
+//!   primitives, secret-dependent allocations);
+//! * no multi-device, no groups, no post-quantum resistance;
+//! * session state persistence — where most exploitable bugs live — is not handled at all.
 //!
-//! ## Ce que le protocole ne protège pas
+//! The project's production path goes exclusively through OpenMLS, in `crypto-core`.
+//! Nothing here may be imported by that crate — and the absence of a `ratchet-lab`
+//! dependency in `crypto-core`'s manifest is an invariant to preserve.
 //!
-//! Même correctement implémenté, il ne cache **pas** qui parle à qui, quand, à quelle
-//! fréquence, ni la taille des messages. Ces métadonnées sont souvent plus révélatrices
-//! que le contenu.
+//! ## What the protocol does not protect
+//!
+//! Even implemented correctly, it does **not** hide who talks to whom, when, how often, nor
+//! the size of the messages. Those metadata are often more revealing than the content.
 
 pub mod error;
 pub mod kdf;

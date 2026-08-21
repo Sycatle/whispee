@@ -1,17 +1,17 @@
-//! X3DH — établissement de session asynchrone.
+//! X3DH — asynchronous session establishment.
 //!
-//! Le point clé : Alice dérive un secret partagé avec Bob **sans que Bob soit en ligne**,
-//! en n'utilisant que le bundle qu'il a laissé sur le serveur. C'est ce qui rend la
-//! messagerie asynchrone possible ; tout le reste du protocole en découle.
+//! The key point: Alice derives a shared secret with Bob **without Bob being online**, using
+//! only the bundle he left on the server. That is what makes asynchronous messaging
+//! possible; the rest of the protocol follows from it.
 //!
-//! Chacun des quatre DH a un rôle distinct :
-//!   DH1 = IK_A · SPK_B  authentifie Alice auprès de Bob
-//!   DH2 = EK_A · IK_B   authentifie Bob auprès d'Alice
-//!   DH3 = EK_A · SPK_B  apporte la forward secrecy
-//!   DH4 = EK_A · OPK_B  renforce la FS du tout premier message (si une OPK est disponible)
+//! Each of the four DHs plays a distinct role:
+//!   DH1 = IK_A · SPK_B  authenticates Alice to Bob
+//!   DH2 = EK_A · IK_B   authenticates Bob to Alice
+//!   DH3 = EK_A · SPK_B  provides forward secrecy
+//!   DH4 = EK_A · OPK_B  strengthens the FS of the very first message (if an OPK is available)
 //!
-//! Aucun DH n'est signé : le secret n'est prouvable par personne d'autre que les deux
-//! participants. C'est la *deniability*, et c'est délibéré.
+//! No DH is signed: the secret is provable by nobody except the two participants. That is
+//! deniability, and it is deliberate.
 
 use rand_core::{CryptoRng, RngCore};
 use x25519_dalek::PublicKey;
@@ -20,20 +20,20 @@ use crate::error::RatchetError;
 use crate::kdf::{RootKey, kdf_x3dh};
 use crate::keys::{EphemeralKeyPair, IdentityKeyPair, IdentityPublic, PreKeyBundle, PreKeyStore};
 
-/// Ce qu'Alice joint à son premier message pour que Bob puisse rejouer le même calcul.
+/// What Alice attaches to her first message so Bob can replay the same computation.
 #[derive(Clone)]
 #[derive(Debug)]
 pub struct InitialMessage {
     pub identity: IdentityPublic,
     pub ephemeral: PublicKey,
-    /// Indique à Bob s'il doit inclure sa one-time prekey dans le calcul.
+    /// Tells Bob whether he must include his one-time prekey in the computation.
     pub used_one_time_prekey: bool,
 }
 
 pub struct X3dhOutcome {
     pub shared_secret: RootKey,
-    /// Liées à chaque message via l'AEAD : un attaquant ne peut pas rejouer un chiffré
-    /// dans une conversation entre d'autres identités.
+    /// Bound to every message through the AEAD: an attacker cannot replay a ciphertext into
+    /// a conversation between other identities.
     pub associated_data: Vec<u8>,
 }
 
@@ -44,14 +44,14 @@ fn associated_data(initiator: &IdentityPublic, responder: &IdentityPublic) -> Ve
     ad
 }
 
-/// Côté Alice.
+/// Alice's side.
 pub fn initiate<R: RngCore + CryptoRng>(
     rng: &mut R,
     identity: &IdentityKeyPair,
     bundle: &PreKeyBundle,
 ) -> Result<(X3dhOutcome, InitialMessage), RatchetError> {
-    // Sans cette vérification, un serveur malveillant substitue sa propre signed prekey
-    // et lit toute la conversation.
+    // Without this check, a malicious server substitutes its own signed prekey and reads the
+    // whole conversation.
     bundle.verify()?;
 
     let ephemeral = EphemeralKeyPair::generate(rng);
@@ -79,7 +79,7 @@ pub fn initiate<R: RngCore + CryptoRng>(
     Ok((outcome, initial))
 }
 
-/// Côté Bob. Rejoue les mêmes DH dans le même ordre, chaque paire prise dans l'autre sens.
+/// Bob's side. Replays the same DHs in the same order, each pair taken the other way round.
 pub fn respond(store: &PreKeyStore, initial: &InitialMessage) -> Result<X3dhOutcome, RatchetError> {
     let mut dhs = vec![
         store.signed_prekey.secret.diffie_hellman(&initial.identity.dh).to_bytes(),
@@ -90,7 +90,7 @@ pub fn respond(store: &PreKeyStore, initial: &InitialMessage) -> Result<X3dhOutc
         let opk = store
             .one_time_prekey
             .as_ref()
-            .ok_or(RatchetError::Malformed("one-time prekey réclamée mais absente"))?;
+            .ok_or(RatchetError::Malformed("one-time prekey claimed but missing"))?;
         dhs.push(opk.secret.diffie_hellman(&initial.ephemeral).to_bytes());
     }
 

@@ -1,93 +1,93 @@
-//! L'appairage transporte la clé racine du compte. Une faille ici cède le compte entier.
+//! Pairing carries the account root key. A flaw here gives away the whole account.
 
 use crypto_core::pairing::{PairingOffer, seal};
 
-const SECRET: &[u8] = b"graine de compte, vaut le compte entier";
+const SECRET: &[u8] = b"account seed, worth the whole account";
 
 #[test]
-fn le_paquet_scelle_est_ouvert_par_son_destinataire() {
-    let offre = PairingOffer::generate();
-    let (public, id) = (offre.public_key(), offre.id());
+fn the_sealed_packet_is_opened_by_its_recipient() {
+    let offer = PairingOffer::generate();
+    let (public, id) = (offer.public_key(), offer.id());
 
-    let (paquet, code_emetteur) = seal(&public, &id, SECRET).unwrap();
-    let ouvert = offre.open(&paquet).unwrap();
+    let (packet, sender_code) = seal(&public, &id, SECRET).unwrap();
+    let opened = offer.open(&packet).unwrap();
 
-    assert_eq!(ouvert.plaintext, SECRET);
-    // Le code doit concorder des deux côtés, sinon il ne sert à rien de le comparer.
-    assert_eq!(ouvert.confirmation, code_emetteur);
-    assert_eq!(code_emetteur.len(), 6);
+    assert_eq!(opened.plaintext, SECRET);
+    // The code must match on both sides, otherwise comparing it is pointless.
+    assert_eq!(opened.confirmation, sender_code);
+    assert_eq!(sender_code.len(), 6);
 }
 
-/// Le serveur relaie le paquet. Il ne détient aucune des deux moitiés privées, donc il ne
-/// peut pas l'ouvrir — pas plus qu'un tiers ayant photographié le QR code.
+/// The server relays the packet. It holds neither private half, so it cannot open it — no more
+/// than a third party who photographed the QR code.
 #[test]
-fn un_tiers_ne_peut_pas_ouvrir_le_paquet() {
-    let offre = PairingOffer::generate();
-    let (public, id) = (offre.public_key(), offre.id());
-    let (paquet, _) = seal(&public, &id, SECRET).unwrap();
+fn a_third_party_cannot_open_the_packet() {
+    let offer = PairingOffer::generate();
+    let (public, id) = (offer.public_key(), offer.id());
+    let (packet, _) = seal(&public, &id, SECRET).unwrap();
 
-    // L'intrus connaît tout ce qui a transité en clair : le QR et le paquet. Il lui manque
-    // la clé privée éphémère, qui n'a jamais quitté le nouvel appareil.
-    let intrus = PairingOffer::generate();
+    // The intruder knows everything that travelled in the clear: the QR and the packet. What he
+    // lacks is the ephemeral private key, which never left the new device.
+    let intruder = PairingOffer::generate();
 
-    assert!(intrus.open(&paquet).is_err());
+    assert!(intruder.open(&packet).is_err());
 }
 
-/// L'identifiant d'appairage est l'AAD du chiffrement : un paquet destiné à une session ne
-/// doit pas pouvoir être rejoué dans une autre.
+/// The pairing id is the AAD of the encryption: a packet meant for one session must not be
+/// replayable in another.
 #[test]
-fn un_paquet_destine_a_une_autre_session_est_rejete() {
-    let offre = PairingOffer::generate();
-    let public = offre.public_key();
+fn a_packet_meant_for_another_session_is_rejected() {
+    let offer = PairingOffer::generate();
+    let public = offer.public_key();
 
-    let (paquet, _) = seal(&public, &[0u8; 16], SECRET).unwrap();
+    let (packet, _) = seal(&public, &[0u8; 16], SECRET).unwrap();
 
-    // Même paire de clés, identifiant différent : l'AEAD refuse.
-    assert!(offre.open(&paquet).is_err());
-}
-
-#[test]
-fn un_paquet_altere_est_rejete() {
-    let offre = PairingOffer::generate();
-    let (public, id) = (offre.public_key(), offre.id());
-    let (mut paquet, _) = seal(&public, &id, SECRET).unwrap();
-
-    let dernier = paquet.len() - 1;
-    paquet[dernier] ^= 0x01;
-
-    assert!(offre.open(&paquet).is_err());
+    // Same key pair, different id: the AEAD refuses.
+    assert!(offer.open(&packet).is_err());
 }
 
 #[test]
-fn un_paquet_tronque_est_rejete_sans_paniquer() {
-    let offre = PairingOffer::generate();
-    assert!(offre.open(&[0u8; 10]).is_err());
+fn a_tampered_packet_is_rejected() {
+    let offer = PairingOffer::generate();
+    let (public, id) = (offer.public_key(), offer.id());
+    let (mut packet, _) = seal(&public, &id, SECRET).unwrap();
+
+    let last = packet.len() - 1;
+    packet[last] ^= 0x01;
+
+    assert!(offer.open(&packet).is_err());
 }
 
-/// Deux appairages successifs ne doivent pas produire le même code de confirmation, sinon
-/// comparer les codes ne prouve rien.
 #[test]
-fn deux_appairages_ont_des_codes_differents() {
+fn a_truncated_packet_is_rejected_without_panicking() {
+    let offer = PairingOffer::generate();
+    assert!(offer.open(&[0u8; 10]).is_err());
+}
+
+/// Two successive pairings must not produce the same confirmation code, otherwise comparing the
+/// codes proves nothing.
+#[test]
+fn two_pairings_have_different_codes() {
     let mut codes = std::collections::HashSet::new();
 
     for _ in 0..20 {
-        let offre = PairingOffer::generate();
-        let (public, id) = (offre.public_key(), offre.id());
+        let offer = PairingOffer::generate();
+        let (public, id) = (offer.public_key(), offer.id());
         codes.insert(seal(&public, &id, SECRET).unwrap().1);
     }
 
-    assert!(codes.len() > 18, "les codes de confirmation se répètent");
+    assert!(codes.len() > 18, "the confirmation codes repeat");
 }
 
-/// Le QR ne doit contenir aucun secret : il est photographiable par construction.
+/// The QR must contain no secret: it can be photographed by construction.
 #[test]
-fn l_offre_ne_publie_que_des_valeurs_publiques() {
-    let offre = PairingOffer::generate();
-    let (public, id) = (offre.public_key(), offre.id());
+fn the_offer_only_publishes_public_values() {
+    let offer = PairingOffer::generate();
+    let (public, id) = (offer.public_key(), offer.id());
 
-    // Ce qui sort de l'offre, c'est exactement ce qui part dans le QR. Deux offres n'ont rien
-    // en commun : aucune valeur fixe ne pourrait servir de secret partagé implicite.
-    let autre = PairingOffer::generate();
-    assert_ne!(public, autre.public_key());
-    assert_ne!(id, autre.id());
+    // What comes out of the offer is exactly what goes into the QR. Two offers share nothing:
+    // no fixed value could act as an implicit shared secret.
+    let other = PairingOffer::generate();
+    assert_ne!(public, other.public_key());
+    assert_ne!(id, other.id());
 }

@@ -1,14 +1,17 @@
 import {
   Bell,
+  Check,
   ChevronDown,
   ChevronLeft,
   Copy,
+  Ellipsis,
   Info,
   Lock,
   MonitorSmartphone,
   Paperclip,
   Plus,
   QrCode,
+  Reply,
   Search,
   SendHorizontal,
   Settings,
@@ -23,12 +26,12 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 /**
- * The icon inventory. Twenty, named by role, and closed.
+ * The icon inventory. Twenty-three, named by role, and closed.
  *
  * # Named imports only, never `import * as icons`
  *
  * A star import defeats tree-shaking: the bundler cannot prove which of the fifteen hundred
- * modules in `lucide-react` are unreachable, so it keeps them. Twenty named imports are a few
+ * modules in `lucide-react` are unreachable, so it keeps them. Twenty-three named imports are a few
  * kilobytes; the star import is the whole set. This is not a style preference, it is the
  * difference between the budget the plan allowed for icons and roughly three hundred times it.
  *
@@ -61,14 +64,17 @@ export type IconName =
   | "back"
   | "close"
   | "collapse"
+  | "confirm"
   | "copy"
   | "devices"
   | "emoji"
   | "info"
   | "lock"
+  | "more"
   | "notifications"
   | "pair"
   | "profile"
+  | "reply"
   | "revoke"
   | "search"
   | "send"
@@ -90,6 +96,15 @@ const ICONS: Record<IconName, LucideIcon> = {
   close: X,
   /** The disclosure chevron on the rail's sections. */
   collapse: ChevronDown,
+  /**
+   * Acknowledge and move on: "I have written this down", "we are done pairing".
+   *
+   * Distinct from `close` on purpose, and the distinction is the whole reason it exists. A cross
+   * dismisses something you are finished looking at; a tick says the thing it sits on *worked*.
+   * Both buttons happen to close a panel, which is why one stood in for the other until now — and
+   * why a screen reader heard "Done" while the eye read a dismissal.
+   */
+  confirm: Check,
   /** Copy a fingerprint or a pairing code — the one gesture the evidence screens all need. */
   copy: Copy,
   /** The device list: this account's, and a peer's. */
@@ -107,11 +122,32 @@ const ICONS: Record<IconName, LucideIcon> = {
   info: Info,
   /** The local lock. A padlock, and no attempt to distinguish locked from unlocked by shape. */
   lock: Lock,
+  /**
+   * The rest of the actions on a message, behind one button.
+   *
+   * Horizontal and not vertical: it sits in a row of buttons that runs along the top edge of a
+   * message, and a vertical ellipsis in a horizontal strip reads as a divider between the buttons
+   * beside it rather than as one of them.
+   *
+   * What this does not solve: an ellipsis says "there is more" and nothing about what. It is only
+   * honest at the end of a row whose visible buttons already cover the frequent gestures — used
+   * as the sole affordance it would hide the interface behind a shrug.
+   */
+  more: Ellipsis,
   notifications: Bell,
   /** Pairing, which is a QR code in practice. */
   pair: QrCode,
   /** Your own account: the name you show and the handle you cannot change. */
   profile: UserRound,
+  /**
+   * Answer one message rather than the thread.
+   *
+   * This table used to have no arrow, and the reply control in the message row was therefore the
+   * word "Reply" — the one text button in a strip of glyphs. That was the right call while the
+   * inventory lacked the glyph and the wrong shape to leave in place once a row of actions had to
+   * fit in a gutter.
+   */
+  reply: Reply,
   /** Revoke a device, delete a vault entry. Destructive, and drawn as such. */
   revoke: Trash2,
   search: Search,

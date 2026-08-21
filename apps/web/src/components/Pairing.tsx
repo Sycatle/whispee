@@ -88,19 +88,19 @@ export function PairDevice({ onDone }: { onDone: () => void }) {
         title="Confirmation code"
         description="This code must be identical on both screens. If it differs, stop: the device you are pairing is not the one you think it is."
         // "Done" here has exactly one effect — it closes this panel — so it becomes a glyph by
-        // the rule at the top of `ui/IconButton.tsx`: frequent, reversible, and ✕ is the one
+        // the rule at the top of `ui/IconButton.tsx`: frequent, reversible, and a tick is the one
         // picture nobody has to be taught. The accessible name stays "Done", because that is
         // what the reader is agreeing to: the two codes matched.
         //
-        // What this does not solve: the glyph is a cross and the name is an affirmation, and
-        // those do not say the same thing. A check mark would, and there is none in the icon
-        // inventory (`ui/Icon.tsx`), which is closed on purpose. Until one is added this control
-        // reads as dismissal to the eye and as acknowledgement to a screen reader.
+        // A tick and not a cross. It closes the panel either way, so the cross was defensible on
+        // effect — and it read as dismissal to the eye while announcing an affirmation to a
+        // screen reader, which is two different messages about the same button. `confirm` exists
+        // for exactly this: the gesture here is agreement, not escape.
         actions={
           <IconButton
             label="Done"
             variant="primary"
-            icon={<Icon name="close" />}
+            icon={<Icon name="confirm" />}
             onClick={onDone}
           />
         }

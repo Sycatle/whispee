@@ -35,7 +35,7 @@ argument is about, and it does not carry over to a job that answers whether the 
 correct. Run `cargo test --release` locally anyway; waiting on a runner to learn something a
 laptop answers in a minute is its own waste.
 
-## Two things that get a pull request rejected on sight
+## Three things that get a pull request rejected on sight
 
 ### 1. `crypto-core` must never depend on `ratchet-lab`
 
@@ -64,6 +64,26 @@ In release, `debug_assert!` disappears and the error propagates normally. The te
 in release — so a green `cargo test` in debug is not evidence of anything.
 
 **Never deploy, and never benchmark against, a debug build of this code.**
+
+### 3. An interactive element carries a name, and a keyboard can reach it
+
+Not a style preference, and not a review checklist item — two thirds of it is enforced before the
+code runs. `label` is a required prop on `Field` and `IconButton`, so an unnamed control does not
+compile, and `pnpm lint` fails the build on the rest.
+
+The two mistakes that keep being made, both of which have shipped here before:
+
+- **A name on a `<span>` or a `<div>`.** Those elements have the role `generic`, which ARIA
+  forbids naming and most screen readers ignore, so the label is not weak — it is absent. Four
+  controls carried one and said nothing at all.
+- **Something revealed on hover and not on focus.** `display: none` takes an element out of the
+  tab order, so a control revealed with `hidden group-hover:` is mouse-only while looking
+  perfectly fine in review.
+
+The rules, the reasoning and the known gaps are in
+[docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md). A patch that weakens one of them belongs in that
+document's own limitations section, the same way a weakened security property belongs in the
+threat model.
 
 ## Running the tests
 

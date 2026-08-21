@@ -100,6 +100,7 @@ Every design decision is written down, with what it costs and what it does not s
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | Wire-level detail: attestations, signature domains, sealed sender, the transparency log |
 | [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) | What the adversary is assumed to do, and the full known-limitations table |
 | [docs/SECURITY-PROPERTIES.md](docs/SECURITY-PROPERTIES.md) | The properties claimed, the ones deliberately not claimed, and the tests that pin them |
+| [docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md) | What holds the interface reachable without a mouse, and what is still missing |
 | [docs/BUILD.md](docs/BUILD.md) | Building every target, reproducible releases, verification |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | What is planned, what is half-done, and what has been ruled out |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, the invariants a patch must not break, tests, commit style |

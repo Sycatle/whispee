@@ -1,3 +1,4 @@
+import { PresenceBadge } from "@/components/Presence";
 import { nameOf } from "@/lib/naming";
 import { useNames } from "@/state/names";
 import { Avatar } from "@/ui/Avatar";
@@ -41,7 +42,9 @@ export function EmptyCenter() {
   return (
     <div className="safe-bottom flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-pane">
       <div className="flex w-full max-w-md flex-col items-center gap-pane py-section text-center">
-        <Avatar seed={fingerprint} label={self.primary} size="lg" />
+        <PresenceBadge session={session} handle={session.handle}>
+          <Avatar seed={fingerprint} label={self.primary} size="lg" />
+        </PresenceBadge>
 
         <div>
           {/*

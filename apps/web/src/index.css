@@ -35,10 +35,24 @@
  * and only a reader who explicitly asked to contradict their OS sees one frame of the other
  * theme. See `lib/theme.ts`. */
 @theme static {
+  /*
+   * The reading measure.
+   *
+   * A line of text is read by the eye sweeping back to the start of the next one, and past
+   * roughly seventy-five characters that return lands on the wrong line often enough to be
+   * felt as effort rather than noticed as a mistake. The thread had no bound at all: on a
+   * 1600-pixel window a three-sentence message ran the full width, and the wider the screen the
+   * worse it read — the one place in an interface where more room is not more comfortable.
+   *
+   * In `ch`, so it follows the font rather than a guess about it: the unit is the width of a
+   * `0`, so the measure stays a count of characters when the text scales.
+   */
+  --container-measure: 68ch;
+
   /* The shell behind the work: the rail, the empty centre, the detail column. */
-  --color-surface-sunken: oklch(0.955 0.004 265);
+  --color-surface-sunken: oklch(0.915 0.006 265);
   /* The working ground: a conversation, the body of a panel. */
-  --color-surface: oklch(0.985 0.003 265);
+  --color-surface: oklch(0.975 0.003 265);
   /* What sits on top of the ground: a received bubble, a card, a floating surface. */
   --color-surface-raised: oklch(1 0 0);
 
@@ -69,9 +83,9 @@
    media query by specificity, which is what makes an override an override. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-surface-sunken: oklch(0.13 0.008 265);
-    --color-surface: oklch(0.17 0.008 265);
-    --color-surface-raised: oklch(0.22 0.01 265);
+    --color-surface-sunken: oklch(0.11 0.008 265);
+    --color-surface: oklch(0.175 0.008 265);
+    --color-surface-raised: oklch(0.245 0.01 265);
     --color-border-subtle: oklch(0.29 0.01 265);
     --color-border-strong: oklch(0.51 0.016 265);
     --color-ink: oklch(0.95 0.004 265);
@@ -86,9 +100,9 @@
 }
 
 :root[data-theme="dark"] {
-  --color-surface-sunken: oklch(0.13 0.008 265);
-  --color-surface: oklch(0.17 0.008 265);
-  --color-surface-raised: oklch(0.22 0.01 265);
+  --color-surface-sunken: oklch(0.11 0.008 265);
+  --color-surface: oklch(0.175 0.008 265);
+  --color-surface-raised: oklch(0.245 0.01 265);
   --color-border-subtle: oklch(0.29 0.01 265);
   --color-border-strong: oklch(0.51 0.016 265);
   --color-ink: oklch(0.95 0.004 265);
@@ -102,8 +116,8 @@
 }
 
 :root[data-theme="light"] {
-  --color-surface-sunken: oklch(0.955 0.004 265);
-  --color-surface: oklch(0.985 0.003 265);
+  --color-surface-sunken: oklch(0.915 0.006 265);
+  --color-surface: oklch(0.975 0.003 265);
   --color-surface-raised: oklch(1 0 0);
   --color-border-subtle: oklch(0.9 0.005 265);
   --color-border-strong: oklch(0.66 0.012 265);

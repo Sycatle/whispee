@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 
-import { PresenceDot } from "@/components/Presence";
+import { PresenceBadge } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
 import { nameMatches, nameOf, titleOf } from "@/lib/naming";
 import { useBinding, useRunBinding } from "@/app/Shortcuts";
@@ -441,14 +441,21 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                         : "hover:bg-(--color-surface-sunken)",
                     )}
                   >
-                    <Avatar
-                      seed={only?.fingerprint ?? (only ? undefined : view.key)}
-                      label={title}
-                      size="md"
-                      {...(only ? { proof: session.verificationOf(only) } : {})}
-                      rejected={view.accounts.some((a) => a.rejected.length > 0)}
-                      className="shrink-0"
-                    />
+                    {/* The badge goes on the face, and only in a one-to-one: in a group it
+                        would not say who it is about, and asking the question multiplies
+                        inferences instead of informing. `PresenceBadge` renders its child
+                        untouched when there is nobody to report on, so the group needs no
+                        branch here. */}
+                    <PresenceBadge session={session} handle={only?.handle ?? ""}>
+                      <Avatar
+                        seed={only?.fingerprint ?? (only ? undefined : view.key)}
+                        label={title}
+                        size="md"
+                        {...(only ? { proof: session.verificationOf(only) } : {})}
+                        rejected={view.accounts.some((a) => a.rejected.length > 0)}
+                        className="shrink-0"
+                      />
+                    </PresenceBadge>
 
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline gap-snug">
@@ -465,16 +472,6 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                         )}
                       </span>
                       <span className="mt-0.5 flex items-baseline gap-snug">
-                        {/*
-                          One dot per conversation, and only one-to-one. In a group it would not say who
-                          it is about — and asking the question multiplies inferences instead of
-                          informing.
-                        */}
-                        {only && (
-                          <span className="shrink-0 self-center">
-                            <PresenceDot session={session} handle={only.handle} />
-                          </span>
-                        )}
                         <span className="min-w-0 flex-1 truncate text-caption font-normal text-(--color-ink-muted)">
                           <EmojiText text={line} />
                         </span>
@@ -526,7 +523,9 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     onClick={() => void open(handle)}
                     className="flex w-full items-center gap-snug rounded-control px-snug py-snug text-left text-body hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
                   >
-                    <Avatar label={contact.primary} size="sm" className="shrink-0" />
+                    <PresenceBadge session={session} handle={handle}>
+                      <Avatar label={contact.primary} size="sm" className="shrink-0" />
+                    </PresenceBadge>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate">{contact.primary}</span>
                       {/* Room for a second line here, unlike a conversation row: nothing else
@@ -570,12 +569,14 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
               type="button"
               className="flex w-full items-center gap-snug rounded-control p-snug text-left hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
             >
-              <Avatar
-                seed={session.accountFingerprint()}
-                label={self.primary}
-                size="md"
-                className="shrink-0"
-              />
+              <PresenceBadge session={session} handle={session.handle}>
+                <Avatar
+                  seed={session.accountFingerprint()}
+                  label={self.primary}
+                  size="md"
+                  className="shrink-0"
+                />
+              </PresenceBadge>
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-body font-medium">{self.primary}</span>
                 {/*

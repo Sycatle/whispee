@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { GroupPanel } from "@/components/Group";
-import { PresenceLine } from "@/components/Presence";
+import { PresenceBadge, PresenceLine } from "@/components/Presence";
 import { VerificationPanel } from "@/components/Verification";
 import { Fingerprint } from "@/components/Fingerprint";
 import type { ResolvedAccount } from "@/lib/account";
@@ -245,13 +245,15 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
   return (
     <>
       <section className="flex flex-col items-center gap-snug p-pane text-center">
-        <Avatar
-          seed={account.fingerprint}
-          label={name.primary}
-          size="lg"
-          proof={state}
-          rejected={rejected}
-        />
+        <PresenceBadge session={session} handle={account.handle}>
+          <Avatar
+            seed={account.fingerprint}
+            label={name.primary}
+            size="lg"
+            proof={state}
+            rejected={rejected}
+          />
+        </PresenceBadge>
         {/* Both lines, always. The handle is what identifies this account; the name above it is
             only what the account says about itself, and dropping the anchor to save a line would
             leave a claim standing alone. */}
@@ -478,14 +480,16 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                   }
                   className="flex w-full items-center gap-snug rounded-control p-snug text-left text-body hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
                 >
-                  <Avatar
-                    seed={account.fingerprint}
-                    label={name.primary}
-                    size="md"
-                    proof={session.verificationOf(account)}
-                    rejected={account.rejected.length > 0}
-                    className="shrink-0"
-                  />
+                  <PresenceBadge session={session} handle={account.handle}>
+                    <Avatar
+                      seed={account.fingerprint}
+                      label={name.primary}
+                      size="md"
+                      proof={session.verificationOf(account)}
+                      rejected={account.rejected.length > 0}
+                      className="shrink-0"
+                    />
+                  </PresenceBadge>
                   <span className="flex min-w-0 flex-1 flex-col">
                     <span className="truncate">{name.primary}</span>
                     {name.secondary !== null && (

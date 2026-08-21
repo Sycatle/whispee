@@ -587,7 +587,12 @@ export function Messages({
                   )}
                 </div>
 
-                <div className="min-w-0 flex-1">
+                {/* `max-w-measure`: the lane holds the text, and text has a width past which it
+                    stops being comfortable to read. See `--container-measure` in `index.css`.
+                    On the lane rather than on the paragraph, so the name, the hour, the quoted
+                    reply and the reactions all stop at the same edge — a column, not a ragged
+                    stack of differently-bounded pieces. */}
+                <div className="min-w-0 max-w-measure flex-1">
                   {/* The name is announced once per turn, not once per line: a burst of three
                       sentences is one person speaking, not three announcements. */}
                   {!continues && (

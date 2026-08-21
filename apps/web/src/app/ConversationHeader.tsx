@@ -221,7 +221,11 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
             at `<h2>` the moment a conversation was opened: the only `<h1>` in the shell lived in
             `EmptyCenter`, which is the screen shown when nothing is open. Each route now has
             exactly one — this one, `Settings`, or the identity on the empty screen. */}
-        <h1 className="truncate text-body font-medium" data-epoch={String(view.epoch)}>
+        {/* `text-prose` and not `text-body`: this is the page's heading, and it was set at the
+            same size as the messages under it — so the one piece of text saying *which
+            conversation this is* had no more weight than any line inside it. One step up the
+            scale, which is enough to be found without turning the bar into a banner. */}
+        <h1 className="truncate text-prose font-medium" data-epoch={String(view.epoch)}>
           {title}
         </h1>
         {/*

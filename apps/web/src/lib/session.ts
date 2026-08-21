@@ -23,9 +23,10 @@ import { PreferencesStore } from "./session-preferences.ts";
 import { Names, type Profile } from "./session-naming.ts";
 import { TrustStore } from "./session-trust.ts";
 import { Archive } from "./session-vault.ts";
+import { Lockbox, type LockKit } from "./session-lock.ts";
 import { composeStored } from "./session-persist.ts";
 import { fromBase64, toHex } from "./keys";
-import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
+import { changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
 import type { SignalSettings } from "./storage";
 import { type Decision, type Steps, type Presence, decide, migrate } from "./migration";
@@ -46,7 +47,7 @@ import {
   sealTyping,
   without,
 } from "./signals";
-import { LockedCipher, type DeviceCipher } from "./cipher";
+import { LockedCipher } from "./cipher";
 import { Gateway } from "./gateway";
 import * as log from "./transparency";
 import * as padding from "./padding";
@@ -62,6 +63,24 @@ import {
   type Sealed,
   loadCrypto,
 } from "./wasm";
+
+/**
+ * The real lock operations, bound to the platform.
+ *
+ * `session-lock.ts` holds the policy and imports nothing but types, because Argon2id lives in the
+ * WASM module and the biometric prompt is Tauri IPC — a module importing either cannot be loaded
+ * by `node --test`. This object is the seam, and it belongs here, where the platform already is.
+ */
+const deviceLock: LockKit = {
+  create: createLock,
+  open: openLock,
+  rekey: changePassword,
+  wrap: (signing, master) => new LockedCipher(signing, master),
+  keepBiometric: async (master) => {
+    await biometrics.enableBiometric(await exportMaster(master));
+  },
+  dropBiometric: () => biometrics.disableBiometric(),
+};
 
 /** How many KeyPackages we keep in stock on the server. */
 const KEY_PACKAGE_TARGET = 10;
@@ -142,14 +161,13 @@ export class Session {
      */
     private readonly anchor: Anchor,
     /**
-     * What encrypts the state at rest.
+     * The local lock, and what encrypts the state at rest behind it.
      *
-     * The anchor's own cipher when no lock is set; a `LockedCipher` otherwise, whose master key
-     * only exists in memory once the password has been typed. The identity does not switch: the
-     * anchor's cipher always signs.
+     * Holds both ciphers so that only one of them can move: the anchor's own signs and does not
+     * switch — the server must see no difference between a locked device and an unlocked one —
+     * while the sealing one is exactly what a lock replaces. See `session-lock.ts`.
      */
-    private atRest: DeviceCipher,
-    private lock: LockEnvelope | undefined,
+    private lockbox: Lockbox,
     /**
      * Vault key. Present by default; `null` only if the user turned backup off, or if deriving
      * it failed.
@@ -432,8 +450,7 @@ export class Session {
       // No lock at creation: the user sets one if they want to, from the app. Forcing it here
       // would put a password prompt right before the recovery phrase screen, which deserves all
       // the attention available.
-      anchor.cipher,
-      undefined,
+      Lockbox.none(deviceLock, anchor.cipher),
       // Vault on from creation, so from the very first message.
       //
       // Giving up forward secrecy on history is a real concession — but a messenger whose
@@ -585,24 +602,12 @@ export class Session {
       throw new StoredSessionTooOld();
     }
 
-    if (stored.lock && opener === undefined) {
-      throw new Error("This session is locked: a password is required.");
-    }
-
-    const master =
-      typeof opener === "string" && stored.lock
-        ? await openLock(stored.lock, opener)
-        : typeof opener === "object"
-          ? opener
-          : undefined;
-
-    const atRest =
-      stored.lock && master ? new LockedCipher(anchor.cipher, master) : anchor.cipher;
+    const lockbox = await Lockbox.open(deviceLock, anchor.cipher, stored, opener);
 
     const crypto = await loadCrypto();
-    const state = await atRest.open(stored.state);
+    const state = await lockbox.cipher.open(stored.state);
     const client = crypto.Client.restore(state, stored.groupIds);
-    const account = crypto.AccountKey.fromSeed(await atRest.open(stored.accountSeed));
+    const account = crypto.AccountKey.fromSeed(await lockbox.cipher.open(stored.accountSeed));
     // The anchor's cipher, not `atRest`: the identity signs the requests, and it does not switch
     // with the lock — the server must see no difference.
     const api = new Api(stored.deviceId, anchor.cipher);
@@ -610,7 +615,7 @@ export class Session {
     // Decrypted before the views are built, so each one opens with its thread already in it
     // rather than with an empty list the network fills in a moment later.
     const cached = stored.history
-      ? decodeHistory(await atRest.open(stored.history))
+      ? decodeHistory(await lockbox.cipher.open(stored.history))
       : new Map<string, Cached>();
 
     const conversations = new Map<string, ConversationView>();
@@ -649,8 +654,7 @@ export class Session {
       crypto,
       api,
       anchor,
-      atRest,
-      stored.lock,
+      lockbox,
       // Three values, not two, and that is the whole migration story for existing accounts:
       // `false` means the user explicitly turned backup off, and that is to be respected;
       // `undefined` means they never had to decide, so it is treated like a new account, so on.
@@ -791,7 +795,7 @@ export class Session {
 
   /** Is a lock set on this device? */
   get locked(): boolean {
-    return this.lock !== undefined;
+    return this.lockbox.engaged;
   }
 
   /**
@@ -802,11 +806,7 @@ export class Session {
    * requests — but no longer decrypts anything.
    */
   async enableLock(password: string): Promise<void> {
-    if (this.lock) throw new Error("A lock is already set.");
-
-    const [envelope, master] = await createLock(password);
-    this.lock = envelope;
-    this.atRest = new LockedCipher(this.anchor.cipher, master);
+    await this.lockbox.enable(password);
     await this.persist();
   }
 
@@ -817,15 +817,7 @@ export class Session {
    * click — the lock would only protect until the first forgotten screen.
    */
   async disableLock(password: string): Promise<void> {
-    if (!this.lock) return;
-
-    await openLock(this.lock, password);
-    this.lock = undefined;
-    this.atRest = this.anchor.cipher;
-
-    // The key kept for biometrics has nothing left to open, and leaving it would be worse than
-    // useless: it would outlive the lock that justified it.
-    await biometrics.disableBiometric().catch(() => {});
+    await this.lockbox.disable(password);
     await this.persist();
   }
 
@@ -846,16 +838,12 @@ export class Session {
    * gesture with friction that buys nothing.
    */
   async enableBiometric(): Promise<void> {
-    if (!(this.atRest instanceof LockedCipher)) {
-      throw new Error("Set a lock first: biometrics keep your key, they do not create one.");
-    }
-
-    await biometrics.enableBiometric(await exportMaster(this.atRest.masterKey()));
+    await this.lockbox.enableBiometric();
   }
 
   /** Removes biometric unlock. The lock stays set, and the password still opens it. */
   async disableBiometric(): Promise<void> {
-    await biometrics.disableBiometric();
+    await this.lockbox.disableBiometric();
   }
 
   /**
@@ -866,8 +854,7 @@ export class Session {
    * clear at the most delicate moment.
    */
   async changeLockPassword(current: string, next: string): Promise<void> {
-    if (!this.lock) throw new Error("No lock to change.");
-    this.lock = await changePassword(this.lock, current, next);
+    await this.lockbox.changePassword(current, next);
     await this.persist();
   }
 
@@ -938,14 +925,14 @@ export class Session {
         mlsState: this.client.exportState(),
         groupIds: this.client.conversationIds(),
         conversations: this.conversations,
-        lock: this.lock,
+        lock: this.lockbox.snapshot(),
         vault: this.archive.snapshot(),
         trust: this.trust.snapshot(),
         signals: this.signals,
         preferences: this.settings.snapshot(),
         names: this.names.snapshot(),
         seenHead: this.seenHead,
-        seal: (bytes) => this.atRest.seal(bytes),
+        seal: (bytes) => this.lockbox.cipher.seal(bytes),
       }),
     );
   }

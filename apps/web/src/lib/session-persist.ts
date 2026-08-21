@@ -34,7 +34,6 @@
  */
 import { encodeHistory, type Cached } from "./history.ts";
 import { toBase64 } from "./keys.ts";
-import type { LockEnvelope } from "./lock";
 import type { ConversationView } from "./session-types";
 import type { SignalSettings, StoredSession } from "./storage";
 import type { SeenHead } from "./transparency";
@@ -77,7 +76,8 @@ export interface PersistInput {
    * rather than quietly deciding it.
    */
   conversations: ReadonlyMap<string, ConversationView>;
-  lock: LockEnvelope | undefined;
+  /** What `Lockbox` contributes, already mapped. */
+  lock: Pick<StoredSession, "lock">;
   /** What `Archive` contributes, already mapped. */
   vault: Pick<StoredSession, "vaultEnabled">;
   /**
@@ -136,7 +136,7 @@ export async function composeStored(input: PersistInput): Promise<StoredSession>
     handle: input.handle,
     // The seed is encrypted like the MLS state: it is worth the whole account.
     accountSeed: await input.seal(input.accountSeed),
-    lock: input.lock,
+    ...input.lock,
     ...input.vault,
     state: await input.seal(input.mlsState),
     groupIds: input.groupIds,

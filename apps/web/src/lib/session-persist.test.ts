@@ -16,6 +16,7 @@ import { test } from "node:test";
 import { decodeHistory } from "./history.ts";
 import { fromBase64 } from "./keys.ts";
 import { composeStored, type PersistInput } from "./session-persist.ts";
+import type { StoredSession } from "./storage";
 import { freshSignalState, type ConversationView } from "./session-types.ts";
 
 const seal = (bytes: Uint8Array): Promise<Uint8Array> => Promise.resolve(bytes);
@@ -43,7 +44,7 @@ function input(over: Partial<PersistInput> = {}): PersistInput {
     mlsState: new Uint8Array([7, 7, 7]),
     groupIds: [new Uint8Array([1, 2, 3])],
     conversations: new Map(),
-    lock: undefined,
+    lock: {},
     vault: { vaultEnabled: true },
     trust: { verified: {}, knownDevices: {} },
     signals: { readReceipts: true, typingIndicator: true, presence: true },
@@ -125,6 +126,17 @@ test("a log head nobody has accepted is absent, not undefined", async () => {
   // different to the store, and it is absence that keeps an untouched account's on-disk shape
   // exactly what it was before this field existed.
   assert.equal("logHead" in stored, false);
+});
+
+test("the lock slice is spread in exactly as given", async () => {
+  // A device with no lock contributes an absent `lock`, not a present `undefined`. `Lockbox` owns
+  // that distinction; what is checked here is only that the slice arrives whole.
+  const open = await composeStored(input());
+  assert.equal(open.lock, undefined);
+
+  const envelope = { salt: "AAAA" } as unknown as NonNullable<StoredSession["lock"]>;
+  const locked = await composeStored(input({ lock: { lock: envelope } }));
+  assert.equal(locked.lock, envelope);
 });
 
 test("the names slice is spread in exactly as given", async () => {

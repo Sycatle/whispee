@@ -12,8 +12,7 @@ import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
 import { ProofStrip } from "@/ui/ProofStrip";
-import { useReport } from "@/state/report";
-import { useBump, useSession } from "@/state/SessionProvider";
+import { useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
 
 /**
@@ -108,13 +107,15 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 function AccountDetail({ account }: { account: ResolvedAccount }) {
   const session = useSession();
-  const bump = useBump();
-  const report = useReport();
   const [comparing, setComparing] = useState(false);
 
   const state = session.verificationOf(account);
   const rejected = account.rejected.length > 0;
   const { title, note } = describe(state, rejected);
+  // A changed fingerprint and an unattested device are the two states that get to shout. Both are
+  // already red in the strip and in the avatar; the words are red too so the reader who scanned
+  // the colour and the reader who read the sentence arrive at the same place.
+  const loud = rejected || state.status === "changed";
 
   return (
     <>
@@ -130,6 +131,16 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
         <PresenceLine session={session} handle={account.handle} />
       </section>
 
+      {/*
+        The proof section, in the order the reading happens: the shape, then the verdict in words,
+        then the digits the verdict is about, then the one action that can change the verdict.
+
+        The strip is first because it is pre-verbal — a changed pattern is noticed before a
+        sentence is read. It is also the weakest thing on the screen: nineteen bits, grindable.
+        It says *something moved*; the hexadecimal underneath, compared out of band, is the only
+        thing here that says *who this is*. That ordering is the section's whole argument, and it
+        is why the strip never appears without the digits below it.
+      */}
       <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
         <SectionTitle>Proof</SectionTitle>
         <ProofStrip
@@ -140,22 +151,27 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
         />
         <p
           className={
-            state.status === "changed" || rejected
-              ? "text-body font-medium text-(--color-danger)"
-              : "text-body font-medium"
+            loud ? "text-body font-medium text-(--color-danger)" : "text-body font-medium"
           }
         >
           {title}
         </p>
         <p className="text-caption text-(--color-ink-muted)">{note}</p>
 
-        <div className="font-evidence">
-          <Fingerprint value={account.fingerprint} />
-        </div>
-
-        <Button variant="secondary" size="sm" onClick={() => setComparing(true)}>
-          Compare fingerprints
-        </Button>
+        {comparing ? (
+          <VerificationPanel account={account} onClose={() => setComparing(false)} />
+        ) : (
+          <>
+            <Fingerprint value={account.fingerprint} />
+            <Button
+              variant={loud ? "primary" : "secondary"}
+              size="sm"
+              onClick={() => setComparing(true)}
+            >
+              Compare fingerprints
+            </Button>
+          </>
+        )}
       </section>
 
       <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
@@ -175,36 +191,12 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
           ))}
         </ul>
       </section>
-
-      {comparing && (
-        <VerificationPanel
-          account={account}
-          state={state}
-          myName={`@${session.handle}`}
-          myFingerprint={session.accountFingerprint()}
-          onVerified={() =>
-            void session
-              .markVerified(account)
-              .then(() => {
-                bump();
-                report.done(`Marked @${account.handle} as verified.`);
-                setComparing(false);
-              })
-              .catch((e: unknown) =>
-                report.error(e instanceof Error ? e.message : String(e)),
-              )
-          }
-          onClose={() => setComparing(false)}
-        />
-      )}
     </>
   );
 }
 
 export function DetailPanel({ view }: { view: ConversationView }) {
   const session = useSession();
-  const bump = useBump();
-  const report = useReport();
   const route = useRoute();
   const navigate = useNavigate();
   const duo = useDuo();
@@ -346,18 +338,17 @@ export function DetailPanel({ view }: { view: ConversationView }) {
         Membership, roles and leaving, for groups only. `GroupPanel` already says the two things
         the user cannot guess — that leaving takes another member's commit, and that removing
         somebody removes all of their devices — and repeating either of them here would be a
-        second copy to keep in step.
+        second copy to keep in step. It says them in the confirmation dialogs, at the moment the
+        commit is about to go out, which is the only moment either sentence changes a decision.
+
+        It takes no `session`, no `onError` and no `onChanged`: it reads the session through
+        `useSession` and reports through `useReport`, so the roster and the roles stay fresh under
+        it whatever this column's own render schedule does.
       */}
       {view.accounts.length > 1 && (
         <section className="space-y-snug p-pane">
           <SectionTitle>Conversation</SectionTitle>
-          <GroupPanel
-            session={session}
-            view={view}
-            onError={(message) => report.error(message)}
-            onChanged={bump}
-            onClose={close}
-          />
+          <GroupPanel view={view} onClose={close} />
         </section>
       )}
     </aside>

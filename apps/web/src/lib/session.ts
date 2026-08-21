@@ -20,6 +20,7 @@ import { PresenceTracker } from "./session-presence.ts";
 import { PreferencesStore } from "./session-preferences.ts";
 import { Names, type Profile } from "./session-naming.ts";
 import { TrustStore } from "./session-trust.ts";
+import { Archive } from "./session-vault.ts";
 import { composeStored } from "./session-persist.ts";
 import { fromBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
@@ -45,7 +46,6 @@ import {
 } from "./signals";
 import { LockedCipher, type DeviceCipher } from "./cipher";
 import { Gateway } from "./gateway";
-import * as vault from "./vault";
 import * as log from "./transparency";
 import * as padding from "./padding";
 import {
@@ -129,7 +129,7 @@ export class Session {
      * Derived from the recovery phrase, so **stable over time**: that is what lets a new device
      * read the history back, and it is exactly what we give up by keeping it. See `vault.ts`.
      */
-    private vaultCipher: CryptoKey | null,
+    private archive: Archive,
     readonly conversations: Map<string, ConversationView>,
     private trust: TrustStore,
     /**
@@ -382,7 +382,7 @@ export class Session {
       // behind a settings screen amounted to refusing it for almost everyone. So the trade-off
       // is taken here, stated on the recovery phrase screen (which is also the vault key), and
       // reversible in settings.
-      await vault.importVaultKey(account.vaultKey()),
+      await Archive.open(() => account.vaultKey()),
       new Map(),
       new TrustStore(),
     );
@@ -569,7 +569,9 @@ export class Session {
       // `false` means the user explicitly turned backup off, and that is to be respected;
       // `undefined` means they never had to decide, so it is treated like a new account, so on.
       // Conflating the two would re-enable the vault behind the back of someone who refused it.
-      stored.vaultEnabled === false ? null : await vaultCipherOf(crypto, account),
+      stored.vaultEnabled === false
+        ? Archive.off()
+        : await Archive.open(() => account.vaultKey()),
       conversations,
       TrustStore.hydrate(stored),
       // A missing `presence` means enabled: that is the default, the flag only records a refusal.
@@ -632,7 +634,7 @@ export class Session {
 
   /** Is the vault on for this account? */
   get archiving(): boolean {
-    return this.vaultCipher !== null;
+    return this.archive.enabled;
   }
 
   /**
@@ -644,7 +646,7 @@ export class Session {
    * for the whole period during which they had it off.
    */
   async enableVault(): Promise<void> {
-    this.vaultCipher = await vault.importVaultKey(this.account.vaultKey());
+    await this.archive.enable(this.account.vaultKey());
     await this.persist();
   }
 
@@ -656,7 +658,7 @@ export class Session {
    * server may keep copies — would be a security lie.
    */
   async disableVault(): Promise<void> {
-    this.vaultCipher = null;
+    this.archive.disable();
     await this.persist();
   }
 
@@ -667,16 +669,7 @@ export class Session {
    * message by message, which has no business delaying the display.
    */
   async restoreHistory(view: ConversationView): Promise<number> {
-    if (!this.vaultCipher) return 0;
-
-    const { messages, unreadable } = await vault.restore(this.api, this.vaultCipher, view.groupId);
-    const added = vault.merge(view.messages, messages);
-
-    // Nothing readable although there were entries: the vault key is no longer the right one,
-    // i.e. the account has been rotated. Say it rather than serve an empty thread.
-    if (messages.length === 0 && unreadable > 0) {
-      throw new Error("The archived history can no longer be read: the recovery phrase changed.");
-    }
+    const added = await this.archive.restore(this.api, view.groupId, view.messages);
 
     view.messages.push(...added);
     touch(view);
@@ -702,25 +695,12 @@ export class Session {
    * about the ratchet.
    */
   async hydrate(view: ConversationView): Promise<number> {
-    if (view.hydrated || !this.vaultCipher) return 0;
+    if (view.hydrated || !this.archive.enabled) return 0;
 
     // Set **before** awaiting: two renders in quick succession would otherwise start two
     // concurrent pulls for the same conversation.
     view.hydrated = true;
     return this.restoreHistory(view);
-  }
-
-  /** Archives the messages just read or sent, if the vault is on. */
-  private async archive(view: ConversationView, messages: Message[]): Promise<void> {
-    if (!this.vaultCipher || messages.length === 0) return;
-
-    try {
-      await vault.store(this.api, this.vaultCipher, view.groupId, messages);
-    } catch (error) {
-      // A failed archive must not block the conversation: the message is already delivered, only
-      // the backup is missing. It will be retried on the next send.
-      console.warn("archiving deferred", error);
-    }
   }
 
   /** Is a lock set on this device? */
@@ -872,7 +852,7 @@ export class Session {
         groupIds: this.client.conversationIds(),
         conversations: this.conversations,
         lock: this.lock,
-        vaultEnabled: this.vaultCipher !== null,
+        vault: this.archive.snapshot(),
         trust: this.trust.snapshot(),
         signals: this.signals,
         preferences: this.settings.snapshot(),
@@ -1649,8 +1629,8 @@ export class Session {
 
     // The vault is encrypted under a key derived from the old seed: the entries already stored
     // become unreadable, permanently. Saying so beats letting someone discover an empty history.
-    if (this.vaultCipher) {
-      this.vaultCipher = await vault.importVaultKey(this.account.vaultKey());
+    if (this.archive.enabled) {
+      await this.archive.enable(this.account.vaultKey());
     }
 
     await this.persist();
@@ -2163,7 +2143,7 @@ export class Session {
     const message: Message = { seq, sender: this.deviceId, content: body, mine: true, sentAt };
     view.messages.push(message);
     touch(view);
-    await this.archive(view, [message]);
+    await this.archive.store(this.api, view.groupId, [message]);
     await this.persist();
   }
 
@@ -2347,7 +2327,7 @@ export class Session {
       view.epoch = this.client.epoch(view.groupId);
       view.peers = this.client.peerFingerprints(view.groupId) as Peer[];
 
-      await this.archive(view, view.messages.slice(before));
+      await this.archive.store(this.api, view.groupId, view.messages.slice(before));
 
       // Persist HERE, before any further network call.
       //
@@ -2719,24 +2699,6 @@ function hexToBytes(value: string): Uint8Array {
 export { fromBase64 };
 
 
-/**
- * Imports the vault key from the account.
- *
- * Split out so `Session.restore` stays readable: the derivation itself lives in `crypto-core`,
- * this module only turns it into a `CryptoKey`.
- *
- * Returns `null` rather than throwing. Now that the vault is on by default, this call sits on the
- * opening path of **every** session: leaving an exception there would make messages inaccessible
- * because their backup failed. We lose archiving, never the conversation.
- */
-async function vaultCipherOf(_crypto: Crypto, account: AccountKey): Promise<CryptoKey | null> {
-  try {
-    return await vault.importVaultKey(account.vaultKey());
-  } catch (error) {
-    console.warn("vault key unavailable: archiving off for this session", error);
-    return null;
-  }
-}
 
 /**
  * What startup offers: a migration, which it does not carry out.

@@ -44,7 +44,7 @@ function input(over: Partial<PersistInput> = {}): PersistInput {
     groupIds: [new Uint8Array([1, 2, 3])],
     conversations: new Map(),
     lock: undefined,
-    vaultEnabled: true,
+    vault: { vaultEnabled: true },
     trust: { verified: {}, knownDevices: {} },
     signals: { readReceipts: true, typingIndicator: true, presence: true },
     preferences: {},
@@ -170,6 +170,6 @@ test("a seen log head is written as base64, and only when there is one", async (
 test("turning the vault off is recorded as a decision", async () => {
   // Three values, not two: `false` is a refusal to honour, `undefined` is a fresh account. See
   // `StoredSession.vaultEnabled`.
-  assert.equal((await composeStored(input({ vaultEnabled: false }))).vaultEnabled, false);
-  assert.equal((await composeStored(input({ vaultEnabled: true }))).vaultEnabled, true);
+  assert.equal((await composeStored(input({ vault: { vaultEnabled: false } }))).vaultEnabled, false);
+  assert.equal((await composeStored(input({ vault: { vaultEnabled: true } }))).vaultEnabled, true);
 });

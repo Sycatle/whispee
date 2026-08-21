@@ -69,7 +69,8 @@ export interface PersistInput {
    */
   conversations: ReadonlyMap<string, ConversationView>;
   lock: LockEnvelope | undefined;
-  vaultEnabled: boolean;
+  /** What `Archive` contributes, already mapped. */
+  vault: Pick<StoredSession, "vaultEnabled">;
   /**
    * What `TrustStore` contributes, already mapped.
    *
@@ -126,7 +127,7 @@ export async function composeStored(input: PersistInput): Promise<StoredSession>
     // The seed is encrypted like the MLS state: it is worth the whole account.
     accountSeed: await input.seal(input.accountSeed),
     lock: input.lock,
-    vaultEnabled: input.vaultEnabled,
+    ...input.vault,
     state: await input.seal(input.mlsState),
     groupIds: input.groupIds,
     ...input.trust,

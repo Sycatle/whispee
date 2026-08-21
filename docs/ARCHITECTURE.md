@@ -63,7 +63,8 @@ apps/
 docs/              This directory.
 release/           whispee.pub, the release public key. artefacts/ is produced, not versioned.
 scripts/           release.sh and verify-release.sh.
-.github/workflows/ android.yml and ios.yml. Nothing else — there is no CI that runs the tests.
+.github/workflows/ test.yml runs the suites, clippy, and the WebAssembly check. android.yml
+                   and ios.yml build mobile artefacts, on demand or on main only.
 ```
 
 ## The crates, and why they are separate

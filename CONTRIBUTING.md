@@ -29,8 +29,11 @@ line item. Concurrent builds cancel each other (`concurrency` with `cancel-in-pr
 push that follows another makes the earlier one moot, and letting it finish would pay a runner
 for an artefact nobody will take.
 
-The consequence to be honest about: **there is no CI that runs the tests.** Only `android.yml`
-and `ios.yml` exist. If you do not run the test suite locally, nobody does.
+The tests themselves are a separate matter, and they do run: `test.yml` triggers on every pull
+request against `dev` or `main`. What stays off `dev` is the **builds** — that is what the quota
+argument is about, and it does not carry over to a job that answers whether the change is
+correct. Run `cargo test --release` locally anyway; waiting on a runner to learn something a
+laptop answers in a minute is its own waste.
 
 ## Two things that get a pull request rejected on sight
 

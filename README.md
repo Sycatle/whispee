@@ -46,8 +46,10 @@ not their equal and does not try to be.
 - **Biometric unlock has never been executed.** The code exists; not one line of it has run.
   There is no Android NDK and no physical device on the development machine, so even the
   compilation of its dependency is unconfirmed.
-- **There is no CI that runs the tests.** Only `android.yml` and `ios.yml` exist, both
-  manual or `main`-only to save Actions quota. Everything is validated locally.
+- **The mobile builds are the only thing still validated by hand.** `test.yml` now runs the
+  Rust and client suites, clippy, and the check that the committed WebAssembly matches
+  `crates/crypto-wasm`. `android.yml` and `ios.yml` stay manual or `main`-only to save Actions
+  quota, so no mobile artefact is produced on a pull request.
 - Mobile builds, backups, account deletion, post-quantum protection: see
   [docs/ROADMAP.md](docs/ROADMAP.md) and the known-limitations table in
   [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).

@@ -333,9 +333,11 @@ machines has not been measured.
 
 Stated here so it is not inferred from silence.
 
-- **There is no CI workflow that runs the tests.** Only `android.yml` and `ios.yml` exist, and both
-  are manual or `main`-only, to save Actions quota. Validation happens locally, through
-  `cargo test --release`.
+- **The WebAssembly shipped to users was, until now, related to its source by nothing.** It is a
+  committed binary loaded by every target; no check read it. `scripts/verify-wasm.sh` now rebuilds
+  the crate and compares byte for byte, and `test.yml` runs it. What that proves is narrow: that
+  what ships is what the repository says it is — not that the source is correct, nor that the
+  toolchain is honest.
 - **Biometric unlock has never executed a single line.** The code exists; the development machine
   has no Android NDK and no physical device. A bug found while writing this documentation — five
   Tauri commands were never registered — is fixed, but the path remains unverified, including

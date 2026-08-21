@@ -47,7 +47,7 @@ These are finished features whose last mile could not be exercised on the develo
 | Background re-locking | Verified only in its wiring, not its timing |
 | QR pairing | The scan itself, for want of `BarcodeDetector` on Chrome under Linux; encoding and decoding are tested |
 | Mobile builds | Only ever built in CI, never locally — no Android NDK and no macOS host here |
-| The test suite in CI | There is none. `android.yml` and `ios.yml` build; nothing runs `cargo test`. Validation is local |
+| Mobile builds in CI | `test.yml` runs the suites and the WebAssembly check on every pull request; `android.yml` and `ios.yml` stay manual or `main`-only, so no mobile artefact is built on a PR |
 
 ## Push notifications — half-built, and stopping there is the decision
 

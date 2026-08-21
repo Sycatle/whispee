@@ -183,12 +183,16 @@ In release, `debug_assert!` disappears and the error propagates normally. The te
 
 **Never deploy a debug build of this code.**
 
-### There is no CI that runs the tests
+### What CI runs, and what it still does not
 
-Only `android.yml` and `ios.yml` exist, and both build rather than test. Nothing runs on `dev`
-at all: triggering a build on every push there would spend most of the Actions quota on
-intermediate states nobody installs. Validation on `dev` is local, through `cargo test
---release`.
+`test.yml` runs the Rust suite against a real Postgres, clippy, the client's types and tests,
+and `scripts/verify-wasm.sh` — which rebuilds `crates/crypto-wasm` and compares it byte for
+byte to the artefacts committed under `apps/web/`. It triggers on pull requests and on pushes
+to `main`, not on every push to `dev`: the spend lands on the moment a change is proposed.
+
+What it still does not do is **build for mobile**. `android.yml` and `ios.yml` remain manual or
+`main`-only, because a macOS runner costs roughly ten times the minutes of a Linux one. So a
+pull request tells you the code is correct; it does not tell you the APK links.
 
 ## Release
 

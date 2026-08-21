@@ -65,6 +65,9 @@ export function encodeSession(session: StoredSession): Uint8Array {
     searchCoverage: session.searchCoverage,
     contactPolicy: session.contactPolicy,
     blocked: session.blocked,
+    displayName: session.displayName,
+    profiles: session.profiles,
+    petnames: session.petnames,
   };
 
   return new TextEncoder().encode(JSON.stringify(raw));
@@ -146,6 +149,18 @@ export function decodeSession(bytes: Uint8Array): StoredSession {
             requireString(value, `blocked[${index}]`),
           ),
         }),
+    // Three more additive optionals, and `VERSION` stays at 1 for the reason spelled out just
+    // above: raising it to announce fields nothing is required to read would make this decoder
+    // refuse every session written before today, in both directions of an upgrade.
+    ...(field.displayName === undefined
+      ? {}
+      : { displayName: requireString(field.displayName, "displayName") }),
+    ...(field.profiles === undefined
+      ? {}
+      : { profiles: requireObject(field.profiles, "profiles") as StoredSession["profiles"] }),
+    ...(field.petnames === undefined
+      ? {}
+      : { petnames: requireObject(field.petnames, "petnames") as Record<string, string> }),
   };
 }
 

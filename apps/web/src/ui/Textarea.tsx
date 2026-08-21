@@ -47,7 +47,11 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
         "transition-colors duration-(--duration-quick) ease-out motion-reduce:transition-none",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent)",
         "disabled:opacity-50",
-        invalid ? "border-(--color-danger)" : "border-(--color-border-subtle)",
+        // `border-strong`, not the `border-subtle` hairline that separates two things sitting
+        // side by side: this border is the only thing saying where the field begins, which makes
+        // it a user interface component under WCAG 1.4.11 and puts a floor of 3:1 under it.
+        // `border-subtle` measured 1.35:1 against the field's own background.
+        invalid ? "border-(--color-danger)" : "border-(--color-border-strong)",
         "touch:min-h-11",
         className,
       )}

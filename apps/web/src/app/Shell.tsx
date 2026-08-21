@@ -179,10 +179,10 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
           // The bar and the thread are siblings in a column here, where they used to be parent
           // and child. Nothing about one panel changes: the bar is still directly above the
           // messages and still the full width of the screen.
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col">
             {header}
             {centre()}
-          </div>
+          </main>
         )}
       </div>
     );
@@ -234,7 +234,16 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
               child. The thread still owns its own scrolling: it is `min-h-0 flex-1` inside its
               own section and the column above it is `min-h-0` too, so nothing here gives the
               overflow somewhere else to go. */}
-          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--color-surface) duo:rounded-surface">
+          {/* `<main>`, and it took until now to exist. Two `<aside>` landmarks stood on either
+              side of a plain `<div>`, so the screen where the user spends every minute had a
+              named margin on the left, a named margin on the right, and nothing in the middle —
+              a reader jumping by landmark could reach both edges and not the content.
+
+              What this does not solve: at one column on the home route the rail is the whole
+              screen and is still an `<aside>`, because it is genuinely the margin at every other
+              width and swapping its element by breakpoint would buy less than it costs to
+              explain. */}
+          <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--color-surface) duo:rounded-surface">
             {!trio && header}
             {centre()}
 
@@ -243,7 +252,7 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
                 <DetailPanel view={view} />
               </div>
             )}
-          </div>
+          </main>
 
           {trio && detailOpen && view !== null && (
             <div className="w-80 shrink-0 overflow-hidden bg-(--color-surface) duo:rounded-surface">

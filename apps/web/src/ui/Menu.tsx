@@ -96,10 +96,18 @@ const surface = cn(
 );
 
 const item = cn(
-  "flex cursor-default select-none items-center gap-gutter rounded-control px-gutter py-snug text-body",
+  "group flex cursor-default select-none items-center gap-gutter rounded-control px-gutter py-snug text-body",
   // Radix moves the highlight with the pointer *and* with the arrow keys, so styling
   // `data-highlighted` covers both; a `hover:` rule would leave keyboard users with no cursor.
-  "outline-none data-[highlighted]:bg-(--color-surface-sunken)",
+  //
+  // The fill is the accent and not a half-tone of the surface. `outline-none` above removes the
+  // focus ring, which makes this fill the *only* thing telling a keyboard user which item the
+  // arrows have reached — and `surface-sunken` on `surface-raised` measures 1.14:1 in light and
+  // 1.16:1 in dark. That is not a faint highlight, it is no highlight: the item under the
+  // cursor and the item beside it were the same colour to anyone not looking for the
+  // difference. An indicator carrying that much meaning owes 3:1; this one is at 4.93:1 and
+  // 6.95:1.
+  "outline-none data-[highlighted]:bg-(--color-accent) data-[highlighted]:text-(--color-accent-ink)",
   "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
   "touch:min-h-11",
 );
@@ -161,7 +169,12 @@ function MenuItem({
         // character by character, and a proportional ⌘⇧K is harder to take in at 12px.
         // `aria-hidden` because a screen reader announcing "command shift K" after every item
         // label triples the length of the menu, and the binding works whether or not it is read.
-        <span aria-hidden="true" className="shrink-0 font-evidence text-caption text-(--color-ink-muted)">
+        // `group-data-` on the item: over the accent fill, muted ink is the one colour that
+        // stops being legible, so the chord follows the label onto `accent-ink`.
+        <span
+          aria-hidden="true"
+          className="shrink-0 font-evidence text-caption text-(--color-ink-muted) group-data-[highlighted]:text-(--color-accent-ink)"
+        >
           {formatShortcut(shortcut)}
         </span>
       )}

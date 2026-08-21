@@ -345,7 +345,15 @@ export function Messages({
         wants no gap at all; the air belongs between turns, which is a property of each line rather
         than of the space between any two of them.
       */}
-      <ol className="min-h-0 flex-1 overflow-y-auto py-pane">
+      {/* `role="list"` restates what `<ol>` already says, and it is needed anyway: Tailwind's
+          preflight sets `list-style: none`, and WebKit reads a list with no marker as one the
+          author no longer means — VoiceOver stops saying "list, 20 items". The name matters as
+          much: this was the one scrolling region in the application with nothing to call it. */}
+      <ol
+        role="list"
+        aria-label="Messages"
+        className="min-h-0 flex-1 overflow-y-auto py-pane"
+      >
         {rows.map(({ key, message, opensDay, continues, opensUnread }) => {
           // Extracted before the JSX: type narrowing is lost inside a closure, and working
           // around it inline made the render unreadable.
@@ -535,21 +543,26 @@ export function Messages({
                   </div>
 
                   {emojis.length > 0 && (
-                    <div
+                    // A list, not a named `<div>`: the name was on a generic element and went
+                    // unread, and what is here really is a list of things. `role="list"` is
+                    // explicit because Tailwind's preflight sets `list-style: none`, which is
+                    // enough for WebKit to stop calling it a list at all.
+                    <ul
+                      role="list"
+                      aria-label="Reactions"
                       className="mt-tight flex flex-wrap gap-tight text-caption"
-                      aria-label="reactions"
                     >
                       {emojis.map((emoji, at) => (
-                        <span
+                        <li
                           // Two people can send the same emoji, so the emoji is not a key. The
                           // position in an already-deduplicated list is.
                           key={at}
                           className="rounded-(--radius-pill) border border-(--color-border-subtle) bg-(--color-surface-raised) px-tight"
                         >
                           <Emoji char={emoji} />
-                        </span>
+                        </li>
                       ))}
-                    </div>
+                    </ul>
                   )}
                 </div>
 
@@ -780,6 +793,10 @@ function Status({ state }: { state: "sent" | "delivered" | "read" }) {
     <span
       // No margin of its own: it now sits in the flex row that carries the text, which spaces it.
       className={state === "read" ? "font-medium" : undefined}
+      // `role="img"` rather than a bare `aria-label`: a name on a generic element is ignored,
+      // and here that silence hid the whole distinction — `delivered` and `read` share the glyph
+      // and differ only in weight, so the word is the only thing that tells them apart.
+      role="img"
       title={label}
       aria-label={label}
       data-receipt={state}

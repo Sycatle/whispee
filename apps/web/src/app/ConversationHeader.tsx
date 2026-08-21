@@ -221,9 +221,13 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
         arrive, and finding it any other way means instrumenting the WebAssembly module.
       */}
       <div className="min-w-0 flex-1">
-        <h2 className="truncate text-body font-medium" data-epoch={String(view.epoch)}>
+        {/* `<h1>`, because an open thread is what this page is about. The document used to start
+            at `<h2>` the moment a conversation was opened: the only `<h1>` in the shell lived in
+            `EmptyCenter`, which is the screen shown when nothing is open. Each route now has
+            exactly one — this one, `Settings`, or the identity on the empty screen. */}
+        <h1 className="truncate text-body font-medium" data-epoch={String(view.epoch)}>
           {title}
-        </h2>
+        </h1>
         {/*
           "is typing…" wins over presence: typing implies being online, and showing both adds
           noise without adding information. One-to-one only — in a group, "online" would not

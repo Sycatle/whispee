@@ -93,6 +93,13 @@ export default tseslint.config(
       "jsx-a11y/control-has-associated-label": "off",
       "jsx-a11y/prefer-tag-over-role": "off",
 
+      // `role="list"` on a `<ul>` is redundant in the specification and required in practice.
+      // Tailwind's preflight sets `list-style: none` on every list, and WebKit takes the missing
+      // marker as a signal that the author no longer means a list: VoiceOver stops announcing
+      // "list, 4 items". Every list in this interface is unstyled, so the redundancy is the fix
+      // rather than an oversight, and the rule would report each one.
+      "jsx-a11y/no-redundant-roles": "off",
+
       // Only `rules-of-hooks`, deliberately, rather than the plugin's recommended set. Version 7
       // ships the React Compiler rules (`set-state-in-effect`, `purity`, `refs`,
       // `static-components`), which describe a model this project has not adopted — they report

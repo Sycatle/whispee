@@ -165,9 +165,11 @@ function Navigation({ section }: { section: SettingsSection | null }) {
     <nav aria-label="Settings" className="space-y-pane p-snug">
       {GROUPS.map((group) => (
         <div key={group.heading}>
-          <h3 className="px-snug py-tight text-caption font-medium tracking-wide text-(--color-ink-muted) uppercase">
+          {/* `<h2>` and not `<h3>`: the screen's title above is the `<h1>`, and skipping a level
+              makes a reader browsing by heading believe a section went missing. */}
+          <h2 className="px-snug py-tight text-caption font-medium tracking-wide text-(--color-ink-muted) uppercase">
             {group.heading}
-          </h3>
+          </h2>
           <ul>
             {group.entries.map((entry) => (
               <li key={entry.section}>

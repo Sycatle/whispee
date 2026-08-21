@@ -297,7 +297,9 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <Section id="conversations" label="Conversations" count={listed.length}>
-          <ul className="px-snug pb-snug">
+          {/* See the note on the thread's `<ol>`: the explicit role is the answer to preflight's
+              `list-style: none`, not a redundancy anybody forgot to remove. */}
+          <ul role="list" aria-label="Conversations" className="px-snug pb-snug">
             {listed.map((view) => {
               const unread = session.unreadIn(view);
               const line = preview(view);
@@ -391,11 +393,13 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                           <EmojiText text={line} />
                         </span>
                         {unread > 0 && (
-                          <span
-                            className="shrink-0 rounded-(--radius-pill) bg-(--color-accent) px-1.5 font-evidence text-caption font-medium text-(--color-accent-ink)"
-                            aria-label={`${unread} unread`}
-                          >
-                            {unread}
+                          // The count sits inside the row's `<button>`, so it is read as part of
+                          // the row's name. The `aria-label` it used to carry was on a generic
+                          // `<span>` and therefore ignored, which left the button announcing a
+                          // bare number with no unit — "Alice, 3".
+                          <span className="shrink-0 rounded-(--radius-pill) bg-(--color-accent) px-1.5 font-evidence text-caption font-medium text-(--color-accent-ink)">
+                            <span aria-hidden="true">{unread}</span>
+                            <span className="sr-only">{unread} unread</span>
                           </span>
                         )}
                       </span>
@@ -415,7 +419,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         {/* Everybody we have a reason to know and no open thread with — see `lib/roster.ts` for
             what that means and what it cannot see. */}
         <Section id="contacts" label="Contacts" count={contacts.length}>
-          <ul className="px-snug pb-snug">
+          <ul role="list" aria-label="Contacts" className="px-snug pb-snug">
             {contacts.map((handle) => {
               const contact = nameOf(handle, names);
 

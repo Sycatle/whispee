@@ -68,12 +68,18 @@ export function PresenceRing({
 export function PresenceDot({ session, handle }: { session: Session; handle: string }) {
   if (!isOnline(session.presenceOf(handle), session.presenceClock)) return null;
 
+  // A name on a bare `<span>` names an element whose role is `generic`, which ARIA forbids
+  // naming and most screen readers drop on the floor: the dot was silent. `PresenceRing` above
+  // already had the right shape — the mark is decoration, the word is text.
   return (
-    <span
-      className="inline-block size-2 shrink-0 rounded-pill bg-(--color-ok)"
-      title="online"
-      aria-label="online"
-    />
+    <>
+      <span
+        aria-hidden="true"
+        className="inline-block size-2 shrink-0 rounded-pill bg-(--color-ok)"
+        title="online"
+      />
+      <span className="sr-only">online</span>
+    </>
   );
 }
 

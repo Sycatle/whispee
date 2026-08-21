@@ -70,6 +70,31 @@ const TONE_NAMES = ["default", "light", "medium-light", "medium", "medium-dark",
 /** The label the recents section carries. Written once: two spellings would be two sections. */
 const RECENTS = "Recently used";
 
+/**
+ * One emoji standing for each section, in the jump bar.
+ *
+ * Artwork and not `ui/Icon.tsx`, deliberately, and it is the one place in the application where
+ * an emoji is chrome. The inventory in `Icon.tsx` is line art naming *actions*; there is no line
+ * drawing of "food and drink" that reads at 18 px, and every other picker in existence uses the
+ * emoji themselves — so a reader already knows what a bear at the top of a grid means.
+ *
+ * Keyed by label so a section without an icon simply gets none, rather than the wrong one: the
+ * groups come from the generated catalogue, and a Unicode release that adds one must not silently
+ * shift every icon by a position.
+ */
+const SECTION_ICONS: Record<string, string> = {
+  [RECENTS]: "\u{1f558}",
+  "Smileys & Emotion": "\u{1f600}",
+  "People & Body": "\u{1f44b}",
+  "Animals & Nature": "\u{1f43b}",
+  "Food & Drink": "\u{1f34e}",
+  "Travel & Places": "\u{1f697}",
+  Activities: "\u26bd",
+  Objects: "\u{1f4a1}",
+  Symbols: "\u{1f523}",
+  Flags: "\u{1f3c1}",
+};
+
 /** A category as the grid lays it out: a heading, and the emoji under it. */
 interface Section {
   label: string;
@@ -110,6 +135,8 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
   // the write reaches disk, so the chosen value is mirrored here.
   const [tone, setTone] = useState<Tone>(session.preferences.skinTone ?? 0);
   const grid = useRef<HTMLDivElement>(null);
+  /** Index of the section the scroller is currently showing, for the jump bar's marker. */
+  const [current, setCurrent] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -125,7 +152,13 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
 
   const sections = useMemo(() => {
     if (!loaded) return [];
-    if (query.trim()) return [{ label: "Results", entries: search(loaded, query) }];
+    if (query.trim()) {
+      // No section at all when nothing matches, rather than an empty one: a "Results" heading
+      // above a blank panel reads as a grid that failed to load, and hides the message below
+      // that says what actually happened.
+      const found = search(loaded, query);
+      return found.length > 0 ? [{ label: "Results", entries: found }] : [];
+    }
 
     const known = new Map(loaded.entries.map((entry) => [entry.char, entry]));
     const recents = session.preferences.recentEmojis
@@ -141,6 +174,47 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
     const char = applyTone(entry, tone);
     onPick(char);
     void session.noteEmojiUse(char);
+  };
+
+  /**
+   * Scrolls a section to the top of the grid.
+   *
+   * Arithmetic on `scrollTop` rather than `scrollIntoView`, for two reasons. `scrollIntoView`
+   * scrolls **every** ancestor that can scroll, so on a phone it drags the whole conversation
+   * behind the sheet. And it has no notion of the sticky heading sitting at the top of this
+   * scroller: aligning the section's own top with the viewport's puts the first row of emoji
+   * underneath the heading of the section above it.
+   */
+  const jump = (index: number) => {
+    const scroller = grid.current;
+    const section = scroller?.querySelector<HTMLElement>(`[data-section="${index}"]`);
+    if (!scroller || !section) return;
+
+    scroller.scrollTop = section.offsetTop;
+    setCurrent(index);
+  };
+
+  /**
+   * Which section the reader is looking at.
+   *
+   * Read off `scrollTop` on every scroll rather than watched with an `IntersectionObserver`: the
+   * sections are already in the DOM and their offsets are already computed, so this is a loop
+   * over nine numbers against an observer with nine registrations and a callback that fires on
+   * its own schedule. The `+ 1` absorbs the sub-pixel rounding that would otherwise leave the
+   * marker one section behind after a jump.
+   */
+  const track = () => {
+    const scroller = grid.current;
+    if (!scroller) return;
+
+    const sections = [...scroller.querySelectorAll<HTMLElement>("[data-section]")];
+    const top = scroller.scrollTop + 1;
+
+    let at = 0;
+    for (const [index, section] of sections.entries()) {
+      if (section.offsetTop <= top) at = index;
+    }
+    setCurrent(at);
   };
 
   const chooseTone = (next: Tone) => {
@@ -204,12 +278,58 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
         />
       </div>
 
+      {/*
+        The jump bar. Hidden while searching, because there is then exactly one section and a row
+        of buttons that all scroll to the same place is a row of buttons that lies.
+
+        Buttons and not tabs: a tab shows one panel and hides the others, and these scroll a single
+        list. Announcing them as tabs would promise a reader that the grid changes when it only
+        moves, and leave them wondering where the other nine panels went.
+      */}
+      {!query.trim() && sections.length > 1 && (
+        <div
+          role="group"
+          aria-label="Jump to a category"
+          className="flex items-center gap-tight border-b border-(--color-border-subtle) px-snug pb-tight"
+        >
+          {sections.map((section, index) => (
+            <button
+              key={section.label}
+              type="button"
+              aria-label={section.label}
+              title={section.label}
+              // The marker is a state, so it is announced and not only drawn. `aria-label` names
+              // the section; this says whether it is the one on screen.
+              aria-current={index === current ? "true" : undefined}
+              onClick={() => jump(index)}
+              className={cn(
+                "relative flex flex-1 items-center justify-center rounded-control py-tight",
+                "transition-colors duration-(--duration-quick) ease-out motion-reduce:transition-none",
+                "hover:bg-(--color-surface-sunken)",
+                "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)",
+                // The underline rather than a filled pill: the icons are full-colour artwork, and
+                // a tinted background behind one of them just makes it look broken.
+                index === current &&
+                  "after:absolute after:inset-x-1 after:bottom-0 after:h-px after:bg-(--color-accent)",
+                index !== current && "opacity-60",
+              )}
+            >
+              <Emoji char={SECTION_ICONS[section.label] ?? section.label.slice(0, 1)} />
+            </button>
+          ))}
+        </div>
+      )}
+
       <div
         ref={grid}
         role="grid"
         aria-label="Emoji"
         onKeyDown={navigate}
-        className="h-72 overflow-y-auto px-snug"
+        onScroll={track}
+        // `relative` is load-bearing: `jump` reads `section.offsetTop`, which is measured from the
+        // nearest positioned ancestor. Without it the offsets are relative to whatever the sheet
+        // or the popover happens to position, and every jump lands somewhere else.
+        className="relative h-72 overflow-y-auto px-snug"
       >
         {loaded === null ? (
           <div className="flex h-72 items-center justify-center">
@@ -221,7 +341,7 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
           </p>
         ) : (
           sections.map((section, index) => (
-            <section key={section.label}>
+            <section key={section.label} data-section={index}>
               <h3 className="sticky top-0 z-(--z-index-sticky) bg-(--color-surface-raised) py-tight text-caption text-(--color-ink-muted)">
                 {section.label}
               </h3>

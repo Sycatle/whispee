@@ -129,6 +129,17 @@ test("search ranks an exact name, then a prefix, then anything else", () => {
   );
 });
 
+test("a several-word query matches terms in any order", () => {
+  // CLDR punctuates its names — the French flag is "flag: France" — so a query of the two obvious
+  // words matched nothing at all while the only test was a contiguous substring.
+  assert.deepEqual(
+    search(catalogue as Catalogue, "flag france").map((entry) => entry.char),
+    ["🇫🇷"],
+  );
+  // Still below the substring tiers: a contiguous name match comes first.
+  assert.equal(search(catalogue as Catalogue, "red heart")[0]?.label, "red heart");
+});
+
 test("search ignores case and diacritics in both directions", () => {
   assert.deepEqual(
     search(CATALOGUE, "CAFE").map((entry) => entry.char),

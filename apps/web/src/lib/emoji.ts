@@ -253,17 +253,27 @@ function fold(value: string): string {
 /**
  * Emoji matching a query, best first.
  *
- * Three tiers, and the order is the whole point: typing "sm" should offer "smile" before
+ * Four tiers, and the order is the whole point: typing "sm" should offer "smile" before
  * "blacksmith", and a name should beat a keyword. Without the tiers the results are alphabetical
  * noise and the first cell — the one Enter selects — is essentially random.
+ *
+ * The last tier is why a query may be several words. The names are CLDR's, and CLDR punctuates:
+ * the French flag is `flag: France`, so "flag france" matched **nothing at all** while the only
+ * test was whether the whole query appeared as a substring. Requiring every term to appear
+ * somewhere in the name or the keywords, in any order, is what makes a two-word query behave the
+ * way anybody typing one expects — and it sits below the substring tiers, so a contiguous match
+ * still wins.
  */
 export function search(from: Catalogue, query: string): Entry[] {
   const needle = fold(query.trim());
   if (!needle) return [];
 
+  const terms = needle.split(/\s+/);
+
   const exact: Entry[] = [];
   const prefix: Entry[] = [];
   const loose: Entry[] = [];
+  const scattered: Entry[] = [];
 
   for (const entry of from.entries) {
     const label = fold(entry.label);
@@ -271,10 +281,13 @@ export function search(from: Catalogue, query: string): Entry[] {
     if (label === needle) exact.push(entry);
     else if (label.startsWith(needle)) prefix.push(entry);
     else if (label.includes(needle)) loose.push(entry);
-    else if (entry.keywords.some((keyword) => fold(keyword).includes(needle))) loose.push(entry);
+    else {
+      const haystack = `${label} ${entry.keywords.map(fold).join(" ")}`;
+      if (terms.every((term) => haystack.includes(term))) scattered.push(entry);
+    }
   }
 
-  return [...exact, ...prefix, ...loose];
+  return [...exact, ...prefix, ...loose, ...scattered];
 }
 
 /**

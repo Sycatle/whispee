@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 
+import { LeaveGroupDialog } from "@/components/Group";
 import { PresenceBadge } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
 import { formatHandle, nameMatches, nameOf, titleOf } from "@/lib/naming";
@@ -247,6 +248,9 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
    * ⌘K goes to the browser untouched rather than being swallowed by a handler with nothing to do.
    */
   const run = useRunBinding();
+
+  /** The group a leave confirmation is open about, if any. */
+  const [leaving, setLeaving] = useState<ConversationView | null>(null);
 
   useBinding("rail.filter", () => {
     setSearching(true);
@@ -532,6 +536,20 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     >
                       Conversation details
                     </ContextMenu.Item>
+                    {/* Leaving is decided about a conversation, so it lives on the conversation
+                        — not at the bottom of a column listing its members. The dialog itself is
+                        mounted by the rail, outside this menu: a confirmation rendered inside one
+                        is unmounted the moment an item is chosen, and a confirmation that flashes
+                        past is not one. */}
+                    {view.accounts.length > 1 && (
+                      <ContextMenu.Item
+                        icon="revoke"
+                        tone="danger"
+                        onSelect={() => setLeaving(view)}
+                      >
+                        Leave the group
+                      </ContextMenu.Item>
+                    )}
                     <ContextMenu.Item
                       icon="copy"
                       // Only where there is one handle to mean. In a group, "copy the handle"
@@ -748,6 +766,19 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
           </Menu.Item>
         </Menu>
       </div>
+
+      {/* Mounted here, outside the context menu that asks for it: a dialog inside a menu is
+          unmounted with the menu the instant an item is chosen. `key` so that opening it on a
+          second group starts from that group's own state rather than the previous one's. */}
+      {leaving !== null && (
+        <LeaveGroupDialog
+          key={leaving.key}
+          view={leaving}
+          open
+          onOpenChange={(open) => !open && setLeaving(null)}
+          onLeft={() => setLeaving(null)}
+        />
+      )}
 
       <Dialog
         open={erasing}

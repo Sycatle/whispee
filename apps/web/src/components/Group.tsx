@@ -50,22 +50,14 @@ import { useReport } from "@/state/report";
  */
 export function useGroupAdmin({
   view,
-  onClose,
 }: {
   view: ConversationView;
-  /**
-   * Closes the detail column. Called once the leave request is in: there is nothing further to
-   * administer in a group one is on the way out of. It does **not** mean the conversation is
-   * gone — see the note on leaving above.
-   */
-  onClose: () => void;
 }) {
   const session = useSession();
   const bump = useBump();
   const report = useReport();
 
   const [busy, setBusy] = useState(false);
-  const [leaving, setLeaving] = useState(false);
   /** The member a confirmation is currently open about, and what it would do to them. */
   const [pending, setPending] = useState<{ kind: "remove" | "handover"; handle: string } | null>(
     null,
@@ -75,18 +67,6 @@ export function useGroupAdmin({
   const iAmAdmin = roles === null || roles.admin === session.handle;
   const iModerate = roles === null || roles.admin === session.handle
     || roles.moderators.includes(session.handle);
-
-  // Who inherits if we leave. Computed the way `Session.requestLeave` does it: the rank just
-  // below — a moderator — otherwise the longest-standing member in MLS tree order. Announced
-  // before leaving rather than discovered after: bequeathing a group without knowing to whom
-  // would be the worst way to leave it.
-  const heir = (() => {
-    if (roles === null || roles.admin !== session.handle) return null;
-    const members = view.peers
-      .map((peer) => peer.name)
-      .filter((name) => name !== session.handle);
-    return members.find((name) => roles.moderators.includes(name)) ?? members[0] ?? null;
-  })();
 
   const action = async (run: () => Promise<void>) => {
     setBusy(true);
@@ -122,13 +102,11 @@ export function useGroupAdmin({
     // says that rather than "no actions". Excluding our own row would make one name in every
     // group behave unlike the others for a reason the reader cannot see.
     if (handle === session.handle) {
-      return roles === null ? (
+      // Nothing the group does *to* us. Leaving is ours to do and lives on the conversation's own
+      // menu, where the decision is actually made.
+      return (
         <ContextMenu.Item disabled onSelect={() => undefined}>
           No actions
-        </ContextMenu.Item>
-      ) : (
-        <ContextMenu.Item icon="revoke" tone="danger" onSelect={() => setLeaving(true)}>
-          Leave the group
         </ContextMenu.Item>
       );
     }
@@ -177,27 +155,21 @@ export function useGroupAdmin({
     );
   };
 
-  const footer = (
-    <div className="space-y-snug">
-      {roles !== null && iModerate && (
-        <p className="text-caption text-(--color-ink-muted)">
-          Removing someone removes <strong>all of their devices</strong>: the unit is the
-          account. From the commit onward, they decrypt nothing that follows.
-        </p>
-      )}
-
-      {roles !== null && (
-        // Leaving is not another row of the roster, so it does not sit at roster distance: the
-        // extra `pt-gutter` on top of the list's `space-y-snug` is what says the subject changed.
-        // It stays a word rather than a glyph, by the rule at the top of `ui/IconButton.tsx` —
-        // rare, and undone only by somebody else's commit.
-        <div className="pt-gutter">
-          <Button variant="quiet" size="sm" onClick={() => setLeaving(true)}>
-            Leave the group
-          </Button>
-        </div>
-      )}
-
+  /**
+   * The confirmations, and nothing visible until one is asked for.
+   *
+   * The warning about removal and the "Leave the group" button used to be rendered here, under
+   * the member list. Both moved: the warning is in the removal dialog, where it is read at the
+   * moment it changes a decision rather than standing permanently over a list nobody is removing
+   * anybody from; leaving is on the conversation's own context menu, which is where you are when
+   * you decide to leave one.
+   *
+   * What remains is a node the caller must render *outside* any menu. A dialog mounted inside a
+   * context menu is unmounted with it the instant an item is chosen, so the confirmation would
+   * flash and vanish — which is exactly the failure a confirmation exists to prevent.
+   */
+  const dialogs = (
+    <>
       {/*
         Every confirmation below names people by handle, and none of them by display name. This
         is the deliberate exception to the rule the roster above follows.
@@ -277,59 +249,112 @@ export function useGroupAdmin({
         }
       />
 
-      <Dialog
-        open={leaving}
-        onOpenChange={setLeaving}
-        tone="danger"
-        title="Leave the group?"
-        actions={
-          <>
-            <Button variant="secondary" onClick={() => setLeaving(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              busy={busy}
-              onClick={() =>
-                void action(async () => {
-                  await session.requestLeave(view);
-                  setLeaving(false);
-                  report.done("Leave request sent. You are out once another member commits it.");
-                  onClose();
-                })
-              }
-            >
-              {heir !== null
-                ? `Hand over to ${formatHandle(heir)} and leave`
-                : "Request to leave"}
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-snug text-(--color-ink-muted)">
-          <p>
-            Leaving is a <strong>request</strong>: the protocol forbids removing yourself, so
-            another member has to pick it up. Until then you stay in the group and keep receiving
-            its messages.
-          </p>
-          {heir !== null && (
-            <p>
-              You administer this group: <strong>{formatHandle(heir)}</strong> will succeed you
-              {roles !== null && roles.moderators.includes(heir)
-                ? " (moderator, the rank below)"
-                : " (longest-standing member)"}
-              . A group with no administrator would be frozen for good.
-            </p>
-          )}
-          {roles?.admin === session.handle && heir === null && (
-            <p className="text-(--color-danger)">
-              You are the last member: leaving amounts to deleting the conversation.
-            </p>
-          )}
-        </div>
-      </Dialog>
-    </div>
+    </>
   );
 
-  return { menuFor, footer, role };
+  return { menuFor, dialogs, role };
+}
+
+/**
+ * Leaving a group, asked about the group.
+ *
+ * Its own component rather than part of `useGroupAdmin`, because the two callers need it in
+ * different places: the detail column has the hook already, and the rail opens this from a
+ * context menu that unmounts the moment an item is chosen. A confirmation rendered inside that
+ * menu would flash and vanish, which is the one thing a confirmation must not do.
+ */
+export function LeaveGroupDialog({
+  view,
+  open,
+  onOpenChange,
+  onLeft,
+}: {
+  view: ConversationView;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Called once the request is in. The rail closes its own state; the column also closes. */
+  onLeft?: () => void;
+}) {
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
+  const [busy, setBusy] = useState(false);
+
+  const roles = session.roles(view);
+
+  // Who inherits if we leave. Computed the way `Session.requestLeave` does it: the rank just
+  // below — a moderator — otherwise the longest-standing member in MLS tree order. Announced
+  // before leaving rather than discovered after: bequeathing a group without knowing to whom
+  // would be the worst way to leave it.
+  const heir = (() => {
+    if (roles === null || roles.admin !== session.handle) return null;
+    const members = view.peers.map((peer) => peer.name).filter((name) => name !== session.handle);
+    return members.find((name) => roles.moderators.includes(name)) ?? members[0] ?? null;
+  })();
+
+  const action = async (run: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await run();
+      bump();
+    } catch (e) {
+      report.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+    open={open}
+    onOpenChange={onOpenChange}
+      tone="danger"
+      title="Leave the group?"
+      actions={
+        <>
+          <Button variant="secondary" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            busy={busy}
+            onClick={() =>
+              void action(async () => {
+                await session.requestLeave(view);
+                onOpenChange(false);
+                report.done("Leave request sent. You are out once another member commits it.");
+                onLeft?.();
+              })
+            }
+          >
+            {heir !== null
+              ? `Hand over to ${formatHandle(heir)} and leave`
+              : "Request to leave"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-snug text-(--color-ink-muted)">
+        <p>
+          Leaving is a <strong>request</strong>: the protocol forbids removing yourself, so
+          another member has to pick it up. Until then you stay in the group and keep receiving
+          its messages.
+        </p>
+        {heir !== null && (
+          <p>
+            You administer this group: <strong>{formatHandle(heir)}</strong> will succeed you
+            {roles !== null && roles.moderators.includes(heir)
+              ? " (moderator, the rank below)"
+              : " (longest-standing member)"}
+            . A group with no administrator would be frozen for good.
+          </p>
+        )}
+        {roles?.admin === session.handle && heir === null && (
+          <p className="text-(--color-danger)">
+            You are the last member: leaving amounts to deleting the conversation.
+          </p>
+        )}
+      </div>
+    </Dialog>
+  );
 }

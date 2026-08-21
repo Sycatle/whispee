@@ -360,7 +360,7 @@ export function DetailPanel({ view }: { view: ConversationView }) {
   // The administration of a group, as a menu per member and a footer. Called unconditionally —
   // it is a hook — and it costs nothing in a one-to-one, where `roles` is null and `menuFor`
   // returns the empty answer.
-  const group = useGroupAdmin({ view, onClose: close });
+  const group = useGroupAdmin({ view });
 
   // The heading takes focus when the panel appears, so a keyboard or screen reader user lands in
   // what just opened rather than continuing from the button they pressed.
@@ -585,17 +585,9 @@ export function DetailPanel({ view }: { view: ConversationView }) {
 
       {focused && <AccountDetail account={focused} />}
 
-      {/*
-        The way out, and nothing else.
-
-        A second list of the same members used to sit here, each row carrying its roles and a
-        strip of buttons — so the column named everybody twice and asked the reader to work out
-        that the two lists were one. The actions moved onto the member list above, where the names
-        already are.
-      */}
-      {focused === undefined && view.accounts.length > 1 && (
-        <section className="space-y-snug p-pane">{group.footer}</section>
-      )}
+      {/* The confirmations, mounted outside every menu — see `useGroupAdmin`. Nothing is drawn
+          until one is asked for. */}
+      {group.dialogs}
     </aside>
   );
 }

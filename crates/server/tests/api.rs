@@ -3528,3 +3528,123 @@ async fn an_unknown_account_has_no_chain_rather_than_an_empty_one() {
     let response = phone.get(&format!("/v1/accounts/{}/chain", "0".repeat(32))).await;
     assert_eq!(response.status(), 404);
 }
+
+// ---------------------------------------------------------------- renaming
+
+/// A name moves; the account does not.
+///
+/// This is the operation the whole identity change exists to make possible, and the assertion that
+/// matters is the negative one: the device ids, the attestations and the account id are all still
+/// what they were. Before accounts were named by their key, a rename would have meant a new
+/// credential everywhere.
+#[tokio::test]
+async fn renaming_moves_the_name_and_leaves_the_account_alone() {
+    let server = start().await;
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+    let phone = alice.device(&server, "phone").await;
+
+    let wanted = unique("renamed");
+    let response = phone
+        .post(&format!("/v1/accounts/{}/handle", alice.id), serde_json::json!({ "handle": wanted }))
+        .await;
+    assert!(response.status().is_success(), "rename refused: {:?}", response.status());
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["account"], alice.id, "the account moved with the name");
+    assert_eq!(body["handle"], wanted);
+    assert_eq!(body["retired"], alice.handle, "the old name was not retired");
+
+    // The directory follows.
+    let resolved: serde_json::Value = reqwest::get(format!("{}/v1/handles/{wanted}", server.base_url))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resolved["account"], alice.id);
+
+    // And the device is still the device: nothing about it was signed over the old name.
+    let devices: serde_json::Value =
+        phone.get(&format!("/v1/accounts/{}/devices", alice.id)).await.json().await.unwrap();
+    assert_eq!(devices["devices"].as_array().unwrap().len(), 1);
+}
+
+/// The retired name answers `410`, and never comes back.
+///
+/// `404` would tell a caller to try again later, which is not true and never becomes true. And a
+/// name that could be re-registered would make every stale reference to it — a bookmark, a mention
+/// in an old message — point at somebody else, which is an impersonation nobody has to mount.
+#[tokio::test]
+async fn a_retired_handle_is_gone_rather_than_free() {
+    let server = start().await;
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+    let phone = alice.device(&server, "phone").await;
+
+    phone
+        .post(
+            &format!("/v1/accounts/{}/handle", alice.id),
+            serde_json::json!({ "handle": unique("renamed") }),
+        )
+        .await;
+
+    let gone = reqwest::get(format!("{}/v1/handles/{}", server.base_url, alice.handle)).await.unwrap();
+    assert_eq!(gone.status(), 410);
+
+    // Nobody may take it, not even a fresh account.
+    let bob = TestAccount::create(&server, &unique("bob")).await;
+    let taken = bob.device(&server, "phone").await;
+    let refused = taken
+        .post(
+            &format!("/v1/accounts/{}/handle", bob.id),
+            serde_json::json!({ "handle": alice.handle }),
+        )
+        .await;
+    assert_eq!(refused.status(), 409);
+}
+
+/// The cooldown counts renames, not the age of the name.
+///
+/// The bug this pins: measuring how long the current handle had been held refused the **first**
+/// rename, because a handle claimed at sign-up is minutes old. That hit the likeliest case of all
+/// — not liking the name you were given the moment you were given it.
+#[tokio::test]
+async fn the_first_rename_is_free_and_the_second_is_not() {
+    let server = start().await;
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+    let phone = alice.device(&server, "phone").await;
+
+    let first = phone
+        .post(
+            &format!("/v1/accounts/{}/handle", alice.id),
+            serde_json::json!({ "handle": unique("first") }),
+        )
+        .await;
+    assert!(first.status().is_success(), "the first rename should not be rate limited");
+
+    let second = phone
+        .post(
+            &format!("/v1/accounts/{}/handle", alice.id),
+            serde_json::json!({ "handle": unique("second") }),
+        )
+        .await;
+    assert_eq!(second.status(), 409, "the second rename should be refused");
+}
+
+/// Only a device of the account may rename it.
+#[tokio::test]
+async fn a_stranger_cannot_rename_somebody_else() {
+    let server = start().await;
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+    alice.device(&server, "phone").await;
+
+    let mallory = TestAccount::create(&server, &unique("mallory")).await;
+    let theirs = mallory.device(&server, "phone").await;
+
+    let refused = theirs
+        .post(
+            &format!("/v1/accounts/{}/handle", alice.id),
+            serde_json::json!({ "handle": unique("stolen") }),
+        )
+        .await;
+    assert_eq!(refused.status(), 403);
+}

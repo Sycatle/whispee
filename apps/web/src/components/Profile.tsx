@@ -30,7 +30,12 @@
 import { useState } from "react";
 
 import { MAX_CODE_POINTS, sanitize, validate } from "@/lib/display-name";
-import { formatHandle } from "@/lib/naming";
+import {
+  MAX_LENGTH as MAX_HANDLE_LENGTH,
+  normalize as normalizeHandle,
+  validate as validateHandle,
+} from "@/lib/handle";
+
 import { useReport } from "@/state/report";
 import { useSession } from "@/state/SessionProvider";
 import { Button } from "@/ui/Button";
@@ -38,9 +43,34 @@ import { Field } from "@/ui/Field";
 import { Input } from "@/ui/Input";
 import { Panel } from "@/ui/Panel";
 import { displayNameMessage } from "@/ui/displayNameMessage";
+import { handleMessage } from "@/ui/handleMessage";
 
 export function ProfileSettings() {
   const session = useSession();
+  const [handleDraft, setHandleDraft] = useState(session.handle);
+  const [renaming, setRenaming] = useState(false);
+
+  // The field keeps what was typed and the canonical form is derived, as in the onboarding: a
+  // field that silently drops the character just typed looks broken, and the person never learns
+  // which characters the format takes.
+  const wantedHandle = normalizeHandle(handleDraft);
+  const handleProblem = handleDraft === "" ? null : validateHandle(wantedHandle);
+
+  const rename = async () => {
+    setRenaming(true);
+    try {
+      await session.renameHandle(wantedHandle);
+      report.done(`You are now @${wantedHandle}.`);
+    } catch (error) {
+      // Shown rather than swallowed: the two refusals the server makes here — the name is taken,
+      // or it was renamed too recently — are both things the reader can act on, and both are
+      // sentences the route already wrote.
+      report.error(error instanceof Error ? error.message : String(error));
+      setHandleDraft(session.handle);
+    } finally {
+      setRenaming(false);
+    }
+  };
   const report = useReport();
 
   const [draft, setDraft] = useState(session.displayName ?? "");
@@ -108,19 +138,55 @@ export function ProfileSettings() {
 
       <Panel
         title="Handle"
-        description="Your handle cannot be changed. It is the account itself — the name your key is published under in the transparency log, the identity inside every encrypted group you belong to, and the prefix of each of your device identifiers. Changing it would not rename this account, it would create another one."
+        description="How people reach you. It is unique, so no two accounts answer to the same one at the same time — but it is a name, not the account: what actually identifies you is your key, which is why this can move and your conversations do not notice."
       >
-        <Field label="Handle" hint="Share this to be reached. It is the same for everybody.">
-          {(control) => (
-            <Input
-              id={control.id}
-              aria-describedby={control.describedBy}
-              value={formatHandle(session.handle)}
-              readOnly
-              disabled
-            />
-          )}
-        </Field>
+        <form
+          className="space-y-pane"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (handleProblem === null && wantedHandle !== session.handle) void rename();
+          }}
+        >
+          <Field
+            label="Handle"
+            hint="Lowercase letters, digits and underscores, 3 to 32 characters."
+            error={handleProblem === null ? undefined : handleMessage(handleProblem)}
+          >
+            {(control) => (
+              <Input
+                id={control.id}
+                aria-describedby={control.describedBy}
+                aria-invalid={control.invalid}
+                value={handleDraft}
+                onChange={(event) => setHandleDraft(event.target.value)}
+                maxLength={MAX_HANDLE_LENGTH}
+                autoComplete="username"
+              />
+            )}
+          </Field>
+
+          {/*
+            Said before the button, not after the press.
+
+            Two consequences the reader cannot guess and would not forgive discovering: the old
+            name is gone for good — the server retires it so that no stale link to it can ever
+            point at somebody else — and there is a day to wait before the next change. Both are
+            arguments made in `migrations/0014_account_identity.sql`; this is where they reach the
+            person they constrain.
+          */}
+          <p className="text-caption text-(--color-ink-muted)">
+            Your current handle is retired when you change it: nobody, including you, can take it
+            again. You can change it once a day.
+          </p>
+
+          <Button
+            type="submit"
+            busy={renaming}
+            disabled={handleProblem !== null || wantedHandle === session.handle}
+          >
+            Change handle
+          </Button>
+        </form>
       </Panel>
     </div>
   );

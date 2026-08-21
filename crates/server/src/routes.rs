@@ -520,33 +520,40 @@ async fn rename_account(
     // `released_at` and a cleared account together: the CHECK in the migration insists on both,
     // so a half-retired row cannot exist. Nothing is deleted — a deleted row is a name back in
     // circulation.
-    let retired: Option<(String, Option<i64>)> = sqlx::query_as(
+    let retired: Option<(String, Option<i64>, bool)> = sqlx::query_as(
         "UPDATE handles SET account = NULL, released_at = now()
          WHERE account = $1 AND released_at IS NULL
-         RETURNING handle, EXTRACT(EPOCH FROM (now() - claimed_at))::BIGINT",
+         RETURNING handle, EXTRACT(EPOCH FROM (now() - claimed_at))::BIGINT, from_rename",
     )
     .bind(&account)
     .fetch_optional(&mut *tx)
     .await?;
 
-    // A cooldown, counted from when the current name was claimed.
+    // A cooldown between **changes**, which is not the same as the age of the current name.
     //
     // Not decoration: renaming freely is how somebody escapes being blocked, or grinds through
     // names until they land on one that reads like somebody else's. A day is long enough to make
     // that tedious and short enough that a person who mistyped their own name is not stuck with
     // it for a week.
-    if let Some((_, Some(held_for))) = &retired {
+    //
+    // `from_rename` is what stops it firing on the first one. A handle claimed at sign-up is
+    // minutes old, so measuring its age would tell somebody who has never renamed that they
+    // renamed too recently — which was the bug, and it hit the single most likely case: not
+    // liking the name you were given the moment you were given it.
+    if let Some((_, Some(held_for), true)) = &retired {
         if *held_for < RENAME_COOLDOWN_SECONDS {
             return Err(ApiError::Conflict("this account was renamed too recently"));
         }
     }
 
-    let claimed =
-        sqlx::query("INSERT INTO handles (handle, account) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(&payload.handle)
-            .bind(&account)
-            .execute(&mut *tx)
-            .await?;
+    let claimed = sqlx::query(
+        "INSERT INTO handles (handle, account, from_rename) VALUES ($1, $2, true)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&payload.handle)
+    .bind(&account)
+    .execute(&mut *tx)
+    .await?;
 
     if claimed.rows_affected() == 0 {
         let owner: Option<(Option<String>,)> =
@@ -565,7 +572,7 @@ async fn rename_account(
     Ok(Json(serde_json::json!({
         "account": account,
         "handle": payload.handle,
-        "retired": retired.map(|(handle, _)| handle),
+        "retired": retired.map(|(handle, _, _)| handle),
     })))
 }
 

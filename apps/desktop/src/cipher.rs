@@ -1,39 +1,37 @@
-//! Les secrets de l'appareil, tenus par le processus natif.
+//! The device secrets, held by the native process.
 //!
-//! # Ce que ce module déplace, et ce qu'il ne déplace pas
+//! # What this module moves, and what it does not
 //!
-//! Il déplace deux choses hors de la webview : la clé qui **chiffre l'état au repos** et la clé
-//! qui **signe les requêtes**. Il ne déplace **pas** les clés MLS, qui vivent toujours dans la
-//! mémoire linéaire du module WebAssembly — cette limite est écrite dans `lib.rs` et reste
-//! entière.
+//! It moves two things out of the webview: the key that **encrypts state at rest** and the key
+//! that **signs requests**. It does **not** move the MLS keys, which still live in the linear
+//! memory of the WebAssembly module — that limit is written down in `lib.rs` and stands.
 //!
-//! La clé de signature comptait autant que l'autre, et c'est moins évident : un état MLS sauvé
-//! dont la clé d'authentification a disparu ne sert à rien, puisque l'appareil ne peut plus
-//! émettre une seule requête. Le serveur refuse par ailleurs d'en changer — voir la clause sur
-//! `auth_key` dans `register_device`. La perdre est donc aussi définitif que perdre l'état.
+//! The signing key mattered as much as the other, and that is less obvious: a saved MLS state
+//! whose authentication key is gone is worthless, since the device can no longer issue a single
+//! request. The server also refuses to change it — see the `auth_key` clause in
+//! `register_device`. Losing it is therefore as final as losing the state.
 //!
-//! # Ce que « la clé ne quitte pas le Rust » vaut réellement
+//! # What "the key never leaves Rust" is actually worth
 //!
-//! Sur le web, les clés sont des `CryptoKey` non extractables : le navigateur refuse d'en
-//! exporter le matériel, y compris à notre propre code. Ici, le processus Rust voit la clé en
-//! clair. Ce n'est pas une régression pratique — un script hostile dans la webview pouvait déjà
-//! *utiliser* la clé sans l'extraire, et il pourra toujours appeler `sceller`/`signer` — mais
-//! c'est une propriété qu'on abandonne, et la taire serait malhonnête.
+//! On the web, keys are non-extractable `CryptoKey`s: the browser refuses to export the material,
+//! including to our own code. Here, the Rust process sees the key in the clear. That is not a
+//! practical regression — a hostile script in the webview could already *use* the key without
+//! extracting it, and it can still call `seal`/`sign` — but it is a property we give up, and
+//! staying quiet about it would be dishonest.
 //!
-//! Ce qu'on gagne en échange : la durabilité. Le répertoire privé de l'application n'est purgé
-//! qu'à la désinstallation, là où le stockage d'une webview mobile est évincé sans préavis.
+//! What we gain in exchange: durability. The application's private directory is only purged on
+//! uninstall, where a mobile webview's storage is evicted without warning.
 //!
-//! # Ce que la phase actuelle ne protège pas
+//! # What the current phase does not protect
 //!
-//! **La clé est dans un fichier, en clair, lisible par le propriétaire du compte.** Les
-//! permissions `0600` empêchent un autre utilisateur du même système de la lire ; elles
-//! n'empêchent ni un appareil rooté, ni une sauvegarde du disque, ni un autre processus du même
-//! utilisateur.
+//! **The key sits in a file, in the clear, readable by the account owner.** The `0600`
+//! permissions stop another user of the same system from reading it; they stop neither a rooted
+//! device, nor a disk backup, nor another process of the same user.
 //!
-//! La protection réelle au repos viendra du trousseau du système — Keychain sur iOS, Keystore
-//! sur Android — qui demande du code natif par plateforme. Ce n'est **pas** ce qui apporte la
-//! durabilité, et c'est pourquoi on peut le livrer après : le répertoire privé suffit à ne plus
-//! perdre l'état. Séparer les deux chantiers évite de retarder l'urgent par le difficile.
+//! Real protection at rest will come from the system keystore — Keychain on iOS, Keystore on
+//! Android — which needs native per-platform code. That is **not** what brings durability, which
+//! is why it can ship later: the private directory is enough to stop losing state. Splitting the
+//! two jobs keeps the difficult one from delaying the urgent one.
 
 use std::path::Path;
 
@@ -45,118 +43,116 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::store;
 
-/// Version du format du fichier de secrets.
+/// Version of the secrets file format.
 ///
-/// Présente dès la première version, parce qu'un format sans version ne peut pas évoluer sans
-/// deviner : le jour où la clé passe au trousseau, il faudra distinguer un fichier ancien d'un
-/// fichier absent.
+/// Present from the first version, because a format without one cannot evolve without guessing:
+/// the day the key moves to the keystore, an old file will have to be told apart from a missing
+/// one.
 const VERSION: u8 = 1;
 
-/// Longueur du nonce AES-GCM, en octets.
+/// Length of the AES-GCM nonce, in bytes.
 ///
-/// Douze, comme côté web : AES-GCM casse catastrophiquement si un nonce est réutilisé sous la
-/// même clé, et 96 bits aléatoires rendent la collision négligeable au rythme où un client
-/// sauvegarde son état.
+/// Twelve, as on the web: AES-GCM breaks catastrophically if a nonce is reused under the same
+/// key, and 96 random bits make a collision negligible at the rate a client saves its state.
 const NONCE_LEN: usize = 12;
 
-/// Les deux secrets d'un appareil.
+/// A device's two secrets.
 ///
-/// `ZeroizeOnDrop` efface le matériel à la libération. Contrairement au JavaScript — où un
-/// `Uint8Array` mis à zéro peut avoir été recopié par le ramasse-miettes — l'effacement est ici
-/// réel, ce qui est l'un des rares gains concrets du passage en natif.
+/// `ZeroizeOnDrop` wipes the material on release. Unlike JavaScript — where a zeroed
+/// `Uint8Array` may already have been copied by the garbage collector — the wipe is real here,
+/// which is one of the few concrete gains of going native.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct DeviceSecrets {
-    /// Chiffre l'état au repos.
+    /// Encrypts state at rest.
     seal: [u8; 32],
-    /// Graine Ed25519. Stockée plutôt que la `SigningKey`, qui n'est pas `Zeroize`.
+    /// Ed25519 seed. Stored rather than the `SigningKey`, which is not `Zeroize`.
     signing: [u8; 32],
 }
 
 impl DeviceSecrets {
-    /// Charge les secrets, ou les crée au premier lancement.
+    /// Loads the secrets, or creates them on first launch.
     ///
-    /// La distinction entre « fichier absent » et « erreur de lecture » vient de
-    /// [`store::Emplacement::lire`], et elle compte ici plus qu'ailleurs : traiter un disque en
-    /// panne comme un premier lancement produirait des secrets neufs par-dessus un compte
-    /// existant, c'est-à-dire une identité perdue et un état devenu illisible.
-    pub fn charger_ou_creer(chemin: &Path) -> std::io::Result<Self> {
-        if let Some(contenu) = store::Emplacement::lire(chemin)? {
-            return Self::decoder(&contenu);
+    /// Telling "file missing" from "read error" comes from [`store::Paths::read`], and it matters
+    /// here more than elsewhere: treating a failing disk as a first launch would mint fresh
+    /// secrets over an existing account — a lost identity and an unreadable state.
+    pub fn load_or_create(path: &Path) -> std::io::Result<Self> {
+        if let Some(content) = store::Paths::read(path)? {
+            return Self::decode(&content);
         }
 
         let mut secrets = Self { seal: [0u8; 32], signing: [0u8; 32] };
         OsRng.fill_bytes(&mut secrets.seal);
         OsRng.fill_bytes(&mut secrets.signing);
 
-        secrets.ecrire(chemin)?;
+        secrets.write(path)?;
         Ok(secrets)
     }
 
-    fn decoder(contenu: &[u8]) -> std::io::Result<Self> {
-        let invalide = |raison: &str| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, raison.to_owned())
+    fn decode(content: &[u8]) -> std::io::Result<Self> {
+        let invalid = |reason: &str| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, reason.to_owned())
         };
 
-        if contenu.len() != 1 + 32 + 32 {
-            return Err(invalide("fichier de secrets de taille inattendue"));
+        if content.len() != 1 + 32 + 32 {
+            return Err(invalid("unexpected secrets file size"));
         }
-        if contenu[0] != VERSION {
-            return Err(invalide("version de fichier de secrets inconnue"));
+        if content[0] != VERSION {
+            return Err(invalid("unknown secrets file version"));
         }
 
         let mut secrets = Self { seal: [0u8; 32], signing: [0u8; 32] };
-        secrets.seal.copy_from_slice(&contenu[1..33]);
-        secrets.signing.copy_from_slice(&contenu[33..65]);
+        secrets.seal.copy_from_slice(&content[1..33]);
+        secrets.signing.copy_from_slice(&content[33..65]);
         Ok(secrets)
     }
 
-    fn ecrire(&self, chemin: &Path) -> std::io::Result<()> {
-        let mut contenu = Vec::with_capacity(65);
-        contenu.push(VERSION);
-        contenu.extend_from_slice(&self.seal);
-        contenu.extend_from_slice(&self.signing);
+    fn write(&self, path: &Path) -> std::io::Result<()> {
+        let mut content = Vec::with_capacity(65);
+        content.push(VERSION);
+        content.extend_from_slice(&self.seal);
+        content.extend_from_slice(&self.signing);
 
-        store::ecrire_atomiquement(chemin, &contenu)?;
-        contenu.zeroize();
+        store::write_atomically(path, &content)?;
+        content.zeroize();
 
-        // Avant tout autre utilisateur du système, et avant que le fichier ne contienne quoi que
-        // ce soit d'utile. Poser les permissions après l'écriture laisserait une fenêtre où le
-        // fichier est lisible par tous — courte, mais réelle, et évitable.
+        // Before any other user of the system, and before the file holds anything useful. Setting
+        // the permissions after the write would leave a window where the file is world-readable —
+        // short, but real, and avoidable.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(chemin, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
 
         Ok(())
     }
 
-    /// Clé publique de signature — la seule moitié qui quitte l'appareil.
-    pub fn cle_publique(&self) -> [u8; 32] {
+    /// Signing public key — the only half that leaves the device.
+    pub fn public_key(&self) -> [u8; 32] {
         SigningKey::from_bytes(&self.signing).verifying_key().to_bytes()
     }
 
-    /// Signe un message de requête.
-    pub fn signer(&self, message: &[u8]) -> [u8; 64] {
+    /// Signs a request message.
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
         SigningKey::from_bytes(&self.signing).sign(message).to_bytes()
     }
 
-    /// Chiffre pour la persistance locale. Rend `nonce || chiffré`.
-    pub fn sceller(&self, clair: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+    /// Encrypts for local persistence. Returns `nonce || ciphertext`.
+    pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
         let mut nonce = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce);
 
-        let chiffre = Aes256Gcm::new(&self.seal.into())
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: clair, aad: &[] })?;
+        let ciphertext = Aes256Gcm::new(&self.seal.into())
+            .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: &[] })?;
 
-        let mut sortie = Vec::with_capacity(NONCE_LEN + chiffre.len());
-        sortie.extend_from_slice(&nonce);
-        sortie.extend_from_slice(&chiffre);
-        Ok(sortie)
+        let mut output = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        output.extend_from_slice(&nonce);
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
     }
 
-    /// Déchiffre ce que [`Self::sceller`] a produit.
-    pub fn ouvrir(&self, blob: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+    /// Decrypts what [`Self::seal`] produced.
+    pub fn open(&self, blob: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
         if blob.len() <= NONCE_LEN {
             return Err(aes_gcm::Error);
         }
@@ -172,107 +168,107 @@ impl DeviceSecrets {
 mod tests {
     use super::*;
 
-    fn chemin_temporaire(nom: &str) -> std::path::PathBuf {
-        let chemin = std::env::temp_dir().join(format!("wac-cipher-{nom}"));
-        let _ = std::fs::remove_dir_all(&chemin);
-        chemin.join("secrets.bin")
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("wac-cipher-{name}"));
+        let _ = std::fs::remove_dir_all(&path);
+        path.join("secrets.bin")
     }
 
     #[test]
-    fn un_scelle_se_rouvre() {
-        let secrets = DeviceSecrets::charger_ou_creer(&chemin_temporaire("rouvrir")).unwrap();
+    fn a_sealed_blob_reopens() {
+        let secrets = DeviceSecrets::load_or_create(&temp_path("reopen")).unwrap();
 
-        let blob = secrets.sceller(b"un etat mls").unwrap();
-        assert_eq!(secrets.ouvrir(&blob).unwrap(), b"un etat mls");
+        let blob = secrets.seal(b"an mls state").unwrap();
+        assert_eq!(secrets.open(&blob).unwrap(), b"an mls state");
     }
 
-    /// Le clair ne doit pas transparaître dans le scellé.
+    /// The plaintext must not show through the sealed blob.
     ///
-    /// Trivial en apparence, et c'est exactement le genre d'invariant qu'un jour quelqu'un casse
-    /// en « optimisant » l'encodage.
+    /// Apparently trivial, and exactly the kind of invariant someone breaks one day by
+    /// "optimising" the encoding.
     #[test]
-    fn le_scelle_ne_contient_pas_le_clair() {
-        let secrets = DeviceSecrets::charger_ou_creer(&chemin_temporaire("opaque")).unwrap();
-        let clair = b"phrase reconnaissable";
+    fn the_sealed_blob_does_not_contain_the_plaintext() {
+        let secrets = DeviceSecrets::load_or_create(&temp_path("opaque")).unwrap();
+        let plaintext = b"recognisable phrase";
 
-        let blob = secrets.sceller(clair).unwrap();
+        let blob = secrets.seal(plaintext).unwrap();
 
-        assert!(!blob.windows(clair.len()).any(|f| f == clair));
+        assert!(!blob.windows(plaintext.len()).any(|w| w == plaintext));
     }
 
-    /// **Le test qui justifie le nonce aléatoire.**
+    /// **The test that justifies the random nonce.**
     ///
-    /// Deux scellés du même clair doivent différer. Un nonce fixe — ou un compteur remis à zéro
-    /// au redémarrage — casserait AES-GCM catastrophiquement, et le symptôme serait invisible :
-    /// tout continuerait de fonctionner.
+    /// Two seals of the same plaintext must differ. A fixed nonce — or a counter reset on restart
+    /// — would break AES-GCM catastrophically, and the symptom would be invisible: everything
+    /// would keep working.
     #[test]
-    fn deux_scelles_du_meme_clair_different() {
-        let secrets = DeviceSecrets::charger_ou_creer(&chemin_temporaire("nonce")).unwrap();
+    fn two_seals_of_the_same_plaintext_differ() {
+        let secrets = DeviceSecrets::load_or_create(&temp_path("nonce")).unwrap();
 
-        assert_ne!(secrets.sceller(b"identique").unwrap(), secrets.sceller(b"identique").unwrap());
+        assert_ne!(secrets.seal(b"identical").unwrap(), secrets.seal(b"identical").unwrap());
     }
 
-    /// Un octet modifié doit faire échouer l'ouverture, pas rendre un clair douteux.
+    /// One flipped byte must make opening fail, not yield a doubtful plaintext.
     #[test]
-    fn un_scelle_altere_est_refuse() {
-        let secrets = DeviceSecrets::charger_ou_creer(&chemin_temporaire("altere")).unwrap();
+    fn a_tampered_seal_is_refused() {
+        let secrets = DeviceSecrets::load_or_create(&temp_path("tampered")).unwrap();
 
-        let mut blob = secrets.sceller(b"un etat mls").unwrap();
-        let dernier = blob.len() - 1;
-        blob[dernier] ^= 0x01;
+        let mut blob = secrets.seal(b"an mls state").unwrap();
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
 
-        assert!(secrets.ouvrir(&blob).is_err());
+        assert!(secrets.open(&blob).is_err());
     }
 
-    /// **Le test qui compte pour la durabilité.**
+    /// **The test that matters for durability.**
     ///
-    /// Les secrets doivent survivre au redémarrage : c'est toute la raison d'être du fichier. Un
-    /// second chargement qui produirait de nouvelles clés rendrait l'état illisible et l'appareil
-    /// muet, sans aucun message d'erreur.
+    /// The secrets must survive a restart: that is the whole point of the file. A second load
+    /// producing new keys would make the state unreadable and the device mute, without a single
+    /// error message.
     #[test]
-    fn les_secrets_survivent_a_un_rechargement() {
-        let chemin = chemin_temporaire("persistance");
+    fn the_secrets_survive_a_reload() {
+        let path = temp_path("persistence");
 
-        let premier = DeviceSecrets::charger_ou_creer(&chemin).unwrap();
-        let blob = premier.sceller(b"etat").unwrap();
-        let publique = premier.cle_publique();
-        drop(premier);
+        let first = DeviceSecrets::load_or_create(&path).unwrap();
+        let blob = first.seal(b"state").unwrap();
+        let public = first.public_key();
+        drop(first);
 
-        let second = DeviceSecrets::charger_ou_creer(&chemin).unwrap();
+        let second = DeviceSecrets::load_or_create(&path).unwrap();
 
-        assert_eq!(second.cle_publique(), publique, "la clé de signature a changé");
-        assert_eq!(second.ouvrir(&blob).unwrap(), b"etat", "l'état n'est plus déchiffrable");
+        assert_eq!(second.public_key(), public, "the signing key changed");
+        assert_eq!(second.open(&blob).unwrap(), b"state", "the state is no longer decryptable");
     }
 
-    /// Une signature vérifie sous la clé publique annoncée.
+    /// A signature verifies under the advertised public key.
     #[test]
-    fn une_signature_verifie_sous_la_cle_publique() {
+    fn a_signature_verifies_under_the_public_key() {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-        let secrets = DeviceSecrets::charger_ou_creer(&chemin_temporaire("signature")).unwrap();
+        let secrets = DeviceSecrets::load_or_create(&temp_path("signature")).unwrap();
         let message = b"POST\n/v1/envelopes\n";
 
-        let signature = secrets.signer(message);
-        let publique = VerifyingKey::from_bytes(&secrets.cle_publique()).unwrap();
+        let signature = secrets.sign(message);
+        let public = VerifyingKey::from_bytes(&secrets.public_key()).unwrap();
 
-        assert!(publique.verify(message, &Signature::from_bytes(&signature)).is_ok());
+        assert!(public.verify(message, &Signature::from_bytes(&signature)).is_ok());
     }
 
-    /// Un fichier tronqué est refusé plutôt que réinterprété.
+    /// A truncated file is refused rather than reinterpreted.
     ///
-    /// Sans cette garde, un fichier corrompu donnerait des clés silencieusement fausses — donc un
-    /// état indéchiffrable présenté comme un mot de passe erroné.
+    /// Without this guard, a corrupted file would silently yield wrong keys — an undecryptable
+    /// state presented as a wrong password.
     #[test]
-    fn un_fichier_tronque_est_refuse() {
-        assert!(DeviceSecrets::decoder(&[VERSION, 0, 0]).is_err());
+    fn a_truncated_file_is_refused() {
+        assert!(DeviceSecrets::decode(&[VERSION, 0, 0]).is_err());
     }
 
-    /// Une version inconnue est refusée plutôt que lue de travers.
+    /// An unknown version is refused rather than misread.
     #[test]
-    fn une_version_inconnue_est_refusee() {
-        let mut contenu = vec![VERSION + 1];
-        contenu.extend_from_slice(&[0u8; 64]);
+    fn an_unknown_version_is_refused() {
+        let mut content = vec![VERSION + 1];
+        content.extend_from_slice(&[0u8; 64]);
 
-        assert!(DeviceSecrets::decoder(&contenu).is_err());
+        assert!(DeviceSecrets::decode(&content).is_err());
     }
 }

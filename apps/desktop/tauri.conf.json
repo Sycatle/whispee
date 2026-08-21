@@ -30,8 +30,8 @@
       "appimage"
     ],
     "category": "SocialNetworking",
-    "shortDescription": "Messagerie chiffrée de bout en bout (démonstration MLS)",
-    "longDescription": "Projet d'apprentissage, non audité. Pour des communications réellement sensibles, utilisez Signal.",
+    "shortDescription": "End-to-end encrypted messaging (MLS demonstration)",
+    "longDescription": "A learning project, never audited. For communications that actually matter, use Signal.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

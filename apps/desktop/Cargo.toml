@@ -5,16 +5,16 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# `tauri-build` lit `tauri.conf.json` et génère le contexte compilé dans le binaire. C'est aussi
-# ce qui fait que l'interface est **embarquée** plutôt que téléchargée : voir la note du module
-# principal sur ce que cela change dans le modèle de menace.
-# Le mobile charge cette crate comme **bibliothèque native** : le système démarre l'activité, il
-# n'appelle aucun `main`. Tauri compile donc avec `--lib`, et une crate qui n'expose qu'un binaire
-# échoue sur `no library targets found` — après plusieurs minutes de compilation croisée, ce qui
-# rend le diagnostic tardif.
+# `tauri-build` reads `tauri.conf.json` and generates the compiled context inside the binary.
+# That is also what makes the interface **embedded** rather than downloaded: see the main module's
+# note on what this changes in the threat model.
+# Mobile loads this crate as a **native library**: the system starts the activity, it calls no
+# `main`. Tauri therefore builds with `--lib`, and a crate exposing only a binary fails on
+# `no library targets found` — after several minutes of cross-compilation, which makes the
+# diagnosis late.
 #
-# `cdylib` sert Android et iOS ; `rlib` permet à `main.rs` d'appeler la bibliothèque sur bureau.
-# Le suffixe `_lib` évite la collision de noms avec le binaire.
+# `cdylib` serves Android and iOS; `rlib` lets `main.rs` call the library on desktop. The `_lib`
+# suffix avoids a name collision with the binary.
 [lib]
 name = "desktop_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
@@ -24,38 +24,37 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-# L'IPC de Tauri sérialise en JSON : un Vec<u8> y deviendrait un tableau de nombres, plus de six
-# octets par octet utile. Le base64 en coûte un tiers.
+# Tauri's IPC serialises to JSON: a Vec<u8> would become an array of numbers there, over six
+# bytes per useful byte. Base64 costs a third of that.
 base64 = "0.22"
-# Les mêmes primitives que le reste du projet : AES-256-GCM pour l'état au repos, Ed25519 pour
-# les requêtes. Reprendre celles du workspace évite qu'un jour deux versions de la même courbe
-# cohabitent dans le même binaire.
+# The same primitives as the rest of the project: AES-256-GCM for state at rest, Ed25519 for
+# requests. Taking the workspace's versions avoids two versions of the same curve one day living
+# in the same binary.
 aes-gcm.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
 zeroize.workspace = true
-# L'invite biométrique n'a d'implémentation que sur Android et iOS, mais la dépendance est
-# déclarée **sans condition de cible**, à rebours de ce que suggèrent les exemples de Tauri.
+# The biometric prompt is only implemented on Android and iOS, but the dependency is declared
+# **without a target condition**, against what Tauri's examples suggest.
 #
-# La raison est le script de construction : il compile pour l'hôte, donc `cfg(target_os =
-# "android")` y est faux même lorsqu'on croise vers Android. Une dépendance conditionnelle par
-# cible reste alors invisible de `tauri-build`, qui refuse la permission `biometric:default`
-# faute de savoir d'où elle viendrait — après plusieurs minutes de compilation, et sur un
-# message qui parle de permissions plutôt que de dépendances.
+# The reason is the build script: it compiles for the host, so `cfg(target_os = "android")` is
+# false there even when cross-compiling to Android. A per-target conditional dependency is then
+# invisible to `tauri-build`, which refuses the `biometric:default` permission for lack of knowing
+# where it would come from — after several minutes of compilation, and with a message about
+# permissions rather than dependencies.
 tauri-plugin-biometric = "2"
 
 
 [features]
-# **Ce drapeau décide d'où vient l'interface**, et non le profil de compilation.
+# **This flag decides where the interface comes from**, not the build profile.
 #
-# Avec lui, la webview lit les fichiers empaquetés dans le binaire ; sans lui, elle va chercher
-# `devUrl` — le serveur Vite sur le port 5173 — et affiche « Connection refused » s'il n'y en a
-# pas. C'est le CLI `tauri build` qui l'ajoute d'ordinaire ; ce projet n'utilise pas ce CLI, donc
-# il doit le déclarer lui-même.
+# With it, the webview reads the files packaged in the binary; without it, it goes looking for
+# `devUrl` — the Vite server on port 5173 — and shows "Connection refused" if there is none. The
+# `tauri build` CLI normally adds it; this project does not use that CLI, so it must declare it
+# itself.
 #
-# Activé par défaut, à rebours de la convention de `create-tauri-app` : le cas courant est de
-# lancer l'application, pas de travailler sur son interface. Pour ce dernier cas, lancer
-# `pnpm run dev` dans `apps/web` puis `cargo run -p desktop --no-default-features`, ce qui rend
-# le rechargement à chaud.
+# On by default, against `create-tauri-app`'s convention: the common case is running the
+# application, not working on its interface. For the latter, run `pnpm run dev` in `apps/web` then
+# `cargo run -p desktop --no-default-features`, which brings hot reload back.
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

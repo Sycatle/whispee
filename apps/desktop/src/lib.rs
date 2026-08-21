@@ -1,51 +1,51 @@
-//! Application de bureau et mobile.
+//! Desktop and mobile application.
 //!
-//! # Pourquoi une bibliothèque et pas seulement un binaire
+//! # Why a library and not just a binary
 //!
-//! Sur mobile, il n'y a pas de `main` : c'est le système qui démarre l'activité Android ou
-//! l'application iOS, et le code Rust est chargé comme **bibliothèque native**. Tauri compile
-//! donc la crate avec `--lib`, et une crate qui n'expose qu'un binaire échoue avec
-//! `no library targets found` — au bout de plusieurs minutes de compilation croisée, ce qui rend
-//! le diagnostic d'autant plus tardif.
+//! On mobile there is no `main`: the system starts the Android activity or the iOS application,
+//! and the Rust code is loaded as a **native library**. Tauri therefore builds the crate with
+//! `--lib`, and a crate exposing only a binary fails with `no library targets found` — after
+//! several minutes of cross-compilation, which makes the diagnosis all the later.
 //!
-//! D'où cette structure : toute la logique vit ici, et `main.rs` n'est qu'un point d'entrée de
-//! bureau qui l'appelle. C'est la convention de Tauri 2, et elle n'est pas cosmétique.
+//! Hence this structure: all the logic lives here, and `main.rs` is only a desktop entry point
+//! that calls it. That is the Tauri 2 convention, and it is not cosmetic.
 //!
-//! # Ce que cette application change dans le modèle de menace
+//! # What this application changes in the threat model
 //!
-//! Le README répète, à propos du client web, une réserve qu'aucune politique navigateur ne lève :
-//! **le serveur livre le JavaScript, et peut en livrer une version qui exfiltre les clés.** La
-//! Content-Security-Policy n'y peut rien — elle contraint ce que le code peut faire, pas qui
-//! l'écrit.
+//! About the web client, the README repeats a reservation no browser policy lifts: **the server
+//! ships the JavaScript, and can ship a version that exfiltrates the keys.** The
+//! Content-Security-Policy cannot help — it constrains what the code may do, not who writes it.
 //!
-//! Ici, l'interface est empaquetée dans le binaire installé. Le serveur ne la livre plus, donc il
-//! ne peut plus la remplacer. C'est la seule façon connue de fermer cette voie, et c'est ce qui
-//! justifie l'existence de cette application — bien plus que le confort d'une fenêtre native.
+//! Here the interface is packaged inside the installed binary. The server no longer ships it, so
+//! it can no longer replace it. That is the only known way to close this path, and it is what
+//! justifies this application's existence — far more than the comfort of a native window.
 //!
-//! Ce que cela déplace plutôt que supprimer : la confiance va désormais au canal de distribution
-//! du binaire. C'est à quoi répond la publication vérifiable de `scripts/release.sh` — build
-//! reproductible d'abord, signature ensuite.
+//! What it displaces rather than removes: trust now goes to the binary's distribution channel.
+//! That is what the verifiable release of `scripts/release.sh` answers — reproducible build
+//! first, signature second.
 //!
-//! # Ce que cela ne change pas encore
+//! # What it does not change yet
 //!
-//! La cryptographie tourne toujours en WebAssembly, dans la webview, exactement comme sur le web.
-//! Les clés privées vivent donc dans la mémoire linéaire du module, accessible au JavaScript de
-//! la page. Les faire passer côté Rust natif — où `zeroize` s'applique vraiment et où le
-//! JavaScript n'a aucun accès — demande de rendre asynchrone chaque appel crypto du client, et
-//! reste à faire. Tant que ce n'est pas fait, l'écrire ici évite de croire la propriété acquise.
+//! The cryptography still runs in WebAssembly, in the webview, exactly as on the web. Private
+//! keys therefore live in the module's linear memory, reachable by the page's JavaScript. Moving
+//! them to native Rust — where `zeroize` really applies and JavaScript has no access — requires
+//! making every client crypto call asynchronous, and remains to be done. Until then, writing it
+//! down here avoids believing the property already held.
 
 pub mod cipher;
 pub mod commands;
 pub mod store;
 
-/// Démarre l'application.
+/// Starts the application.
 ///
-/// `mobile_entry_point` génère le symbole que l'activité Android et l'application iOS cherchent
-/// au chargement de la bibliothèque. Sans lui, la compilation réussit et le lancement échoue —
-/// la pire des deux façons d'échouer.
+/// `mobile_entry_point` generates the symbol the Android activity and the iOS application look
+/// for when loading the library. Without it, the build succeeds and the launch fails — the worse
+/// of the two ways to fail.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // This list must stay in sync with the commands declared in `commands.rs`: a command left
+        // out here still compiles, and only fails when the webview invokes it at runtime.
         .invoke_handler(tauri::generate_handler![
             commands::device_public_key,
             commands::device_sign,
@@ -54,10 +54,15 @@ pub fn run() {
             commands::session_load,
             commands::session_save,
             commands::session_clear,
+            commands::master_seal,
+            commands::master_open,
+            commands::master_present,
+            commands::master_clear,
+            commands::biometric_available,
         ])
-        // Le coffre est ouvert au démarrage et son échec est fatal : une application qui démarre
-        // sans pouvoir persister semble fonctionner et perd tout au premier redémarrage.
-        .setup(|app| commands::installer(app))
+        // The vault is opened at startup and its failure is fatal: an application that starts
+        // without being able to persist seems to work and loses everything on the first restart.
+        .setup(|app| commands::install(app))
         .run(tauri::generate_context!())
-        .expect("l'application n'a pas pu démarrer");
+        .expect("the application could not start");
 }

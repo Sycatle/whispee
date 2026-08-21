@@ -1,10 +1,9 @@
-//! Point d'entrée de bureau.
+//! Desktop entry point.
 //!
-//! Volontairement vide de logique : tout vit dans la bibliothèque, parce que le mobile n'a pas de
-//! `main` et charge la crate comme bibliothèque native. Voir l'en-tête de `lib.rs`.
+//! Deliberately empty of logic: everything lives in the library, because mobile has no `main` and
+//! loads the crate as a native library. See the header of `lib.rs`.
 
-// Sur Windows, un binaire de bureau ne doit pas ouvrir de console derrière sa fenêtre. Sans
-// effet ailleurs.
+// On Windows, a desktop binary must not open a console behind its window. No effect elsewhere.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {

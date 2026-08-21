@@ -1,30 +1,28 @@
-//! Ce que la webview peut demander au processus natif.
+//! What the webview may ask of the native process.
 //!
-//! # Une couche mince, délibérément
+//! # A thin layer, deliberately
 //!
-//! Toute la logique vit dans [`crate::store`] et [`crate::cipher`], qui sont testables sans
-//! Tauri ni webview. Ce module ne fait que traduire : base64 à l'entrée, base64 à la sortie,
-//! erreurs en chaînes. C'est ce qui permet aux treize tests des deux autres modules d'exister —
-//! une commande Tauri, elle, demande un `AppHandle`, donc une application, donc rien de testable
-//! en unitaire.
+//! All the logic lives in [`crate::store`] and [`crate::cipher`], which are testable without
+//! Tauri or a webview. This module only translates: base64 in, base64 out, errors as strings.
+//! That is what lets the thirteen tests of the other two modules exist — a Tauri command needs an
+//! `AppHandle`, hence an application, hence nothing unit-testable.
 //!
-//! # Pourquoi du base64 et pas des octets
+//! # Why base64 and not bytes
 //!
-//! L'IPC de Tauri sérialise en JSON. Un `Vec<u8>` y devient un tableau de nombres — plus de six
-//! octets de JSON par octet utile. Le base64 coûte un tiers, ce qui reste un coût : l'état MLS
-//! traverse cette frontière **en clair** à chaque sauvegarde, et il peut faire des dizaines de
-//! kilooctets.
+//! Tauri's IPC serialises to JSON. A `Vec<u8>` becomes an array of numbers there — over six bytes
+//! of JSON per useful byte. Base64 costs a third, which is still a cost: the MLS state crosses
+//! this boundary **in the clear** on every save, and it can run to tens of kilobytes.
 //!
-//! Ce coût n'est pas mesuré. S'il devient visible, la seule sortie qui ne ramène pas la clé dans
-//! la webview est de faire porter la sauvegarde entière au Rust — c'est-à-dire de déplacer aussi
-//! le stockage MLS, ce qui est un autre chantier.
+//! That cost is not measured. If it becomes visible, the only way out that does not bring the key
+//! back into the webview is to hand the whole save to Rust — that is, to move MLS storage too,
+//! which is another job.
 //!
-//! # Ce que ces commandes ne protègent pas
+//! # What these commands do not protect
 //!
-//! Elles sont atteignables par tout JavaScript de la page. Un script hostile peut appeler
-//! `state_open` comme il pouvait appeler `crypto.subtle.decrypt` : ce qui change, c'est qu'il ne
-//! peut pas emporter la clé, pas qu'il ne peut pas s'en servir. La frontière de processus
-//! remplace la garantie du moteur JavaScript ; elle ne fait pas de la webview un lieu sûr.
+//! They are reachable by any JavaScript on the page. A hostile script can call `state_open` just
+//! as it could call `crypto.subtle.decrypt`: what changes is that it cannot carry the key away,
+//! not that it cannot use it. The process boundary replaces the JavaScript engine's guarantee; it
+//! does not make the webview a safe place.
 
 use std::sync::Mutex;
 
@@ -33,214 +31,214 @@ use base64::prelude::BASE64_STANDARD;
 use tauri::{Manager, State};
 
 use crate::cipher::DeviceSecrets;
-use crate::store::{self, Emplacement};
+use crate::store::{self, Paths};
 
-/// Les secrets et l'emplacement, tenus par le processus pour toute la durée de l'application.
-pub struct Coffre {
+/// The secrets and the paths, held by the process for the lifetime of the application.
+pub struct Vault {
     secrets: Mutex<DeviceSecrets>,
-    emplacement: Emplacement,
+    paths: Paths,
 }
 
-impl Coffre {
-    /// Ouvre le coffre au démarrage, en créant les secrets au premier lancement.
-    pub fn ouvrir(racine: std::path::PathBuf) -> std::io::Result<Self> {
-        let emplacement = Emplacement::new(racine);
-        let secrets = DeviceSecrets::charger_ou_creer(&emplacement.secrets())?;
+impl Vault {
+    /// Opens the vault at startup, creating the secrets on first launch.
+    pub fn open(root: std::path::PathBuf) -> std::io::Result<Self> {
+        let paths = Paths::new(root);
+        let secrets = DeviceSecrets::load_or_create(&paths.secrets())?;
 
-        Ok(Self { secrets: Mutex::new(secrets), emplacement })
+        Ok(Self { secrets: Mutex::new(secrets), paths })
     }
 }
 
-/// Traduit une erreur en message présentable, sans détail exploitable.
+/// Turns an error into a presentable message, with no exploitable detail.
 ///
-/// Les erreurs d'entrée/sortie portent des chemins, et les erreurs AEAD ne disent rien d'utile de
-/// toute façon. Le détail part dans les traces, pas dans la webview.
-fn echec(contexte: &'static str) -> String {
-    contexte.to_owned()
+/// I/O errors carry paths, and AEAD errors say nothing useful anyway. The detail goes to the
+/// traces, not to the webview.
+fn failure(context: &'static str) -> String {
+    context.to_owned()
 }
 
 #[tauri::command]
-pub fn device_public_key(coffre: State<'_, Coffre>) -> Result<String, String> {
-    let secrets = coffre.secrets.lock().map_err(|_| echec("coffre indisponible"))?;
-    Ok(BASE64_STANDARD.encode(secrets.cle_publique()))
+pub fn device_public_key(vault: State<'_, Vault>) -> Result<String, String> {
+    let secrets = vault.secrets.lock().map_err(|_| failure("vault unavailable"))?;
+    Ok(BASE64_STANDARD.encode(secrets.public_key()))
 }
 
 #[tauri::command]
-pub fn device_sign(payload: String, coffre: State<'_, Coffre>) -> Result<String, String> {
-    let message = BASE64_STANDARD.decode(payload).map_err(|_| echec("payload illisible"))?;
-    let secrets = coffre.secrets.lock().map_err(|_| echec("coffre indisponible"))?;
+pub fn device_sign(payload: String, vault: State<'_, Vault>) -> Result<String, String> {
+    let message = BASE64_STANDARD.decode(payload).map_err(|_| failure("unreadable payload"))?;
+    let secrets = vault.secrets.lock().map_err(|_| failure("vault unavailable"))?;
 
-    Ok(BASE64_STANDARD.encode(secrets.signer(&message)))
+    Ok(BASE64_STANDARD.encode(secrets.sign(&message)))
 }
 
 #[tauri::command]
-pub fn state_seal(plaintext: String, coffre: State<'_, Coffre>) -> Result<String, String> {
-    let clair = BASE64_STANDARD.decode(plaintext).map_err(|_| echec("clair illisible"))?;
-    let secrets = coffre.secrets.lock().map_err(|_| echec("coffre indisponible"))?;
+pub fn state_seal(plaintext: String, vault: State<'_, Vault>) -> Result<String, String> {
+    let clear = BASE64_STANDARD.decode(plaintext).map_err(|_| failure("unreadable plaintext"))?;
+    let secrets = vault.secrets.lock().map_err(|_| failure("vault unavailable"))?;
 
-    let scelle = secrets.sceller(&clair).map_err(|_| echec("chiffrement impossible"))?;
-    Ok(BASE64_STANDARD.encode(scelle))
+    let sealed = secrets.seal(&clear).map_err(|_| failure("encryption failed"))?;
+    Ok(BASE64_STANDARD.encode(sealed))
 }
 
 #[tauri::command]
-pub fn state_open(blob: String, coffre: State<'_, Coffre>) -> Result<String, String> {
-    let scelle = BASE64_STANDARD.decode(blob).map_err(|_| echec("blob illisible"))?;
-    let secrets = coffre.secrets.lock().map_err(|_| echec("coffre indisponible"))?;
+pub fn state_open(blob: String, vault: State<'_, Vault>) -> Result<String, String> {
+    let sealed = BASE64_STANDARD.decode(blob).map_err(|_| failure("unreadable blob"))?;
+    let secrets = vault.secrets.lock().map_err(|_| failure("vault unavailable"))?;
 
-    // Un échec ici signifie soit une altération, soit une clé qui ne correspond pas. Les deux
-    // sont graves et indiscernables : c'est la propriété de l'AEAD, pas une imprécision.
-    let clair = secrets.ouvrir(&scelle).map_err(|_| echec("déchiffrement impossible"))?;
-    Ok(BASE64_STANDARD.encode(clair))
+    // A failure here means either tampering or a key that does not match. Both are serious and
+    // indistinguishable: that is the AEAD's property, not sloppiness.
+    let clear = secrets.open(&sealed).map_err(|_| failure("decryption failed"))?;
+    Ok(BASE64_STANDARD.encode(clear))
 }
 
-/// Lit la session persistée, ou `None` au premier lancement.
+/// Reads the persisted session, or `None` on first launch.
 #[tauri::command]
-pub fn session_load(coffre: State<'_, Coffre>) -> Result<Option<String>, String> {
-    let contenu = Emplacement::lire(&coffre.emplacement.session())
-        .map_err(|_| echec("session illisible"))?;
+pub fn session_load(vault: State<'_, Vault>) -> Result<Option<String>, String> {
+    let content = Paths::read(&vault.paths.session())
+        .map_err(|_| failure("unreadable session"))?;
 
-    Ok(contenu.map(|octets| BASE64_STANDARD.encode(octets)))
+    Ok(content.map(|bytes| BASE64_STANDARD.encode(bytes)))
 }
 
 #[tauri::command]
-pub fn session_save(contenu: String, coffre: State<'_, Coffre>) -> Result<(), String> {
-    let octets = BASE64_STANDARD.decode(contenu).map_err(|_| echec("session illisible"))?;
+pub fn session_save(content: String, vault: State<'_, Vault>) -> Result<(), String> {
+    let bytes = BASE64_STANDARD.decode(content).map_err(|_| failure("unreadable session"))?;
 
-    store::ecrire_atomiquement(&coffre.emplacement.session(), &octets)
-        .map_err(|_| echec("écriture impossible"))
+    store::write_atomically(&vault.paths.session(), &bytes)
+        .map_err(|_| failure("write failed"))
 }
 
-/// Efface la session, **sans toucher aux secrets**.
+/// Erases the session, **leaving the secrets alone**.
 ///
-/// Les deux effacements sont distincts parce que leurs conséquences le sont : effacer la session
-/// laisse un appareil enregistré qui repart de zéro, effacer les secrets laisse une identité que
-/// le serveur connaît encore mais que plus personne ne peut prouver. `Session.forget` doit
-/// appeler les deux ; ce sont deux appels, et c'est voulu.
+/// The two erasures are distinct because their consequences are: erasing the session leaves a
+/// registered device starting over, erasing the secrets leaves an identity the server still knows
+/// but nobody can prove any more. `Session.forget` must call both; that is two calls, and it is
+/// intended.
 #[tauri::command]
-pub fn session_clear(coffre: State<'_, Coffre>) -> Result<(), String> {
-    match std::fs::remove_file(coffre.emplacement.session()) {
+pub fn session_clear(vault: State<'_, Vault>) -> Result<(), String> {
+    match std::fs::remove_file(vault.paths.session()) {
         Ok(()) => Ok(()),
-        // Effacer ce qui n'existe pas est le résultat demandé, pas une erreur.
-        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(echec("effacement impossible")),
+        // Erasing what does not exist is the requested outcome, not an error.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(failure("erasure failed")),
     }
 }
 
-/// Installe le coffre dans l'application.
+/// Installs the vault into the application.
 ///
-/// Échoue bruyamment si les secrets ne peuvent être ni lus ni créés. C'est délibéré : démarrer
-/// sans coffre donnerait une application qui semble fonctionner et ne peut rien persister, donc
-/// qui perd tout au premier redémarrage — la panne la plus coûteuse et la plus tardive à voir.
-pub fn installer(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let racine = app.path().app_local_data_dir()?;
-    app.manage(Coffre::ouvrir(racine)?);
+/// Fails loudly if the secrets can be neither read nor created. That is deliberate: starting
+/// without a vault would give an application that seems to work and can persist nothing, so it
+/// loses everything on the first restart — the costliest failure, and the latest to be seen.
+pub fn install(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let root = app.path().app_local_data_dir()?;
+    app.manage(Vault::open(root)?);
 
     Ok(())
 }
 
-/// Range la clé maîtresse du verrou, scellée par les secrets de l'appareil.
+/// Stores the lock's master key, sealed by the device secrets.
 ///
-/// # Ce que le déverrouillage biométrique échange
+/// # What biometric unlock trades away
 ///
-/// Un mot de passe n'est stocké nulle part : il n'existe que dans la tête de son propriétaire, et
-/// c'est ce qui rend l'état illisible pour qui emporte le disque. L'activation de la biométrie
-/// **écrit la clé maîtresse sur l'appareil**, scellée par les secrets qui, eux, sont en clair
-/// dans le répertoire privé de l'application.
+/// A password is stored nowhere: it exists only in its owner's head, and that is what makes the
+/// state unreadable to whoever walks off with the disk. Enabling biometrics **writes the master
+/// key to the device**, sealed by the secrets, which are themselves in the clear in the
+/// application's private directory.
 ///
-/// La protection devient donc celle du système : le répertoire privé, et l'invite biométrique
-/// devant cette commande. C'est solide contre qui prend le téléphone en main, et sans valeur
-/// contre qui en extrait le stockage — un `root`, une sauvegarde non chiffrée, une image disque.
+/// The protection becomes the system's: the private directory, and the biometric prompt in front
+/// of this command. That is solid against whoever picks up the phone, and worthless against
+/// whoever extracts its storage — a `root`, an unencrypted backup, a disk image.
 ///
-/// C'est **strictement plus faible** que le mot de passe seul. L'interface doit le dire avant
-/// d'offrir le bouton, pas après.
+/// It is **strictly weaker** than the password alone. The interface must say so before offering
+/// the button, not after.
 #[tauri::command]
-pub fn master_seal(master: String, coffre: State<'_, Coffre>) -> Result<(), String> {
-    let clair = BASE64_STANDARD.decode(master).map_err(|_| echec("clé illisible"))?;
+pub fn master_seal(master: String, vault: State<'_, Vault>) -> Result<(), String> {
+    let clear = BASE64_STANDARD.decode(master).map_err(|_| failure("unreadable key"))?;
 
-    let secrets = coffre.secrets.lock().map_err(|_| echec("coffre indisponible"))?;
-    let scelle = secrets.sceller(&clair).map_err(|_| echec("chiffrement impossible"))?;
+    let secrets = vault.secrets.lock().map_err(|_| failure("vault unavailable"))?;
+    let sealed = secrets.seal(&clear).map_err(|_| failure("encryption failed"))?;
 
-    store::ecrire_atomiquement(&coffre.emplacement.master(), &scelle)
-        .map_err(|_| echec("écriture impossible"))
+    store::write_atomically(&vault.paths.master(), &sealed)
+        .map_err(|_| failure("write failed"))
 }
 
-/// Rend la clé maîtresse, après authentification de l'utilisateur.
+/// Returns the master key, after the user authenticates.
 ///
-/// L'invite est déclenchée **ici**, dans le processus natif, et non par la webview avant
-/// l'appel. La différence est tout l'intérêt du dispositif : une invite posée côté JavaScript
-/// est une politesse qu'un script hostile saute, tandis que celle-ci est sur le chemin de la
-/// clé. Sans authentification, la commande ne rend rien.
+/// The prompt is raised **here**, in the native process, and not by the webview before the call.
+/// That difference is the whole point of the scheme: a prompt placed on the JavaScript side is a
+/// courtesy a hostile script skips, whereas this one sits on the key's path. Without
+/// authentication, the command returns nothing.
 ///
-/// Sur bureau, il n'y a pas d'invite : les plateformes de bureau n'exposent rien d'équivalent à
-/// travers Tauri. La commande y reste utilisable, ce qui est cohérent — l'activation, elle, est
-/// refusée en amont par `biometrie_disponible`.
+/// On desktop there is no prompt: desktop platforms expose nothing equivalent through Tauri. The
+/// command stays usable there, which is consistent — enabling it is what `biometric_available`
+/// refuses upstream.
 #[tauri::command]
 pub async fn master_open(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    authentifier(&app, "Déverrouiller vos conversations")?;
+    authenticate(&app, "Unlock your conversations")?;
 
-    let coffre = app.state::<Coffre>();
-    let Some(scelle) = Emplacement::lire(&coffre.emplacement.master())
-        .map_err(|_| echec("clé illisible"))?
+    let vault = app.state::<Vault>();
+    let Some(sealed) = Paths::read(&vault.paths.master())
+        .map_err(|_| failure("unreadable key"))?
     else {
         return Ok(None);
     };
 
-    let secrets = coffre.secrets.lock().map_err(|_| echec("coffre indisponible"))?;
-    let clair = secrets.ouvrir(&scelle).map_err(|_| echec("déchiffrement impossible"))?;
+    let secrets = vault.secrets.lock().map_err(|_| failure("vault unavailable"))?;
+    let clear = secrets.open(&sealed).map_err(|_| failure("decryption failed"))?;
 
-    Ok(Some(BASE64_STANDARD.encode(clair)))
+    Ok(Some(BASE64_STANDARD.encode(clear)))
 }
 
-/// Le déverrouillage biométrique est-il activé sur cet appareil ?
+/// Is biometric unlock enabled on this device?
 ///
-/// Sans invite, délibérément : l'interface doit pouvoir décider quel bouton afficher avant que
-/// l'utilisateur n'ait rien demandé. Poser l'invite ici la déclencherait à chaque démarrage,
-/// y compris pour répondre « non ».
+/// Without a prompt, deliberately: the interface must be able to decide which button to show
+/// before the user has asked for anything. Prompting here would fire on every startup, including
+/// to answer "no".
 ///
-/// La question ne fuit rien : elle ne dit pas quelle est la clé, seulement qu'il en existe une.
+/// The question leaks nothing: it does not say what the key is, only that one exists.
 #[tauri::command]
-pub fn master_present(coffre: State<'_, Coffre>) -> Result<bool, String> {
-    Ok(Emplacement::lire(&coffre.emplacement.master())
-        .map_err(|_| echec("clé illisible"))?
+pub fn master_present(vault: State<'_, Vault>) -> Result<bool, String> {
+    Ok(Paths::read(&vault.paths.master())
+        .map_err(|_| failure("unreadable key"))?
         .is_some())
 }
 
-/// Retire la clé maîtresse. Le verrou reste posé ; seule la biométrie cesse de l'ouvrir.
+/// Removes the master key. The lock stays on; only biometrics stop opening it.
 #[tauri::command]
-pub fn master_clear(coffre: State<'_, Coffre>) -> Result<(), String> {
-    match std::fs::remove_file(coffre.emplacement.master()) {
+pub fn master_clear(vault: State<'_, Vault>) -> Result<(), String> {
+    match std::fs::remove_file(vault.paths.master()) {
         Ok(()) => Ok(()),
-        Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(echec("effacement impossible")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(failure("erasure failed")),
     }
 }
 
-/// Le déverrouillage biométrique est-il utilisable sur cet appareil ?
+/// Is biometric unlock usable on this device?
 ///
-/// Deux conditions, et pas une : la plateforme doit exposer l'invite, et l'utilisateur doit
-/// avoir enrôlé une empreinte ou un visage. Un téléphone dont personne n'a configuré la
-/// biométrie répond non, et proposer le réglage y donnerait un bouton qui échoue à l'usage.
+/// Two conditions, not one: the platform must expose the prompt, and the user must have enrolled
+/// a fingerprint or a face. A phone whose biometrics nobody configured answers no, and offering
+/// the setting there would give a button that fails in use.
 #[tauri::command]
-pub fn biometrie_disponible(app: tauri::AppHandle) -> bool {
+pub fn biometric_available(app: tauri::AppHandle) -> bool {
     let _ = &app;
 
     #[cfg(mobile)]
     {
         use tauri_plugin_biometric::BiometricExt;
-        return app.biometric().status().map(|etat| etat.is_available).unwrap_or(false);
+        return app.biometric().status().map(|state| state.is_available).unwrap_or(false);
     }
 
     #[cfg(not(mobile))]
     false
 }
 
-/// L'invite du système, là où elle existe.
+/// The system prompt, where it exists.
 ///
-/// Sur bureau elle n'existe pas et la fonction laisse passer : c'est `biometrie_disponible` qui
-/// empêche d'y activer le réglage, et refuser ici en plus ne ferait qu'égarer le diagnostic si
-/// un jour un fichier `master.bin` s'y retrouvait.
-fn authentifier(app: &tauri::AppHandle, raison: &str) -> Result<(), String> {
-    let _ = (app, raison);
+/// On desktop it does not exist and this function lets the call through: `biometric_available` is
+/// what prevents enabling the setting there, and refusing here as well would only mislead the
+/// diagnosis if a `master.bin` ever ended up on a desktop.
+fn authenticate(app: &tauri::AppHandle, reason: &str) -> Result<(), String> {
+    let _ = (app, reason);
 
     #[cfg(mobile)]
     {
@@ -248,8 +246,8 @@ fn authentifier(app: &tauri::AppHandle, raison: &str) -> Result<(), String> {
 
         return app
             .biometric()
-            .authenticate(raison.to_owned(), AuthOptions::default())
-            .map_err(|_| echec("authentification refusée"));
+            .authenticate(reason.to_owned(), AuthOptions::default())
+            .map_err(|_| failure("authentication refused"));
     }
 
     #[cfg(not(mobile))]

@@ -1,128 +1,123 @@
-//! Persistance de la session, côté natif.
+//! Session persistence, on the native side.
 //!
-//! # Pourquoi ce module existe
+//! # Why this module exists
 //!
-//! Le client range son état MLS dans IndexedDB. Sur mobile, ce stockage **n'est pas garanti** :
-//! iOS évince les données de WKWebView après sept jours d'inactivité, Android purge sous pression
-//! mémoire. Et la perte est définitive — le ratchet MLS détruit ses clés au fur et à mesure, donc
-//! l'historique devient illisible et les conversations sont à recréer.
+//! The client keeps its MLS state in IndexedDB. On mobile that storage is **not guaranteed**:
+//! iOS evicts WKWebView data after seven days of inactivity, Android purges under memory
+//! pressure. And the loss is final — the MLS ratchet destroys its keys as it goes, so history
+//! becomes unreadable and conversations have to be recreated.
 //!
-//! Le répertoire privé de l'application, lui, n'est purgé qu'à la désinstallation.
+//! The application's private directory, by contrast, is only purged on uninstall.
 //!
-//! # L'écriture atomique n'est pas un détail d'implémentation
+//! # Atomic writing is not an implementation detail
 //!
-//! C'est **l'exigence centrale**, et le seul risque que ce module introduit qui n'existait pas
-//! avec IndexedDB. Une transaction IndexedDB interrompue laisse la base intacte ; un
-//! `File::write` interrompu laisse un fichier tronqué, c'est-à-dire un état MLS illisible,
-//! c'est-à-dire exactement la perte définitive qu'on cherche à éviter.
+//! It is **the central requirement**, and the only risk this module introduces that IndexedDB did
+//! not have. An interrupted IndexedDB transaction leaves the database intact; an interrupted
+//! `File::write` leaves a truncated file — an unreadable MLS state, which is exactly the final
+//! loss we are trying to avoid.
 //!
-//! D'où `écrire dans un temporaire → fsync → renommer → fsync du répertoire`. Le renommage est
-//! atomique sur POSIX comme sur NTFS : à tout instant, le fichier final est soit l'ancien
-//! contenu, soit le nouveau, jamais un mélange. Les deux `fsync` comptent autant que le
-//! renommage — sans eux, le contenu peut n'atteindre le disque qu'après le renommage, et une
-//! coupure de courant laisse un fichier renommé mais vide.
+//! Hence `write to a temporary → fsync → rename → fsync the directory`. The rename is atomic on
+//! POSIX as on NTFS: at any instant the final file is either the old content or the new, never a
+//! mixture. Both `fsync`s matter as much as the rename — without them the content may only reach
+//! the disk after the rename, and a power cut leaves a renamed but empty file.
 //!
-//! # Pas de génération précédente, délibérément
+//! # No previous generation, deliberately
 //!
-//! Garder une copie N-1 pour « pouvoir revenir » est tentant et **faux**. Le client le documente
-//! déjà à propos de sa propre sauvegarde : un état MLS restauré en retard fait reculer les
-//! epochs et rejoue des clés déjà utilisées. Un état périmé restauré silencieusement est une
-//! faute cryptographique, pas un filet de sécurité. Le renommage atomique est la seule protection
-//! acceptable.
+//! Keeping an N-1 copy "to be able to go back" is tempting and **wrong**. The client already
+//! documents this about its own backup: an MLS state restored late rewinds epochs and replays
+//! already-used keys. A stale state restored silently is a cryptographic fault, not a safety net.
+//! The atomic rename is the only acceptable protection.
 //!
-//! # Deux fichiers, pas un
+//! # Two files, not one
 //!
-//! `session.bin` porte la session chiffrée, réécrite à chaque sauvegarde. `secrets.bin` porte
-//! les clés de l'appareil, écrites une fois. Les séparer permet d'effacer l'une sans l'autre, ce
-//! dont `session_clear` a besoin : oublier une session ne doit pas détruire une identité que le
-//! serveur connaît encore.
+//! `session.bin` holds the encrypted session, rewritten on every save. `secrets.bin` holds the
+//! device keys, written once. Separating them allows erasing one without the other, which
+//! `session_clear` needs: forgetting a session must not destroy an identity the server still
+//! knows.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Écrit un fichier de telle sorte qu'un lecteur ne voie jamais d'état intermédiaire.
+/// Writes a file such that a reader never sees an intermediate state.
 ///
-/// Le temporaire est créé dans le **même répertoire** que la cible : `rename` n'est atomique
-/// qu'à l'intérieur d'un système de fichiers, et un temporaire placé dans `/tmp` traverserait
-/// souvent une frontière de montage — le renommage deviendrait alors une copie, qui peut
-/// s'interrompre.
-pub fn ecrire_atomiquement(cible: &Path, contenu: &[u8]) -> std::io::Result<()> {
-    let repertoire = cible.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "chemin sans répertoire parent")
+/// The temporary is created in the **same directory** as the target: `rename` is only atomic
+/// within one filesystem, and a temporary placed in `/tmp` would often cross a mount boundary —
+/// the rename would then become a copy, which can be interrupted.
+pub fn write_atomically(target: &Path, content: &[u8]) -> std::io::Result<()> {
+    let dir = target.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path without a parent directory")
     })?;
 
-    fs::create_dir_all(repertoire)?;
+    fs::create_dir_all(dir)?;
 
-    let temporaire = cible.with_extension("tmp");
+    let temporary = target.with_extension("tmp");
 
     {
-        let mut fichier = fs::File::create(&temporaire)?;
-        fichier.write_all(contenu)?;
-        // Le contenu doit être sur le disque **avant** que le renommage ne le rende visible.
-        // Sans ce `sync_all`, une coupure entre les deux laisse un fichier renommé et vide.
-        fichier.sync_all()?;
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(content)?;
+        // The content must be on disk **before** the rename makes it visible. Without this
+        // `sync_all`, a cut between the two leaves a renamed, empty file.
+        file.sync_all()?;
     }
 
-    fs::rename(&temporaire, cible)?;
+    fs::rename(&temporary, target)?;
 
-    // Le renommage lui-même est une écriture de répertoire, et elle aussi peut rester en cache.
-    // Sur Windows, ouvrir un répertoire échoue ; l'omission y est sans conséquence, `rename`
-    // étant déjà transactionnel sur NTFS.
+    // The rename is itself a directory write, and it too can sit in cache. On Windows, opening a
+    // directory fails; omitting it there is harmless, `rename` already being transactional on
+    // NTFS.
     #[cfg(unix)]
-    if let Ok(handle) = fs::File::open(repertoire) {
+    if let Ok(handle) = fs::File::open(dir) {
         let _ = handle.sync_all();
     }
 
     Ok(())
 }
 
-/// Emplacement des fichiers de session.
-pub struct Emplacement {
-    racine: PathBuf,
+/// Where the session files live.
+pub struct Paths {
+    root: PathBuf,
 }
 
-impl Emplacement {
-    pub fn new(racine: PathBuf) -> Self {
-        Self { racine }
+impl Paths {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
     }
 
-    /// La session chiffrée. Réécrite à chaque sauvegarde.
+    /// The encrypted session. Rewritten on every save.
     pub fn session(&self) -> PathBuf {
-        self.racine.join("session.bin")
+        self.root.join("session.bin")
     }
 
-    /// Les clés de l'appareil. Écrites une fois, au premier lancement.
+    /// The device keys. Written once, on first launch.
     ///
-    /// Séparées de la session parce que leurs durées de vie et leurs conséquences diffèrent :
-    /// effacer la session laisse un appareil enregistré qui repart de zéro, effacer les secrets
-    /// laisse une identité que le serveur connaît encore mais que plus personne ne peut prouver.
+    /// Separate from the session because their lifetimes and consequences differ: erasing the
+    /// session leaves a registered device starting over, erasing the secrets leaves an identity
+    /// the server still knows but nobody can prove any more.
     pub fn secrets(&self) -> PathBuf {
-        self.racine.join("secrets.bin")
+        self.root.join("secrets.bin")
     }
 
-    /// La clé maîtresse du verrou, scellée — présente seulement si le déverrouillage
-    /// biométrique est activé.
+    /// The sealed master key of the lock — present only if biometric unlock is enabled.
     ///
-    /// Un troisième fichier, et non un champ des deux autres, parce que sa présence **est**
-    /// l'information : le déverrouillage biométrique est actif si et seulement si ce fichier
-    /// existe. Le ranger dans la session obligerait à l'ouvrir pour le savoir, ce qui suppose
-    /// la clé qu'il contient.
+    /// A third file, rather than a field of the other two, because its presence **is** the
+    /// information: biometric unlock is on if and only if this file exists. Storing it inside the
+    /// session would mean opening the session to find out, which presupposes the key it holds.
     pub fn master(&self) -> PathBuf {
-        self.racine.join("master.bin")
+        self.root.join("master.bin")
     }
 
-    /// Lit un fichier, ou `None` s'il n'existe pas.
+    /// Reads a file, or `None` if it does not exist.
     ///
-    /// L'absence n'est pas une erreur : c'est l'état d'une installation neuve, et le distinguer
-    /// d'une erreur de lecture est ce qui permet à l'appelant de choisir entre « créer une
-    /// session » et « alerter ». Les confondre ferait passer un disque en panne pour un premier
-    /// lancement, et effacerait un compte au lieu de le signaler.
-    pub fn lire(chemin: &Path) -> std::io::Result<Option<Vec<u8>>> {
-        match fs::read(chemin) {
-            Ok(contenu) => Ok(Some(contenu)),
-            Err(erreur) if erreur.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(erreur) => Err(erreur),
+    /// Absence is not an error: it is the state of a fresh install, and telling it apart from a
+    /// read error is what lets the caller choose between "create a session" and "raise the
+    /// alarm". Conflating them would make a failing disk look like a first launch, and erase an
+    /// account instead of reporting it.
+    pub fn read(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        match fs::read(path) {
+            Ok(content) => Ok(Some(content)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
     }
 }
@@ -131,101 +126,101 @@ impl Emplacement {
 mod tests {
     use super::*;
 
-    fn repertoire_temporaire(nom: &str) -> PathBuf {
-        let chemin = std::env::temp_dir().join(format!("wac-store-test-{nom}"));
-        let _ = fs::remove_dir_all(&chemin);
-        chemin
+    fn temp_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("wac-store-test-{name}"));
+        let _ = fs::remove_dir_all(&path);
+        path
     }
 
     #[test]
-    fn une_ecriture_est_relisible() {
-        let racine = repertoire_temporaire("relire");
-        let emplacement = Emplacement::new(racine.clone());
+    fn a_write_is_readable_again() {
+        let root = temp_dir("reread");
+        let paths = Paths::new(root.clone());
 
-        ecrire_atomiquement(&emplacement.session(), b"un etat chiffre").unwrap();
+        write_atomically(&paths.session(), b"an encrypted state").unwrap();
 
         assert_eq!(
-            Emplacement::lire(&emplacement.session()).unwrap().as_deref(),
-            Some(b"un etat chiffre".as_slice()),
+            Paths::read(&paths.session()).unwrap().as_deref(),
+            Some(b"an encrypted state".as_slice()),
         );
 
-        fs::remove_dir_all(&racine).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
-    /// **Le test qui porte la propriété du module.**
+    /// **The test that carries the module's property.**
     ///
-    /// Une seconde écriture ne doit jamais laisser un mélange des deux contenus. C'est ce que le
-    /// renommage garantit, et c'est ce qu'un `File::create` suivi d'un `write_all` ne garantit
-    /// pas — il tronque d'abord, puis écrit.
+    /// A second write must never leave a mixture of the two contents. That is what the rename
+    /// guarantees, and what a `File::create` followed by a `write_all` does not — it truncates
+    /// first, then writes.
     #[test]
-    fn une_reecriture_plus_courte_ne_laisse_aucun_residu() {
-        let racine = repertoire_temporaire("residu");
-        let emplacement = Emplacement::new(racine.clone());
+    fn a_shorter_rewrite_leaves_no_residue() {
+        let root = temp_dir("residue");
+        let paths = Paths::new(root.clone());
 
-        ecrire_atomiquement(&emplacement.session(), b"un contenu tres long a remplacer").unwrap();
-        ecrire_atomiquement(&emplacement.session(), b"court").unwrap();
+        write_atomically(&paths.session(), b"a very long content to replace").unwrap();
+        write_atomically(&paths.session(), b"short").unwrap();
 
         assert_eq!(
-            Emplacement::lire(&emplacement.session()).unwrap().as_deref(),
-            Some(b"court".as_slice()),
-            "la queue de l'ancien contenu a survécu",
+            Paths::read(&paths.session()).unwrap().as_deref(),
+            Some(b"short".as_slice()),
+            "the tail of the old content survived",
         );
 
-        fs::remove_dir_all(&racine).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
-    /// Un fichier absent n'est pas une erreur : c'est une installation neuve.
+    /// A missing file is not an error: it is a fresh install.
     ///
-    /// Les confondre ferait passer un disque en panne pour un premier lancement, et créerait un
-    /// compte par-dessus un état encore présent.
+    /// Conflating them would make a failing disk look like a first launch, and create an account
+    /// on top of a state that is still there.
     #[test]
-    fn un_fichier_absent_se_distingue_d_une_erreur() {
-        let emplacement = Emplacement::new(repertoire_temporaire("absent"));
+    fn a_missing_file_is_distinguished_from_an_error() {
+        let paths = Paths::new(temp_dir("missing"));
 
-        assert!(Emplacement::lire(&emplacement.session()).unwrap().is_none());
+        assert!(Paths::read(&paths.session()).unwrap().is_none());
     }
 
-    /// Le répertoire est créé au besoin : au premier lancement, il n'existe pas.
+    /// The directory is created on demand: on first launch it does not exist.
     #[test]
-    fn le_repertoire_est_cree_au_besoin() {
-        let racine = repertoire_temporaire("cree").join("un").join("deux");
-        let emplacement = Emplacement::new(racine.clone());
+    fn the_directory_is_created_on_demand() {
+        let root = temp_dir("created").join("one").join("two");
+        let paths = Paths::new(root.clone());
 
-        ecrire_atomiquement(&emplacement.secrets(), b"{}").unwrap();
+        write_atomically(&paths.secrets(), b"{}").unwrap();
 
-        assert!(emplacement.secrets().exists());
-        fs::remove_dir_all(racine.parent().unwrap().parent().unwrap()).unwrap();
+        assert!(paths.secrets().exists());
+        fs::remove_dir_all(root.parent().unwrap().parent().unwrap()).unwrap();
     }
 
-    /// Les trois fichiers sont distincts, et cela porte une propriété.
+    /// The three files are distinct, and that carries a property.
     ///
-    /// Oublier une session, retirer le déverrouillage biométrique et détruire l'identité de
-    /// l'appareil sont trois gestes aux conséquences différentes. Deux chemins qui se
-    /// confondraient feraient exécuter le mauvais des trois, sans que rien ne le signale.
+    /// Forgetting a session, removing biometric unlock and destroying the device identity are
+    /// three acts with different consequences. Two paths that collided would run the wrong one of
+    /// the three, with nothing to signal it.
     #[test]
-    fn les_trois_fichiers_ne_se_confondent_pas() {
-        let emplacement = Emplacement::new(repertoire_temporaire("distincts"));
-        let chemins = [emplacement.session(), emplacement.secrets(), emplacement.master()];
+    fn the_three_files_do_not_collide() {
+        let paths = Paths::new(temp_dir("distinct"));
+        let files = [paths.session(), paths.secrets(), paths.master()];
 
-        for (i, un) in chemins.iter().enumerate() {
-            for autre in &chemins[i + 1..] {
-                assert_ne!(un, autre);
+        for (i, one) in files.iter().enumerate() {
+            for other in &files[i + 1..] {
+                assert_ne!(one, other);
             }
         }
     }
 
-    /// Aucun temporaire ne doit survivre à une écriture réussie.
+    /// No temporary may survive a successful write.
     ///
-    /// Un `.tmp` oublié n'est pas dangereux en soi, mais il contient l'état **en clair du point
-    /// de vue du renommage** — c'est-à-dire une copie de plus du blob, que rien ne nettoie.
+    /// A forgotten `.tmp` is not dangerous in itself, but it holds the state **as the rename sees
+    /// it** — one more copy of the blob, which nothing cleans up.
     #[test]
-    fn le_temporaire_ne_survit_pas() {
-        let racine = repertoire_temporaire("temporaire");
-        let emplacement = Emplacement::new(racine.clone());
+    fn the_temporary_does_not_survive() {
+        let root = temp_dir("temporary");
+        let paths = Paths::new(root.clone());
 
-        ecrire_atomiquement(&emplacement.session(), b"contenu").unwrap();
+        write_atomically(&paths.session(), b"content").unwrap();
 
-        assert!(!emplacement.session().with_extension("tmp").exists());
-        fs::remove_dir_all(&racine).unwrap();
+        assert!(!paths.session().with_extension("tmp").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

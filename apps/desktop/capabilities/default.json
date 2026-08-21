@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions accordées à la fenêtre principale. Volontairement minimales : chaque entrée ajoutée ici est une capacité que le JavaScript de la page peut atteindre, et la raison d'être de cette application est justement de réduire ce que ce JavaScript peut faire.",
+  "description": "Permissions granted to the main window. Deliberately minimal: every entry added here is a capability the page's JavaScript can reach, and reducing what that JavaScript can do is the whole point of this application.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

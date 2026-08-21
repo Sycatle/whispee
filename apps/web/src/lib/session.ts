@@ -559,7 +559,7 @@ export class Session {
       });
     }
 
-    return new Session(
+    const session = new Session(
       stored.deviceId,
       stored.handle,
       client,
@@ -580,6 +580,19 @@ export class Session {
       // A missing `presence` means enabled: that is the default, the flag only records a refusal.
       { readReceipts: true, typingIndicator: true, ...stored.signals },
     );
+
+    // Assigned after construction rather than passed in: the other entry points build a session
+    // for an account that has never resolved anyone, so they have no anchor to hand over, and a
+    // parameter they would all pass as `undefined` teaches nothing.
+    if (stored.logHead) {
+      session.seenHead = {
+        size: stored.logHead.size,
+        root: fromBase64(stored.logHead.root),
+        logKey: fromBase64(stored.logHead.logKey),
+      };
+    }
+
+    return session;
   }
 
   /**
@@ -855,6 +868,15 @@ export class Session {
           .filter((view) => view.postingKey)
           .map((view) => [view.key, toBase64(view.postingKey as Uint8Array)]),
       ),
+      ...(this.seenHead
+        ? {
+            logHead: {
+              size: this.seenHead.size,
+              root: toBase64(this.seenHead.root),
+              logKey: toBase64(this.seenHead.logKey),
+            },
+          }
+        : {}),
     });
   }
 
@@ -901,7 +923,15 @@ export class Session {
       if (verdict.ok) {
         // The head is remembered only on success: endorsing a head we just rejected would amount
         // to validating what we reject.
+        //
+        // Written to disk when it actually moves, and not on every resolve: `persist` re-seals
+        // the whole MLS state, which is far too much work to repeat for a head that is already
+        // the one on disk. A log only grows when an account is created or a key rotated, so the
+        // write is rare — and it is the write that makes the anchor mean anything after a
+        // reload.
+        const advanced = head !== undefined && this.seenHead?.size !== head.size;
         this.seenHead = head;
+        if (advanced) await this.persist();
       } else {
         this.raiseLogAlert(verdict.reason);
       }

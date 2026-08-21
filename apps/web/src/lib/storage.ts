@@ -116,6 +116,25 @@ interface StoredSession {
    * state at rest anyway, like the MLS keys, which are worth far more.
    */
   postingKeys?: Record<string, string>;
+  /**
+   * The last accepted head of the transparency log.
+   *
+   * # Why this has to survive a restart
+   *
+   * It is the anchor the consistency proof is measured against, and a consistency proof is the
+   * only one of the three checks that says anything about the **past**: without it the server can
+   * replace a key it already published and serve a log that is perfectly consistent with itself.
+   *
+   * Kept in memory only, the anchor was empty on every start, and `verifyAccount` skips the
+   * consistency check when it has nothing to compare against. So the first resolve after each
+   * reload accepted any signed, self-consistent log — which is the exact window the mechanism
+   * exists to close. `transparency.ts` already described this field as "kept from one session to
+   * the next"; this is what makes that true.
+   *
+   * Base64 rather than bytes, like `postingKeys`: the native store goes through a JSON codec,
+   * and a `Uint8Array` handed to `JSON.stringify` comes back as an object keyed by strings.
+   */
+  logHead?: { size: number; root: string; logKey: string };
 }
 
 /** What the user agrees to emit. */

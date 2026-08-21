@@ -57,6 +57,7 @@ export function encodeSession(session: StoredSession): Uint8Array {
     knownDevices: session.knownDevices,
     signals: session.signals,
     postingKeys: session.postingKeys,
+    logHead: session.logHead,
   };
 
   return new TextEncoder().encode(JSON.stringify(raw));
@@ -105,6 +106,11 @@ export function decodeSession(bytes: Uint8Array): StoredSession {
     ...(field.postingKeys === undefined
       ? {}
       : { postingKeys: field.postingKeys as Record<string, string> }),
+    // Absent on any session written before the anchor was persisted. Treated as "no anchor",
+    // which is what those sessions actually had — the first resolve then re-establishes one.
+    ...(field.logHead === undefined
+      ? {}
+      : { logHead: field.logHead as StoredSession["logHead"] }),
   };
 }
 

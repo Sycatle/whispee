@@ -30,9 +30,27 @@ test("a complete session reads back identically", () => {
     knownDevices: { bob: ["device-2"] },
     signals: { readReceipts: true, typingIndicator: false, presence: true },
     postingKeys: { "0a0b": "key" },
+    logHead: { size: 7, root: "cm9vdA==", logKey: "a2V5" },
   });
 
   assert.deepEqual(roundTrip(original), original);
+});
+
+/**
+ * The anchor is the only thing that makes a consistency proof mean anything, and a codec that
+ * dropped it would put the client back where it was: accepting, on every start, any log that is
+ * merely consistent with itself. The failure would be invisible — the application works, the
+ * proof just stops proving.
+ */
+test("the log anchor survives the round trip", () => {
+  const anchored = session({ logHead: { size: 12, root: "cm9vdA==", logKey: "a2V5" } });
+
+  assert.deepEqual(roundTrip(anchored).logHead, anchored.logHead);
+});
+
+/** A session written before the anchor existed has none, and must not gain an empty one. */
+test("a session with no anchor reads back without one", () => {
+  assert.ok(!("logHead" in roundTrip(session())));
 });
 
 /**

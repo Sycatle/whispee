@@ -102,8 +102,15 @@ pub struct ChainLink {
 /// The server can withhold a link and cannot forge one. A chain with a hole fails to verify on
 /// the client, which says so rather than assuming continuity — omission stays possible and stays
 /// detectable, which is the asymmetry the whole project rests on.
+/// One row of the chain as Postgres returns it: sequence, key, rotation signature, rotation time.
+///
+/// Named rather than written inline because the shape is four columns wide and two of them are
+/// nullable — a reader checking the `map` below against the `SELECT` has to count positions, and
+/// counting is where the columns get swapped.
+type ChainRow = (i64, Vec<u8>, Option<Vec<u8>>, Option<i64>);
+
 pub async fn chain(pool: &PgPool, account: &str) -> Result<Vec<ChainLink>, sqlx::Error> {
-    let rows: Vec<(i64, Vec<u8>, Option<Vec<u8>>, Option<i64>)> = sqlx::query_as(
+    let rows: Vec<ChainRow> = sqlx::query_as(
         "SELECT seq, identity_key, rotation, rotated_at FROM log_entries
          WHERE account = $1 ORDER BY seq",
     )

@@ -408,8 +408,7 @@ pub fn short_id(id: &str) -> String {
     if !is_account_id(id) {
         return id.to_owned();
     }
-    id[..ID_SHORT_HEX_LEN]
-        .as_bytes()
+    id.as_bytes()[..ID_SHORT_HEX_LEN]
         .chunks(4)
         .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
         .collect::<Vec<_>>()

@@ -540,10 +540,10 @@ async fn rename_account(
     // minutes old, so measuring its age would tell somebody who has never renamed that they
     // renamed too recently — which was the bug, and it hit the single most likely case: not
     // liking the name you were given the moment you were given it.
-    if let Some((_, Some(held_for), true)) = &retired {
-        if *held_for < RENAME_COOLDOWN_SECONDS {
-            return Err(ApiError::Conflict("this account was renamed too recently"));
-        }
+    if let Some((_, Some(held_for), true)) = &retired
+        && *held_for < RENAME_COOLDOWN_SECONDS
+    {
+        return Err(ApiError::Conflict("this account was renamed too recently"));
     }
 
     let claimed = sqlx::query(

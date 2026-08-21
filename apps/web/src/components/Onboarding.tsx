@@ -325,10 +325,17 @@ export function Onboarding({
             {/*
               The handle the name will claim, shown before it is claimed and not after.
 
-              It is the one thing on this screen that cannot be changed later — it is the account
-              — so it is on screen while the decision is still open, rather than discovered on the
-              first message. Shown as a fact rather than as a field, because it is answered
-              already; the button is there for the minority who care which one they get.
+              It used to say this was permanent, because it was: the handle *was* the account, in
+              the MLS credential and in every attestation. It is an alias now — see
+              `docs/specs/2026-08-21-account-identity.md` — so the sentence had to go rather than
+              be softened. Copy that overstates a commitment is worse than no copy: somebody
+              agonises over a choice that costs them nothing.
+
+              It stays on screen all the same. Not because it is irreversible, but because it is
+              the name people will be reading next to everything this account ever says, and
+              being shown it once beats discovering it on the first message. Shown as a fact
+              rather than as a field, because it is answered already; the button is for the
+              minority who care which one they get.
             */}
             {!custom && (
               <div className="flex items-center justify-between gap-gutter rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-gutter">
@@ -337,7 +344,7 @@ export function Onboarding({
                   <span className="font-evidence wrap-anywhere text-(--color-ink)">
                     @{derived}
                   </span>
-                  . This is what identifies you, and it cannot be changed afterwards.
+                  . You can change it later, in settings.
                 </p>
                 <Button
                   type="button"

@@ -248,3 +248,44 @@ export function addressedIn(
 
   return reply;
 }
+
+/**
+ * Rewrites the handles a writer typed into the accounts they meant.
+ *
+ * # Why the conversion happens here and not in the composer
+ *
+ * The wire has to carry the account id: a handle can be given up and re-typed by nobody — see
+ * `migrations/0014_account_identity.sql` — but it can be *renamed*, and a mention carrying a name
+ * is orphaned by the next rename. That is the same argument this module already makes against
+ * carrying a display name, one level down, and it became true the day handles stopped being
+ * identities.
+ *
+ * What does **not** have to follow is the composer. An id is thirty-two hexadecimal characters;
+ * a writer who accepted a suggestion would watch `@a1b2c3d4e5f6…` land in the middle of their
+ * sentence, and a `<textarea>` — which is what the composer is, deliberately — has no way to draw
+ * it as anything else. So the field keeps the handle, and this function does the substitution
+ * once, on the way out.
+ *
+ * # What that costs
+ *
+ * A member who renames themselves between the keystroke and the send is resolved to whoever holds
+ * the handle in the roster we are looking at. The window is the length of a sentence and the
+ * lookup is against the conversation's own members rather than the server's directory, so the
+ * mistake needs a rename inside that window *and* somebody else to have taken the freed name —
+ * which the tombstone rule makes impossible. The residual case is a member renaming mid-sentence
+ * and the mention landing on the account they no longer answer for, which is the right account.
+ *
+ * # It only ever rewrites members
+ *
+ * `directory` is this conversation's handles, not the server's. `@alice` written where no member
+ * answers to `alice` stays exactly as typed, for the reason `runs` gives: it addresses somebody
+ * who will never read it, and inventing an id for them would be worse than leaving prose.
+ */
+export function resolve(text: string, directory: ReadonlyMap<string, string>): string {
+  const parts = runs(text, directory.keys());
+  if (!parts.some((run) => "handle" in run)) return text;
+
+  return parts
+    .map((run) => ("text" in run ? run.text : `@${directory.get(run.handle) ?? run.handle}`))
+    .join("");
+}

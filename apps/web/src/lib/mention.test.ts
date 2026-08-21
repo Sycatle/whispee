@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { addressedIn, addresses, completions, runs, typed } from "./mention.ts";
+import { addressedIn, addresses, completions, resolve, runs, typed } from "./mention.ts";
 import type { NameSources } from "./naming.ts";
 
 const MEMBERS = ["alice", "bob", "carol_w", "dave"];
@@ -148,4 +148,49 @@ test("our own messages never address us", () => {
     { seq: 2, mine: true, content: { kind: "reply", text: "and", target: 1 } },
   ];
   assert.equal(addressedIn(thread, 0, "alice", MEMBERS), null);
+});
+
+const DIRECTORY = new Map([
+  ["alice", "a".repeat(32)],
+  ["bob", "b".repeat(32)],
+]);
+
+test("a typed handle leaves as the account it names", () => {
+  assert.equal(resolve("hi @alice", DIRECTORY), `hi @${"a".repeat(32)}`);
+});
+
+test("a handle nobody in the room answers to is left alone", () => {
+  // The same rule `runs` applies: it addresses somebody who will never read it, and inventing an
+  // id for them would be worse than leaving prose.
+  assert.equal(resolve("hi @mallory", DIRECTORY), "hi @mallory");
+});
+
+test("resolving touches nothing when there is nothing to resolve", () => {
+  const plain = "no mentions here, and an @ sign";
+  assert.equal(resolve(plain, DIRECTORY), plain);
+});
+
+test("an email address survives resolution intact", () => {
+  assert.equal(resolve("write to sam@alice about it", DIRECTORY), "write to sam@alice about it");
+});
+
+test("several mentions and the prose between them all survive", () => {
+  assert.equal(
+    resolve("@alice and @bob, look", DIRECTORY),
+    `@${"a".repeat(32)} and @${"b".repeat(32)}, look`,
+  );
+});
+
+test("an id typed by hand is already resolved and stays put", () => {
+  const already = `hi @${"a".repeat(32)}`;
+  assert.equal(resolve(already, DIRECTORY), already);
+});
+
+test("what resolution produces is what rendering reads back", () => {
+  // The round trip is the property that matters: a mention the sender wrote and the recipient
+  // cannot find highlighted is worse than no mention at all.
+  const accounts = [...DIRECTORY.values()];
+  const wire = resolve("hi @alice", DIRECTORY);
+  assert.deepEqual(runs(wire, accounts), [{ text: "hi " }, { handle: "a".repeat(32) }]);
+  assert.equal(addresses(wire, "a".repeat(32), accounts), true);
 });

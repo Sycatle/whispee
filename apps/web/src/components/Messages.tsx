@@ -1,9 +1,24 @@
 /**
- * Message thread: bubbles, folded reactions, quotes, read state.
+ * Message thread: lines, folded reactions, quotes, read state.
  *
  * Split out of `page.tsx` once reactions turned a flat list into a tree: a reaction is not a
- * bubble, it is an annotation on another bubble, and the same goes for the quote in a reply.
+ * line, it is an annotation on another line, and the same goes for the quote in a reply.
  * Keeping that logic in the page render mixed the app layout with the shape of a conversation.
+ *
+ * # Lines rather than bubbles, and what that costs
+ *
+ * The thread used to align our own messages right and everybody else's left, inside bubbles
+ * capped at 75% of the pane. Alignment is a cheap way to say who is speaking and an expensive way
+ * to lay out text: it spends a quarter of the width on nothing, it ragged-edges every paragraph
+ * against a different margin, and it gives a group thread two columns for however many people are
+ * in it. So authorship moved off the axis and onto the line itself — a fixed lane on the left
+ * holding the avatar, the name and the hour spelled out at the top of each turn, and the text
+ * running the full width underneath.
+ *
+ * What that costs is the instant read of "mine" that alignment gave for free. It is paid back by
+ * a very slight tint over our own rows, and that tint is deliberately **not** the accent: the
+ * accent is rationed to selection, focus and "you are here", and a thread of our own messages
+ * would spend the whole budget in one screen.
  *
  * # It reads the session rather than receiving it
  *
@@ -17,35 +32,40 @@
  *
  * Virtualisation. Every message in the thread is in the DOM, and a thread of ten thousand is
  * ten thousand nodes. The windowing belongs in a module of its own alongside the grouping rules
- * it has to respect; anticipating it here would only produce a shape to undo.
+ * it has to respect; anticipating it here would only produce a shape to undo. Half of that module
+ * now exists: `lib/thread.ts` resolves the day headings, the grouping and the unread line over the
+ * whole list before anything is drawn, so a window that renders a slice would still get them
+ * right. What is left is the scrolling.
  */
 import { Fragment, useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
 import { EmojiDrawer } from "@/components/EmojiPicker";
-import { continues, dayLabel, opensDay, timeOf } from "@/lib/datetime";
-import { compactNameOf, formatHandle } from "@/lib/naming";
+import { dayLabel, timeOf } from "@/lib/datetime";
+import { compactNameOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
+import { layout, textOf } from "@/lib/thread";
 import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
-import { Button } from "@/ui/Button";
 import { cn } from "@/ui/cn";
 import { Emoji, EmojiText } from "@/ui/Emoji";
+import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
+import { Menu } from "@/ui/Menu";
 import { Spinner } from "@/ui/Spinner";
 import { Tooltip } from "@/ui/Tooltip";
 
 /**
  * The palette offered on hover, before this account has a history of its own.
  *
- * Five and not more: the row sits inside the bubble's width and every extra button pushes Reply
- * further from the thumb. Once somebody has reacted a few times these are replaced by
- * `preferences.recentEmojis`, which is the same idea with the choosing done by the person using
- * it rather than by us. The full set is a keypress away in the picker beside them.
+ * Five and not more: the bar hangs off the corner of a line and every extra button pushes the
+ * overflow menu further from the thumb. Once somebody has reacted a few times these are replaced
+ * by `preferences.recentEmojis`, which is the same idea with the choosing done by the person
+ * using it rather than by us. The full set is a keypress away in the picker beside them.
  *
  * Two of these carry an invisible `FE0F` and it is not an accident: `👍️` and `❤️` have a text
  * presentation as well as an emoji one, so the catalogue spells them fully qualified. Writing the
@@ -54,6 +74,37 @@ import { Tooltip } from "@/ui/Tooltip";
  * the picker.
  */
 const EMOJIS = ["👍️", "❤️", "😂", "😮", "🙏"];
+
+/**
+ * The lane on the left of every line: the avatar at the top of a turn, the hour under it.
+ *
+ * 56px is 40 for the avatar plus 16 of air, and it is the one measurement the whole thread is
+ * built on — the name, the text, the quote and the reactions all start at its right edge, so a
+ * line that got it wrong would step sideways out of the column.
+ *
+ * **This should be a `--spacing-lane` token in `index.css`,** and it is written as a scale value
+ * here only because that file is not this change's to edit. Whoever adds the token has to bring
+ * three things onto it at the same time: this lane, the avatar size below, and the reply banner
+ * in `Conversation.tsx`, whose quote should line up with the quotes inside the thread rather than
+ * with the composer.
+ */
+const LANE = "w-14 shrink-0";
+
+/**
+ * How the avatar is made to measure 40px.
+ *
+ * `ui/Avatar.tsx` offers 20, 24, 32 and 64, and 40 is not among them. Adding a step is the right
+ * fix and belongs in that file; until then this is a call-site override, and it overrides two
+ * different things because the component sizes its two states differently — the identicon by SVG
+ * `width`/`height` attributes, which any class beats, and the neutral placeholder by an inline
+ * `style`, which nothing beats without `!`. Both carry `aria-hidden`, which is what makes one
+ * selector enough.
+ *
+ * `sm` and not `md` is still a decision and not a leftover: the proof strip rides under an `md`
+ * avatar, and the argument against putting it in the thread is the one written beside the avatar
+ * below.
+ */
+const AVATAR_40 = "[&_[aria-hidden]]:size-10! [&_[aria-hidden]]:text-body";
 
 export function Messages({
   view,
@@ -82,15 +133,6 @@ export function Messages({
     reactions.set(message.content.target, target);
   }
 
-  const textOf = (seq: number): string => {
-    const target = messages.find((message) => message.seq === seq);
-    if (!target) return "message unavailable";
-    if (target.content.kind === "text") return target.content.text;
-    if (target.content.kind === "reply") return target.content.text;
-    if (target.content.kind === "attachment") return target.content.ref.name;
-    return "…";
-  };
-
   const visible = messages.filter((message) => message.content.kind !== "reaction");
 
   /**
@@ -102,20 +144,6 @@ export function Messages({
    */
   const authorOf = (message: (typeof visible)[number]) =>
     message.mine ? session.handle : message.sender;
-
-  /**
-   * Is there more than one person on the other side?
-   *
-   * Counted in devices rather than in accounts, which is the pre-existing test and is kept on
-   * purpose: `peers` is restored with the conversation, `accounts` is empty until the first poll
-   * answers. Deciding the layout from `accounts` would draw a one-to-one thread for a second and
-   * then reflow the whole list into a group one.
-   *
-   * What it does not solve: a one-to-one with someone who has two devices counts as a group, so
-   * that thread carries names and avatars it does not need. Wrong in the harmless direction —
-   * redundant identification rather than absent identification.
-   */
-  const group = view.peers.length > 1;
 
   /**
    * Everybody a line in this thread can be attributed to.
@@ -130,12 +158,13 @@ export function Messages({
   ];
 
   /**
-   * What to call the author of a bubble, on the one line a bubble gives.
+   * What to call the author of a line, on the one line a turn gives it.
    *
-   * This is the site the compact form was written for. A bubble author has no second line, and it
-   * is read at a glance rather than studied — so a self-asserted name that another member could
-   * be mistaken for is not shown here at all, and both of them fall back to their handle. See the
-   * argument at the top of `lib/naming.ts`.
+   * This is the site the compact form was written for. The name sits on a single row beside the
+   * hour, with no second line to carry a handle underneath, and it is read at a glance rather than
+   * studied — so a self-asserted name that another member could be mistaken for is not shown here
+   * at all, and both of them fall back to their handle. See the argument at the top of
+   * `lib/naming.ts`.
    *
    * A message with no sender keeps "unknown" rather than being given a name: the absence is a
    * fact about the envelope, and there is nobody to name.
@@ -171,6 +200,16 @@ export function Messages({
     // moves is exactly the disappearing line described above.
   }, [view.key]);
 
+  /**
+   * Every seam in the thread, decided in one pass before a single line is drawn.
+   *
+   * Not a `useMemo`, and that is the rule at the top of `state/SessionProvider.tsx` rather than an
+   * oversight: `visible` is rebuilt from a mutating graph on every render, so memoising this would
+   * need `useRevision()` in the dependency list to be correct at all — and would be silently
+   * wrong the day somebody trimmed the list.
+   */
+  const rows = layout(visible, { authorOf, readCursor: boundary.current });
+
   // The outbox counts: a message the user just wrote appears there first, and not scrolling to it
   // would hide the very thing they are waiting to see.
   //
@@ -192,7 +231,7 @@ export function Messages({
   // heuristic.
   //
   // It fires on mount and on `visibilitychange`, and deliberately **not** on the visibility of
-  // individual bubbles. An `IntersectionObserver` would make a read receipt report *which*
+  // individual lines. An `IntersectionObserver` would make a read receipt report *which*
   // message the reader looked at and for how long — a change to what a receipt discloses,
   // dressed up as an optimisation.
   useEffect(() => {
@@ -222,10 +261,25 @@ export function Messages({
   };
 
   /**
+   * Take a message's own words out of the thread.
+   *
+   * The confirmation is a toast rather than a label that flips to "Copied", for the reason
+   * `Pairing.tsx` gives at its own copy button: a flipped label says nothing on the second copy
+   * and nothing at all to a screen reader.
+   *
+   * What this does not solve: a clipboard write the browser refuses rejects silently. There is
+   * nothing useful to say about it — the text is on screen and can be selected — and an error
+   * banner for a permission the user just declined would be noise.
+   */
+  const copy = (text: string) => {
+    void navigator.clipboard.writeText(text).then(() => report.done("Message copied"));
+  };
+
+  /**
    * The five shortcuts, which are the five most recently used once there are five.
    *
-   * Topped up from the defaults rather than shown short: a row that grows from one button to
-   * five over a week moves Reply under the reader's thumb a little further every day.
+   * Topped up from the defaults rather than shown short: a bar that grows from one button to
+   * five over a week moves the overflow menu under the reader's thumb a little further every day.
    */
   const quick = [
     ...session.preferences.recentEmojis,
@@ -276,40 +330,26 @@ export function Messages({
         </div>
       )}
 
-      <ol className="min-h-0 flex-1 space-y-snug overflow-y-auto p-pane">
-        {visible.map((message, index) => {
-          const before = index === 0 ? undefined : visible[index - 1];
-          const heading = opensDay(message.sentAt, before?.sentAt) ? message.sentAt : undefined;
-          const grouped =
-            before !== undefined &&
-            continues(authorOf(message), message.sentAt, authorOf(before), before.sentAt);
-          // The first message past the boundary, and only if something precedes it: a line above
-          // the very first message of a thread marks nothing.
-          const opensUnread =
-            !message.mine &&
-            before !== undefined &&
-            message.seq > boundary.current &&
-            before.seq <= boundary.current;
-
+      {/*
+        No vertical rhythm on the list itself. A run of lines from one person is one paragraph and
+        wants no gap at all; the air belongs between turns, which is a property of each line rather
+        than of the space between any two of them.
+      */}
+      <ol className="min-h-0 flex-1 overflow-y-auto py-pane">
+        {rows.map(({ key, message, opensDay, continues, opensUnread }) => {
           // Extracted before the JSX: type narrowing is lost inside a closure, and working
           // around it inline made the render unreadable.
           const attachment = message.content.kind === "attachment" ? message.content.ref : null;
           const cite = message.content.kind === "reply" ? message.content.target : null;
+          const spoken =
+            message.content.kind === "text" || message.content.kind === "reply"
+              ? message.content.text
+              : null;
           const emojis = [...(reactions.get(message.seq)?.values() ?? [])];
-
-          /**
-           * Secondary text inside a bubble: the author's name, the quote, the time row.
-           *
-           * Muted on a received bubble, and **not** muted on one of ours. There is no muted ink
-           * defined against the accent, and the `opacity-70` this replaces put 12px text at
-           * roughly 3:1 on it — the same failure that cost the tree its `text-white`. Full
-           * `accent-ink` is the only honest answer there; the hierarchy is carried by size and
-           * position instead of by contrast.
-           */
-          const secondary = message.mine ? null : "text-(--color-ink-muted)";
+          const mineAlready = reactions.get(message.seq)?.get(session.handle);
 
           return (
-            <Fragment key={message.seq}>
+            <Fragment key={key}>
               {/*
                 One heading per day, and none at all for a thread nobody stamped: a date on
                 screen that no message carries would be an invention.
@@ -320,7 +360,7 @@ export function Messages({
               {opensUnread && (
                 <li
                   role="separator"
-                  className="flex items-center gap-snug py-tight text-caption text-(--color-accent)"
+                  className="flex items-center gap-snug px-pane py-snug text-caption text-(--color-accent)"
                 >
                   <span className="h-px flex-1 bg-(--color-accent)/40" />
                   New messages
@@ -328,124 +368,146 @@ export function Messages({
                 </li>
               )}
 
-              {heading !== undefined && (
-                <li role="separator" className="py-snug text-center">
+              {opensDay !== undefined && (
+                <li role="separator" className="px-pane py-snug text-center">
                   <span className="rounded-(--radius-pill) bg-(--color-surface-raised) px-gutter py-tight text-caption text-(--color-ink-muted)">
-                    {dayLabel(heading, now)}
+                    {dayLabel(opensDay, now)}
                   </span>
                 </li>
               )}
 
               <li
                 className={cn(
-                  "group flex items-end gap-snug",
-                  message.mine && "flex-row-reverse",
-                  grouped && "-mt-1",
+                  // `relative` is load-bearing: the action bar is absolutely positioned against
+                  // this row so that it can overlap the row's top edge without reserving height
+                  // inside it. Revealing it by reflow made the thread jump under the pointer.
+                  "group relative flex px-pane py-tight",
+                  // The air goes above the first line of a turn, so a burst of three sentences
+                  // reads as one paragraph and the next speaker is visibly a new one.
+                  !continues && "mt-snug",
+                  // Ours, said without the accent and without the axis. Derived from the ink
+                  // rather than written as a colour, which is what makes it behave in both
+                  // themes for free: the ink is dark over a light ground and light over a dark
+                  // one, so five percent of it darkens the row in one theme and lifts it in the
+                  // other, by the same barely-there amount.
+                  message.mine && "rounded-control bg-(--color-ink)/5",
                 )}
               >
                 {/*
-                  The author's face, in a group and only there.
+                  The lane: the author's face at the top of each turn, the hour under it.
 
-                  In a one-to-one the same two drawings alternate down the whole thread and
-                  identify nobody: the header already names who this is, and the side of the pane
-                  says which of the two is speaking. So the avatar is spent where it answers a
-                  question the reader actually has — who, out of several, said this.
+                  The avatar is drawn for everybody now, ours included, and on every turn rather
+                  than only in group threads. Alignment used to answer "who said this" and the
+                  avatar was spent only where alignment could not — in a group. With the thread in
+                  one column the avatar *is* the answer, in a one-to-one as much as in a group, and
+                  an anchor that appeared and disappeared depending on how many people were in the
+                  room would make the column ragged for no gain.
 
-                  A fixed-width gutter holds the place inside a run of messages, so a burst of
-                  three sentences stays one column rather than stepping sideways under its own
-                  first line. `sm` and not `md`: the proof strip rides under an `md` avatar, and
-                  repeating a verification pattern on every bubble would turn evidence into
-                  wallpaper. It belongs in the detail column, once.
+                  `sm` and not `md`: the proof strip rides under an `md` avatar, and repeating a
+                  verification pattern on every message would turn evidence into wallpaper. It
+                  belongs in the detail column, once.
                 */}
-                {group && !message.mine && (
-                  <span className="w-6 shrink-0">
-                    {!grouped && (
-                      <Avatar
-                        seed={seedOf(message.sender)}
-                        label={nameOfAuthor(message.sender)}
-                        size="sm"
-                      />
-                    )}
-                  </span>
-                )}
+                <div className={cn(LANE, "flex flex-col items-start")}>
+                  {continues ? (
+                    /*
+                      The hour of a continuation line, in the lane, on hover.
 
-                <div
-                  className={cn(
-                    "flex min-w-0 max-w-[75%] flex-col",
-                    message.mine && "items-end",
+                      Faded rather than absent, so it stays in the accessibility tree: a screen
+                      reader still reads a stamp on every line, exactly as it did when the hour sat
+                      under each bubble. Only the eye is spared the column of repeated numbers.
+                    */
+                    message.sentAt !== undefined && (
+                      <time
+                        dateTime={new Date(message.sentAt).toISOString()}
+                        title={new Date(message.sentAt).toLocaleString()}
+                        className="pt-0.5 text-[0.6875rem] leading-5 text-(--color-ink-muted) opacity-0 transition-opacity duration-(--duration-quick) ease-out group-hover:opacity-100 motion-reduce:transition-none"
+                      >
+                        {timeOf(message.sentAt)}
+                      </time>
+                    )
+                  ) : (
+                    <Avatar
+                      seed={seedOf(message.sender)}
+                      label={nameOfAuthor(message.sender)}
+                      size="sm"
+                      className={AVATAR_40}
+                    />
                   )}
-                >
-                  <div
-                    // `whitespace-pre-wrap`: the composer accepts line breaks, and HTML collapses
-                    // them. Without this a message written as a list arrives as one run-on
-                    // sentence — the text is intact on the wire and mangled only on screen, which
-                    // is the kind of loss nobody thinks to check.
-                    className={cn(
-                      "whitespace-pre-wrap wrap-anywhere rounded-bubble px-gutter py-snug text-left text-body",
-                      message.mine
-                        ? "bg-(--color-accent) text-(--color-accent-ink)"
-                        : "border border-(--color-border-subtle) bg-(--color-surface-raised)",
-                    )}
-                  >
-                    {/* The name is announced once per turn, not once per line: a burst of three
-                        sentences is one person speaking, not three announcements. */}
-                    {!message.mine && group && !grouped && (
-                      <span className={cn("block text-caption font-medium", secondary)}>
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  {/* The name is announced once per turn, not once per line: a burst of three
+                      sentences is one person speaking, not three announcements. */}
+                  {!continues && (
+                    <div className="flex items-baseline gap-snug">
+                      <span className="truncate text-body font-medium">
                         {nameOfAuthor(message.sender)}
                       </span>
-                    )}
+                      {/*
+                        `<time>` with a machine-readable `dateTime`, so a screen reader announces
+                        the full date rather than reading "14:02" as two numbers, and the tooltip
+                        carries the day a line in the middle of a thread does not repeat.
 
-                    {cite !== null && (
-                      <span
-                        // The rule keeps `border-current/40`: an opacity on a hairline is not an
-                        // opacity on text, and it is the one way to draw a divider that works on
-                        // both the accent bubble and the raised one.
-                        className={cn(
-                          "mb-tight block border-l-2 border-current/40 pl-snug text-caption",
-                          secondary,
-                        )}
-                      >
-                        <EmojiText text={textOf(cite)} />
-                      </span>
-                    )}
-
-                    {attachment ? (
-                      <Attachment
-                        attachment={attachment}
-                        onOpen={() => session.openAttachment(view, attachment)}
-                      />
-                    ) : message.content.kind === "text" ? (
-                      <EmojiText text={message.content.text} big />
-                    ) : message.content.kind === "reply" ? (
-                      <EmojiText text={message.content.text} big />
-                    ) : null}
-
-                    {/*
-                      Time and receipt on one line under the text.
-
-                      `<time>` with a machine-readable `dateTime`, so a screen reader announces
-                      the full date rather than reading "14:02" as two numbers, and the tooltip
-                      carries the day a bubble in the middle of a thread does not repeat.
-
-                      Nothing is shown when the sender did not stamp. An empty slot is honest; a
-                      guessed hour is not.
-                    */}
-                    <span
-                      className={cn(
-                        "mt-tight flex items-center justify-end gap-tight text-caption",
-                        secondary,
-                      )}
-                    >
+                        Nothing is shown when the sender did not stamp. An empty slot is honest; a
+                        guessed hour is not.
+                      */}
                       {message.sentAt !== undefined && (
                         <time
                           dateTime={new Date(message.sentAt).toISOString()}
                           title={new Date(message.sentAt).toLocaleString()}
+                          className="shrink-0 text-caption text-(--color-ink-muted)"
                         >
                           {timeOf(message.sentAt)}
                         </time>
                       )}
-                      {message.mine && <Status state={session.statusOf(view, message.seq)} />}
+                    </div>
+                  )}
+
+                  {cite !== null && (
+                    <span
+                      // A real hairline token now that there is no accent ground to survive.
+                      // The rule used to be `border-current/40`, which was the only colour that
+                      // worked on both the accent bubble and the raised one; with every line on
+                      // the same surface, the border colour can say what it means.
+                      className="mb-tight block border-l-2 border-(--color-border-strong) pl-snug text-caption text-(--color-ink-muted)"
+                    >
+                      <EmojiText text={textOf(messages, cite)} />
                     </span>
+                  )}
+
+                  <div className="flex items-end gap-snug">
+                    <div
+                      // `whitespace-pre-wrap`: the composer accepts line breaks, and HTML collapses
+                      // them. Without this a message written as a list arrives as one run-on
+                      // sentence — the text is intact on the wire and mangled only on screen, which
+                      // is the kind of loss nobody thinks to check.
+                      className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left text-body"
+                    >
+                      {attachment ? (
+                        <Attachment
+                          attachment={attachment}
+                          onOpen={() => session.openAttachment(view, attachment)}
+                        />
+                      ) : spoken !== null ? (
+                        <EmojiText text={spoken} big />
+                      ) : null}
+                    </div>
+
+                    {/*
+                      The receipt at the end of the line rather than under the text: with the
+                      bubble gone there is no box for it to sit inside, and a line of its own for
+                      two ticks would double the height of every message we send.
+
+                      What this does not solve: on a single-line message the action bar overlaps
+                      this corner while the pointer is over the row, so the ticks are hidden for
+                      exactly as long as somebody is reaching for a reaction. The state is not
+                      urgent and comes back the moment the pointer leaves.
+                    */}
+                    {message.mine && (
+                      <span className="shrink-0 text-caption text-(--color-ink-muted)">
+                        <Status state={session.statusOf(view, message.seq)} />
+                      </span>
+                    )}
                   </div>
 
                   {emojis.length > 0 && (
@@ -465,91 +527,162 @@ export function Messages({
                       ))}
                     </div>
                   )}
+                </div>
+
+                {/*
+                  Reactions and Reply used to be `hidden group-hover:flex`, which put them out of
+                  reach of everyone without a mouse: `display: none` takes an element out of the tab
+                  order, and a finger has no hover to give. They were, in practice, features only
+                  some people had.
+
+                  Faded rather than hidden, so the buttons stay focusable and the row keeps its
+                  height — revealing them by reflow made the thread jump under the pointer. They
+                  come back on hover, on keyboard focus anywhere inside the row, and unconditionally
+                  on a touch device, where there is no other way to ask for them.
+
+                  Anchored over the row's top edge rather than laid out under the text: a bar in
+                  the flow claimed a line of height on every message whether or not it was wanted,
+                  and it put the controls of the message above within a few pixels of the text of
+                  the one below. `z-index-sticky` because it overlaps the previous row, which is
+                  painted after it in document order.
+                */}
+                <div
+                  // `has-[[data-state=open]]` is the one addition to that rule, and it is the
+                  // menu's fault: Radix portals its content and takes focus with it, so a bar
+                  // holding an open picker or an open menu is neither hovered nor focus-within,
+                  // and it faded out from under the surface it had just opened. The trigger keeps
+                  // `data-state="open"` for as long as the panel is up, which is exactly the
+                  // condition wanted.
+                  className="absolute -top-3 right-pane z-(--z-index-sticky) flex items-center gap-tight rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-tight text-body shadow-menu opacity-0 transition-opacity duration-(--duration-quick) ease-out focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100 motion-reduce:transition-none touch:opacity-100"
+                  data-actions
+                >
+                  {quick.map((emoji) => (
+                    // The label is a node and not a string so the emoji in it is artwork like
+                    // every other emoji on screen. Interpolated into a template literal it was
+                    // the last glyph in the application still drawn by the platform font.
+                    <Tooltip
+                      key={emoji}
+                      label={
+                        <>
+                          React with <Emoji char={emoji} />
+                        </>
+                      }
+                    >
+                      <IconButton
+                        label={`React with ${emoji}`}
+                        icon={<Emoji char={emoji} />}
+                        size="sm"
+                        onClick={() => react(message.seq, emoji)}
+                      />
+                    </Tooltip>
+                  ))}
+
+                  {/* Everything the five shortcuts are not. `side="top"` because the bar sits at
+                      the top of a line and a panel opening downwards would cover the message it
+                      belongs to; Radix flips it anyway when there is no room above. */}
+                  <EmojiDrawer
+                    label="React with another emoji"
+                    size="sm"
+                    side="top"
+                    align="end"
+                    onPick={(emoji) => react(message.seq, emoji)}
+                  />
 
                   {/*
-                    Reactions and Reply used to be `hidden group-hover:flex`, which put them out of
-                    reach of everyone without a mouse: `display: none` takes an element out of the tab
-                    order, and a finger has no hover to give. They were, in practice, features only
-                    some people had.
-
-                    Faded rather than hidden, so the buttons stay focusable and the row keeps its
-                    height — revealing them by reflow made the thread jump under the pointer. They
-                    come back on hover, on keyboard focus anywhere inside the row, and unconditionally
-                    on a touch device, where there is no other way to ask for them.
+                    Reply, as a glyph at last. The note this replaces said `ui/Icon.tsx` was a
+                    closed inventory holding no reply arrow and that widening it for one call site
+                    was the growth that file exists to prevent. The inventory has since been
+                    widened on purpose, `reply` is in it, and the word can go: a bar of five emoji
+                    and two glyphs has no room for a piece of prose, and the label survives as the
+                    accessible name and as the tooltip.
                   */}
-                  <div
-                    className={cn(
-                      "mt-tight flex items-center gap-tight text-body opacity-0 transition-opacity duration-(--duration-quick) ease-out motion-reduce:transition-none focus-within:opacity-100 group-hover:opacity-100 touch:opacity-100",
-                      message.mine && "justify-end",
-                    )}
-                    data-actions
-                  >
-                    {quick.map((emoji) => (
-                      // The label is a node and not a string so the emoji in it is artwork like
-                      // every other emoji on screen. Interpolated into a template literal it was
-                      // the last glyph in the application still drawn by the platform font.
-                      <Tooltip
-                        key={emoji}
-                        label={
-                          <>
-                            React with <Emoji char={emoji} />
-                          </>
-                        }
-                      >
-                        <IconButton
-                          label={`React with ${emoji}`}
-                          icon={<Emoji char={emoji} />}
-                          size="sm"
-                          onClick={() => react(message.seq, emoji)}
-                        />
-                      </Tooltip>
-                    ))}
-
-                    {/* Everything the five shortcuts are not. `side="top"` because the row sits
-                        under a bubble and a panel opening downwards would cover the next
-                        message; Radix flips it anyway when there is no room above. */}
-                    <EmojiDrawer
-                      label="React with another emoji"
+                  <Tooltip label="Reply">
+                    <IconButton
+                      label="Reply"
+                      icon={<Icon name="reply" />}
                       size="sm"
-                      side="top"
-                      align={message.mine ? "end" : "start"}
-                      onPick={(emoji) => react(message.seq, emoji)}
+                      onClick={() => onReplyTo(message.seq)}
                     />
-                    {/*
-                      A word and not a glyph, alone in this row. `ui/Icon.tsx` is a closed
-                      inventory and holds no reply arrow; borrowing the back chevron would name
-                      the wrong action, and widening the table for one call site is the growth
-                      that file exists to prevent. "Reply" is also the shorter thing to read.
-                    */}
-                    <Button variant="quiet" size="sm" onClick={() => onReplyTo(message.seq)}>
-                      Reply
-                    </Button>
-                  </div>
+                  </Tooltip>
+
+                  {/*
+                    The overflow, and the short list of things that are really in it.
+
+                    There is no delete, no edit and no pin here because there is none in the
+                    protocol: `lib/content.ts` has no content type for any of the three and
+                    `Session` has no method that would send one. An item that greyed out, or one
+                    that removed a message from this screen and from nowhere else, would be a lie
+                    about what this application can do — and the one lie a messenger cannot afford
+                    is "that message is gone".
+
+                    So: copying the words, which is a browser capability and needs no protocol at
+                    all, and taking back a reaction, which `reactTo` has always supported with an
+                    empty emoji and which the thread until now had no way to ask for — tapping the
+                    same emoji again simply sent it a second time.
+                  */}
+                  <Menu
+                    align="end"
+                    trigger={
+                      <IconButton label="More actions" icon={<Icon name="more" />} size="sm" />
+                    }
+                  >
+                    <Menu.Item
+                      icon="copy"
+                      // An attachment has a name and no words. Copying the file name under a label
+                      // that promises the message would be the wrong thing quietly.
+                      disabled={spoken === null}
+                      onSelect={() => copy(spoken ?? "")}
+                    >
+                      Copy text
+                    </Menu.Item>
+                    <Menu.Item
+                      icon="close"
+                      disabled={mineAlready === undefined}
+                      onSelect={() => react(message.seq, "")}
+                    >
+                      Remove my reaction
+                    </Menu.Item>
+                  </Menu>
                 </div>
               </li>
             </Fragment>
           );
         })}
+
         {/*
           Written, not yet accepted. Rendered after the thread and never inside it: these have no
           sequence number, and the whole reason they are kept apart is that nothing downstream can
           mistake one for a message the server has numbered.
+
+          Which is also why they are never grouped with the line above: grouping is decided in
+          `lib/thread.ts` from a `seq` and a boundary expressed as one, and a pending message has
+          neither. It gets its own lane with its own hour, and repeats the anchor rather than
+          guessing that the turn above was ours.
         */}
         {view.outbox.map((entry) => (
-          <li key={entry.localId} className="flex justify-end">
+          <li key={entry.localId} className="mt-snug flex rounded-control bg-(--color-ink)/5 px-pane py-tight">
+            <div className={LANE}>
+              <time
+                dateTime={new Date(entry.sentAt).toISOString()}
+                title={new Date(entry.sentAt).toLocaleString()}
+                className="pt-0.5 text-[0.6875rem] leading-5 text-(--color-ink-muted)"
+              >
+                {timeOf(entry.sentAt)}
+              </time>
+            </div>
+
             <div
               className={cn(
-                "max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-bubble px-gutter py-snug text-left text-body",
+                "min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left text-body",
                 entry.state === "failed"
-                  ? "bg-(--color-danger) text-(--color-state-ink)"
+                  ? "text-(--color-danger)"
                   : // The fade is the message: this one is not acquired yet. Not a muted ink —
                     // an ink says what something is, and this says how far along it is.
-                    "bg-(--color-accent) text-(--color-accent-ink) opacity-60",
+                    "opacity-60",
               )}
             >
               <EmojiText text={entry.text} big />
-              <span className="mt-tight flex items-center justify-end gap-snug text-caption">
-                <time dateTime={new Date(entry.sentAt).toISOString()}>{timeOf(entry.sentAt)}</time>
+              <span className="mt-tight flex items-center gap-snug text-caption">
                 {entry.state === "sending" ? (
                   <Spinner size="sm" label="sending" />
                 ) : (
@@ -607,12 +740,13 @@ export function Messages({
  * phone off as human attention.
  *
  * The three used to be told apart by opacity, which is the thing this pass is removing from
- * text: dimmed 12px ink on the accent bubble was under 3:1, so the distinction was invisible to
- * exactly the readers it was meant for. Weight replaces it.
+ * text: dimmed 12px ink was under 3:1, so the distinction was invisible to exactly the readers it
+ * was meant for. Weight replaces it.
  *
  * What that does not solve: `delivered` and `read` still share the `✓✓` glyph and now differ
  * only by a stroke. The accessible name and `title` carry the difference in full, and there is
- * no colour to spend on it — a filled bubble already owns its foreground.
+ * no colour to spend on it — the accent is rationed elsewhere and a receipt is not a state the
+ * reader has to act on.
  */
 function Status({ state }: { state: "sent" | "delivered" | "read" }) {
   const label = { sent: "sent", delivered: "delivered", read: "read" }[state];
@@ -620,7 +754,7 @@ function Status({ state }: { state: "sent" | "delivered" | "read" }) {
 
   return (
     <span
-      // No margin of its own: it now sits in the flex row that carries the time, which spaces it.
+      // No margin of its own: it now sits in the flex row that carries the text, which spaces it.
       className={state === "read" ? "font-medium" : undefined}
       title={label}
       aria-label={label}

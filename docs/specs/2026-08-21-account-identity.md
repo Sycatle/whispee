@@ -1,6 +1,6 @@
 # Account identity: an anchor that is not a name
 
-**Status.** Design, not built. Nothing in this document is implemented.
+**Status.** Built. See the section at the end for what changed on the way.
 
 **Date.** 2026-08-21.
 
@@ -183,3 +183,33 @@ The properties worth pinning are the ones a test can hold without a network:
 - `roles.rs` grants nothing to a handle that matches an admin's *former* alias.
 - A rename produces exactly one notice per conversation, and none in a conversation the renamer
   is not in.
+
+---
+
+## What changed on the way
+
+Three things this document did not foresee, recorded because a spec that pretends it was right is
+a spec nobody will trust the next time.
+
+**The handle was signed into every attestation**, not merely carried by the credential.
+`DeviceClaim`, `RevocationClaim` and `RotationClaim` all had it as field zero, so every
+attestation an account had ever made was bound to whatever it was called at the time. The domains
+moved to `v2` as a result — field zero changed meaning, and a thirty-two character handle is a
+legal handle that reads exactly like an id, so nothing but the label could tell the two apart.
+
+**The handle had to gain a channel of its own.** The spec said the displayed handle must never be
+re-fetched from the server, and stopped there — it did not follow the consequence, which is that
+once the credential carries an id, *nobody in a room knows the handle at all*. `TYPE_HANDLE` (11)
+now carries it as a claim over MLS, believed exactly as much as a display name. An account whose
+claim has not arrived is shown the first 64 bits of its id.
+
+**`VERSION` was not the migration door it looked like.** It guards the native path only: the web
+client reads its state back from IndexedDB with a plain `get` and compares nothing. The states
+that had to be refused were precisely the ones with no version to read, so the check is on the
+*shape* — a device id whose prefix is not 32 hexadecimal characters is from before. Absent had to
+mean old, not unknown.
+
+And one defect found by pressing the button rather than by reading the code: the rename cooldown
+measured how long the account had held its current name, which refused the **first** rename,
+because a handle claimed at sign-up is minutes old. The rule was always about frequency, and the
+first change has no previous one.

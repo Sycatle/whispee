@@ -56,7 +56,7 @@ Four headers carry the rest:
 
 | Header | Contents |
 |---|---|
-| `x-device-id` | the device identifier, qualified by the handle (`alice:desktop`) |
+| `x-device-id` | the device identifier, qualified by the account id (`d52c15be…:desktop`) |
 | `x-timestamp` | Unix seconds, matching the signed value |
 | `x-nonce` | base64 of the 16-byte nonce |
 | `x-signature` | base64 of the Ed25519 signature |
@@ -116,9 +116,9 @@ the single implementation; `crates/transparency` adds one more for tree heads.
 
 | Domain | Signed or MACed by | Covers |
 |---|---|---|
-| `wac-attest-v1` | account identity key | `handle`, `device_id`, `auth_key`, `mls_key` |
-| `wac-revoke-v1` | account identity key | `handle`, `device_id`, `revoked_at` |
-| `wac-rotate-v1` | **previous** account identity key | `handle`, `new_identity_key`, `rotated_at` |
+| `wac-attest-v2` | account identity key | `account`, `device_id`, `auth_key`, `mls_key` |
+| `wac-revoke-v2` | account identity key | `account`, `device_id`, `revoked_at` |
+| `wac-rotate-v2` | **previous** account identity key | `account`, `new_identity_key`, `rotated_at` |
 | `wac-post-v1` | group posting key (HMAC) | `group_id`, `nonce`, `SHA256(body)` |
 | `wac-signal-mac-v1` | group posting key (HMAC) | `group_id`, `nonce`, `SHA256(body)` |
 | `wac-gateway-v1` | device authentication key | `device_id`, server challenge |
@@ -128,10 +128,10 @@ the single implementation; `crates/transparency` adds one more for tree heads.
 
 Each label makes a message of one kind unreadable as a message of another kind:
 
-- `wac-attest-v1` vs `wac-revoke-v1`: without the split, an attestation legitimately obtained for
+- `wac-attest-v2` vs `wac-revoke-v2`: without the split, an attestation legitimately obtained for
   a device could be presented as a revocation certificate for that same device — letting anyone
   get any attested device evicted.
-- `wac-rotate-v1`: a signature produced to revoke a device must not be usable to change the
+- `wac-rotate-v2`: a signature produced to revoke a device must not be usable to change the
   account key, which would amount to taking the account over.
 - `wac-post-v1` vs the three above: this one is a **symmetric MAC whose key the server holds**,
   where the others are signatures the server cannot produce. Conflating the domains would let
@@ -151,7 +151,7 @@ new rules.
 ### 2.2 Length prefixing
 
 Every variable-length field is preceded by its `u16` length. Without those prefixes,
-`handle="ab", device_id="c"` and `handle="a", device_id="bc"` serialise to identical bytes: an
+`account="ab", device_id="c"` and `account="a", device_id="bc"` serialise to identical bytes: an
 attestation obtained for one would hold for the other. The `two_different_splits_do_not_collide`
 test pins that down. A field longer than `u16::MAX` is refused rather than truncated, since silent
 truncation would make two distinct entries indistinguishable. The fixed-width timestamps go
@@ -250,9 +250,12 @@ single leading type byte:
 6  reply           u64 BE target ‖ UTF-8 text
 7  stamped         u64 BE milliseconds ‖ <any of the above>
 8  profile         u64 BE milliseconds ‖ UTF-8 display name (≤ 64 bytes)
+9  reserved        the friend system, not built
+10 membership      u8 event ‖ UTF-8 account  (joined | removed | left)
+11 handle          u64 BE milliseconds ‖ UTF-8 handle (≤ 32 bytes)
 ```
 
-Types 2, 3, 4 and 8 are **protocol traffic**: they ride the encrypted channel because that is
+Types 2, 3, 4, 8 and 11 are **protocol traffic**: they ride the encrypted channel because that is
 precisely what is wanted — a path the server carries without being able to read it — but they are
 not messages. `isControl` names them in one place, so a new control type does not have to be
 remembered on send *and* on receive.
@@ -284,10 +287,13 @@ during a catch-up is a worse answer than none.
 
 ### 4.2 The display name is asserted, not established
 
-A handle cannot change: it is the account's primary key, the identity bytes inside the MLS
-credential, a leaf already published in the transparency log, the subject of every attestation the
-account has signed, and the prefix of each of its device ids. Type 8 is how an account puts a
-mutable, human name in front of that anchor without touching it.
+An **account id** cannot change: it is the fingerprint of the account's genesis identity key, the
+identity bytes inside the MLS credential, the subject of every attestation the account has signed,
+and the prefix of each of its device ids. Type 8 is how an account puts a mutable, human name in
+front of that anchor without touching it.
+
+The **handle** used to be that anchor and no longer is — see §7.1. It is now a claim like the
+display name, and travels the same way, as type 11.
 
 It goes through MLS and nowhere else. A column on the server would be a cleartext object per
 account, stored and served by the party the rest of this document assumes is hostile, and it would
@@ -305,6 +311,28 @@ before applying last-writer-wins. What no clamp can fix is the claim itself: typ
 member calls themselves this, and nothing more. Two members can claim one name, and the one who
 wants to be mistaken for somebody is the one who will. Clients therefore keep the handle on screen
 beside the name, and fall back to the handle outright wherever there is no room for both.
+
+### 4.3 The handle travels the same way, and for a sharper reason
+
+Type 11 carries `u64 BE milliseconds ‖ UTF-8 handle`, with the same shape, the same clamp and the
+same last-writer-wins as type 8.
+
+It has to travel at all because the credential stopped carrying it. When the handle *was* the
+credential's subject, every member of a group already held it, authenticated, without anyone
+sending anything; the credential names an account id now, and a handle is a label nobody in the
+room would otherwise know.
+
+**It is not read back from the server**, and that restraint is the point rather than a preference.
+The server holds the directory that maps handles to accounts and is free to lie in it. What stops
+the lie from mattering is that an account id is checkable against key material inside the
+credential — but a *handle* fetched at render time is checkable against nothing, and fetching it
+would hand the server a fresh opportunity to say who somebody is on every screen, forever.
+
+So the handle is believed exactly as much as a display name: a member may claim one they do not
+hold. That buys them nothing the display name did not already offer, and the ambiguity rule above
+applies unchanged. Uniqueness is a property the server enforces at registration, not a property a
+client can verify at read time, and this document does not pretend otherwise. A member whose claim
+has not arrived is shown the first 64 bits of their account id instead.
 
 ---
 
@@ -362,7 +390,7 @@ construction, and an old roster cannot be replayed.
 Putting the roster in an application message instead would have left it replayable and
 unauthenticated — a member could rebroadcast an old roster in which they were admin.
 
-The roster names **handles**, not signature keys. A handle covers every device of an account, so
+The roster names **account ids**, not signature keys. An id covers every device of an account, so
 adding a phone needs no roster change and an admin is admin from any of their devices. It is also
 what the MLS credential already carries, so there is no extra binding to establish.
 
@@ -404,24 +432,38 @@ excluded from. Another member must pick it up.
 
 ### 7.1 What an account signs over
 
-An account is an Ed25519 identity key (AIK) derived from a twelve-word BIP-39 phrase, plus a
-handle. No phone number and no email address anywhere.
+An account is an Ed25519 identity key (AIK) derived from a twelve-word BIP-39 phrase. No phone
+number and no email address anywhere.
 
-The handle matches `^[a-z0-9_]{3,32}$`, enforced by the server at creation and by a CHECK on the
-column. The format is not cosmetic. Handles are compared as strings in places where the comparison
-decides something: the roster extension names the admin and the moderators by handle, so `Alice`
-and `alice` being two accounts that look identical would be an authorisation question and not a
-display one. And because a handle can no longer contain `:`, the first colon of a device id is
-unambiguously its separator — the check that a device id begins with its account's handle used to
-be a prefix test that `a:b` could slip past.
+**The account is named by that key, not by a handle.** Its id is `SHA256(genesis identity key)`
+truncated to 16 bytes and written as 32 lowercase hexadecimal characters. The id is *derived*,
+never assigned, and the difference carries the whole design: a server that mints ids can forge one,
+reassign one, or serve two people two different answers about one name, while a server that merely
+lists them can do none of those — the id is a hash of a key that is inside the credential the
+verifier is already checking.
+
+**Genesis and not current.** Rotation moves the identity key, so an id derived from the live key
+would move with it. The anchor is the first key the account ever had; §7.3 describes the published
+chain that ties it to whatever key is current.
+
+The handle is an alias: unique among live handles, releasable, renameable, and **never re-issued**.
+It matches `^[a-z0-9_]{3,32}$`, enforced by the server at registration and by a CHECK on the
+column. Retiring rather than freeing a name is not tidiness: every stale reference to `@bob` — a
+bookmark, a screenshot, a mention in a message written last year — would otherwise name whoever
+claimed it next, and that is an impersonation nobody has to mount. It arrives on its own, on a
+schedule the attacker picks by waiting.
 
 What the format does not fix: `rn` still reads as `m`, and `_` is still a separator the eye skips.
 It removes the wide classes of confusion, not the narrow ones.
 
-Each device carries a signature by the account over `(handle, device_id, auth_key, mls_key)`,
-length-prefixed, under domain `wac-attest-v1`. Both keys are attested **together**, not
+Each device carries a signature by the account over `(account, device_id, auth_key, mls_key)`,
+length-prefixed, under domain `wac-attest-v2`. Both keys are attested **together**, not
 separately: separating them would let someone recombine one device's attested authentication key
 with another device's MLS key.
+
+The domains are at v2 because field zero used to be the handle and is now the id, and the two are
+not distinguishable by shape — a thirty-two character handle is legal and reads as an id. The
+version in the label exists for exactly this, and this is the first time it has been spent.
 
 The client re-verifies every attestation on receipt. It never relies on the server's verification,
 since the server is precisely what is under suspicion — server-side verification only rejects
@@ -450,13 +492,21 @@ hex quads. It covers the account key alone, so it does **not** change when a cor
 phone. A fingerprint that changed on every legitimate event would be ignored within weeks; device
 additions are signalled separately.
 
-Device identifiers are qualified by the handle (`alice:desktop`) and the server enforces that:
-otherwise the namespace would be global and the first arrival would seize "desktop" for everyone.
+Device identifiers are qualified by the account id (`d52c15be…:desktop`) and the server enforces
+that: otherwise the namespace would be global and the first arrival would seize "desktop" for
+everyone. The prefix used to be the handle, which meant every device id an account ever issued was
+tied to whatever it was called at the time — one of the reasons a handle could not be renamed.
+
+The **displayed** short form of an id is its first 64 bits, grouped in quads. A truncated
+fingerprint is grindable: an attacker generates account keys until the leading characters match
+their target's. At 32 bits that is minutes on a laptop; at 64 it is out of reach of anyone
+attacking a chat handle. The full 128 bits stay in the verification panel, and that panel — not the
+inline form — is the proof.
 
 ### 7.3 Revocation and rotation
 
-Revocation produces a **certificate signed by the account** under `wac-revoke-v1`, covering
-`(handle, device_id, revoked_at)`. The timestamp is inside the signed message, so the server cannot
+Revocation produces a **certificate signed by the account** under `wac-revoke-v2`, covering
+`(account, device_id, revoked_at)`. The timestamp is inside the signed message, so the server cannot
 backdate a genuine revocation to pretend a device was already excluded at the time of a message.
 
 The certificate is not for the server, which already knows the account key: it is for the **other
@@ -467,13 +517,35 @@ hiding them would make revocation indistinguishable from omission, and omission 
 can still do.
 
 Rotation changes the account identity key and is signed **by the outgoing key**, under
-`wac-rotate-v1`, covering `(handle, new_identity_key, rotated_at)`. Verifying against the new key
+`wac-rotate-v2`, covering `(account, new_identity_key, rotated_at)`. Verifying against the new key
 would only prove possession of it, that is, nothing. Its main effect is mechanical and free: every
 existing attestation becomes unverifiable, because clients recompute them against the current key.
 Total revocation is not a separate mechanism, it is a consequence.
 
 The old-key signature proves *continuity*, not legitimacy. A thief holds the same seed and can
 rotate first; the server cannot tell them apart and applies the first valid rotation.
+
+**The chain is published**, and that is what makes an account id survive its own key changing.
+Each log entry for an account carries the rotation signature that authorised it, so `GET
+/v1/accounts/{account}/chain` serves every key the account has ever published, oldest first, with
+the link that justifies each step. A client checks three things, all locally:
+
+1. the first key fingerprints to the account id — **this is the anchor**, and it is what makes an
+   id self-authenticating rather than something the directory asserts;
+2. each later key is signed by the key before it, never by the anchor, since verifying everything
+   against the first key would accept a chain whose middle was replaced;
+3. each entry is in the log, by inclusion proof.
+
+The signature is stored beside the leaf rather than inside it. The leaf commits to the account and
+the key, and a signature is self-authenticating — serving the wrong one produces a chain that
+fails to verify, which is the same outcome as serving none. What the server can still do is
+**withhold** a link, and that is visible: a chain with a hole fails check 2 and the client reports
+it rather than assuming continuity. Omission stays possible and stays detectable, which is the
+asymmetry §7.2 is about, applied to keys instead of devices.
+
+Without this, the gap was concrete rather than theoretical: an account id is computed from the
+genesis key and does not move when the key rotates, so a server serving a rotation nobody signed
+would have quietly handed the account to somebody else **under an id that still looked right**.
 
 ---
 
@@ -490,7 +562,7 @@ Every published account key is appended to an append-only Merkle tree.
 ```
 leaf_hash(contents) = SHA256(0x00 ‖ contents)
 node_hash(l, r)     = SHA256(0x01 ‖ l ‖ r)
-entry(handle, key)  = len‖handle ‖ len‖key
+entry(account, key) = len‖account ‖ len‖key
 ```
 
 **The `0x00` / `0x01` domain prefixes are not a formality.** Without leaf/node separation, the hash
@@ -518,7 +590,7 @@ in no other context.
 The client verifies three things, and it takes all three:
 
 1. **Head signature** — the head really comes from the log.
-2. **Inclusion** — the key served is the one in the log, with the leaf recomputed from the handle
+2. **Inclusion** — the key served is the one in the log, with the leaf recomputed from the account
    and the key actually received, never from a hash supplied by the server.
 3. **Consistency** — today's log extends the one seen yesterday.
 

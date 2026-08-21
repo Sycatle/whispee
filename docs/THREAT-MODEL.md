@@ -213,6 +213,42 @@ the loss surface for no gain against a server that never sees it.
   handle containing `:` split a device id. It leaves the narrow ones alone: `rn` still reads as
   `m`, and `_` is still a separator nobody looks at.
 
+- **Impersonation by handle.** The handle used to be the account: it was the subject of the MLS
+  credential, so every member of a room held it authenticated and nobody could claim somebody
+  else's. It is an alias now, and it arrives the way a display name does — a claim by its owner,
+  over MLS. **A member can therefore claim a handle they do not hold**, and this client cannot
+  check that, because checking means asking the directory at render time, which is the one power
+  the account-id design exists to take away from the server.
+
+  What bounds it: the account id underneath is authenticated by the credential and is what every
+  comparison in the protocol uses, so a false claim changes nothing about who can read what, who
+  administers a group, or which devices belong to whom. Two members claiming one handle collapse
+  to their ids on screen by the same ambiguity rule as two display names. And a handle is never
+  re-issued once released, which removes the version of this attack that needs no lie at all —
+  waiting for somebody to give a name up and then taking it.
+
+  What it does not bound: somebody who has never seen the real `@charlie` has nothing to compare a
+  claim against. That is first contact, and it is the same leap of faith it always was; the
+  fingerprint is still the answer.
+
+- **A lying directory.** `GET /v1/handles/{handle}` maps a name to an account, and the server may
+  answer with somebody else's id, answer late, or refuse. This is deliberately survivable rather
+  than prevented: the id it returns is a hash of a key that is inside the credential the client is
+  about to verify, so a wrong id does not become a verifying one. The worst it achieves is sending
+  somebody to the wrong account at first contact — the failure the product already has, and
+  already answers with an out-of-band fingerprint comparison.
+
+  The property that makes this bounded is that ids are **derived, never assigned**. A server that
+  minted them could tell Alice and Carol two different things about one name and leave nothing to
+  compare; here there is nothing to compare because there is nothing to disagree about.
+
+- **A truncated account id.** Inline, an account shows the first 64 bits of its id. A truncated
+  fingerprint is grindable: an attacker generates account keys until the leading characters of
+  theirs match their target's. At 32 bits that is minutes on a laptop, which is why the inline form
+  is not 32 bits. At 64 it costs on the order of `2^64` key generations to hit a chosen target,
+  which is out of reach of anybody attacking a chat handle. The full 128 bits are in the
+  verification panel, and **that panel is the proof** — the inline form is a convenience.
+
 - **Legal compulsion of the operator.** It changes what the operator does, not what it can do; the
   "malicious server" row already covers the capability.
 - **Supply chain below the source.** Reproducible builds cover the binary against the published

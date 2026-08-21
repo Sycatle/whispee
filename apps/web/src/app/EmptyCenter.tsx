@@ -1,3 +1,5 @@
+import { nameOf } from "@/lib/naming";
+import { useNames } from "@/state/names";
 import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
@@ -31,14 +33,27 @@ export function EmptyCenter() {
   const session = useSession();
   const navigate = useNavigate();
   const fingerprint = session.accountFingerprint();
+  // The same function every other person on screen goes through: `useNames` folds this account's
+  // display name into `profiles` under its own handle, so there is no self case to keep in step.
+  const names = useNames();
+  const self = nameOf(session.handle, names);
 
   return (
     <div className="safe-bottom flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-pane">
       <div className="flex w-full max-w-md flex-col items-center gap-pane py-section text-center">
-        <Avatar seed={fingerprint} label={`@${session.handle}`} size="lg" />
+        <Avatar seed={fingerprint} label={self.primary} size="lg" />
 
         <div>
-          <h1 className="text-display font-medium">@{session.handle}</h1>
+          {/*
+            The name in the display size, the handle immediately under it. This screen exists to
+            state who this device says you are, and a name you typed is not that: it is the label
+            you chose for other people's screens. The handle is what identifies the account, so it
+            keeps its place here rather than being replaced by the friendlier string above it.
+          */}
+          <h1 className="text-display font-medium">{self.primary}</h1>
+          {self.secondary !== null && (
+            <p className="mt-tight text-body text-(--color-ink-muted)">{self.secondary}</p>
+          )}
           {/* The device identifier is evidence, not prose: it is compared character by character
               against what another device shows during pairing. Hence the monospace token, whose
               whole reason for existing is that a shared metric makes that comparison possible. */}

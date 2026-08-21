@@ -2,6 +2,7 @@ import { DeviceSettings } from "@/components/Devices";
 import { LockSettings } from "@/components/Lock";
 import { NoticeSettings } from "@/components/Notices";
 import { PairDevice } from "@/components/Pairing";
+import { ProfileSettings } from "@/components/Profile";
 import { SignalSettings } from "@/components/Signals";
 import { VaultSettings } from "@/components/Vault";
 import { useDuo } from "@/lib/duo";
@@ -16,7 +17,7 @@ import { useNavigate } from "@/routes/Router";
 import { WebClientWarning } from "./WebClientWarning";
 
 /**
- * `#/settings/<section>` — the six panels that used to swap themselves into the rail.
+ * `#/settings/<section>` — the panels that used to swap themselves into the rail, plus a profile.
  *
  * # The bug this fixes for free, which is not a cosmetic one
  *
@@ -29,7 +30,7 @@ import { WebClientWarning } from "./WebClientWarning";
  *
  * # A navigation list, not tabs
  *
- * Seven destinations in three groups, each with its own heading. Tabs would have to fit seven
+ * Eight destinations in three groups, each with its own heading. Tabs would have to fit eight
  * labels on one line at 480 pixels — the narrowest the desktop window goes — and would lose the
  * grouping, which is the part that tells somebody where to look for a setting they have not seen
  * before.
@@ -51,6 +52,7 @@ const GROUPS: { heading: string; entries: Entry[] }[] = [
   {
     heading: "Your account",
     entries: [
+      { section: "profile", label: "Name and handle", icon: <Icon name="profile" /> },
       { section: "devices", label: "Your devices", icon: <Icon name="devices" /> },
       { section: "pairing", label: "Add a device", icon: <Icon name="pair" /> },
       { section: "backup", label: "History backup", icon: <Icon name="backup" /> },
@@ -71,6 +73,7 @@ const GROUPS: { heading: string; entries: Entry[] }[] = [
 ];
 
 const TITLES: Record<SettingsSection, string> = {
+  profile: "Name and handle",
   devices: "Your devices",
   pairing: "Add a device",
   lock: "Lock",
@@ -122,7 +125,7 @@ function Appearance() {
 }
 
 /**
- * The six existing panels, now reached by URL.
+ * The panels, now reached by URL.
  *
  * Three of them still take a callback, and it is not an oversight on either side: `onClose` and
  * `onDone` mean "this flow has finished", which is a different statement from "the panel is
@@ -136,6 +139,8 @@ function Section({ section }: { section: SettingsSection }) {
   const done = () => navigate({ kind: "settings", section: null });
 
   switch (section) {
+    case "profile":
+      return <ProfileSettings />;
     case "devices":
       return <DeviceSettings onClose={done} />;
     case "pairing":

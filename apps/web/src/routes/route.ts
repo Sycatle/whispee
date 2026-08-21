@@ -72,6 +72,7 @@
 
 /** The panels reachable under `#/settings`. Also the validation list for `parse`. */
 export const SETTINGS_SECTIONS = [
+  "profile",
   "devices",
   "pairing",
   "lock",

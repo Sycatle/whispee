@@ -42,6 +42,44 @@ const TYPE_REPLY = 6;
  */
 const TYPE_STAMPED = 7;
 
+/**
+ * A self-declared display name: `u8 8 ‖ u64 BE milliseconds ‖ UTF-8 name`, at most 64 bytes of
+ * name.
+ *
+ * # Why the name travels here at all
+ *
+ * A column on the server would be a cleartext object, one per account, stored and served by the
+ * server — and the directory enumeration oracle would start returning human names instead of
+ * handles. `ui/Avatar.tsx` already refuses an uploaded picture for exactly that reason, and a
+ * name is the same trade for less. The MLS credential is the other tempting place and is worse:
+ * the credential **is** the identity link, so every rename would read as an identity change and
+ * raise the "the fingerprint changed" banner on a cosmetic edit.
+ *
+ * # Why it carries its own timestamp instead of using `TYPE_STAMPED`
+ *
+ * Because it needs to be `isControl` and still be ordered. Control traffic is deliberately never
+ * stamped — see `encode` — since it is not displayed, and being control is what buys the three
+ * things a profile needs: no bubble in the thread, nothing archived to the vault, and no
+ * contribution to the receipt cursor. But last-writer-wins needs *some* order, and `seq` is per
+ * conversation while a name is per account: two groups would disagree about which rename came
+ * last. Eight bytes inside the body give the ordering without giving up any of the three.
+ *
+ * # What the timestamp is worth
+ *
+ * Exactly what the stamp of `TYPE_STAMPED` is worth: nothing, it is **declared by the sender**.
+ * A group member can date their rename to the year 2400 and pin their name there forever, since
+ * every later update would lose the comparison. So the receiver clamps it — see `decodeBody` —
+ * and that clamp is the only reason a self-declared clock is tolerable here.
+ */
+const TYPE_PROFILE = 8;
+
+/*
+ * **9 is reserved for `TYPE_INVITE`**, the friend system that is not built yet. It is written
+ * down here rather than left implicit because the failure mode is silent: two branches each
+ * taking "the next free number" ship two incompatible meanings for one byte, and the only symptom
+ * is a peer decoding an invitation as somebody's name. Numbers are cheap; collisions are not.
+ */
+
 export type Content =
   | { kind: "text"; text: string }
   | { kind: "attachment"; ref: AttachmentRef }
@@ -49,7 +87,8 @@ export type Content =
   | { kind: "posting-key"; key: Uint8Array }
   | { kind: "receipt"; state: ReceiptState; seq: number }
   | { kind: "reaction"; target: number; emoji: string }
-  | { kind: "reply"; target: number; text: string };
+  | { kind: "reply"; target: number; text: string }
+  | { kind: "profile"; name: string; at: number };
 
 /**
  * What a receipt attests.
@@ -134,7 +173,17 @@ export function encodeGossip(head: GossipHead): Uint8Array {
  * remembered on send **and** on receive.
  */
 export function isControl(body: Content): boolean {
-  return body.kind === "gossip" || body.kind === "posting-key" || body.kind === "receipt";
+  return (
+    body.kind === "gossip" ||
+    body.kind === "posting-key" ||
+    body.kind === "receipt" ||
+    // A profile is control for all three reasons at once, and each one was checked before it was
+    // put here: nobody wants a bubble reading "Charlie" every time someone renames themselves,
+    // the vault has no business archiving a name that will be replaced, and the receipt cursor
+    // must not advance on it or two clients renaming each other would acknowledge forever. What
+    // it gives up in exchange is the stamp, which is why it carries its own.
+    body.kind === "profile"
+  );
 }
 
 /**
@@ -171,6 +220,8 @@ function encodeBody(body: Content): Uint8Array {
       return encodeTargeted(TYPE_REACTION, body.target, body.emoji);
     case "reply":
       return encodeTargeted(TYPE_REPLY, body.target, body.text);
+    case "profile":
+      return encodeProfile(body.name, body.at);
   }
 }
 
@@ -226,6 +277,46 @@ export function encodePostingKey(key: Uint8Array): Uint8Array {
   out.set(key.subarray(0, 32), 1);
   return out;
 }
+
+/**
+ * Encodes a display name and the moment its owner claims to have set it.
+ *
+ * The size is checked here and not only on the way in, because this is the last place that sees
+ * the bytes: a name that got past the input field by some other route — a queued send from an
+ * older build, a caller that forgot `validate` — would otherwise go out over the wire in a shape
+ * every recipient is required to reject. Failing on our own side is the one failure the sender
+ * can actually see.
+ */
+export function encodeProfile(name: string, at: number): Uint8Array {
+  const body = new TextEncoder().encode(name);
+  if (body.length > PROFILE_NAME_MAX_BYTES) throw new Error("display name too long");
+
+  const out = new Uint8Array(1 + 8 + body.length);
+  out[0] = TYPE_PROFILE;
+  new DataView(out.buffer).setBigUint64(1, BigInt(Math.max(0, Math.trunc(at))), false);
+  out.set(body, 9);
+  return out;
+}
+
+/**
+ * The wire ceiling on a name, in bytes.
+ *
+ * Duplicated from `display-name.ts` rather than imported: this module is the format, and a format
+ * that reads its own limits out of a validation module would change shape the day somebody
+ * relaxes the user-facing rule. `display-name.ts` refuses a name over this; here it is a hard
+ * bound on bytes anybody may put on the wire, including a peer we did not write.
+ */
+const PROFILE_NAME_MAX_BYTES = 64;
+
+/**
+ * How far ahead of our own clock a peer's self-declared time may sit before we stop believing it.
+ *
+ * Five minutes, which is ordinary clock skew between two consumer devices. Past that the sender
+ * is either badly wrong or pinning: a name dated ten years out would win last-writer-wins against
+ * every update its owner ever makes afterwards, and the name would be frozen with no way to say
+ * so. So the value is replaced by the moment of receipt, which is the one clock we trust.
+ */
+const PROFILE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 export function encodeAttachment(ref: AttachmentRef): Uint8Array {
   const body = new TextEncoder().encode(JSON.stringify(ref));
@@ -305,6 +396,25 @@ function decodeBody(bytes: Uint8Array): Content {
       return bytes[0] === TYPE_REACTION
         ? { kind: "reaction", target, emoji: text }
         : { kind: "reply", target, text };
+    }
+
+    case TYPE_PROFILE: {
+      if (body.length < 8) throw new Error("truncated profile timestamp");
+      const name = body.subarray(8);
+      if (name.length > PROFILE_NAME_MAX_BYTES) throw new Error("badly sized display name");
+
+      const declared = Number(new DataView(body.buffer, body.byteOffset).getBigUint64(0, false));
+      const now = Date.now();
+
+      // Clamped, not rejected. A skewed clock is common and refusing the message would drop a
+      // legitimate rename; a date far in the future is the pinning move described on
+      // `TYPE_PROFILE`, and taking the receipt time defeats it without needing to tell the two
+      // cases apart. The name is **not** sanitised here: `content.ts` decodes bytes and does not
+      // know what a screen is, and `display-name.ts` states that its `sanitize` runs at both
+      // ends. The caller in `session.ts` is the receiving end.
+      const at = declared > now + PROFILE_CLOCK_SKEW_MS ? now : declared;
+
+      return { kind: "profile", name: new TextDecoder().decode(name), at };
     }
 
     case TYPE_ATTACHMENT: {

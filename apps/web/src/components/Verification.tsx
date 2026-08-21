@@ -78,6 +78,13 @@ export function Verification({
 
   return (
     <div className={inset}>
+      {/*
+        The handle, never the display name, and this is the one screen where that is a rule rather
+        than a layout choice. "Charlie's fingerprint has changed" is weaker than
+        "@charlie8295's fingerprint has changed" for exactly the reason this banner exists: Charlie
+        is the string somebody impersonating Charlie gets to choose. Every other surface in the
+        client goes through `naming.ts`; this one deliberately does not.
+      */}
       <Banner tone="danger" title={`@${account.handle}'s fingerprint has changed`}>
         Either @{account.handle} restored their account from their recovery phrase, or someone
         has stepped in between. The first explanation is rare, the second is an attack — and

@@ -12,6 +12,7 @@ import { type PairingCode, awaitPairing, decodePairingCode, encodePairingCode } 
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
 import { withoutTone } from "./emoji";
+import { sanitize, validate } from "./display-name";
 import * as envelope from "./envelope";
 import { type Cached, decodeHistory, encodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
@@ -590,6 +591,12 @@ export class Session {
       ...(stored.skinTone === undefined ? {} : { skinTone: stored.skinTone }),
     };
 
+    session.profiles = stored.profiles ?? {};
+    session.petnames = stored.petnames ?? {};
+    // Conditional, unlike the two above: absent is what makes the interface fall back to
+    // `@handle`, and an empty string present on the field would be a third state nobody handles.
+    if (stored.displayName !== undefined) session.displayName = stored.displayName;
+
     if (stored.logHead) {
       session.seenHead = {
         size: stored.logHead.size,
@@ -823,6 +830,13 @@ export class Session {
 
   async forget(): Promise<void> {
     this.forgotten = true;
+    // Cleared in memory as well as on disk. The store is gone, but this instance stays alive for
+    // as long as the page does, and `profiles` is the one field here that holds other people's
+    // names in the clear — leaving it populated would keep an address book readable by anything
+    // still holding the session after the user asked for it to be destroyed.
+    this.displayName = undefined;
+    this.profiles = {};
+    this.petnames = {};
     await this.anchor.store.clear();
   }
 
@@ -880,6 +894,12 @@ export class Session {
       searchCoverage: this.preferences.searchCoverage,
       blocked: this.preferences.blocked,
       recentEmojis: this.preferences.recentEmojis,
+      // Written only when there is something to write. An account that never named itself and
+      // never received a name keeps the exact on-disk shape it had before this feature existed,
+      // which is what makes the unchanged `VERSION` honest rather than merely tolerated.
+      ...(this.displayName === undefined ? {} : { displayName: this.displayName }),
+      ...(Object.keys(this.profiles).length === 0 ? {} : { profiles: this.profiles }),
+      ...(Object.keys(this.petnames).length === 0 ? {} : { petnames: this.petnames }),
       ...(this.preferences.locale === undefined ? {} : { locale: this.preferences.locale }),
       ...(this.preferences.contactPolicy === undefined
         ? {}
@@ -2204,6 +2224,14 @@ export class Session {
       await this.sharePostingKey(view).catch((error: unknown) => {
         console.warn("posting key sharing deferred", error);
       });
+
+      // The one hook the display name needs, and the reason it needs no other. A conversation
+      // just created, one just joined, and one that just gained a member all arrive here with an
+      // epoch this view has never announced under — the third because adding a member *is* an
+      // epoch change. `announceProfile` compares and stays quiet otherwise.
+      await this.announceProfile(view).catch((error: unknown) => {
+        console.warn("display name announcement deferred", error);
+      });
     }
 
     for (const view of this.conversations.values()) {
@@ -2363,6 +2391,12 @@ export class Session {
       if (decode.kind === "receipt" && incoming.sender) {
         record(view.receipts, incoming.sender, decode.state, decode.seq);
       }
+      // Same authentication argument as the receipt just above: the handle comes from the MLS
+      // credential, so no member can rename another. What it does not establish is that the name
+      // is *true* — it is self-declared, and a petname is the only answer to that.
+      if (decode.kind === "profile" && incoming.sender) {
+        this.absorbProfile(incoming.sender, decode.name, decode.at);
+      }
       return;
     }
 
@@ -2440,6 +2474,185 @@ export class Session {
         }
       }
     }
+  }
+
+  /**
+   * The name this account shows to the people it talks to, if it has set one.
+   *
+   * Public and mutable in the same spirit as `preferences`, and read-only in practice: everything
+   * that changes it goes through `setDisplayName`, which is the only path that also cleans it,
+   * writes it down and tells the other members. Absent means never set, and the display falls
+   * back to `@handle` — which always exists, and is the thing that actually identifies somebody.
+   */
+  displayName?: string;
+
+  /**
+   * The names other people have declared for themselves, by handle.
+   *
+   * Self-declared, therefore **not evidence**. Two people can claim the same name, and one of
+   * them can pick it precisely because the other has it. Nothing here disambiguates them; the
+   * handle shown alongside does, and `petnames` is how somebody overrules the claim entirely.
+   */
+  profiles: Record<string, { name: string; at: number }> = {};
+
+  /**
+   * Names this device has given other people, by handle.
+   *
+   * Never emitted. A petname is a note the reader took about somebody, and handing it back to its
+   * subject would be a disclosure nobody asked for.
+   */
+  petnames: Record<string, string> = {};
+
+  /**
+   * Sets — or clears — the name this device gives somebody else.
+   *
+   * The counterpart to `setDisplayName`, and its opposite in every way that matters. A display
+   * name is asserted by its subject and broadcast; a petname is asserted by the reader and goes
+   * nowhere. That is exactly why it outranks the display name on screen: it is the one string in
+   * the naming chain that no peer, and no server, can influence.
+   *
+   * Cleaned and bounded by the same rules as a display name, because it lands in the same slots
+   * of the same layouts — a petname that overflowed a bubble author would be a petname that broke
+   * a thread. It is **not** broadcast, and there is deliberately no code path that could: handing
+   * somebody the note you took about them is a disclosure nobody asked for.
+   *
+   * An empty result removes the entry rather than storing an empty string, so that "no petname"
+   * has one representation and `naming.ts` has one thing to test for.
+   */
+  async setPetname(handle: string, name: string): Promise<void> {
+    const cleaned = sanitize(name);
+
+    if (cleaned !== "") {
+      const error = validate(cleaned);
+      if (error !== null) throw new Error(error);
+    }
+
+    if (cleaned === "") delete this.petnames[handle];
+    else this.petnames[handle] = cleaned;
+
+    await this.persist();
+
+    // Every view, for the same reason `absorbProfile` touches every view: the person is drawn in
+    // the thread, the conversation list and the member roster, and the revision counter is per
+    // view. Renaming somebody in one pane and not the others is the bug this avoids.
+    for (const view of this.conversations.values()) touch(view);
+  }
+
+  /**
+   * Sets — or clears — the name this account shows, and tells everyone it talks to.
+   *
+   * Cleaned before it is judged, because a name is refused for what it means and not for what the
+   * keyboard put in it: rejecting "Charlie " for a trailing space the user cannot see would be an
+   * error message about nothing. `validate` then answers with a code, and the code is thrown as
+   * is — the caller is at the display boundary and knows what language to say it in. Callers are
+   * expected to validate first; this is the barrier for the ones that do not.
+   *
+   * An empty result clears the name rather than failing, and the clear is broadcast like any
+   * other change. Not broadcasting it would leave the old name standing on every peer's screen
+   * for as long as their session lives, which is the one outcome somebody removing their name is
+   * trying to avoid.
+   */
+  async setDisplayName(name: string): Promise<void> {
+    const cleaned = sanitize(name);
+
+    if (cleaned !== "") {
+      const error = validate(cleaned);
+      if (error !== null) throw new Error(error);
+    }
+
+    this.displayName = cleaned === "" ? undefined : cleaned;
+    await this.persist();
+
+    for (const view of this.conversations.values()) {
+      // Our own name is drawn on our own messages too, so the same re-render is owed here as on
+      // receiving somebody else's: the revision counter is per view, and nothing else bumps it.
+      touch(view);
+
+      // One failure must not swallow the rest. A conversation whose post is refused keeps the old
+      // name until the next epoch re-announces it, which is a stale label — not a lost rename.
+      await this.emitProfile(view).catch((error: unknown) => {
+        console.warn(`display name not announced in ${view.key}`, error);
+      });
+    }
+  }
+
+  /**
+   * Announces the name in a conversation, unless it has already been announced at this epoch.
+   *
+   * Called from the poll loop beside `gossip` and `sharePostingKey`, which is the hook that
+   * already exists for "say this once per group". The epoch is the right unit rather than the
+   * session: it moves when the roster does, so a member who joins after us gets the name without
+   * anyone having to notice that they arrived.
+   *
+   * Silent when no name is set. An account that never named itself must not spend an envelope per
+   * group announcing the fact — the absence is the default everywhere, and saying it out loud
+   * would be pure traffic.
+   */
+  private async announceProfile(view: ConversationView): Promise<void> {
+    if (this.displayName === undefined || view.profileEpoch === view.epoch) return;
+
+    await this.emitProfile(view);
+  }
+
+  /**
+   * Posts the profile, guard rail included.
+   *
+   * The epoch is recorded **before** the send and not after, exactly as `gossip` and
+   * `sharePostingKey` set their flags first: a send that throws would otherwise be retried on
+   * every poll for the lifetime of the conversation, which turns one failed announcement into a
+   * permanent stream of them. A name that failed to go out is picked up again at the next epoch.
+   */
+  private async emitProfile(view: ConversationView): Promise<void> {
+    // Nobody to tell. A group we are alone in is one whose other members have all left; it costs
+    // an envelope and reaches no one.
+    if (view.peers.length === 0) return;
+
+    view.profileEpoch = view.epoch;
+
+    await this.sendContent(view, {
+      kind: "profile",
+      name: this.displayName ?? "",
+      at: Date.now(),
+    });
+  }
+
+  /**
+   * Records the name a peer has declared for themselves.
+   *
+   * `sanitize` runs here and not in `content.ts`, which decodes bytes and has no notion of a
+   * screen. This is the receiving end of the contract that module states: a name from a peer is
+   * not less hostile than one typed locally, it is more so — nobody chose those code points by
+   * accident.
+   *
+   * Last writer wins on the **clamped** time, so a peer cannot pin their name by dating it far
+   * ahead; `content.ts` does the clamping. Ties keep what is already stored, which makes a
+   * replayed message a no-op rather than a flicker.
+   *
+   * A name that cleans away to nothing removes the entry instead of storing an empty string. The
+   * absence is what the display falls back on, and one representation of "no name" is enough.
+   */
+  private absorbProfile(handle: string, declared: string, at: number): void {
+    const known = this.profiles[handle];
+    if (known && known.at >= at) return;
+
+    const name = sanitize(declared);
+    // Refused rather than truncated, on the same grounds as the input field: cutting somebody's
+    // name to fit would show a name they never chose, and the wire format bounds this anyway.
+    if (name !== "" && validate(name) !== null) return;
+
+    if (name === "") delete this.profiles[handle];
+    else this.profiles[handle] = { name, at };
+
+    // Every conversation, not only the one the message arrived in. The name is drawn wherever the
+    // person is — the thread, the conversation list, the member roster — and the revision counter
+    // is per view, so touching only the receiving one would leave the same person renamed in one
+    // place and not in another.
+    for (const view of this.conversations.values()) touch(view);
+
+    // No write from here. `absorb` runs inside the poll loop, which persists once the whole page
+    // of envelopes has been applied — and it has to be that one write, because the cursor and the
+    // MLS ratchet must reach the disk together. A second, concurrent seal of the same state would
+    // race it for nothing more than a name.
   }
 }
 

@@ -13,6 +13,12 @@ import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
 import { ProofStrip } from "@/ui/ProofStrip";
 import { useSession } from "@/state/SessionProvider";
+import { useNames } from "@/state/names";
+import { useReport } from "@/state/report";
+import { nameOf } from "@/lib/naming";
+import { MAX_CODE_POINTS, sanitize, validate } from "@/lib/display-name";
+import { Field } from "@/ui/Field";
+import { Input } from "@/ui/Input";
 import { useNavigate, useRoute } from "@/routes/Router";
 
 /**
@@ -105,10 +111,91 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * The nickname this device gives somebody, and the only name on this panel nobody else can move.
+ *
+ * It sits under the proof rather than over it on purpose. The order of this column is shape,
+ * verdict, digits, action — the argument that a pattern is noticed before a sentence is read. A
+ * text field above that would push the one section that establishes *who this is* below the fold
+ * in favour of a cosmetic one.
+ *
+ * # Why the reader gets to overrule the name somebody chose
+ *
+ * A display name is asserted by its subject: anybody can claim to be Charlie, and the one who
+ * wants to be mistaken for Charlie is exactly the one who will. A petname is written by the
+ * person reading it, which makes it the only link in the naming chain that no peer and no server
+ * can influence — so it wins, everywhere, over both the asserted name and the handle.
+ *
+ * It is never sent. There is no code path that could send it, and that is not an accident: a note
+ * you took about somebody is not something to hand back to them.
+ */
+function Petname({ handle }: { handle: string }) {
+  const session = useSession();
+  const report = useReport();
+  const names = useNames();
+
+  const saved = names.petnames[handle] ?? "";
+  const [draft, setDraft] = useState(saved);
+
+  // Keyed on the handle so that navigating from one member to another in the same panel resets
+  // the field instead of carrying the previous person's nickname into it. `key` on the element
+  // does the remount; this state simply starts from what is stored.
+  const cleaned = sanitize(draft);
+  const error = cleaned === "" ? null : validate(cleaned);
+  const unchanged = cleaned === saved;
+
+  async function save() {
+    try {
+      await session.setPetname(handle, draft);
+      report.done(cleaned === "" ? `Nickname removed.` : `Saved. You will see them as ${cleaned}.`);
+    } catch (failure: unknown) {
+      report.error(failure instanceof Error ? failure.message : "The nickname could not be saved.");
+    }
+  }
+
+  return (
+    <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
+      <SectionTitle>Nickname</SectionTitle>
+      <form
+        className="space-y-snug"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (error === null && !unchanged) void save();
+        }}
+      >
+        <Field
+          label="Nickname"
+          labelHidden
+          hint="Only you see this. It replaces the name they chose for themselves, everywhere."
+          error={error === "too-long" ? `At most ${MAX_CODE_POINTS} characters.` : undefined}
+        >
+          {(control) => (
+            <Input
+              id={control.id}
+              aria-describedby={control.describedBy}
+              aria-invalid={control.invalid}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder="Not set"
+              autoComplete="off"
+              maxLength={MAX_CODE_POINTS * 2}
+            />
+          )}
+        </Field>
+        <Button type="submit" variant="secondary" size="sm" disabled={error !== null || unchanged}>
+          Save nickname
+        </Button>
+      </form>
+    </section>
+  );
+}
+
 function AccountDetail({ account }: { account: ResolvedAccount }) {
   const session = useSession();
+  const names = useNames();
   const [comparing, setComparing] = useState(false);
 
+  const name = nameOf(account.handle, names);
   const state = session.verificationOf(account);
   const rejected = account.rejected.length > 0;
   const { title, note } = describe(state, rejected);
@@ -122,12 +209,18 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
       <section className="flex flex-col items-center gap-snug border-b border-(--color-border-subtle) p-pane text-center">
         <Avatar
           seed={account.fingerprint}
-          label={`@${account.handle}`}
+          label={name.primary}
           size="lg"
           proof={state}
           rejected={rejected}
         />
-        <p className="text-title font-medium">@{account.handle}</p>
+        {/* Both lines, always. The handle is what identifies this account; the name above it is
+            only what the account says about itself, and dropping the anchor to save a line would
+            leave a claim standing alone. */}
+        <p className="text-title font-medium">{name.primary}</p>
+        {name.secondary !== null && (
+          <p className="font-evidence text-caption text-(--color-ink-muted)">{name.secondary}</p>
+        )}
         <PresenceLine session={session} handle={account.handle} />
       </section>
 
@@ -174,6 +267,8 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
         )}
       </section>
 
+      <Petname key={account.handle} handle={account.handle} />
+
       <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
         <SectionTitle>Devices</SectionTitle>
         {/* The count, then the identifiers. The fingerprint covers the account and does not move
@@ -197,6 +292,7 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
 
 export function DetailPanel({ view }: { view: ConversationView }) {
   const session = useSession();
+  const names = useNames();
   const route = useRoute();
   const navigate = useNavigate();
   const duo = useDuo();
@@ -260,8 +356,10 @@ export function DetailPanel({ view }: { view: ConversationView }) {
   }, [duo, trio, view.key]);
 
   const title =
-    view.accounts.map((a) => `@${a.handle}`).join(", ") ||
-    [...new Set(view.peers.map((p) => p.name))].map((n) => `@${n}`).join(", ") ||
+    view.accounts.map((a) => nameOf(a.handle, names).primary).join(", ") ||
+    // `peers` carries MLS credentials, which are handles: available from restore, before the
+    // first poll has resolved anybody, so a conversation reopened cold still has a title.
+    [...new Set(view.peers.map((p) => p.name))].map((n) => nameOf(n, names).primary).join(", ") ||
     "empty conversation";
 
   return (
@@ -285,7 +383,7 @@ export function DetailPanel({ view }: { view: ConversationView }) {
           tabIndex={-1}
           className="min-w-0 flex-1 truncate text-body font-medium outline-none"
         >
-          {focused ? `@${focused.handle}` : title}
+          {focused ? nameOf(focused.handle, names).primary : title}
         </h2>
         {duo && (
           <IconButton label="Close details" icon={<Icon name="close" />} onClick={close} />
@@ -298,7 +396,10 @@ export function DetailPanel({ view }: { view: ConversationView }) {
         <section className="space-y-snug border-b border-(--color-border-subtle) p-pane">
           <SectionTitle>Members</SectionTitle>
           <ul className="space-y-tight">
-            {view.accounts.map((account) => (
+            {view.accounts.map((account) => {
+              const name = nameOf(account.handle, names);
+
+              return (
               <li key={account.handle}>
                 <button
                   type="button"
@@ -313,16 +414,24 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                 >
                   <Avatar
                     seed={account.fingerprint}
-                    label={`@${account.handle}`}
+                    label={name.primary}
                     size="md"
                     proof={session.verificationOf(account)}
                     rejected={account.rejected.length > 0}
                     className="shrink-0"
                   />
-                  <span className="min-w-0 flex-1 truncate">@{account.handle}</span>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">{name.primary}</span>
+                    {name.secondary !== null && (
+                      <span className="truncate font-evidence text-caption text-(--color-ink-muted)">
+                        {name.secondary}
+                      </span>
+                    )}
+                  </span>
                 </button>
               </li>
-            ))}
+              );
+            })}
             {view.accounts.length === 0 && (
               <li className="text-caption text-(--color-ink-muted)">
                 Nobody has been resolved yet. The next poll fills this in.

@@ -24,8 +24,10 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { Attachment } from "@/components/Attachment";
 import { EmojiDrawer } from "@/components/EmojiPicker";
 import { continues, dayLabel, opensDay, timeOf } from "@/lib/datetime";
+import { compactNameOf, formatHandle } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
+import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
@@ -57,6 +59,7 @@ export function Messages({
   const session = useSession();
   const bump = useBump();
   const report = useReport();
+  const names = useNames();
   const bottom = useRef<HTMLDivElement>(null);
 
   const messages = view.messages.slice().sort((a, b) => a.seq - b.seq);
@@ -107,6 +110,32 @@ export function Messages({
    * redundant identification rather than absent identification.
    */
   const group = view.peers.length > 1;
+
+  /**
+   * Everybody a line in this thread can be attributed to.
+   *
+   * `accounts` and `peers` both: `peers` is restored with the conversation while `accounts` waits
+   * for the first poll, and somebody who has since been removed is still the author of what they
+   * said. This is the `among` every compact name below is checked against, and a rival missing
+   * from it is an ambiguity that goes unnoticed.
+   */
+  const members = [
+    ...new Set([...view.accounts.map((a) => a.handle), ...view.peers.map((p) => p.name)]),
+  ];
+
+  /**
+   * What to call the author of a bubble, on the one line a bubble gives.
+   *
+   * This is the site the compact form was written for. A bubble author has no second line, and it
+   * is read at a glance rather than studied — so a self-asserted name that another member could
+   * be mistaken for is not shown here at all, and both of them fall back to their handle. See the
+   * argument at the top of `lib/naming.ts`.
+   *
+   * A message with no sender keeps "unknown" rather than being given a name: the absence is a
+   * fact about the envelope, and there is nobody to name.
+   */
+  const nameOfAuthor = (handle: string | null) =>
+    handle === null ? "unknown" : compactNameOf(handle, names, members);
 
   /**
    * The fingerprint the author's avatar is drawn from, or `undefined`.
@@ -327,7 +356,7 @@ export function Messages({
                     {!grouped && (
                       <Avatar
                         seed={seedOf(message.sender)}
-                        label={`@${message.sender ?? "unknown"}`}
+                        label={nameOfAuthor(message.sender)}
                         size="sm"
                       />
                     )}
@@ -356,7 +385,7 @@ export function Messages({
                         sentences is one person speaking, not three announcements. */}
                     {!message.mine && group && !grouped && (
                       <span className={cn("block text-caption font-medium", secondary)}>
-                        {message.sender ?? "unknown"}
+                        {nameOfAuthor(message.sender)}
                       </span>
                     )}
 
@@ -546,7 +575,7 @@ export function Messages({
       */}
       {isTyping.length > 0 && (
         <p className="px-pane pb-tight text-caption text-(--color-ink-muted)" aria-live="polite">
-          {isTyping.map((handle) => `@${handle}`).join(", ")}{" "}
+          {isTyping.map((handle) => compactNameOf(handle, names, members)).join(", ")}{" "}
           {isTyping.length > 1 ? "are typing" : "is typing"}…
         </p>
       )}

@@ -249,9 +249,10 @@ single leading type byte:
 5  reaction        u64 BE target ‖ UTF-8 emoji
 6  reply           u64 BE target ‖ UTF-8 text
 7  stamped         u64 BE milliseconds ‖ <any of the above>
+8  profile         u64 BE milliseconds ‖ UTF-8 display name (≤ 64 bytes)
 ```
 
-Types 2, 3 and 4 are **protocol traffic**: they ride the encrypted channel because that is
+Types 2, 3, 4 and 8 are **protocol traffic**: they ride the encrypted channel because that is
 precisely what is wanted — a path the server carries without being able to read it — but they are
 not messages. `isControl` names them in one place, so a new control type does not have to be
 remembered on send *and* on receive.
@@ -274,10 +275,36 @@ It is an annotation on the thread, never its order: ordering stays `seq`, which 
 and no member controls. In a 1-to-1 there is exactly one other person who could lie about it, and
 they could equally lie in the text.
 
-Control traffic is never stamped: it is not displayed, so the eight bytes buy nothing. Neither is
+Type 8 carries its own time instead of being wrapped, which is what lets it be control traffic and
+still be ordered — see §4.2. Control traffic is otherwise never stamped: it is not displayed, so
+the eight bytes buy nothing. Neither is
 anything written before type 7 existed. Both decode to a message with no time, and the client
 shows an empty slot rather than a guess — dating a week-old message to "now" because it arrived
 during a catch-up is a worse answer than none.
+
+### 4.2 The display name is asserted, not established
+
+A handle cannot change: it is the account's primary key, the identity bytes inside the MLS
+credential, a leaf already published in the transparency log, the subject of every attestation the
+account has signed, and the prefix of each of its device ids. Type 8 is how an account puts a
+mutable, human name in front of that anchor without touching it.
+
+It goes through MLS and nowhere else. A column on the server would be a cleartext object per
+account, stored and served by the party the rest of this document assumes is hostile, and it would
+turn the existing account-existence oracle into one that answers with a human name. It is equally
+not in the credential: the credential **is** the identity binding, so a rename there would present
+to every peer as a changed identity and raise the fingerprint banner.
+
+The name is announced once per group per epoch, alongside gossip and the posting key. The epoch is
+the right unit rather than the session because it moves when the roster does, so somebody who
+joins later receives the name without anyone having to notice they arrived.
+
+Like the stamp, the time is **declared by the sender**, and a member can date theirs far ahead to
+pin their name against later updates. Receivers clamp it to their own clock plus a small skew
+before applying last-writer-wins. What no clamp can fix is the claim itself: type 8 says that this
+member calls themselves this, and nothing more. Two members can claim one name, and the one who
+wants to be mistaken for somebody is the one who will. Clients therefore keep the handle on screen
+beside the name, and fall back to the handle outright wherever there is no room for both.
 
 ---
 
@@ -379,6 +406,17 @@ excluded from. Another member must pick it up.
 
 An account is an Ed25519 identity key (AIK) derived from a twelve-word BIP-39 phrase, plus a
 handle. No phone number and no email address anywhere.
+
+The handle matches `^[a-z0-9_]{3,32}$`, enforced by the server at creation and by a CHECK on the
+column. The format is not cosmetic. Handles are compared as strings in places where the comparison
+decides something: the roster extension names the admin and the moderators by handle, so `Alice`
+and `alice` being two accounts that look identical would be an authorisation question and not a
+display one. And because a handle can no longer contain `:`, the first colon of a device id is
+unambiguously its separator — the check that a device id begins with its account's handle used to
+be a prefix test that `a:b` could slip past.
+
+What the format does not fix: `rn` still reads as `m`, and `_` is still a separator the eye skips.
+It removes the wide classes of confusion, not the narrow ones.
 
 Each device carries a signature by the account over `(handle, device_id, auth_key, mls_key)`,
 length-prefixed, under domain `wac-attest-v1`. Both keys are attested **together**, not

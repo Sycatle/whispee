@@ -1,30 +1,29 @@
 name: iOS build
 
-# Construit l'application iOS sur un runner macOS.
+# Builds the iOS app on a macOS runner.
 #
-# # Pourquoi ce workflow ne se déclenche jamais tout seul
+# # Why this workflow never triggers on its own
 #
-# **Une minute de runner macOS est facturée dix fois une minute de runner Linux.** C'est le
-# poste de dépense décisif du dépôt, très loin devant tout le reste : une construction iOS
-# automatique à chaque poussée sur `main` consommerait à elle seule l'essentiel du quota.
+# **A macOS runner minute is billed ten times a Linux one.** It is the repository's decisive
+# cost, far ahead of everything else: an automatic iOS build on every push to `main` would eat
+# most of the quota by itself.
 #
-# Il n'y a donc qu'une entrée, `workflow_dispatch`, et c'est délibéré. Obtenir un binaire iOS
-# est une décision, pas un effet de bord d'une poussée. Ajouter ici un déclencheur `push` — même
-# restreint par `paths` — reviendrait à choisir de dépenser dix fois plus sans que personne ne
-# l'ait demandé.
+# So there is a single entry point, `workflow_dispatch`, and that is deliberate. Getting an iOS
+# binary is a decision, not a side effect of a push. Adding a `push` trigger here — even narrowed
+# by `paths` — would be choosing to spend ten times more without anyone asking for it.
 #
-# # Ce qui n'est pas fait
+# # What is not done
 #
-# Aucune signature, donc aucun binaire installable sur un appareil réel : cela demande un compte
-# développeur Apple, un profil de provisionnement et un certificat. Ce workflow construit pour le
-# simulateur et vérifie que la chaîne tient — ce qui est déjà ce qu'on ne peut pas faire ailleurs,
-# puisque iOS est hors d'atteinte sous Linux.
+# No signing, so no binary installable on a real device: that needs an Apple developer account,
+# a provisioning profile and a certificate. This workflow builds for the simulator and checks
+# that the toolchain holds — which is already what cannot be done anywhere else, since iOS is
+# out of reach under Linux.
 
 on:
   workflow_dispatch:
     inputs:
       device:
-        description: "Construire pour un appareil réel plutôt que pour le simulateur (exige une signature)"
+        description: "Build for a real device rather than the simulator (requires signing)"
         type: boolean
         default: false
 
@@ -56,7 +55,7 @@ jobs:
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
-      # Le cache compte double ici : il économise des minutes facturées dix fois.
+      # The cache counts double here: it saves minutes billed ten times over.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
@@ -76,8 +75,8 @@ jobs:
         working-directory: apps/web
         run: pnpm install --frozen-lockfile
 
-      # Même choix que pour Android : le projet Xcode est généré à chaque construction plutôt que
-      # versionné, pour qu'il ne puisse pas dériver de `tauri.conf.json`.
+      # Same choice as for Android: the Xcode project is generated on every build rather than
+      # committed, so it cannot drift from `tauri.conf.json`.
       - name: Generate the Xcode project
         working-directory: apps/desktop
         env:

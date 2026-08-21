@@ -1,101 +1,98 @@
 #!/usr/bin/env bash
 #
-# Construit une publication vérifiable de l'application de bureau, et la signe.
+# Builds a verifiable release of the desktop app, and signs it.
 #
-# # Reproductible d'abord, signé ensuite
+# # Reproducible first, signed second
 #
-# Une signature dit « quelqu'un détenant cette clé a produit ce fichier ». Elle ne dit pas « ce
-# fichier correspond à ce code ». Pour un projet dont la thèse est que l'utilisateur ne devrait
-# pas avoir à croire l'opérateur sur parole, l'ordre importe : un binaire reproductible se
-# vérifie en le reconstruisant, sans faire confiance à personne. La signature n'authentifie
-# ensuite que la publication.
+# A signature says "someone holding this key produced this file". It does not say "this file
+# matches this code". For a project whose thesis is that users should not have to take the
+# operator's word for it, the order matters: a reproducible binary is verified by rebuilding it,
+# trusting no one. The signature then only authenticates the release.
 #
-# # Pourquoi les préfixes sont calculés et non écrits dans `.cargo/config.toml`
+# # Why the prefixes are computed and not written into `.cargo/config.toml`
 #
-# Sans `--remap-path-prefix`, le binaire contient le chemin absolu du répertoire de construction
-# — 217 occurrences, mesurées avant ce script. Deux constructions honnêtes du même commit, sur
-# deux machines, donnent alors deux empreintes différentes.
+# Without `--remap-path-prefix`, the binary embeds the absolute path of the build directory —
+# 217 occurrences, measured before this script. Two honest builds of the same commit, on two
+# machines, then produce two different hashes.
 #
-# Les écrire en dur dans un fichier de configuration versionné reproduirait le défaut qu'ils
-# corrigent : ils ne vaudraient que pour la machine de celui qui les a écrits. Ils sont donc
-# dérivés ici de `git rev-parse` et de `CARGO_HOME`.
+# Hard-coding them into a committed config file would reproduce the very flaw they fix: they
+# would only hold for the machine of whoever wrote them. So they are derived here from
+# `git rev-parse` and `CARGO_HOME`.
 #
-# Les deux préfixes comptent. Celui du dépôt efface les chemins de notre code ; celui du registre
-# efface ceux des dépendances, qui vivent sous `CARGO_HOME` et varient avec l'utilisateur.
-# Oublier le second laisse une reproductibilité fausse de façon discrète : elle tient sur une même
-# machine et casse ailleurs — c'est-à-dire au seul moment où elle sert.
+# Both prefixes matter. The repository one erases our own code's paths; the registry one erases
+# the dependencies', which live under `CARGO_HOME` and vary per user. Forgetting the second
+# leaves reproducibility quietly false: it holds on one machine and breaks elsewhere — that is,
+# at the only moment it is useful.
 #
 # # Usage
 #
-#   scripts/release.sh /chemin/vers/cle-privee.pem
-#   RELEASE_KEY=/chemin/vers/cle-privee.pem scripts/release.sh
+#   scripts/release.sh /path/to/private-key.pem
+#   RELEASE_KEY=/path/to/private-key.pem scripts/release.sh
 #
-# La clé privée n'est jamais lue depuis le dépôt et n'y entre jamais. Pour en créer une :
+# The private key is never read from the repository and never enters it. To create one:
 #
-#   openssl genpkey -algorithm ed25519 -out cle-privee.pem
-#   openssl pkey -in cle-privee.pem -pubout -out release/whispee.pub
+#   openssl genpkey -algorithm ed25519 -out private-key.pem
+#   openssl pkey -in private-key.pem -pubout -out release/whispee.pub
 set -euo pipefail
 
-racine="$(git rev-parse --show-toplevel)"
-cd "$racine"
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
 
-cle="${1:-${RELEASE_KEY:-}}"
-if [[ -z "$cle" ]]; then
-    echo "erreur : chemin de la clé privée manquant (argument ou RELEASE_KEY)" >&2
-    echo "voir l'en-tête de ce script pour en produire une" >&2
+key="${1:-${RELEASE_KEY:-}}"
+if [[ -z "$key" ]]; then
+    echo "error: missing private key path (argument or RELEASE_KEY)" >&2
+    echo "see the header of this script to produce one" >&2
     exit 1
 fi
-if [[ ! -r "$cle" ]]; then
-    echo "erreur : clé privée illisible : $cle" >&2
+if [[ ! -r "$key" ]]; then
+    echo "error: unreadable private key: $key" >&2
     exit 1
 fi
 
-# Une publication dont le contenu ne correspond à aucun commit n'est pas vérifiable : personne ne
-# saurait quoi reconstruire pour la comparer. C'est le genre d'erreur qui ne se remarque
-# qu'après distribution, donc on refuse avant.
+# A release whose content matches no commit is not verifiable: nobody would know what to rebuild
+# to compare it. That is the kind of mistake only noticed after distribution, so refuse before.
 if [[ -n "$(git status --porcelain)" ]]; then
-    echo "erreur : l'arbre de travail contient des modifications non validées" >&2
-    echo "une publication doit correspondre exactement à un commit" >&2
+    echo "error: the working tree has uncommitted changes" >&2
+    echo "a release must match exactly one commit" >&2
     exit 1
 fi
 
 commit="$(git rev-parse HEAD)"
 
-# Neutralise les horodatages de construction. La date du commit plutôt que l'heure courante :
-# elle est la même pour tous ceux qui reconstruiront ce commit.
+# Neutralises build timestamps. The commit date rather than the current time: it is the same for
+# everyone who rebuilds this commit.
 SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
 export SOURCE_DATE_EPOCH
 
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 
-# Le sysroot compte autant que les deux autres. Les messages de panique de `core` et `alloc`
-# portent le chemin de la bibliothèque standard, qui vit sous le répertoire personnel : sans ce
-# troisième préfixe, il restait 26 chemins absolus dans le binaire — contre 217 sans aucun
-# remap. Assez peu pour passer inaperçu à la relecture, assez pour que deux utilisateurs
-# obtiennent des empreintes différentes.
+# The sysroot matters as much as the other two. Panic messages from `core` and `alloc` carry the
+# standard library's path, which lives under the home directory: without this third prefix, 26
+# absolute paths remained in the binary — against 217 with no remap at all. Few enough to go
+# unnoticed on review, enough for two users to get different hashes.
 sysroot="$(rustc --print sysroot)"
 
-export RUSTFLAGS="--remap-path-prefix=$racine=/build"
+export RUSTFLAGS="--remap-path-prefix=$root=/build"
 RUSTFLAGS+=" --remap-path-prefix=$cargo_home/registry=/cargo-registry"
 RUSTFLAGS+=" --remap-path-prefix=$sysroot=/rust-sysroot"
 
-sortie="$racine/release/artefacts"
-rm -rf "$sortie"
-mkdir -p "$sortie"
+output="$root/release/artefacts"
+rm -rf "$output"
+mkdir -p "$output"
 
-echo "→ construction de l'interface"
+echo "→ building the front end"
 (cd apps/web && pnpm install --frozen-lockfile && pnpm run build)
 
-echo "→ construction du binaire"
+echo "→ building the binary"
 cargo build -p desktop --release
 
-cp target/release/desktop "$sortie/whispee"
+cp target/release/desktop "$output/whispee"
 
-# Les versions font partie de la publication, pas de la documentation. La reproductibilité vaut
-# **à environnement donné** : une autre version de `rustc` ou de `pnpm` produit un binaire
-# différent sans que rien ne soit compromis. Sans ce fichier, celui qui vérifie ne peut pas
-# distinguer une altération d'un simple écart d'outillage — et apprend à ignorer l'échec.
-cat > "$sortie/BUILD-INFO" <<INFO
+# Tool versions are part of the release, not of the documentation. Reproducibility holds **for a
+# given environment**: a different `rustc` or `pnpm` produces a different binary without anything
+# being compromised. Without this file, a verifier cannot tell tampering from a mere toolchain
+# mismatch — and learns to ignore the failure.
+cat > "$output/BUILD-INFO" <<INFO
 commit=$commit
 source_date_epoch=$SOURCE_DATE_EPOCH
 rustc=$(rustc --version)
@@ -104,17 +101,17 @@ node=$(node --version)
 pnpm=$(pnpm --version)
 INFO
 
-echo "→ empreintes et signature"
-(cd "$sortie" && sha256sum whispee BUILD-INFO > SHA256SUMS)
+echo "→ hashes and signature"
+(cd "$output" && sha256sum whispee BUILD-INFO > SHA256SUMS)
 
-# La signature porte sur `SHA256SUMS`, pas sur le binaire : un seul fichier signé couvre ainsi
-# l'ensemble de la publication, y compris `BUILD-INFO`. Signer le binaire seul laisserait les
-# versions d'outillage modifiables sans que la signature en souffre.
-openssl pkeyutl -sign -rawin -inkey "$cle" \
-    -in "$sortie/SHA256SUMS" -out "$sortie/SHA256SUMS.sig"
+# The signature covers `SHA256SUMS`, not the binary: a single signed file then covers the whole
+# release, `BUILD-INFO` included. Signing the binary alone would leave the toolchain versions
+# editable without the signature noticing.
+openssl pkeyutl -sign -rawin -inkey "$key" \
+    -in "$output/SHA256SUMS" -out "$output/SHA256SUMS.sig"
 
 echo
-echo "publication prête dans release/artefacts :"
-ls -1 "$sortie"
+echo "release ready in release/artefacts:"
+ls -1 "$output"
 echo
-echo "à vérifier avec : scripts/verify-release.sh"
+echo "verify it with: scripts/verify-release.sh"

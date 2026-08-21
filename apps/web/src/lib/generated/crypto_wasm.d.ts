@@ -2,399 +2,394 @@
 /* eslint-disable */
 
 /**
- * Poignée du compte pseudonyme.
+ * Handle on the pseudonymous account.
  *
- * Séparée de [`Client`] à dessein : un compte survit à ses appareils, et un appareil peut
- * exister le temps d'un appairage sans détenir la clé du compte. Les fusionner ferait croire
- * que l'un implique l'autre.
+ * Kept separate from [`Client`] on purpose: an account outlives its devices, and a device can
+ * exist for the duration of a pairing without ever holding the account key. Merging them
+ * would suggest one implies the other.
  *
- * **Cet objet détient la clé racine du compte.** La perdre équivaut à perdre le compte ; la
- * divulguer équivaut à le céder.
+ * **This object holds the account's root key.** Losing it means losing the account;
+ * disclosing it means giving the account away.
  */
 export class AccountKey {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Signe l'appartenance d'un appareil à ce compte.
+     * Signs a device's membership of this account.
      */
     attest(handle: string, device_id: string, auth_key: Uint8Array, mls_key: Uint8Array): Uint8Array;
     /**
-     * Graine à transmettre à un appareil qu'on appaire. **Vaut le compte entier.**
+     * Seed to hand to a device being paired. **It is worth the whole account.**
      */
     exportSeed(): Uint8Array;
     /**
-     * Empreinte du compte, à comparer hors bande.
+     * The account fingerprint, to be compared out of band.
      *
-     * Stable quand le compte gagne ou perd un appareil : la détection d'un appareil hostile
-     * passe par la notification d'ajout, pas par un changement d'empreinte qui serait ignoré
-     * à force de se produire légitimement.
+     * Stable when the account gains or loses a device: a hostile device is caught by the
+     * device-added notification, not by a fingerprint change that would be ignored from
+     * happening legitimately too often.
      */
     fingerprint(): string;
     /**
-     * Reconstruit le compte depuis la graine reçue lors d'un appairage.
+     * Rebuilds the account from the seed received during a pairing.
      */
     static fromSeed(seed: Uint8Array): AccountKey;
     /**
-     * Crée un compte et retourne `{phrase, identityKey}`.
+     * Creates an account and returns `{phrase, identityKey}`.
      */
     static generate(): any;
     identityKey(): Uint8Array;
     /**
-     * Reconstruit le compte depuis sa phrase de récupération.
+     * Rebuilds the account from its recovery phrase.
      */
     static restore(phrase: string): AccountKey;
     /**
-     * Signe la révocation d'un appareil de ce compte.
+     * Signs the revocation of a device of this account.
      *
-     * Le certificat est vérifiable par n'importe qui détenant la clé publique du compte :
-     * c'est ce qui permet à un **autre** membre du groupe de commiter le retrait sans croire
-     * le serveur sur parole.
+     * The certificate is verifiable by anyone holding the account's public key: that is what
+     * lets **another** group member commit the removal without taking the server's word for
+     * it.
      */
     revoke(handle: string, device_id: string, revoked_at: bigint): Uint8Array;
     /**
-     * Signe le passage de ce compte à une nouvelle clé d'identité.
+     * Signs this account's move to a new identity key.
      *
-     * À appeler sur l'**ancien** compte, qui désigne ainsi son successeur.
+     * Call it on the **old** account, which thereby names its successor.
      *
-     * C'est la seule réponse réelle à un appareil volé : celui-ci détient la graine, donc le
-     * compte entier, et le révoquer ne l'empêche pas d'en attester un nouveau. La rotation,
-     * elle, rend invérifiables toutes les attestations d'un coup.
+     * This is the only real answer to a stolen device: it holds the seed, hence the whole
+     * account, and revoking it does not stop it from attesting a new one. Rotation, on the
+     * other hand, invalidates every attestation at once.
      */
     rotate(handle: string, new_identity_key: Uint8Array, rotated_at: bigint): Uint8Array;
     /**
-     * Clé symétrique du coffre de sauvegarde, dérivée à la demande.
+     * Symmetric key of the backup vault, derived on demand.
      */
     vaultKey(): Uint8Array;
 }
 
 /**
- * Poignée unique côté JavaScript : une identité d'appareil et ses conversations.
+ * The single JavaScript-side handle: one device identity and its conversations.
  *
- * Les conversations sont indexées par identifiant de groupe plutôt qu'exposées comme objets
- * séparés. Manipuler deux poignées appariées depuis JS — une identité, une conversation —
- * invite à les mélanger, et chiffrer avec la mauvaise identité est une erreur silencieuse.
+ * Conversations are indexed by group id rather than exposed as separate objects. Juggling
+ * two paired handles from JS — an identity and a conversation — invites mixing them up, and
+ * encrypting with the wrong identity fails silently.
  */
 export class Client {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Applique le commit préparé par `invite`, une fois celui-ci publié.
+     * Applies the commit prepared by `invite`, once it has been published.
      *
-     * Retourne l'arbre de ratchet à jour, à transmettre à l'invité avec son Welcome. Il ne
-     * peut pas être produit plus tôt : tant que le commit n'est pas appliqué, l'arbre ne
-     * contient pas le nouveau membre et son Welcome serait rejeté.
+     * Returns the up-to-date ratchet tree, to hand to the invitee along with their Welcome. It
+     * cannot be produced any earlier: until the commit is applied, the tree does not contain
+     * the new member and their Welcome would be rejected.
      */
     applyPending(group_id: Uint8Array): Uint8Array;
     /**
-     * Commite les propositions en attente — typiquement la demande de sortie d'un membre.
+     * Commits the pending proposals — typically a member's request to leave.
      */
     commitPending(group_id: Uint8Array): Uint8Array;
     /**
-     * Identifiants des conversations ouvertes, à persister à côté de l'état pour pouvoir
-     * les recharger via [`Client::restore`].
+     * Ids of the open conversations, to persist next to the state so they can be reloaded
+     * through [`Client::restore`].
      */
     conversationIds(): Uint8Array[];
     /**
-     * Crée une identité d'appareil.
+     * Creates a device identity.
      *
-     * `name` est transporté en clair dans le credential MLS et visible du serveur comme de
-     * tous les membres du groupe. N'y mettez rien de sensible.
+     * `name` travels in the clear inside the MLS credential and is visible to the server and
+     * to every group member. Put nothing sensitive in it.
      */
     static create(name: string): Client;
     /**
-     * Crée une conversation et retourne son identifiant de groupe.
+     * Creates a conversation and returns its group id.
      */
     createConversation(): Uint8Array;
     /**
-     * Crée un groupe administré. Le créateur en est l'admin, seul et unique.
+     * Creates an administered group. The creator is its one and only admin.
      *
-     * À réserver aux vrais groupes. Un 1-to-1 doit passer par `createConversation` : des rôles
-     * n'y ont aucun sens, et le groupe plat est la forme correcte.
+     * Reserve this for real groups. A 1-to-1 must go through `createConversation`: roles make
+     * no sense there, and the flat group is the correct shape.
      */
     createGroup(admin: string): Uint8Array;
     encrypt(group_id: Uint8Array, plaintext: Uint8Array): Uint8Array;
     /**
-     * Epoch courante du groupe. Deux membres à des epochs différentes ne peuvent pas se
-     * lire : c'est la première chose à regarder quand un message ne passe pas.
+     * The group's current epoch. Two members at different epochs cannot read each other:
+     * it is the first thing to look at when a message does not go through.
      */
     epoch(group_id: Uint8Array): bigint;
     /**
-     * Exporte l'état complet des sessions.
+     * Exports the complete session state.
      *
-     * **Ce blob contient les clés privées en clair.** Il ne doit jamais atteindre
-     * `localStorage`, ni un backup, ni le serveur. Le chiffrer d'abord avec une clé
-     * `CryptoKey` non-extractable détenue dans IndexedDB.
+     * **This blob contains the private keys in the clear.** It must never reach
+     * `localStorage`, a backup, or the server. Encrypt it first with a non-extractable
+     * `CryptoKey` held in IndexedDB.
      *
-     * Ne jamais restaurer un état *ancien* : cela fait reculer le groupe d'epoch et rejoue
-     * des clés déjà utilisées, ce qui détruit la forward secrecy.
+     * Never restore an *old* state: it rolls the group back an epoch and replays keys already
+     * used, destroying forward secrecy.
      */
     exportState(): Uint8Array;
     fingerprint(): string;
     /**
-     * Prépare l'ajout d'un membre. Retourne `{commit, welcome}` **sans rien appliquer**.
+     * Prepares the addition of a member. Returns `{commit, welcome}` **without applying
+     * anything**.
      *
-     * Les deux parties ne vont pas au même endroit : le `commit` aux membres déjà présents,
-     * le `welcome` au seul invité.
+     * The two halves go to different places: the `commit` to the members already present, the
+     * `welcome` to the invitee alone.
      *
-     * Le groupe reste à son epoch actuelle jusqu'à [`Client::applyPending`]. Publier d'abord,
-     * appliquer ensuite : l'inverse casse le groupe sans recours si la publication échoue —
-     * l'émetteur aurait changé d'epoch, les autres non, et le commit serait perdu.
+     * The group stays at its current epoch until [`Client::applyPending`]. Publish first,
+     * apply second: the reverse breaks the group beyond repair if publication fails — the
+     * sender would have changed epoch, the others not, and the commit would be lost.
      */
     invite(group_id: Uint8Array, key_package: Uint8Array): any;
     /**
-     * Rejoint une conversation depuis un Welcome. Retourne l'identifiant de groupe.
+     * Joins a conversation from a Welcome. Returns the group id.
      */
     join(welcome: Uint8Array, ratchet_tree: Uint8Array): Uint8Array;
     /**
-     * Demande à quitter le groupe. Retourne une **proposition**, pas un commit.
+     * Asks to leave the group. Returns a **proposal**, not a commit.
      *
-     * La RFC 9420 interdit de se retirer soi-même dans un commit qu'on génère : un autre
-     * membre doit la reprendre via `commitPending`. Conséquence à afficher honnêtement —
-     * tant que personne ne commite, le départ n'a pas eu lieu et la conversation continue
-     * d'être lue.
+     * RFC 9420 forbids removing yourself in a commit you generate: another member has to pick
+     * it up through `commitPending`. Display the consequence honestly — until someone
+     * commits, the departure has not happened and the conversation is still being read.
      */
     leaveGroup(group_id: Uint8Array): Uint8Array;
     /**
-     * Nom de cet appareil, tel qu'inscrit dans le credential MLS.
+     * This device's name, as written into the MLS credential.
      */
     name(): string;
     /**
-     * Empreintes des autres membres, à comparer hors bande.
+     * The other members' fingerprints, to be compared out of band.
      *
-     * L'interface doit rendre cette comparaison possible et compréhensible. Sans elle, un
-     * serveur malveillant peut se placer au milieu de deux sessions parfaitement chiffrées
-     * sans qu'aucune vérification cryptographique ne le détecte.
+     * The interface must make that comparison possible and understandable. Without it, a
+     * malicious server can sit in the middle of two perfectly encrypted sessions with no
+     * cryptographic check catching it.
      */
     peerFingerprints(group_id: Uint8Array): any;
     /**
-     * Clés de signature MLS des autres membres, telles qu'elles figurent dans l'arbre.
+     * The other members' MLS signature keys, as they appear in the tree.
      *
-     * Vient de l'état authentifié, pas du serveur. C'est ce qui permet au client de constater
-     * qu'un membre de l'arbre ne figure plus parmi les appareils actifs de son compte.
+     * Comes from the authenticated state, not from the server. This is what lets the client
+     * notice that a member of the tree is no longer among its account's active devices.
      */
     peerSignatureKeys(group_id: Uint8Array): any;
     /**
-     * Traite un message entrant : applicatif ou changement de groupe.
+     * Processes an incoming message: application data or a group change.
      *
-     * Le résultat doit être traité dans les deux cas. Ignorer un `groupChanged` laisse
-     * l'appareil à une epoch périmée, et tout ce qui suit devient indéchiffrable.
+     * The result must be handled in both cases. Ignoring a `groupChanged` leaves the device at
+     * a stale epoch, and everything that follows becomes undecryptable.
      */
     process(group_id: Uint8Array, message: Uint8Array, revoked: Uint8Array[]): any;
     /**
-     * Produit un KeyPackage à publier sur le serveur.
+     * Produces a KeyPackage to publish on the server.
      *
-     * **À usage unique.** Le serveur doit le retirer du stock dès qu'il le sert, et
-     * l'appelant doit en réapprovisionner régulièrement : sans stock disponible, plus
-     * personne ne peut ouvrir de conversation avec cet appareil.
+     * **Single use.** The server must remove it from the pool as soon as it serves it, and
+     * the caller must restock regularly: with an empty pool, nobody can open a conversation
+     * with this device any more.
      */
     publishKeyPackage(): Uint8Array;
     /**
-     * Prépare le retrait d'un membre, désigné par sa clé de signature MLS.
+     * Prepares the removal of a member, designated by their MLS signature key.
      *
-     * C'est ce retrait — et non le filtrage côté serveur — qui prive effectivement l'appareil
-     * de la suite : le commit re-clé l'arbre. Même discipline que `invite` : publier, puis
+     * It is this removal — not server-side filtering — that actually cuts the device off from
+     * what follows: the commit re-keys the tree. Same discipline as `invite`: publish, then
      * `applyPending`.
      */
     removeMember(group_id: Uint8Array, mls_key: Uint8Array): Uint8Array;
     /**
-     * Reconstruit un client depuis un état exporté.
+     * Rebuilds a client from an exported state.
      *
-     * `groupIds` est la liste des conversations à recharger. Le stockage MLS ne fournit pas
-     * d'énumération : c'est à l'appelant de conserver cette liste, à côté de l'état.
+     * `groupIds` is the list of conversations to reload. MLS storage offers no enumeration:
+     * keeping that list, alongside the state, is the caller's job.
      *
-     * Ne restaurez **jamais** un état plus ancien que le dernier exporté : les groupes
-     * reculeraient d'epoch et rejoueraient des clés déjà utilisées. Un état MLS n'est pas
-     * une sauvegarde ordinaire — il ne doit exister qu'une seule copie vivante.
+     * **Never** restore a state older than the last one exported: groups would roll back an
+     * epoch and replay keys already used. An MLS state is not an ordinary backup — only one
+     * live copy may exist.
      */
     static restore(state: Uint8Array, group_ids: Uint8Array[]): Client;
     /**
-     * Roster du groupe : `{admin, moderators}`, ou `null` si le groupe est plat.
+     * The group roster: `{admin, moderators}`, or `null` if the group is flat.
      */
     roster(group_id: Uint8Array): any;
     /**
-     * Remplace les rôles du groupe. Comme tout commit, à publier avant `applyPending`.
+     * Replaces the group's roles. Like every commit, publish it before `applyPending`.
      *
-     * Passer un `admin` différent de l'actuel **transmet le groupe** : l'émetteur ne pourra
-     * pas se le reprendre.
+     * Passing an `admin` different from the current one **hands the group over**: the sender
+     * cannot take it back.
      */
     setRoles(group_id: Uint8Array, admin: string, moderators: string[]): Uint8Array;
     /**
-     * Clé symétrique du canal éphémère de ce groupe, pour l'epoch courante.
+     * Symmetric key of this group's ephemeral channel, for the current epoch.
      *
-     * **Ces octets ne doivent servir qu'aux signaux jetables.** Ils ne passent pas par le
-     * ratchet applicatif, donc ils n'offrent aucune forward secrecy à l'intérieur d'une
-     * epoch, et ils n'authentifient pas l'émetteur — la clé est celle du groupe. Y faire
-     * transiter un message vaudrait annuler les deux propriétés pour lesquelles MLS a été
-     * choisi.
+     * **These bytes must only serve throwaway signals.** They do not go through the
+     * application ratchet, so they offer no forward secrecy within an epoch, and they do not
+     * authenticate the sender — the key belongs to the group. Routing a message through them
+     * would forfeit both properties MLS was chosen for.
      *
-     * La clé change à chaque commit : un membre retiré perd ce canal en même temps que le
-     * reste, sans traitement particulier.
+     * The key changes on every commit: a removed member loses this channel along with the
+     * rest, with no special handling.
      */
     signalKey(group_id: Uint8Array): Uint8Array;
     /**
-     * Empreinte de cet appareil, à afficher pour que le correspondant la compare.
-     * Clé publique de signature MLS de cet appareil.
+     * This device's fingerprint, to display so the peer can compare it.
+     * This device's MLS signature public key.
      *
-     * Elle doit être attestée par le compte **en même temps** que la clé d'authentification
-     * HTTP : attestées séparément, on pourrait recombiner l'attestation d'un appareil
-     * légitime avec la clé MLS d'un appareil hostile.
+     * It must be attested by the account **at the same time** as the HTTP authentication
+     * key: attested separately, a legitimate device's attestation could be recombined with a
+     * hostile device's MLS key.
      */
     signatureKey(): Uint8Array;
 }
 
 /**
- * Offre d'appairage détenue par le **nouvel** appareil.
+ * Pairing offer held by the **new** device.
  *
- * C'est lui qui affiche le QR, l'ancien qui scanne. Ce sens est obligatoire : un QR est
- * photographiable, il ne doit donc contenir aucun secret. Ici il ne porte qu'une clé publique
- * éphémère et une adresse de dépôt.
+ * The new device shows the QR, the old one scans it. That direction is mandatory: a QR can be
+ * photographed, so it must contain no secret. Here it carries only an ephemeral public key
+ * and a drop address.
  */
 export class Pairing {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Identifiant d'appairage : l'adresse de dépôt sur le serveur. Public, sans valeur seul.
+     * Pairing id: the drop address on the server. Public, worthless on its own.
      */
     id(): Uint8Array;
     constructor();
     /**
-     * Ouvre le paquet déposé par l'appareil d'origine.
+     * Opens the packet dropped by the original device.
      *
-     * Consomme l'offre : le secret éphémère ne sert qu'une fois, ce qui interdit de rejouer
-     * un ancien paquet contre la même clé. Un second appel échoue, délibérément.
+     * Consumes the offer: the ephemeral secret is single-use, which forbids replaying an old
+     * packet against the same key. A second call fails, deliberately.
      */
     open(sealed: Uint8Array): any;
     /**
-     * Clé publique éphémère à publier dans le QR.
+     * Ephemeral public key to publish in the QR.
      */
     publicKey(): Uint8Array;
 }
 
 /**
- * Empreinte d'un compte dont on ne détient que la clé publique.
+ * Fingerprint of an account we only hold the public key of.
  */
 export function accountFingerprint(identity_key: Uint8Array): string;
 
 /**
- * Dérive la clé de déverrouillage locale depuis un mot de passe.
+ * Derives the local unlock key from a password.
  *
- * Argon2id, 64 Mio, 3 passes. **Environ une seconde** : c'est le prix à payer une fois par
- * déverrouillage, et à chaque essai par un attaquant qui aurait obtenu la base.
+ * Argon2id, 64 MiB, 3 passes. **About one second**: that is the price paid once per unlock,
+ * and on every attempt by an attacker who got hold of the database.
  *
- * Cette fonction n'existe pas dans WebCrypto. PBKDF2, lui, y est — mais il ne coûte que du
- * calcul, ce qu'un GPU fait par milliards. Le coût mémoire d'Argon2id est ce qui ramène une
- * attaque parallèle au niveau d'un processeur ordinaire.
+ * This function does not exist in WebCrypto. PBKDF2 does — but it only costs computation,
+ * which a GPU does by the billion. Argon2id's memory cost is what brings a parallel attack
+ * back down to the level of an ordinary processor.
  *
- * Appeler cette fonction gèle le fil d'exécution pendant sa durée. À lancer depuis un Worker
- * si l'interface doit rester réactive.
+ * Calling this function freezes the thread of execution for its duration. Run it from a
+ * Worker if the interface must stay responsive.
  */
 export function deriveUnlockKey(password: string, salt: Uint8Array): Uint8Array;
 
 /**
- * Message à signer pour ouvrir une session gateway.
+ * Message to sign in order to open a gateway session.
  *
- * Retourne les octets à signer, **pas la signature** : la clé d'authentification de l'appareil
- * est une clé WebCrypto non extractible, qui ne quitte jamais le navigateur et n'entre donc
- * jamais dans ce module. La séparation est délibérée — c'est elle qui fait qu'un bug ici ne
- * peut pas divulguer la clé.
+ * Returns the bytes to sign, **not the signature**: the device's authentication key is a
+ * non-extractable WebCrypto key that never leaves the browser and therefore never enters this
+ * module. The split is deliberate — it is what stops a bug here from leaking the key.
  *
- * Même argument que pour [`post_mac`] quant au lieu du calcul : le format canonique vit dans la
- * crate `attest`, et le réécrire en JavaScript le dupliquerait. Un octet de divergence, et
- * aucune session ne s'ouvre.
+ * Same argument as [`post_mac`] about where the computation lives: the canonical format is in
+ * the `attest` crate, and rewriting it in JavaScript would duplicate it. One byte of
+ * divergence and no session opens.
  */
 export function gatewayChallenge(device_id: string, nonce: Uint8Array): Uint8Array;
 
 /**
- * Hash de feuille d'une entrée du journal, tel que le serveur doit l'avoir calculé.
+ * Leaf hash of a log entry, as the server must have computed it.
  *
- * Le client le recalcule lui-même à partir du handle et de la clé qu'on lui sert : accepter le
- * hash fourni par le serveur reviendrait à lui demander de prouver ce qu'il affirme avec ce
- * qu'il affirme.
+ * The client recomputes it from the handle and the key it is served: accepting the hash the
+ * server provides would amount to asking it to prove what it claims with what it claims.
  */
 export function logLeaf(handle: string, identity_key: Uint8Array): Uint8Array;
 
 /**
- * Authentifie un dépôt d'enveloppe sans révéler qui dépose.
+ * Authenticates an envelope post without revealing who posts.
  *
- * # Ce que ce MAC dit au serveur
+ * # What this MAC tells the server
  *
- * Que le déposant détient la clé du groupe, donc qu'il en est membre. Rien de plus. Le serveur
- * n'a jamais eu besoin de savoir **qui** poste — seulement que le posteur a le droit de le
- * faire, pour ne pas servir de boîte aux lettres ouverte. Ce sont deux choses distinctes, et
- * la seconde suffit.
+ * That the poster holds the group key, hence that they are a member. Nothing more. The server
+ * never needed to know **who** posts — only that the poster is allowed to, so it does not act
+ * as an open mailbox. Those are two distinct things, and the second one is enough.
  *
- * L'expéditeur réel reste authentifié **par MLS**, à l'intérieur du chiffré : les
- * destinataires le lisent, le serveur non.
+ * The real sender stays authenticated **by MLS**, inside the ciphertext: the recipients read
+ * it, the server does not.
  *
- * # Pourquoi le calcul est fait ici et pas en JavaScript
+ * # Why the computation happens here and not in JavaScript
  *
- * Le message authentifié a un format canonique, partagé avec le vérificateur. Le réécrire côté
- * client dupliquerait la définition — exactement ce que la crate `attest` existe pour
- * supprimer. Un octet de divergence, et tous les dépôts sont refusés.
+ * The authenticated message has a canonical format, shared with the verifier. Rewriting it on
+ * the client would duplicate the definition — exactly what the `attest` crate exists to
+ * remove. One byte of divergence and every post is refused.
  */
 export function postMac(posting_key: Uint8Array, group_id: Uint8Array, nonce: Uint8Array, body: Uint8Array): Uint8Array;
 
 /**
- * Scelle un paquet à destination du nouvel appareil, depuis les valeurs lues dans le QR.
+ * Seals a packet for the new device, from the values read in the QR.
  *
- * Retourne `{payload, confirmation}`. Le code de confirmation doit être **affiché des deux
- * côtés et comparé par l'utilisateur** : c'est ce qui atteste que les deux appareils parlent
- * bien du même échange.
+ * Returns `{payload, confirmation}`. The confirmation code must be **displayed on both sides
+ * and compared by the user**: that is what attests that the two devices are talking about the
+ * same exchange.
  */
 export function sealPairing(offer_public: Uint8Array, offer_id: Uint8Array, plaintext: Uint8Array): any;
 
 /**
- * MAC accompagnant le dépôt d'un **signal éphémère**.
+ * MAC accompanying the post of an **ephemeral signal**.
  *
- * Jumeau de [`post_mac`], au domaine près — voir `attest::signal_message` pour la raison de
- * cette séparation. Il prouve la même chose : l'appartenance au groupe, pas l'identité.
+ * Twin of [`post_mac`], up to the domain — see `attest::signal_message` for the reason behind
+ * that separation. It proves the same thing: group membership, not identity.
  */
 export function signalMac(posting_key: Uint8Array, group_id: Uint8Array, nonce: Uint8Array, body: Uint8Array): Uint8Array;
 
 /**
- * Vérifie une attestation d'appareil servie par le serveur.
+ * Verifies a device attestation served by the server.
  *
- * **À rappeler systématiquement côté client.** Le serveur vérifie déjà à l'écriture, mais
- * c'est précisément le serveur qu'on soupçonne : sa vérification n'est qu'un filtre précoce,
- * jamais une garantie. Voir le test
- * `un_appareil_fantome_injecte_en_sql_ne_passe_pas_la_verification_du_client`.
+ * **Always re-check this on the client.** The server already verifies on write, but the
+ * server is precisely who we suspect: its check is an early filter, never a guarantee. See
+ * the test `a_ghost_device_injected_in_sql_does_not_pass_client_verification`.
  */
 export function verifyAttestation(identity_key: Uint8Array, handle: string, device_id: string, auth_key: Uint8Array, mls_key: Uint8Array, attestation: Uint8Array): boolean;
 
 /**
- * Vérifie que le journal actuel **prolonge** celui qu'on avait déjà vu, sans réécriture.
+ * Checks that the current log **extends** the one already seen, with no rewriting.
  *
- * Sans ce contrôle, le serveur pourrait remplacer une clé déjà publiée et servir un journal
- * tout aussi cohérent : le journal ne prouverait plus rien sur le passé.
+ * Without this check, the server could replace an already published key and serve a log just
+ * as coherent: the log would no longer prove anything about the past.
  */
 export function verifyConsistency(from: number, old_root: Uint8Array, to: number, new_root: Uint8Array, proof: Uint8Array[]): boolean;
 
 /**
- * Vérifie qu'une clé figure bien dans le journal, à l'indice annoncé.
+ * Checks that a key really is in the log, at the announced index.
  *
- * **C'est ce qui ferme le trou du premier contact.** Les attestations empêchent le serveur
- * d'ajouter un appareil ; elles ne l'empêchent pas de servir sa propre clé de compte à
- * quelqu'un qui n'a rien à quoi comparer. Une preuve d'inclusion, elle, ne se fabrique pas.
+ * **This is what closes the first-contact hole.** Attestations stop the server from adding a
+ * device; they do not stop it from serving its own account key to someone with nothing to
+ * compare against. An inclusion proof, by contrast, cannot be forged.
  */
 export function verifyInclusion(leaf: Uint8Array, index: number, size: number, proof: Uint8Array[], root: Uint8Array): boolean;
 
 /**
- * Vérifie un certificat de révocation servi par le serveur.
+ * Verifies a revocation certificate served by the server.
  *
- * **À appeler systématiquement.** Un client qui croirait le serveur sur parole lui rendrait
- * le pouvoir de faire évincer les appareils de son choix — de la censure ciblée, durable, et
- * indiscernable d'une révocation légitime.
+ * **Always call this.** A client that took the server's word for it would hand the server the
+ * power to evict any device it chose — targeted censorship, durable, and indistinguishable
+ * from a legitimate revocation.
  */
 export function verifyRevocation(identity_key: Uint8Array, handle: string, device_id: string, revoked_at: bigint, revocation: Uint8Array): boolean;
 
 /**
- * Vérifie qu'une tête de journal a bien été signée par le journal.
+ * Checks that a tree head really was signed by the log.
  *
- * **Ce que cela prouve est étroit** : que la tête vient du journal. Pas qu'elle soit la seule
- * qu'il ait émise. Un serveur qui tient deux journaux signe deux têtes également valides ;
- * seule la comparaison entre clients l'attrape.
+ * **What this proves is narrow**: that the head comes from the log. Not that it is the only
+ * head the log ever emitted. A server running two logs signs two equally valid heads; only
+ * comparison between clients catches it.
  */
 export function verifyTreeHead(log_key: Uint8Array, size: bigint, root: Uint8Array, timestamp: bigint, signature: Uint8Array): boolean;
 

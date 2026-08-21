@@ -1,29 +1,29 @@
 name: Android build
 
-# Construit un APK de débogage, sur un runner Ubuntu où le SDK Android est préinstallé.
-# Aucune signature : elle viendra avec la distribution.
+# Builds a debug APK on an Ubuntu runner, where the Android SDK is preinstalled.
+# No signing: that comes with distribution.
 #
-# # Économie de minutes : ce qui déclenche, et ce qui ne déclenche pas
+# # Saving minutes: what triggers a build, and what doesn't
 #
-# **Rien ne se construit sur `dev`.** C'est la branche de travail : y déclencher un build à
-# chaque poussée dépenserait l'essentiel du quota pour des états intermédiaires que personne
-# n'installe. Le travail s'y valide par `cargo test`, en local.
+# **Nothing builds on `dev`.** That's the working branch; building on every push there would
+# burn most of the quota on intermediate states nobody installs. Work is validated with
+# `cargo test`, locally.
 #
-# Ne restent que deux entrées : une poussée sur `main`, qui est une intégration, et le
-# déclenchement manuel quand on veut un APK sans attendre.
+# That leaves two entry points: a push to `main`, which is an integration, and manual dispatch
+# when an APK is wanted without waiting.
 #
-# Pas de `pull_request` non plus : une PR de `dev` vers `main` doublerait chaque construction —
-# une fois à l'ouverture, une fois à la fusion — pour le même arbre.
+# No `pull_request` either: a PR from `dev` to `main` would build the same tree twice — once on
+# open, once on merge.
 #
-# Les `paths` restreignent encore : l'APK n'embarque ni le serveur, ni ses migrations, ni les
-# crates de cryptographie. Le module WebAssembly qu'il contient est un artefact **versionné**
-# sous `apps/web/`, donc modifier `crates/crypto-wasm` sans le régénérer ne change pas l'APK.
+# The `paths` filter narrows it further: the APK carries neither the server, nor its migrations,
+# nor the crypto crates. The WebAssembly module it embeds is a **committed** artefact under
+# `apps/web/`, so changing `crates/crypto-wasm` without regenerating it does not change the APK.
 #
-# # Ce que ce workflow installe et qu'un projet Capacitor n'aurait pas demandé
+# # What this workflow installs that a Capacitor project would not have needed
 #
-# Le NDK et une cible Rust Android. Tauri compile du Rust natif par architecture, là où
-# Capacitor n'embarque que du JavaScript — c'est ce qui rend chaque architecture coûteuse, et
-# donc ce qui justifie de n'en construire qu'une pour du débogage.
+# The NDK and a Rust Android target. Tauri compiles native Rust per architecture, where Capacitor
+# ships only JavaScript — that is what makes each architecture expensive, and what justifies
+# building only one for debug.
 
 on:
   workflow_dispatch:
@@ -35,8 +35,8 @@ on:
       - "Cargo.lock"
       - ".github/workflows/android.yml"
 
-# Une poussée qui en suit une autre rend la précédente sans objet : la laisser finir paierait
-# un runner pour un artefact que personne ne prendra.
+# A push that follows another makes the previous one moot: letting it finish pays for a runner
+# producing an artefact nobody will take.
 concurrency:
   group: android-${{ github.ref }}
   cancel-in-progress: true
@@ -59,40 +59,39 @@ jobs:
           node-version: 22
           package-manager-cache: false
 
-      # `corepack` fournit la version de pnpm épinglée dans `packageManager`, plutôt que celle
-      # qui traîne sur le runner.
+      # `corepack` provides the pnpm version pinned in `packageManager`, rather than whatever
+      # happens to sit on the runner.
       - name: Enable pnpm
         run: corepack enable
 
-      # **Une seule architecture, et c'est une mesure d'économie.**
+      # **One architecture only, and that is a cost measure.**
       #
-      # Tauri compile du Rust natif par architecture : les quatre cibles par défaut quadruplent
-      # la compilation de tout l'arbre de dépendances, ce qui a suffi à frôler le délai maximal
-      # d'un runner dès que le cache a été invalidé.
+      # Tauri compiles native Rust per architecture: the four default targets quadruple the
+      # compilation of the whole dependency tree, which was enough to come close to a runner's
+      # maximum duration as soon as the cache was invalidated.
       #
-      # `aarch64` couvre l'essentiel du parc réel ; `armv7` et `x86` sont respectivement les
-      # appareils anciens et les émulateurs. Un APK de débogage n'a besoin ni des uns ni des
-      # autres. Une publication, si — et elle passera par un workflow distinct, où la dépense
-      # sera justifiée par un artefact qu'on distribue.
+      # `aarch64` covers most real devices; `armv7` and `x86` are old handsets and emulators
+      # respectively. A debug APK needs neither. A release does — and it will get its own
+      # workflow, where the spend is justified by an artefact that gets distributed.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      # Le cache est ici une mesure d'économie autant que de vitesse : sans lui, chaque
-      # construction recompile tout l'arbre de dépendances Rust en compilation croisée.
+      # The cache is a cost measure as much as a speed one: without it, every build recompiles
+      # the entire Rust dependency tree under cross-compilation.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
 
-      # Le SDK est préinstallé sur le runner, le NDK non. Sans lui, la compilation croisée n'a
-      # pas d'éditeur de liens et échoue tardivement, au premier objet à lier.
+      # The SDK is preinstalled on the runner, the NDK is not. Without it, cross-compilation has
+      # no linker and fails late, on the first object to link.
       - name: Install Android NDK
         run: |
           echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
-      # Mis en cache comme le reste : `cargo install` recompile le CLI depuis les sources, ce
-      # qui coûte plusieurs minutes de runner à chaque exécution.
+      # Cached like the rest: `cargo install` rebuilds the CLI from source, costing several
+      # runner minutes on every run.
       - name: Cache the Tauri CLI
         id: cache-tauri-cli
         uses: actions/cache@v4
@@ -108,27 +107,27 @@ jobs:
         working-directory: apps/web
         run: pnpm install --frozen-lockfile
 
-      # Le projet natif est généré à chaque construction plutôt que versionné : `tauri android
-      # init` produit un projet Gradle complet, et un projet généré qui dérive de sa source est
-      # une source d'erreurs silencieuses. Le régénérer coûte quelques secondes.
+      # The native project is generated on every build rather than committed: `tauri android
+      # init` produces a full Gradle project, and a generated project that drifts from its source
+      # is a source of silent errors. Regenerating costs a few seconds.
       #
-      # `VITE_API_URL` est figée dans le bundle **et** dans la CSP — voir `csp()` dans
-      # `vite.config.ts`. Absente, elle produirait un client qui pointe vers la boucle locale du
-      # téléphone, c'est-à-dire vers rien.
+      # `VITE_API_URL` is frozen into the bundle **and** into the CSP — see `csp()` in
+      # `vite.config.ts`. Absent, it would produce a client pointing at the phone's own loopback,
+      # that is, at nothing.
       - name: Generate the Android project
         working-directory: apps/desktop
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
         run: cargo tauri android init
 
-      # La caméra sert à scanner le carré d'appairage, et Android refuse `getUserMedia` sans
-      # cette déclaration — silencieusement du point de vue de l'utilisateur, qui voit une
-      # caméra qui ne s'ouvre pas.
+      # The camera scans the pairing square, and Android refuses `getUserMedia` without this
+      # declaration — silently from the user's point of view, who just sees a camera that never
+      # opens.
       #
-      # Ajoutée ici et non dans un fichier du dépôt parce que `gen/` est régénéré à chaque
-      # build : toute modification manuelle du manifeste serait effacée par l'étape précédente.
-      # Le jour où ce projet Android sera versionné, cette étape devra disparaître avec le
-      # commentaire qui l'explique, sans quoi la permission finira déclarée deux fois.
+      # Added here and not in a committed file because `gen/` is regenerated on every build: any
+      # manual edit to the manifest would be wiped by the previous step. The day this Android
+      # project is committed, this step must go along with the comment explaining it, or the
+      # permission ends up declared twice.
       - name: Declare the camera permission
         working-directory: apps/desktop/gen/android/app/src/main
         run: |
@@ -146,9 +145,9 @@ jobs:
         with:
           name: app-debug-apk
           path: apps/desktop/gen/android/app/build/outputs/apk/**/*.apk
-          # Un build qui « réussit » sans produire de binaire est un échec silencieux : c'est
-          # exactement le genre de succès trompeur qu'on ne remarque qu'au moment d'installer.
+          # A build that "succeeds" without producing a binary is a silent failure: exactly the
+          # kind of misleading success you only notice when it's time to install.
           if-no-files-found: error
-          # Les artefacts comptent dans le quota de stockage, et un APK de débogage n'a aucune
-          # valeur au-delà de quelques jours.
+          # Artefacts count against the storage quota, and a debug APK is worthless beyond a few
+          # days.
           retention-days: 7

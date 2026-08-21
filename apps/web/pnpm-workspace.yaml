@@ -1,9 +1,9 @@
-# pnpm refuse par défaut d'exécuter les scripts d'installation d'une dépendance : un script
-# post-install s'exécute avec tous les droits de l'utilisateur, et c'est une voie de compromission
-# de chaîne d'approvisionnement bien réelle. Chaque exception se déclare donc ici, une par une.
+# By default pnpm refuses to run a dependency's install scripts: a post-install script runs with
+# all of the user's privileges, and that is a very real supply-chain compromise path. Every
+# exception is therefore declared here, one by one.
 #
-# `esbuild` télécharge son binaire natif à l'installation. C'est le transpileur de Vite : sans
-# lui, rien ne se construit. L'autoriser n'est pas un contournement du garde-fou, c'est ce que le
-# garde-fou demande — une décision explicite plutôt qu'une permission générale.
+# `esbuild` downloads its native binary at install time. It is Vite's transpiler: without it,
+# nothing builds. Allowing it is not a way around the guard rail, it is what the guard rail asks
+# for — an explicit decision rather than a blanket permission.
 allowBuilds:
   esbuild: true

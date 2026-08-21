@@ -7,10 +7,10 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
-    // Le lanceur de tests de Node résout les imports en ESM strict : il n'ajoute aucune
-    // extension. Un module qui importe une valeur d'un module voisin n'est donc testable que si
-    // le chemin porte son extension. Sans danger ici — `noEmit` est vrai, rien n'est transpilé
-    // vers un chemin qui n'existerait plus.
+    // Node's test runner resolves imports as strict ESM: it adds no extension. A module that
+    // imports a value from a neighbouring module is therefore only testable if the path carries
+    // its extension. Harmless here — `noEmit` is true, nothing is transpiled to a path that
+    // would no longer exist.
     "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
@@ -26,9 +26,9 @@
   "exclude": [
     "node_modules",
     "dist",
-    // Exécutés par le lanceur de tests de Node, qui exige l'extension `.ts` dans les imports —
-    // ce que le compilateur du bundler refuse. Les deux ont raison dans leur contexte ; les
-    // séparer est moins coûteux que de plier l'un à l'autre.
+    // Run by Node's test runner, which requires the `.ts` extension in imports — which the
+    // bundler's compiler refuses. Both are right in their own context; separating them costs
+    // less than bending one to the other.
     "**/*.test.ts"
   ]
 }

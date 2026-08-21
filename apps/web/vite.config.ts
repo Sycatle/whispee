@@ -4,57 +4,56 @@ import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 
 /**
- * Build du client.
+ * Client build.
  *
- * # Pourquoi Vite plutôt que Next
+ * # Why Vite rather than Next
  *
- * Le projet n'utilisait de Next qu'une seule chose : un middleware posant un nonce CSP par
- * requête. Ce nonce n'était lui-même nécessaire **que parce que Next injecte des scripts
- * inline** (amorçage, streaming RSC). Sans ces scripts, il n'y a rien d'inline à autoriser et
- * `script-src 'self'` suffit — ce qui est plus strict qu'un nonce, pas moins.
+ * The project used exactly one thing from Next: middleware setting a per-request CSP nonce. That
+ * nonce was itself needed **only because Next injects inline scripts** (bootstrap, RSC
+ * streaming). Without those scripts there is nothing inline to allow, and `script-src 'self'`
+ * suffices — which is stricter than a nonce, not looser.
  *
- * Le reste de ce que Next apporte était inutilisé : pas de rendu serveur (tout est chiffré
- * localement, il n'y a rien à prégénérer), pas de route d'API (le serveur est en Rust), une
- * seule page.
+ * The rest of what Next brings went unused: no server rendering (everything is encrypted
+ * locally, there is nothing to pre-render), no API route (the server is in Rust), a single page.
  *
- * Cette sortie statique alimente les trois cibles — web, bureau et mobile — sans être
- * construite deux fois.
+ * This static output feeds all three targets — web, desktop and mobile — without being built
+ * twice.
  */
 /**
- * Politique de sécurité de contenu, dérivée de l'origine réelle de l'API.
+ * Content security policy, derived from the API's actual origin.
  *
- * # Pourquoi elle est calculée et non écrite dans `index.html`
+ * # Why it is computed and not written into `index.html`
  *
- * Parce qu'une CSP en dur et une `VITE_API_URL` configurable divergent au premier déploiement,
- * et que le symptôme est un « Failed to fetch » que le navigateur émet **avant** d'envoyer quoi
- * que ce soit : le serveur ne voit rien, et le message ne désigne pas la cause. C'est le même
- * piège que celui documenté sur la liste des en-têtes CORS, côté serveur.
+ * Because a hard-coded CSP and a configurable `VITE_API_URL` diverge on the first deployment, and
+ * the symptom is a "Failed to fetch" the browser raises **before** sending anything: the server
+ * sees nothing, and the message does not name the cause. Same trap as the one documented on the
+ * CORS header list, server side.
  *
- * # Pourquoi `connect-src` porte deux origines
+ * # Why `connect-src` carries two origins
  *
- * `connect-src` ne déduit **pas** l'origine `ws://` de l'origine `http://` correspondante. Une
- * seule des deux suffirait à couper la moitié du client — les requêtes ou la session temps
- * réel — sans que l'autre ne le signale.
+ * `connect-src` does **not** infer the `ws://` origin from the matching `http://` one. Either one
+ * alone would cut half the client — requests or the real-time session — without the other
+ * signalling it.
  *
- * # Pas de nonce, et c'est un durcissement
+ * # No nonce, and that is hardening
  *
- * Aucun script inline n'est produit par ce build, donc `'self'` seul suffit : il n'autorise que
- * les fichiers de cette origine, là où un nonce autorise ce que le serveur désigne.
+ * This build emits no inline script, so `'self'` alone suffices: it allows only files from this
+ * origin, where a nonce allows whatever the server designates.
  *
- * Ce qu'elle ne corrige toujours pas : le serveur livre ce JavaScript et peut en livrer une
- * version hostile. Aucune politique navigateur ne s'y oppose — seule l'application de bureau,
- * dont le code est empaqueté dans le binaire installé, ferme cette voie.
+ * What it still does not fix: the server serves this JavaScript and can serve a hostile version.
+ * No browser policy stands in the way — only the desktop app, whose code is packaged into the
+ * installed binary, closes that path.
  */
 function csp(api: string): string {
   const websocket = api.replace(/^http/, "ws");
 
   return [
     "default-src 'self'",
-    // `wasm-unsafe-eval` est requis pour instancier le module WebAssembly ; il n'autorise pas
-    // `eval()` sur du JavaScript.
+    // `wasm-unsafe-eval` is required to instantiate the WebAssembly module; it does not allow
+    // `eval()` on JavaScript.
     "script-src 'self' 'wasm-unsafe-eval'",
-    // Tailwind injecte ses styles à l'exécution. Le risque résiduel d'une injection CSS est sans
-    // commune mesure avec celui d'un script.
+    // Tailwind injects its styles at runtime. The residual risk of a CSS injection is nowhere
+    // near that of a script.
     "style-src 'self' 'unsafe-inline'",
     `connect-src 'self' ${api} ${websocket}`,
     "img-src 'self' data:",
@@ -88,14 +87,13 @@ export default defineConfig(({ mode }) => ({
   },
 
   build: {
-    // **Le réglage qui justifie toute la migration.** Vite injecte par défaut un petit polyfill
-    // inline pour `modulepreload` ; le laisser réintroduirait exactement le script inline qu'on
-    // vient de supprimer, et avec lui le besoin d'un nonce. Les navigateurs visés le supportent
-    // nativement.
+    // **The setting that justifies the whole migration.** Vite injects a small inline polyfill
+    // for `modulepreload` by default; leaving it would reintroduce exactly the inline script we
+    // just removed, and with it the need for a nonce. Target browsers support it natively.
     modulePreload: { polyfill: false },
 
-    // Le module WebAssembly est déjà compressé et fait plus d'un mégaoctet : l'avertissement
-    // n'apprendrait rien, il masquerait ceux qui comptent.
+    // The WebAssembly module is already compressed and over a megabyte: the warning would teach
+    // nothing and would hide the ones that matter.
     chunkSizeWarningLimit: 2048,
   },
 }));

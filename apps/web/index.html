@@ -1,28 +1,27 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <!--
-      `viewport-fit=cover` étend la page sous l'encoche et sous la barre de geste ; sans lui,
-      le système laisse des bandes inertes aux couleurs du fond, et `env(safe-area-inset-*)`
-      vaut zéro — c'est-à-dire que les retraits déclarés dans `index.css` seraient sans effet.
+      `viewport-fit=cover` extends the page under the notch and under the gesture bar; without
+      it the system leaves inert bands in the background colour, and `env(safe-area-inset-*)` is
+      zero — meaning the insets declared in `index.css` would have no effect.
 
-      `maximum-scale` et `user-scalable` sont délibérément absents : ils désactiveraient le zoom,
-      ce dont personne n'a besoin ici et qui retire à qui voit mal le seul recours dont il
-      dispose. Le champ de saisie évite le zoom automatique d'iOS par sa taille de police, pas
-      en interdisant le geste.
+      `maximum-scale` and `user-scalable` are deliberately absent: they would disable zoom, which
+      nobody needs here and which takes away the only recourse a low-vision user has. The input
+      field avoids iOS auto-zoom through its font size, not by forbidding the gesture.
     -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 
-    <title>Whispee — messagerie chiffrée de bout en bout</title>
+    <title>Whispee — end-to-end encrypted messaging</title>
     <meta
       name="description"
-      content="Démonstration MLS (RFC 9420). Projet d'apprentissage, non audité."
+      content="An MLS (RFC 9420) demonstration. A learning project, not audited."
     />
 
     <!--
-      Content-Security-Policy, calculée au build à partir de `VITE_API_URL` : voir `csp()` dans
-      `vite.config.ts`, qui explique pourquoi elle n'est pas écrite en dur ici.
+      Content-Security-Policy, computed at build time from `VITE_API_URL`: see `csp()` in
+      `vite.config.ts`, which explains why it is not hard-coded here.
     -->
     <meta http-equiv="Content-Security-Policy" content="%CSP%" />
     <meta name="referrer" content="no-referrer" />

@@ -1,8 +1,8 @@
-# Postgres de développement.
+# Development Postgres.
 #
-# Port 55432 côté hôte : 5432 et 54322 sont déjà pris sur cette machine, et un serveur de
-# messagerie qui refuse de démarrer parce qu'un autre projet occupe le port est une perte
-# de temps récurrente.
+# Port 55432 on the host: 5432 and 54322 are already taken on this machine, and a messaging
+# server that refuses to start because another project holds the port is a recurring waste of
+# time.
 services:
   postgres:
     image: postgres:17-alpine

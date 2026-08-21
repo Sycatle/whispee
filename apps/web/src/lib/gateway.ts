@@ -35,6 +35,14 @@ import { fromBase64, fromHex, toBase64, toHex } from "./keys";
 export interface GatewayHandlers {
   onEnvelope(groupId: Uint8Array, seq: number): void;
   onSignal(groupId: Uint8Array, payload: Uint8Array): void;
+  /**
+   * The server holds nothing below `oldest` any more, and our cursor was below it.
+   *
+   * The session's counterpart to the `oldest` field of the HTTP fetch. It is announced here so
+   * that a conversation whose history was purged is reported at reconnection, instead of being
+   * indistinguishable from one where nothing has happened.
+   */
+  onGap(groupId: Uint8Array, oldest: number): void;
 }
 
 /** Reconnection delay ceiling. Beyond it, we hammer a server that is already struggling. */
@@ -226,6 +234,10 @@ export class Gateway {
 
       case "envelope":
         this.handlers.onEnvelope(fromHex(frame.group_id as string), frame.seq as number);
+        return;
+
+      case "gap":
+        this.handlers.onGap(fromHex(frame.group_id as string), frame.oldest as number);
         return;
 
       case "signal":

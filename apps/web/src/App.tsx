@@ -5,9 +5,11 @@ import { Unlock } from "@/components/Lock";
 import { MigrationBanner } from "@/components/Migration";
 import { Onboarding } from "@/components/Onboarding";
 import { RELOCK_MS, networkReported, observeIdle, observeLifecycle } from "@/lib/lifecycle";
+import { compactNameOf } from "@/lib/naming";
 import { countUnreadInTitle, createNotifier } from "@/lib/notifications";
 import { type ProposedMigration, Session, start } from "@/lib/session";
 import { RouterProvider, useNavigate } from "@/routes/Router";
+import { useNames } from "@/state/names";
 import { ReportProvider, useReport, useReported } from "@/state/report";
 import { Revision } from "@/state/revision";
 import { SessionProvider, useBump, useSession, type SessionStore } from "@/state/SessionProvider";
@@ -213,6 +215,7 @@ function Frame({
   const bump = useBump();
   const report = useReport();
   const reported = useReported();
+  const names = useNames();
   const navigate = useNavigate();
   // Stable by construction, so the poll below can depend on it without restarting its interval
   // every time a banner or a toast changes.
@@ -379,8 +382,20 @@ function Frame({
       if (before !== undefined && view.contentCursor > before) {
         // The name only travels if the user asked for it: it is the one thing here that ends up
         // legible on a locked screen.
+        /*
+          The compact form, and the second of the two places it exists for. A notification is one
+          line on a lock screen, read at a glance and with nowhere to put the handle underneath —
+          so a self-asserted name that another member of the same thread could be mistaken for is
+          not shown at all, and everybody involved falls back to their handle.
+
+          The disclosure guard above it is unchanged on purpose. A display name is exactly as
+          disclosing as a handle: both name a person to whoever is looking at the screen, and
+          treating a human-readable one as the lesser leak would have it get past a setting the
+          user turned off for the other.
+        */
+        const among = view.accounts.map((account) => account.handle);
         const name = session.discloseConversationName
-          ? view.accounts.map((account) => `@${account.handle}`).join(", ")
+          ? view.accounts.map((account) => compactNameOf(account.handle, names, among)).join(", ")
           : undefined;
 
         notifier.current?.arrived({ conversation: key, ...(name ? { name } : {}) });

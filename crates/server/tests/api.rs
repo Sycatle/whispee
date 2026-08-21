@@ -3455,3 +3455,76 @@ async fn a_group_created_moments_ago_is_not_mistaken_for_an_abandoned_one() {
         "the first envelope of a new conversation was purged"
     );
 }
+
+/// The chain is what ties an account id to whatever key it uses today.
+///
+/// Three properties, and the first is the one that matters: the genesis key **fingerprints to the
+/// account id**. That is what makes an id self-authenticating rather than something the directory
+/// asserts — a server that swapped an account's whole chain would have to produce a first key
+/// hashing to an id it does not control.
+#[tokio::test]
+async fn the_chain_anchors_an_account_on_the_fingerprint_of_its_first_key() {
+    let server = start().await;
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+    let phone = alice.device(&server, "phone").await;
+
+    let before: serde_json::Value =
+        phone.get(&format!("/v1/accounts/{}/chain", alice.id)).await.json().await.unwrap();
+    let genesis = before["chain"].as_array().unwrap();
+    assert_eq!(genesis.len(), 1, "a fresh account has published exactly one key");
+
+    let first = BASE64_STANDARD.decode(genesis[0]["identity_key"].as_str().unwrap()).unwrap();
+    assert_eq!(attest::account_id(&first), alice.id, "the anchor is not the account id");
+    assert!(genesis[0].get("rotation").is_none(), "the genesis entry authorises itself");
+
+    // Rotate, and the chain grows a link rather than replacing one.
+    let (next, _phrase) = crypto_core::Account::generate().unwrap();
+    let rotated_at = now();
+    let rotation = alice.account.rotate(&alice.id, &next.identity_key(), rotated_at).unwrap();
+
+    let response = phone
+        .post(
+            &format!("/v1/accounts/{}/rotate", alice.id),
+            serde_json::json!({
+                "new_identity_key": BASE64_STANDARD.encode(next.identity_key()),
+                "rotation": BASE64_STANDARD.encode(rotation),
+                "rotated_at": rotated_at,
+            }),
+        )
+        .await;
+    assert!(response.status().is_success(), "rotation refused: {:?}", response.status());
+
+    let after: serde_json::Value =
+        phone.get(&format!("/v1/accounts/{}/chain", alice.id)).await.json().await.unwrap();
+    let chain = after["chain"].as_array().unwrap();
+    assert_eq!(chain.len(), 2, "a rotation appends, it does not replace");
+
+    // The anchor has not moved. This is the property that lets an account keep its name across a
+    // rotation, and the reason the id is computed from the genesis key rather than the live one.
+    let still = BASE64_STANDARD.decode(chain[0]["identity_key"].as_str().unwrap()).unwrap();
+    assert_eq!(attest::account_id(&still), alice.id);
+
+    // And the new link is signed by the key it supersedes — verified here the way a client would,
+    // against the previous entry rather than against the server's say-so.
+    let signature = BASE64_STANDARD.decode(chain[1]["rotation"].as_str().unwrap()).unwrap();
+    let claim = attest::RotationClaim {
+        account: &alice.id,
+        new_identity_key: &next.identity_key(),
+        rotated_at: chain[1]["rotated_at"].as_i64().unwrap() as u64,
+    };
+    attest::verify_rotation(&still, &claim, &signature).expect("the link does not verify");
+}
+
+/// A chain nobody has published is absent, not empty.
+///
+/// An empty array reads as "this account has no keys", which is not a state an account can be in
+/// — it would let a caller conclude something false about an account that simply is not there.
+#[tokio::test]
+async fn an_unknown_account_has_no_chain_rather_than_an_empty_one() {
+    let server = start().await;
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+    let phone = alice.device(&server, "phone").await;
+
+    let response = phone.get(&format!("/v1/accounts/{}/chain", "0".repeat(32))).await;
+    assert_eq!(response.status(), 404);
+}

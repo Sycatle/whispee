@@ -95,6 +95,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/accounts/{account}/devices", get(list_account_devices))
         .route("/v1/accounts/{account}/rotate", post(rotate_account))
         .route("/v1/accounts/{account}/handle", post(rename_account))
+        .route("/v1/accounts/{account}/chain", get(account_chain))
         .route("/v1/handles/{handle}", get(resolve_handle))
         .route("/v1/log/sth", get(log_head))
         .route("/v1/log/proof/{account}", get(log_proof))
@@ -372,7 +373,9 @@ async fn create_account(
     // inclusion proof would be rejected by every client: the account would exist without being
     // reachable, and nothing would say why.
     if inserted.rows_affected() > 0 {
-        crate::log::append(&mut tx, &id, &identity_key).await?;
+        // The genesis entry: no predecessor, so nothing authorises it but the fact that its
+        // fingerprint *is* the id being created. A client checks that itself.
+        crate::log::append(&mut tx, &id, &identity_key, None).await?;
     }
 
     // The handle, in the same transaction as the account it names.
@@ -883,6 +886,55 @@ async fn log_proof(
     }))
 }
 
+#[derive(Serialize)]
+struct ChainEntry {
+    seq: i64,
+    identity_key: String,
+    /// Absent on the genesis entry, which has no predecessor to be authorised by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rotation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rotated_at: Option<i64>,
+}
+
+/// Every identity key an account has published, oldest first, with what authorised each.
+///
+/// # What the caller does with it, and why the server proves nothing here
+///
+/// Three checks, all local:
+///
+/// 1. The first entry's key fingerprints to the account id. **This is the anchor** — it is what
+///    makes an id self-authenticating rather than something the directory asserts.
+/// 2. Each later entry is signed by the key of the one before it, over `wac-rotate-v2`.
+/// 3. Each entry is in the tree, via the inclusion proof at `/v1/log/proof`.
+///
+/// None of those needs the server to be honest. It can withhold a link, and a chain with a hole
+/// fails check 2 — which the client reports rather than papering over. It cannot forge one: it
+/// does not hold any account key, and that is the whole reason rotations are signed by their
+/// predecessor rather than merely recorded.
+async fn account_chain(
+    State(pool): State<PgPool>,
+    Path(account): Path<String>,
+    _signed: Signed,
+) -> ApiResult<Json<serde_json::Value>> {
+    let links = crate::log::chain(&pool, &account).await?;
+    if links.is_empty() {
+        return Err(ApiError::NotFound);
+    }
+
+    let entries: Vec<ChainEntry> = links
+        .into_iter()
+        .map(|link| ChainEntry {
+            seq: link.seq,
+            identity_key: BASE64_STANDARD.encode(link.identity_key),
+            rotation: link.rotation.map(|bytes| BASE64_STANDARD.encode(bytes)),
+            rotated_at: link.rotated_at,
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "account": account, "chain": entries })))
+}
+
 #[derive(Deserialize)]
 struct ConsistencyQuery {
     /// Log size as the client last saw it.
@@ -1003,7 +1055,13 @@ async fn rotate_account(
     // A rotation **appends** to the log, it replaces nothing: this is what lets a client see
     // that a key changed rather than watch it vanish, and what stops the server from quietly
     // rewriting an identity.
-    crate::log::append(&mut tx, &account, &new_identity_key).await?;
+    //
+    // The signature travels with it now. It was verified a few lines above and used to be thrown
+    // away, which left every other client taking our word that the key change was the account's
+    // own doing — a gap that became load-bearing once the account id was anchored on the genesis
+    // key. See `migrations/0015_rotation_chain.sql`.
+    crate::log::append(&mut tx, &account, &new_identity_key, Some((&rotation, payload.rotated_at)))
+        .await?;
 
     // The other devices' KeyPackages go with the old key: they carry credentials nobody can
     // tie back to the account any more, and would be used to add those devices to new groups.

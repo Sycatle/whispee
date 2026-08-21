@@ -62,17 +62,64 @@ pub async fn append(
     tx: &mut sqlx::PgConnection,
     account: &str,
     identity_key: &[u8],
+    // `rotation` is the signature authorising this key, and the instant it covers. `None` on the
+    // genesis entry, which has no predecessor to be authorised by: its authority is that its
+    // fingerprint **is** the account id, and a client checks that directly rather than being told
+    // it. Every later entry carries the link — see `migrations/0015_rotation_chain.sql` for why
+    // the chain is published at all.
+    rotation: Option<(&[u8], u64)>,
 ) -> Result<(), sqlx::Error> {
     let leaf = transparency::leaf_hash(&transparency::entry(account, identity_key));
 
-    sqlx::query("INSERT INTO log_entries (account, identity_key, leaf) VALUES ($1, $2, $3)")
-        .bind(account)
-        .bind(identity_key)
-        .bind(leaf.as_slice())
-        .execute(tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO log_entries (account, identity_key, leaf, rotation, rotated_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(account)
+    .bind(identity_key)
+    .bind(leaf.as_slice())
+    .bind(rotation.map(|(signature, _)| signature))
+    .bind(rotation.map(|(_, at)| at as i64))
+    .execute(tx)
+    .await?;
 
     Ok(())
+}
+
+/// One published key of an account, and what authorised it.
+///
+/// Ordered by `seq`, which is the tree's own order: the first is the genesis key, whose
+/// fingerprint is the account id.
+pub struct ChainLink {
+    pub seq: i64,
+    pub identity_key: Vec<u8>,
+    pub rotation: Option<Vec<u8>>,
+    pub rotated_at: Option<i64>,
+}
+
+/// Every key an account has published, oldest first.
+///
+/// The server can withhold a link and cannot forge one. A chain with a hole fails to verify on
+/// the client, which says so rather than assuming continuity — omission stays possible and stays
+/// detectable, which is the asymmetry the whole project rests on.
+pub async fn chain(pool: &PgPool, account: &str) -> Result<Vec<ChainLink>, sqlx::Error> {
+    let rows: Vec<(i64, Vec<u8>, Option<Vec<u8>>, Option<i64>)> = sqlx::query_as(
+        "SELECT seq, identity_key, rotation, rotated_at FROM log_entries
+         WHERE account = $1 ORDER BY seq",
+    )
+    .bind(account)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(seq, identity_key, rotation, rotated_at)| ChainLink {
+            seq,
+            identity_key,
+            rotation,
+            rotated_at,
+        })
+        .collect())
 }
 
 /// Brings accounts created before the log existed into it.
@@ -93,7 +140,8 @@ pub async fn backfill(pool: &PgPool) -> Result<usize, sqlx::Error> {
 
     let mut tx = pool.begin().await?;
     for (account, identity_key) in &missing {
-        append(&mut tx, account, identity_key).await?;
+        // A backfilled account has no rotation to record: this is its first published key.
+        append(&mut tx, account, identity_key, None).await?;
     }
     tx.commit().await?;
 

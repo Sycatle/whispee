@@ -338,6 +338,28 @@ export class Session {
     await this.persist();
   }
 
+  /**
+   * What is typed and not yet sent, per conversation.
+   *
+   * Switching conversation used to lose it: the text lived in the composer's own state, which is
+   * unmounted the moment the other pane takes over. Half a sentence, gone for changing screen to
+   * check something — the most ordinary thing anyone does mid-message.
+   *
+   * **Not persisted**, unlike the outbox. A draft is a thought in progress and the tab closing is
+   * a fair end to it; the outbox holds messages someone decided to send. Keeping drafts would
+   * also write the one thing nobody has committed to into a file they cannot see.
+   */
+  private readonly drafts = new Map<string, string>();
+
+  draftIn(view: ConversationView): string {
+    return this.drafts.get(view.key) ?? "";
+  }
+
+  setDraft(view: ConversationView, text: string): void {
+    if (text === "") this.drafts.delete(view.key);
+    else this.drafts.set(view.key, text);
+  }
+
   /** Real-time session, when it is open. Its failure removes no feature. */
   private gateway?: Gateway;
 

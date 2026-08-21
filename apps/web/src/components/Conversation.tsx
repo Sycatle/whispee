@@ -25,7 +25,9 @@ export function Conversation({
    */
   onBack?: () => void;
 }) {
-  const [text, setText] = useState("");
+  // Seeded from the session, which is what makes a half-written message survive a look at
+  // another conversation. Keyed on the view, so switching remounts with the right draft.
+  const [text, setText] = useState(() => session.draftIn(view));
   const [verifying, setVerifying] = useState<string | null>(null);
   const [group, setGroup] = useState(false);
   const [sending, setSending] = useState(false);
@@ -47,11 +49,12 @@ export function Conversation({
       .catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
   }, [session, view, onChanged, onError]);
 
-  const send = async (event: React.FormEvent) => {
+  const send = async (event: { preventDefault: () => void }) => {
     event.preventDefault();
     const body = text.trim();
     if (!body) return;
     setText("");
+    session.setDraft(view, "");
     const cite = replyTo;
     setReplyTo(null);
 
@@ -80,6 +83,7 @@ export function Conversation({
    */
   const typing = (value: string) => {
     setText(value);
+    session.setDraft(view, value);
     if (value) void session.notifyTyping(view).catch(() => {});
   };
 
@@ -237,14 +241,33 @@ export function Conversation({
         >
           {sending ? "…" : "📎"}
         </button>
-        <input
+        {/*
+          A textarea, not an input. A messenger that cannot hold a line break refuses paragraphs,
+          pasted addresses and anything with a list in it.
+
+          Enter still sends, because that is what everyone's hands expect; Shift+Enter breaks the
+          line. On a touch device Enter does **not** send — the on-screen keyboard's return key is
+          how people write a second line, and hijacking it would make multi-line messages
+          impossible on precisely the device where they are hardest to retype.
+
+          The height follows the content up to a ceiling, past which it scrolls: a composer that
+          grows without limit eats the conversation it belongs to.
+        */}
+        <textarea
           value={text}
           onChange={(e) => typing(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== "Enter" || e.shiftKey) return;
+            if (matchMedia("(pointer: coarse)").matches) return;
+            e.preventDefault();
+            void send(e);
+          }}
+          rows={1}
           placeholder={replyTo === null ? "Message" : "Reply"}
           // `text-base` on purpose: below 16 pixels, iOS zooms into the field on focus and does
           // not zoom back out on blur. Fixing that by forbidding zoom would strip a fallback
           // from the people who need it; fixing it by font size costs nothing.
-          className="min-w-0 flex-1 rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2 text-base touch:min-h-11"
+          className="max-h-32 min-w-0 flex-1 resize-none rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2 text-base field-sizing-content touch:min-h-11"
         />
         <button
           type="submit"

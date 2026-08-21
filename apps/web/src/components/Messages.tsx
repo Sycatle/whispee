@@ -28,6 +28,7 @@ import { nextExpiry } from "@/lib/signals";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
+import { Banner } from "@/ui/Banner";
 import { Button } from "@/ui/Button";
 import { cn } from "@/ui/cn";
 import { IconButton } from "@/ui/IconButton";
@@ -194,6 +195,28 @@ export function Messages({
 
   return (
     <>
+      {/*
+        The severed ratchet, said out loud.
+
+        Until now `view.stale` stopped the polling and rendered nothing, so the conversation
+        simply went quiet — the doc comment on the flag calls that the lesser of two wrongs and
+        still a wrong. This is the sentence that was owed.
+
+        Above the list rather than inside it, and not dismissible: the condition is still true,
+        and a banner waved away would leave a thread that looks alive and is not. It promises no
+        recovery, because none is implemented.
+      */}
+      {view.stale === true && (
+        <div className="p-pane pb-0">
+          <Banner tone="danger" title="This conversation stops here on this device">
+            Messages waiting on the server were deleted before this device could fetch them, and
+            they are part of what decrypts everything sent afterwards. Nothing further will arrive
+            in this thread here. What is already on screen stays readable, and the conversation
+            keeps working on your other devices and for the people you were talking to.
+          </Banner>
+        </div>
+      )}
+
       <ol className="min-h-0 flex-1 space-y-snug overflow-y-auto p-pane">
         {visible.map((message, index) => {
           const before = index === 0 ? undefined : visible[index - 1];

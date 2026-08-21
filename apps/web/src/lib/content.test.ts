@@ -167,3 +167,41 @@ test("a profile carrying an oversized name is rejected on decode", () => {
 
   assert.throws(() => decode(oversized));
 });
+
+test("a membership notice round-trips, for each event", () => {
+  for (const event of ["joined", "removed", "left"] as const) {
+    const decoded = decode(encode({ kind: "membership", event, handle: "charlie8295" }));
+    assert.deepEqual(decoded, { body: { kind: "membership", event, handle: "charlie8295" } });
+  }
+});
+
+test("a membership notice is not control, so it is shown, archived and counted", () => {
+  // The whole point is that it appears in the thread. Were it control it would be silently
+  // dropped from the display, from the vault, and from the unread count — three failures with
+  // one cause and no error anywhere.
+  assert.equal(isControl({ kind: "membership", event: "joined", handle: "charlie8295" }), false);
+});
+
+test("a membership notice keeps its timestamp", () => {
+  // Being non-control is what earns the stamp: the line sits in the thread among messages, and
+  // one line without an hour in a column of them is the odd one out.
+  const at = new Date("2024-03-04T12:00:00Z").getTime();
+  const decoded = decode(encode({ kind: "membership", event: "left", handle: "dana4417" }, at));
+
+  assert.equal(decoded.sentAt, at);
+  assert.deepEqual(decoded.body, { kind: "membership", event: "left", handle: "dana4417" });
+});
+
+test("an unknown membership event is refused rather than drawn with a blank verb", () => {
+  // A newer client saying something this one cannot render. The alternative to throwing is a
+  // sentence with a hole in it, which reads as a bug in the conversation rather than in the app.
+  const forged = new Uint8Array([10, 99, ...new TextEncoder().encode("charlie8295")]);
+  assert.throws(() => decode(forged), /unknown membership event/);
+});
+
+test("a handle with an astral character survives the round trip", () => {
+  // The subject is somebody else's handle: it is not our string to assume anything about.
+  const handle = "dana\u{1F600}4417";
+  const decoded = decode(encode({ kind: "membership", event: "removed", handle }));
+  assert.deepEqual(decoded.body, { kind: "membership", event: "removed", handle });
+});

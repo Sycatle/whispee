@@ -80,6 +80,38 @@ const TYPE_PROFILE = 8;
  * is a peer decoding an invitation as somebody's name. Numbers are cheap; collisions are not.
  */
 
+/**
+ * A change of membership, said in the thread so that everybody sees the same history.
+ *
+ * # Why a message and not the commit
+ *
+ * Every member already receives the MLS commit that adds or removes somebody: the information is
+ * on the wire either way. Reading it out of the commit would be the more robust design — nothing
+ * to send separately, nothing to fail to send — and it is not what this does, because a commit
+ * says which *leaf* moved, not which account it belonged to nor who caused it. Recovering "Alice
+ * removed Bob" from it means mapping leaves back to handles at the epoch before the change, for
+ * a line of prose. The message carries what the sentence needs and nothing else.
+ *
+ * The cost is stated rather than hidden: this is a claim by its sender, like any message. A
+ * client could post "Alice removed Bob" without removing anybody. It changes no state and grants
+ * nothing — the roster and the tree are the truth, and both are authenticated — so the worst case
+ * is a line of fiction in a conversation where the reader can see the member list disagreeing
+ * with it. Making it unforgeable would mean deriving it from the commit, which is the design
+ * above, at the price described above.
+ *
+ * # Not control
+ *
+ * It is meant to be read, so it is displayed, archived, and counted like anything else in the
+ * thread. That is deliberate down to the unread count: somebody added to a group while away has
+ * had the room change under them, which is news in the same sense a message is.
+ */
+const TYPE_MEMBERSHIP = 10;
+
+/** What happened to somebody's membership. The subject is `handle`; the actor is the sender. */
+export type MembershipEvent = "joined" | "removed" | "left";
+
+const MEMBERSHIP_EVENTS: MembershipEvent[] = ["joined", "removed", "left"];
+
 export type Content =
   | { kind: "text"; text: string }
   | { kind: "attachment"; ref: AttachmentRef }
@@ -88,7 +120,8 @@ export type Content =
   | { kind: "receipt"; state: ReceiptState; seq: number }
   | { kind: "reaction"; target: number; emoji: string }
   | { kind: "reply"; target: number; text: string }
-  | { kind: "profile"; name: string; at: number };
+  | { kind: "profile"; name: string; at: number }
+  | { kind: "membership"; event: MembershipEvent; handle: string };
 
 /**
  * What a receipt attests.
@@ -148,6 +181,16 @@ export function encodeText(text: string): Uint8Array {
  * it as an **anchor** and asks the server to prove that its own log extends it. Carrying the
  * signature would suggest it serves some purpose here.
  */
+/** `u8 event ‖ handle`. The handle is the subject; who did it is the sender of the message. */
+export function encodeMembership(event: MembershipEvent, handle: string): Uint8Array {
+  const name = new TextEncoder().encode(handle);
+  const out = new Uint8Array(1 + 1 + name.length);
+  out[0] = TYPE_MEMBERSHIP;
+  out[1] = MEMBERSHIP_EVENTS.indexOf(event);
+  out.set(name, 2);
+  return out;
+}
+
 export function encodeGossip(head: GossipHead): Uint8Array {
   const out = new Uint8Array(1 + 4 + 32);
   out[0] = TYPE_GOSSIP;
@@ -222,6 +265,8 @@ function encodeBody(body: Content): Uint8Array {
       return encodeTargeted(TYPE_REPLY, body.target, body.text);
     case "profile":
       return encodeProfile(body.name, body.at);
+    case "membership":
+      return encodeMembership(body.event, body.handle);
   }
 }
 
@@ -396,6 +441,21 @@ function decodeBody(bytes: Uint8Array): Content {
       return bytes[0] === TYPE_REACTION
         ? { kind: "reaction", target, emoji: text }
         : { kind: "reply", target, text };
+    }
+
+    case TYPE_MEMBERSHIP: {
+      if (body.length < 1) throw new Error("truncated membership event");
+
+      const event = MEMBERSHIP_EVENTS[body[0]];
+      // An event byte we do not know is a newer client saying something this one cannot render.
+      // Refusing it is right: the alternative is drawing a line with a blank verb in it.
+      if (event === undefined) throw new Error("unknown membership event");
+
+      return {
+        kind: "membership",
+        event,
+        handle: new TextDecoder().decode(body.subarray(1)),
+      };
     }
 
     case TYPE_PROFILE: {

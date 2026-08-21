@@ -121,21 +121,24 @@ reason to say so first.
 
 ## Adding somebody to an existing group
 
-**Wanted, and not written.** A group's members are the members it was created with, minus anybody
-removed since; talking to somebody new means starting another conversation that has them in it.
-That is a real limitation rather than a design position, and the interface no longer explains it
-away — the sentence that used to sit in the detail column was removed because a limitation
-described at length reads as a decision.
+**Done.** `Session.addAccount` adds an account and all of its devices to a group that already
+exists, and the thread says so — a membership notice is posted for the addition, the removal and
+the departure alike, so everybody sees the same history of who came and went.
 
-What exists: `api.addMembers` is reached from starting a conversation and from catching up an
-existing member's new device, so the server side and the MLS `Add` proposal are both already
-exercised. What is missing is the part that makes it an *invitation* rather than a mechanism —
-who is allowed to add, what the added member can read, and what the rest of the group is told.
+Three things it settles, recorded because each was a way it could have gone wrong quietly:
 
-The last of those is the one to settle first. MLS gives a new member the group secret from their
-commit onward and nothing before it, so history is not disclosed by adding somebody; but "nothing
-before it" is a property the person adding them has to understand, and the person being added has
-to be told what they will and will not see. Neither sentence is written anywhere yet.
+- **Who may add.** Moderators and the admin, the same rank that may remove. A member able to add
+  somebody they cannot then remove would change the room for everybody with no way back.
+- **What the new member reads.** Nothing said before their own commit. That is the MLS ratchet
+  rather than a policy, so no setting can soften it; the confirmation says it plainly instead of
+  leaving the reader to assume.
+- **The posting key.** It travels *through* MLS, once per session, so somebody joining afterwards
+  never sees that message — it predates their commit. Left alone they would fall back to signed
+  posts: working, and a silent downgrade of sealed sender. Adding clears `postingKeyShared` so
+  the next poll re-shares it.
+
+What it does not do: there is no invitation to accept. The added member is in the group from the
+commit, and the first they know of it is the conversation appearing.
 
 ## What will not be resolved
 

@@ -7,6 +7,7 @@
  */
 import { type ResolvedAccount, resolveAccount } from "./account";
 import { Api, ApiError, type PostMac } from "./api";
+import type { MembershipEvent } from "./content";
 import { deviceNameCandidates, detectDeviceKind } from "./device";
 import { type PairingCode, decodePairingCode } from "./pairing";
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
@@ -1454,6 +1455,30 @@ export class Session {
     view.accounts = [...view.accounts, peer];
     this.refreshView(view);
     await this.persist();
+
+    // Announced after the commit, deliberately: sent before, it would predate the new member's
+    // own arrival in the tree and be the one line about them they could not read.
+    await this.announce(view, "joined", handle);
+  }
+
+  /**
+   * Says in the thread that the membership changed.
+   *
+   * Failure is swallowed. The change has already happened — the commit is out, the tree has
+   * moved — and throwing here would report a *failed removal* to somebody whose removal
+   * succeeded, which is a worse lie than a missing line. The line is a courtesy to the reader;
+   * the roster is the record.
+   */
+  private async announce(
+    view: ConversationView,
+    event: MembershipEvent,
+    handle: string,
+  ): Promise<void> {
+    try {
+      await this.sendContent(view, { kind: "membership", event, handle });
+    } catch (error) {
+      console.warn(`membership notice not sent (${event} ${handle})`, error);
+    }
   }
 
   async removeAccount(view: ConversationView, handle: string): Promise<void> {
@@ -1469,6 +1494,11 @@ export class Session {
     view.accounts = view.accounts.filter((candidate) => candidate.handle !== handle);
     this.refreshView(view);
     await this.persist();
+
+    // The people still here are the audience: whoever was removed is out of the tree by now and
+    // will not receive this, which is the right outcome — they were not told twice, and the room
+    // that is left knows what happened to it.
+    await this.announce(view, "removed", handle);
   }
 
   /**
@@ -1543,6 +1573,12 @@ export class Session {
         roles.moderators.filter((m) => m !== heir),
       );
     }
+
+    // Before the proposal, and that ordering is the whole reason this works: leaving is a
+    // request another member commits, so between the proposal and the commit we are still in the
+    // group — but only just, and a client that committed quickly would take our ability to write
+    // with it. Said first, the line is always sent by somebody who is still a member.
+    await this.announce(view, "left", this.handle);
 
     const proposal = this.client.leaveGroup(view.groupId);
     const posted = await this.api.postEnvelope(view.groupId, envelope.encodeMls(proposal));

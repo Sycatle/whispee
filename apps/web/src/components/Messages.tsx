@@ -249,7 +249,10 @@ export function Messages({
    * tick that would have to explain itself.
    */
   const lastMine = visible.reduce<number | null>(
-    (found, message) => (message.mine ? message.seq : found),
+    // A membership notice is ours in the sense that we sent it, and nobody wants to know whether
+    // "you added Bob" has been read. The receipt belongs to the last thing we *said*.
+    (found, message) =>
+      message.mine && message.content.kind !== "membership" ? message.seq : found,
     null,
   );
 
@@ -504,6 +507,40 @@ export function Messages({
         className="flex min-h-0 flex-1 flex-col overflow-y-auto py-pane [&>*:first-child]:mt-auto [&>li]:shrink-0"
       >
         {rows.map(({ key, message, opensDay, continues, opensUnread }) => {
+          /*
+            A change of membership is not somebody speaking, so it is not drawn like one: no face,
+            no name column, no hour beside it, no reactions and no reply. A centred line, the way
+            the day separator is, because both are the thread saying something about itself rather
+            than carrying what a person said.
+            
+            It is still a `<li>` with a `data-row`, so it takes its place in the roving tabindex
+            and the arrow keys walk over it — it is a line of the conversation, and skipping it
+            would make the thread jump for no reason the reader can see.
+          */
+          if (message.content.kind === "membership") {
+            const { event, handle } = message.content;
+            const actor = authorOf(message);
+            const subject = nameOfAuthor(handle);
+
+            // The sender is the actor, so "left" needs no attribution: the subject is the actor.
+            // The other two do, and the sentence reads better with the actor first.
+            const said =
+              event === "left"
+                ? `${subject} left`
+                : `${nameOfAuthor(actor)} ${event === "joined" ? "added" : "removed"} ${subject}`;
+
+            return (
+              <li
+                key={key}
+                data-row={key}
+                tabIndex={thread.at === key ? 0 : -1}
+                className="px-pane py-snug text-center focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)"
+              >
+                <span className="text-caption text-(--color-ink-muted)">{said}</span>
+              </li>
+            );
+          }
+
           // Extracted before the JSX: type narrowing is lost inside a closure, and working
           // around it inline made the render unreadable.
           const attachment = message.content.kind === "attachment" ? message.content.ref : null;

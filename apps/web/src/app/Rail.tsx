@@ -72,6 +72,20 @@ function preview(view: ConversationView): { text: string; mine: boolean } {
     if (content.kind === "text" || content.kind === "reply")
       return { text: content.text, mine: message.mine };
     if (content.kind === "attachment") return { text: content.ref.name, mine: message.mine };
+
+    // A membership change is the latest news of a conversation as much as a message is, and
+    // skipping it would leave the row showing something older than the reason it just moved to
+    // the top. Never prefixed with "You:": the sentence already names who did what.
+    if (content.kind === "membership") {
+      const subject = formatHandle(content.handle);
+      return {
+        mine: false,
+        text:
+          content.event === "left"
+            ? `${subject} left`
+            : `${subject} ${content.event === "joined" ? "joined" : "was removed"}`,
+      };
+    }
   }
   return { text: "", mine: false };
 }

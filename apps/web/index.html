@@ -20,6 +20,20 @@
     />
 
     <!--
+      The colour the system paints around the page: the Android address bar, and the band above
+      the safe area. Two declarations because the answer differs by scheme, and sRGB hex because
+      `theme-color` is read by the browser chrome rather than by the page, where OKLCH support is
+      not something to rely on.
+
+      These duplicate `--color-surface` from `index.css` by hand. That is unfortunate and there
+      is no mechanism to avoid it — this file is not processed by Tailwind. If the surface colour
+      moves, these move with it; the symptom of forgetting is a seam between the page and the
+      system bar, visible only on a phone.
+    -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fbfbfc" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#14161b" />
+
+    <!--
       Content-Security-Policy, computed at build time from `VITE_API_URL`: see `csp()` in
       `vite.config.ts`, which explains why it is not hard-coded here.
     -->
@@ -28,6 +42,18 @@
   </head>
   <body class="min-h-dvh antialiased">
     <div id="root"></div>
+    <!--
+      Where floating surfaces are mounted: menus, dialogs, mobile sheets, toasts.
+
+      A sibling of `#root` rather than a child, so that a portal is never subject to a transform,
+      an `overflow: hidden` or a stacking context created somewhere in the layout — the three
+      things that silently clip or mis-place a popover. Being last in the document also means it
+      wins the paint order without needing a `z-index` to say so.
+
+      Empty in the markup and filled at run time by `ui/Overlays.tsx`. It exists here, as static
+      HTML, because the CSP allows no inline script to create it.
+    -->
+    <div id="overlays"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

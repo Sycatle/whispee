@@ -13,6 +13,7 @@ import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./atta
 import * as content from "./content";
 import * as envelope from "./envelope";
 import { type Cached, decodeHistory, encodeHistory } from "./history";
+import { PINNED_LOG_KEY } from "./pinning";
 import { fromBase64, toBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
@@ -1084,6 +1085,7 @@ export class Session {
         handle,
         account.identityKey,
         this.seenHead,
+        PINNED_LOG_KEY,
       );
 
       if (verdict.ok) {

@@ -150,3 +150,32 @@ test("a log shorter than a peer's view is refused without asking for a proof", a
 
   assert.equal(verdict.ok, false);
 });
+
+/**
+ * The only check that works on a **first** contact. Everything else compares the server against
+ * its own past, which a server meeting a client for the first time has none of.
+ */
+test("a log signed by a key this build was not compiled for is refused", () => {
+  const verdict = acceptHead(crypto(), head(), undefined, bytes(0xbb));
+
+  assert.equal(verdict.ok, false);
+});
+
+test("the pinned key accepts the log it was pinned to", () => {
+  assert.deepEqual(acceptHead(crypto(), head(), undefined, KEY), { ok: true });
+});
+
+/**
+ * A deployment generates its own log key on first boot, so there is nothing to compile in until
+ * it has. An unset pin must therefore leave behaviour exactly as it was.
+ */
+test("no pin leaves the first contact exactly as it was", () => {
+  assert.deepEqual(acceptHead(crypto(), head(), undefined, undefined), { ok: true });
+});
+
+/** The pin is checked before the anchor: a wrong key is wrong whatever else agrees with it. */
+test("the pin outranks a matching anchor", () => {
+  const verdict = acceptHead(crypto(), head(), seen(), bytes(0xbb));
+
+  assert.equal(verdict.ok, false);
+});

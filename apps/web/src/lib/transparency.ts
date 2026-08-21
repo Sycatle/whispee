@@ -56,7 +56,26 @@ export function acceptHead(
   crypto: Crypto,
   head: SignedHead,
   seen: SeenHead | undefined,
+  /**
+   * The log key this build was compiled against, if it was compiled against one.
+   *
+   * This is the only check here that works on **first contact**. Everything else compares the
+   * server against its own past: with no anchor and no pin, a client meeting a hostile server for
+   * the first time has nothing to hold it to, and the server can sign a log of its own invention
+   * with a key of its own choosing. A key that shipped with the application did not come from it.
+   *
+   * Passed in rather than read from the environment here, so this module stays testable without a
+   * bundler. See `pinning.ts` for where the value comes from and what it is worth on each target.
+   */
+  pinned?: Uint8Array,
 ): Verdict {
+  if (pinned && !equal(pinned, head.logKey)) {
+    return {
+      ok: false,
+      reason: "the log is signed by a key this application was not built to trust.",
+    };
+  }
+
   if (seen && !equal(seen.logKey, head.logKey)) {
     return { ok: false, reason: "the log key changed: this is no longer the same log." };
   }
@@ -92,10 +111,11 @@ export async function verifyAccount(
   handle: string,
   identityKey: Uint8Array,
   seen: SeenHead | undefined,
+  pinned?: Uint8Array,
 ): Promise<{ verdict: Verdict; head?: SeenHead }> {
   const proof = await api.logProof(handle);
 
-  const head = acceptHead(crypto, proof.head, seen);
+  const head = acceptHead(crypto, proof.head, seen, pinned);
   if (!head.ok) return { verdict: head };
 
   // The leaf is **recomputed** from the handle and the key we are served. Using the server's would

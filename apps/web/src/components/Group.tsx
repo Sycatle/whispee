@@ -1,12 +1,10 @@
 import { useState } from "react";
-import { formatHandle, nameOf } from "@/lib/naming";
+import { formatHandle } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { Button } from "@/ui/Button";
 import { ContextMenu } from "@/ui/ContextMenu";
 import { Dialog } from "@/ui/Dialog";
 import { useBump, useSession } from "@/state/SessionProvider";
-import { useNames } from "@/state/names";
-import { useNavigate } from "@/routes/Router";
 import { useReport } from "@/state/report";
 
 /**
@@ -50,7 +48,7 @@ import { useReport } from "@/state/report";
  * under it. See the rule at the top of `state/SessionProvider.tsx`: a session arriving by prop is
  * fresh exactly once.
  */
-export function GroupPanel({
+export function useGroupAdmin({
   view,
   onClose,
 }: {
@@ -65,8 +63,6 @@ export function GroupPanel({
   const session = useSession();
   const bump = useBump();
   const report = useReport();
-  const names = useNames();
-  const navigate = useNavigate();
 
   const [busy, setBusy] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -118,174 +114,71 @@ export function GroupPanel({
    * both. The confirmations further down deliberately do not — see the comment above the first
    * of them.
    */
-  /**
-   * A member's name, and a way in to their card.
-   *
-   * `handle` is optional because our own row has nowhere to go: the card behind these names is a
-   * verification panel, and there is nothing to verify about the key this device holds. Without
-   * it the name renders as plain text — no underline, no pointer, nothing promised.
-   */
-  const Member = ({
-    name,
-    handle,
-  }: {
-    name: { primary: string; secondary: string | null };
-    handle?: string;
-  }) => (
-    <>
-      {handle === undefined ? (
-        <span>{name.primary}</span>
-      ) : (
-        <button
-          type="button"
-          onClick={() => navigate({ kind: "conversation", key: view.key, detail: { handle } })}
-          className="rounded-control underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent)"
-        >
-          {name.primary}
-        </button>
-      )}
-      {name.secondary !== null && (
-        <span className="font-evidence text-caption text-(--color-ink-muted)">
-          {name.secondary}
-        </span>
-      )}
-    </>
-  );
+  const menuFor = (handle: string) => {
+    const isModerator = roles?.moderators.includes(handle) ?? false;
+    const isAdmin = roles?.admin === handle;
 
-  const Role = ({ handle }: { handle: string }) => {
-    const named = role(handle);
-    if (named === null) return null;
-    return <span className="text-caption text-(--color-accent)">{named}</span>;
+    // Ourselves: the group has nothing to do *to* us, but leaving is ours to do, so the menu
+    // says that rather than "no actions". Excluding our own row would make one name in every
+    // group behave unlike the others for a reason the reader cannot see.
+    if (handle === session.handle) {
+      return roles === null ? (
+        <ContextMenu.Item disabled onSelect={() => undefined}>
+          No actions
+        </ContextMenu.Item>
+      ) : (
+        <ContextMenu.Item icon="revoke" tone="danger" onSelect={() => setLeaving(true)}>
+          Leave the group
+        </ContextMenu.Item>
+      );
+    }
+
+    if (roles === null || isAdmin) {
+      // No roles at all is a one-to-one wearing a group's clothes, and the admin has no rank
+      // above them to be given or taken.
+      return (
+        <ContextMenu.Item disabled onSelect={() => undefined}>
+          No actions
+        </ContextMenu.Item>
+      );
+    }
+
+    return (
+      <>
+        {iAmAdmin && (
+          <>
+            {/* Reversible in one click, so it is not behind a confirmation. */}
+            <ContextMenu.Item
+              disabled={busy}
+              onSelect={() => void action(() => session.setModerator(view, handle, !isModerator))}
+            >
+              {isModerator ? "Remove moderator" : "Make moderator"}
+            </ContextMenu.Item>
+            <ContextMenu.Item
+              disabled={busy}
+              onSelect={() => setPending({ kind: "handover", handle })}
+            >
+              Hand over
+            </ContextMenu.Item>
+          </>
+        )}
+        {/* A moderator removes ordinary members, not their peers. */}
+        {iModerate && (!isModerator || iAmAdmin) && (
+          <ContextMenu.Item
+            icon="revoke"
+            tone="danger"
+            disabled={busy}
+            onSelect={() => setPending({ kind: "remove", handle })}
+          >
+            Remove from group
+          </ContextMenu.Item>
+        )}
+      </>
+    );
   };
 
-  return (
+  const footer = (
     <div className="space-y-snug">
-      {roles === null && (
-        <p className="text-caption text-(--color-ink-muted)">
-          One-to-one conversation: no roles. A hierarchy would make no sense here.
-        </p>
-      )}
-
-      <ul className="space-y-tight">
-        <li className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
-          {/* Through `nameOf` like every other row: `useNames` folds this account's display name
-              into `profiles` under its own handle, so the self case does not exist here. */}
-          <Member name={nameOf(session.handle, names)} />
-          <span className="text-caption text-(--color-ink-muted)">(you)</span>
-          <Role handle={session.handle} />
-        </li>
-
-        {view.accounts.map((account) => {
-          const isModerator = roles?.moderators.includes(account.handle) ?? false;
-          const isAdmin = roles?.admin === account.handle;
-
-          return (
-            /* The same three actions the buttons below carry, on the row itself. They go through
-               `setPending` exactly as the buttons do, so "Hand over" and "Remove" still raise the
-               confirmation that explains what removal costs — a context menu must not be the door
-               that skips the warning. "Make moderator" acts directly here too, for the reason
-               given below: it is reversible in one click. */
-            <ContextMenu
-              key={account.handle}
-              trigger={
-            <li className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
-              <Member name={nameOf(account.handle, names)} handle={account.handle} />
-              <Role handle={account.handle} />
-              <span className="text-caption text-(--color-ink-muted)">
-                {account.devices.length} device{account.devices.length > 1 ? "s" : ""}
-              </span>
-
-              {roles !== null && !isAdmin && (
-                <span className="flex flex-wrap gap-tight">
-                  {/* Only the admin hands out roles: a moderator who could would promote
-                      themselves to admin, and there would be no authority left. */}
-                  {iAmAdmin && (
-                    <>
-                      {/* Reversible in one click, so it is not behind a confirmation. */}
-                      <Button
-                        variant="quiet"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() =>
-                          void action(() =>
-                            session.setModerator(view, account.handle, !isModerator),
-                          )
-                        }
-                      >
-                        {isModerator ? "Remove moderator" : "Make moderator"}
-                      </Button>
-                      <Button
-                        variant="quiet"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => setPending({ kind: "handover", handle: account.handle })}
-                      >
-                        Hand over
-                      </Button>
-                    </>
-                  )}
-                  {/* A moderator removes ordinary members, not their peers. */}
-                  {iModerate && (!isModerator || iAmAdmin) && (
-                    <Button
-                      variant="quiet"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => setPending({ kind: "remove", handle: account.handle })}
-                      className="text-(--color-danger)"
-                    >
-                      Remove
-                    </Button>
-                  )}
-                </span>
-              )}
-            </li>
-              }
-            >
-              {roles === null || isAdmin ? (
-                // Nothing to offer: the admin's own row has no actions, and a conversation with
-                // no roles at all is a one-to-one wearing a group's clothes.
-                <ContextMenu.Item disabled onSelect={() => undefined}>
-                  No actions
-                </ContextMenu.Item>
-              ) : (
-                <>
-                  {iAmAdmin && (
-                    <>
-                      <ContextMenu.Item
-                        disabled={busy}
-                        onSelect={() =>
-                          void action(() =>
-                            session.setModerator(view, account.handle, !isModerator),
-                          )
-                        }
-                      >
-                        {isModerator ? "Remove moderator" : "Make moderator"}
-                      </ContextMenu.Item>
-                      <ContextMenu.Item
-                        disabled={busy}
-                        onSelect={() => setPending({ kind: "handover", handle: account.handle })}
-                      >
-                        Hand over
-                      </ContextMenu.Item>
-                    </>
-                  )}
-                  {iModerate && (!isModerator || iAmAdmin) && (
-                    <ContextMenu.Item
-                      icon="revoke"
-                      tone="danger"
-                      disabled={busy}
-                      onSelect={() => setPending({ kind: "remove", handle: account.handle })}
-                    >
-                      Remove from group
-                    </ContextMenu.Item>
-                  )}
-                </>
-              )}
-            </ContextMenu>
-          );
-        })}
-      </ul>
-
       {roles !== null && iModerate && (
         <p className="text-caption text-(--color-ink-muted)">
           Removing someone removes <strong>all of their devices</strong>: the unit is the
@@ -437,4 +330,6 @@ export function GroupPanel({
       </Dialog>
     </div>
   );
+
+  return { menuFor, footer, role };
 }

@@ -58,6 +58,7 @@ import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
 import { cn } from "@/ui/cn";
+import { MiniProfile } from "@/components/MiniProfile";
 import { ContextMenu } from "@/ui/ContextMenu";
 import { Emoji, EmojiText } from "@/ui/Emoji";
 import { Icon } from "@/ui/Icon";
@@ -124,7 +125,6 @@ export function Messages({
   const bump = useBump();
   const report = useReport();
   const names = useNames();
-  const navigate = useNavigate();
   const bottom = useRef<HTMLDivElement>(null);
 
   /**
@@ -160,12 +160,6 @@ export function Messages({
    * your own laptop announce themselves to each other in your own thread is noise, and the
    * distinction is available in the receipts anyway.
    */
-  /** The card behind a face and a name. Never our own — there is no key of ours to verify. */
-  const openAuthor = (handle: string | null) => {
-    if (handle === null || handle === session.handle) return;
-    navigate({ kind: "conversation", key: view.key, detail: { handle } });
-  };
-
   const authorOf = (message: (typeof visible)[number]) =>
     message.mine ? session.handle : message.sender;
 
@@ -622,10 +616,7 @@ export function Messages({
                 {/* Marked only where the mark leads somewhere. `AuthorMenu` renders nothing of
                     its own for our own turns, so underlining our name on hover would promise a
                     menu that is not there — an affordance for an action that does not exist. */}
-                <div
-                  data-author={message.mine ? undefined : ""}
-                  className={cn(LANE, "flex flex-col items-start")}
-                >
+                <div data-author className={cn(LANE, "flex flex-col items-start")}>
                   {continues ? (
                     /*
                       The hour of a continuation line, in the lane, on hover.
@@ -657,19 +648,11 @@ export function Messages({
                       something the keyboard already reaches, which is a different thing from a
                       target the keyboard cannot reach at all.
                     */
-                    message.mine ? (
-                      <Avatar
-                        seed={seedOf(authorOf(message))}
-                        label={nameOfAuthor(authorOf(message))}
-                        size="sm"
-                        className={AVATAR_40}
-                      />
-                    ) : (
+                    <MiniProfile handle={authorOf(message) ?? session.handle} view={view}>
                       <button
                         type="button"
                         tabIndex={-1}
                         aria-hidden="true"
-                        onClick={() => openAuthor(authorOf(message))}
                         className="cursor-pointer"
                       >
                         <Avatar
@@ -679,7 +662,7 @@ export function Messages({
                           className={AVATAR_40}
                         />
                       </button>
-                    )
+                    </MiniProfile>
                   )}
                 </div>
                 </AuthorMenu>
@@ -695,24 +678,19 @@ export function Messages({
                   {!continues && (
                     <div className="flex items-baseline gap-snug">
                       <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
-                        {message.mine ? (
-                          <span className="truncate text-body font-medium">
-                            {nameOfAuthor(authorOf(message))}
-                          </span>
-                        ) : (
-                          /* A real button, because the underline promises one. It is the only
-                             tab stop the pair adds, and it lands once per turn rather than once
-                             per message — the name is drawn only when the speaker changes. */
+                        {/* A real button, because the underline promises one. It is the only tab
+                            stop the pair adds, and it lands once per turn rather than once per
+                            message — the name is drawn only when the speaker changes. */}
+                        <MiniProfile handle={authorOf(message) ?? session.handle} view={view}>
                           <button
                             type="button"
                             data-author
                             data-author-name
-                            onClick={() => openAuthor(authorOf(message))}
                             className="truncate rounded-control text-body font-medium underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent)"
                           >
                             {nameOfAuthor(authorOf(message))}
                           </button>
-                        )}
+                        </MiniProfile>
                       </AuthorMenu>
                       {/*
                         `<time>` with a machine-readable `dateTime`, so a screen reader announces
@@ -1097,20 +1075,30 @@ function AuthorMenu({
   const navigate = useNavigate();
   const report = useReport();
 
-  if (mine || handle === null) return <>{children}</>;
+  // An unattributed message has nobody to open anything for. Our own turns are *not* excluded:
+  // the menu simply says what concerns us, because one face behaving unlike every other for a
+  // reason the reader cannot see is worse than any answer the menu gives.
+  if (handle === null) return <>{children}</>;
 
   return (
     <ContextMenu trigger={<span className="contents">{children}</span>}>
       <ContextMenu.Label>{formatHandle(handle)}</ContextMenu.Label>
       <ContextMenu.Separator />
-      <ContextMenu.Item
-        icon="info"
-        onSelect={() =>
-          navigate({ kind: "conversation", key: view.key, detail: { handle } })
-        }
-      >
-        View profile
-      </ContextMenu.Item>
+      {mine ? (
+        <ContextMenu.Item
+          icon="profile"
+          onSelect={() => navigate({ kind: "settings", section: "profile" })}
+        >
+          Edit your profile
+        </ContextMenu.Item>
+      ) : (
+        <ContextMenu.Item
+          icon="info"
+          onSelect={() => navigate({ kind: "conversation", key: view.key, detail: { handle } })}
+        >
+          View full profile
+        </ContextMenu.Item>
+      )}
       <ContextMenu.Item
         icon="copy"
         onSelect={() => {

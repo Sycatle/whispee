@@ -119,6 +119,24 @@ That is **strictly weaker than the password alone**. It is not a reason to refus
 a lock removed because it is tiresome protects less than a lukewarm one that stays on. It is a
 reason to say so first.
 
+## Adding somebody to an existing group
+
+**Wanted, and not written.** A group's members are the members it was created with, minus anybody
+removed since; talking to somebody new means starting another conversation that has them in it.
+That is a real limitation rather than a design position, and the interface no longer explains it
+away — the sentence that used to sit in the detail column was removed because a limitation
+described at length reads as a decision.
+
+What exists: `api.addMembers` is reached from starting a conversation and from catching up an
+existing member's new device, so the server side and the MLS `Add` proposal are both already
+exercised. What is missing is the part that makes it an *invitation* rather than a mechanism —
+who is allowed to add, what the added member can read, and what the rest of the group is told.
+
+The last of those is the one to settle first. MLS gives a new member the group secret from their
+commit onward and nothing before it, so history is not disclosed by adding somebody; but "nothing
+before it" is a property the person adding them has to understand, and the person being added has
+to be told what they will and will not see. Neither sentence is written anywhere yet.
+
 ## What will not be resolved
 
 Not "later" — these are known and accepted, and none of them has a fix inside the current

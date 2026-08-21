@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
-import { GroupPanel } from "@/components/Group";
+import { useGroupAdmin } from "@/components/Group";
+import { MiniProfile } from "@/components/MiniProfile";
+import { ContextMenu } from "@/ui/ContextMenu";
 import { PresenceBadge, PresenceLine } from "@/components/Presence";
 import { VerificationPanel } from "@/components/Verification";
 import { Fingerprint } from "@/components/Fingerprint";
@@ -355,6 +357,11 @@ export function DetailPanel({ view }: { view: ConversationView }) {
     requestAnimationFrame(() => document.getElementById(INFO_TOGGLE_ID)?.focus());
   };
 
+  // The administration of a group, as a menu per member and a footer. Called unconditionally —
+  // it is a hook — and it costs nothing in a one-to-one, where `roles` is null and `menuFor`
+  // returns the empty answer.
+  const group = useGroupAdmin({ view, onClose: close });
+
   // The heading takes focus when the panel appears, so a keyboard or screen reader user lands in
   // what just opened rather than continuing from the button they pressed.
   useEffect(() => {
@@ -504,48 +511,16 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                     {members.map(({ account, mine }) => {
                       const name = nameOf(account.handle, names);
 
-                      // Our own row is not a link: the card it would open is a verification panel,
-                      // and there is nothing to verify about the key this device is holding.
-                      if (mine) {
-                        return (
-                          <li
-                            key={account.handle}
-                            className="flex w-full items-center gap-snug p-snug text-left text-body"
-                          >
-                            <PresenceBadge session={session} handle={account.handle}>
-                              <Avatar
-                                seed={account.fingerprint}
-                                label={name.primary}
-                                size="md"
-                                className="shrink-0"
-                              />
-                            </PresenceBadge>
-                            <span className="flex min-w-0 flex-1 flex-col">
-                              <span className="truncate">
-                                {name.primary}{" "}
-                                <span className="text-(--color-ink-muted)">(you)</span>
-                              </span>
-                              {name.secondary !== null && (
-                                <span className="truncate font-evidence text-caption text-(--color-ink-muted)">
-                                  {name.secondary}
-                                </span>
-                              )}
-                            </span>
-                          </li>
-                        );
-                      }
-
                       return (
-              <li key={account.handle}>
+              <ContextMenu key={account.handle} trigger={
+              <li>
+                {/* The card, not the column. Clicking a name used to replace this whole panel
+                    with that person's verification card — the right destination for comparing a
+                    key, the wrong one for "who is this", which is what a click on a name in a
+                    member list is asking. The column stays one press away, from inside the card. */}
+                <MiniProfile handle={account.handle} view={view}>
                 <button
                   type="button"
-                  onClick={() =>
-                    navigate({
-                      kind: "conversation",
-                      key: view.key,
-                      detail: { handle: account.handle },
-                    })
-                  }
                   className="flex w-full items-center gap-snug rounded-control p-snug text-left text-body hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
                 >
                   <PresenceBadge session={session} handle={account.handle}>
@@ -553,13 +528,25 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                       seed={account.fingerprint}
                       label={name.primary}
                       size="md"
-                      proof={session.verificationOf(account)}
-                      rejected={account.rejected.length > 0}
+                      // Our own entry carries neither: there is no verification of this device's
+                      // own key, and nothing of ours to have been rejected.
+                      {...(mine ? {} : { proof: session.verificationOf(account as ResolvedAccount) })}
+                      rejected={!mine && (account as ResolvedAccount).rejected.length > 0}
                       className="shrink-0"
                     />
                   </PresenceBadge>
                   <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate">{name.primary}</span>
+                    <span className="flex min-w-0 items-baseline gap-snug">
+                      <span className="truncate">{name.primary}</span>
+                      {mine && <span className="text-(--color-ink-muted)">(you)</span>}
+                      {/* Who administers, which the removed roster used to say and nothing else
+                          does now. */}
+                      {group.role(account.handle) !== null && (
+                        <span className="shrink-0 text-caption text-(--color-accent)">
+                          {group.role(account.handle)}
+                        </span>
+                      )}
+                    </span>
                     {name.secondary !== null && (
                       <span className="truncate font-evidence text-caption text-(--color-ink-muted)">
                         {name.secondary}
@@ -572,7 +559,15 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                     <PresenceLine session={session} handle={account.handle} />
                   </span>
                 </button>
+                </MiniProfile>
               </li>
+                      }>
+                        {/* Promote, hand over, remove — the same actions the group panel used to
+                            carry under each name, and they still go through the confirmations
+                            that explain what removing somebody costs. A context menu must not be
+                            the door that skips the warning. */}
+                        {group.menuFor(account.handle)}
+                      </ContextMenu>
                       );
                     })}
                   </ul>
@@ -591,37 +586,15 @@ export function DetailPanel({ view }: { view: ConversationView }) {
       {focused && <AccountDetail account={focused} />}
 
       {/*
-        Membership, roles and leaving, for groups only. `GroupPanel` already says the two things
-        the user cannot guess — that leaving takes another member's commit, and that removing
-        somebody removes all of their devices — and repeating either of them here would be a
-        second copy to keep in step. It says them in the confirmation dialogs, at the moment the
-        commit is about to go out, which is the only moment either sentence changes a decision.
+        The way out, and nothing else.
 
-        It takes no `session`, no `onError` and no `onChanged`: it reads the session through
-        `useSession` and reports through `useReport`, so the roster and the roles stay fresh under
-        it whatever this column's own render schedule does.
+        A second list of the same members used to sit here, each row carrying its roles and a
+        strip of buttons — so the column named everybody twice and asked the reader to work out
+        that the two lists were one. The actions moved onto the member list above, where the names
+        already are.
       */}
-      {view.accounts.length > 1 && (
-        <section className="space-y-snug p-pane">
-          <SectionTitle>Conversation</SectionTitle>
-          {/*
-            Why the `[+]` in the conversation bar is inert for this group, written where somebody
-            who pressed it and got nothing will look next — beside the membership controls, one
-            press of `[ⓘ]` away from the button itself.
-
-            It is the truth and not a placeholder for missing work: nothing in this client can add
-            a member to a group that already exists. `api.addMembers` is reached only from
-            starting a conversation and from catching up an existing member's new device, and
-            turning it into an invitation is protocol work on a cryptographic ratchet rather than
-            a screen. Until that exists, the sentence is what the reader is owed.
-          */}
-          <p className="text-caption text-(--color-ink-muted)">
-            Nobody can be added to this group. Its members are the members it was created with,
-            minus anybody removed since. Talking to somebody new means starting a conversation
-            that has them in it.
-          </p>
-          <GroupPanel view={view} onClose={close} />
-        </section>
+      {focused === undefined && view.accounts.length > 1 && (
+        <section className="space-y-snug p-pane">{group.footer}</section>
       )}
     </aside>
   );

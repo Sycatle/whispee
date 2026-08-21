@@ -1,10 +1,10 @@
-//! Harnais de test : serveur réel, base réelle, requêtes signées réelles.
+//! Test harness: real server, real database, real signed requests.
 //!
-//! Rien n'est simulé. Un test de delivery service qui court-circuite l'authentification ou
-//! la base ne teste que sa propre maquette.
+//! Nothing is mocked. A delivery service test that short-circuits authentication or the
+//! database only tests its own mock-up.
 //!
-//! Ce module est compilé une fois par binaire de test, et aucun n'utilise tout le harnais :
-//! `dead_code` y signalerait donc, à chaque compilation, ce qui sert seulement aux autres.
+//! This module is compiled once per test binary, and none of them uses the whole harness:
+//! `dead_code` would therefore flag, on every build, whatever only serves the others.
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,12 +16,12 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use sqlx::PgPool;
 
-/// Distingue les données de chaque test.
+/// Keeps each test's data apart.
 ///
-/// Le compteur seul ne suffit pas : la base **persiste entre les exécutions**, donc
-/// `alice-0` existerait déjà au deuxième `cargo test`, avec une autre clé — et
-/// l'enregistrement serait refusé (409), à juste titre. Le préfixe aléatoire par processus
-/// isole chaque exécution sans avoir à purger la base.
+/// The counter alone is not enough: the database **persists between runs**, so `alice-0`
+/// would already exist on the second `cargo test`, with a different key — and registration
+/// would rightly be refused (409). The per-process random prefix isolates each run without
+/// having to purge the database.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 static RUN_ID: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     use rand_core::RngCore;
@@ -43,87 +43,87 @@ pub async fn start() -> TestServer {
     });
 
     let pool = server::connect(&database_url).await.unwrap_or_else(|e| {
-        panic!("base injoignable ({e}) — lancer `docker compose up -d`");
+        panic!("database unreachable ({e}) — run `docker compose up -d`");
     });
 
-    // Limite de débit désactivée : la suite crée des dizaines de comptes en quelques secondes
-    // depuis la boucle locale, ce qu'aucun quota réaliste ne laisserait passer. Le test qui
-    // vérifie que la limite mord se construit sa propre application, avec un quota bas.
-    demarrer_avec(pool, server::throttle::Throttle::par_minute(0), server::throttle::Claims::par_minute(0)).await
+    // Rate limit disabled: the suite creates dozens of accounts within seconds from the
+    // loopback, which no realistic quota would let through. The test that checks the limit
+    // bites builds its own application, with a low quota.
+    start_with(pool, server::throttle::Throttle::per_minute(0), server::throttle::Claims::per_minute(0)).await
 }
 
-/// Serveur de test à limite de débit imposée.
+/// Test server with an enforced rate limit.
 pub async fn start_with_throttle(quota: u32) -> TestServer {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
     });
 
     let pool = server::connect(&database_url).await.unwrap();
-    demarrer_avec(pool, server::throttle::Throttle::par_minute(quota), server::throttle::Claims::par_minute(0)).await
+    start_with(pool, server::throttle::Throttle::per_minute(quota), server::throttle::Claims::per_minute(0)).await
 }
 
-/// Serveur de test à quota de consommation de KeyPackages imposé.
+/// Test server with an enforced KeyPackage claim quota.
 ///
-/// La limite des routes ouvertes reste désactivée : préparer les appareils d'un test en
-/// consomme plusieurs, et les deux bornes n'ont rien à voir l'une avec l'autre.
+/// The open-route limit stays disabled: setting up a test's devices consumes several of
+/// them, and the two bounds have nothing to do with each other.
 pub async fn start_with_claim_quota(quota: u32) -> TestServer {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
     });
 
     let pool = server::connect(&database_url).await.unwrap();
-    demarrer_avec(pool, server::throttle::Throttle::par_minute(0), server::throttle::Claims::par_minute(quota)).await
+    start_with(pool, server::throttle::Throttle::per_minute(0), server::throttle::Claims::per_minute(quota)).await
 }
 
-/// Un émetteur de réveil qui retient ce qu'on lui confie.
+/// A wake emitter that keeps whatever it is handed.
 ///
-/// Ce que le serveur envoie au fournisseur — et surtout **à qui** — est une propriété de
-/// confidentialité. La vérifier demande de voir passer les adresses.
+/// What the server sends to the provider — and above all **to whom** — is a confidentiality
+/// property. Checking it means seeing the addresses go by.
 #[derive(Default)]
-pub struct ReveilEspion(pub std::sync::Mutex<Vec<server::push::Adresse>>);
+pub struct WakerSpy(pub std::sync::Mutex<Vec<server::push::Address>>);
 
-impl server::push::Emetteur for ReveilEspion {
-    fn reveiller(&self, adresses: Vec<server::push::Adresse>) {
-        self.0.lock().expect("espion empoisonné").extend(adresses);
+impl server::push::Waker for WakerSpy {
+    fn wake(&self, addresses: Vec<server::push::Address>) {
+        self.0.lock().expect("poisoned spy").extend(addresses);
     }
 }
 
-impl ReveilEspion {
-    /// Attend que le réveil détaché ait eu lieu, ou renonce.
+impl WakerSpy {
+    /// Waits for the detached wake to happen, or gives up.
     ///
-    /// Le réveil part dans une tâche à part pour ne pas retarder la réponse à l'expéditeur : il
-    /// n'y a donc rien à attendre côté HTTP. Une attente bornée vaut mieux qu'un délai fixe, qui
-    /// serait soit trop court sur une machine chargée, soit du temps perdu à chaque exécution.
-    pub async fn attendre(&self, combien: usize) -> Vec<server::push::Adresse> {
+    /// The wake runs in its own task so it does not delay the sender's response: there is
+    /// nothing to wait for on the HTTP side. A bounded wait beats a fixed delay, which would
+    /// be either too short on a loaded machine or wasted time on every run.
+    pub async fn wait_for(&self, how_many: usize) -> Vec<server::push::Address> {
         for _ in 0..100 {
             {
-                let vues = self.0.lock().expect("espion empoisonné");
-                if vues.len() >= combien {
-                    return vues.clone();
+                let seen = self.0.lock().expect("poisoned spy");
+                if seen.len() >= how_many {
+                    return seen.clone();
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
 
-        self.0.lock().expect("espion empoisonné").clone()
+        self.0.lock().expect("poisoned spy").clone()
     }
 }
 
-/// Un serveur dont on observe les réveils.
-pub async fn start_avec_reveil() -> (TestServer, std::sync::Arc<ReveilEspion>) {
+/// A server whose wakes are observed.
+pub async fn start_with_waker() -> (TestServer, std::sync::Arc<WakerSpy>) {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
     });
     let pool = server::connect(&database_url).await.unwrap();
-    let espion = std::sync::Arc::new(ReveilEspion::default());
+    let spy = std::sync::Arc::new(WakerSpy::default());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = server::app_avec_reveil(
+    let app = server::app_with_waker(
         pool.clone(),
-        server::throttle::Throttle::par_minute(0),
-        server::throttle::Claims::par_minute(0),
-        espion.clone(),
+        server::throttle::Throttle::per_minute(0),
+        server::throttle::Claims::per_minute(0),
+        spy.clone(),
     )
     .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
@@ -131,10 +131,10 @@ pub async fn start_avec_reveil() -> (TestServer, std::sync::Arc<ReveilEspion>) {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (TestServer { base_url: format!("http://{addr}"), pool }, espion)
+    (TestServer { base_url: format!("http://{addr}"), pool }, spy)
 }
 
-async fn demarrer_avec(
+async fn start_with(
     pool: PgPool,
     throttle: server::throttle::Throttle,
     claims: server::throttle::Claims,
@@ -142,9 +142,9 @@ async fn demarrer_avec(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    // `into_make_service_with_connect_info` comme en production : sans lui, l'extracteur
-    // `ConnectInfo` de la limite échoue et les routes ouvertes renvoient une erreur interne.
-    // Un harnais qui servirait autrement que le binaire testerait sa propre maquette.
+    // `into_make_service_with_connect_info` as in production: without it, the limit's
+    // `ConnectInfo` extractor fails and the open routes return an internal error. A harness
+    // that served differently from the binary would test its own mock-up.
     let app = server::app_with(pool.clone(), throttle, claims)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
@@ -155,25 +155,24 @@ async fn demarrer_avec(
     TestServer { base_url: format!("http://{addr}"), pool }
 }
 
-/// Un appareil client : sa clé d'authentification et de quoi signer ses requêtes.
+/// A client device: its authentication key and what it needs to sign its requests.
 ///
-/// Cette clé est distincte de la clé de signature MLS. Voir `server::auth`.
+/// That key is distinct from the MLS signature key. See `server::auth`.
 pub struct Device {
     pub id: String,
     signing_key: SigningKey,
-    /// Clé de signature MLS. Distincte de `signing_key` : réutiliser une clé pour deux
-    /// protocoles est une erreur classique. Attestée en même temps qu'elle, pour interdire de
-    /// recombiner l'attestation d'un appareil avec la clé MLS d'un autre.
+    /// MLS signature key. Distinct from `signing_key`: reusing one key for two protocols is a
+    /// classic mistake. Attested along with it, so an attestation from one device cannot be
+    /// recombined with another device's MLS key.
     mls_key: [u8; 32],
     http: reqwest::Client,
     base_url: String,
 }
 
-/// Un compte pseudonyme et sa clé racine.
+/// A pseudonymous account and its root key.
 ///
-/// Les tests passent par un compte réel plutôt que par une insertion directe : c'est la seule
-/// façon de vérifier que les attestations produites côté client sont bien celles que le
-/// serveur accepte.
+/// Tests go through a real account rather than a direct insert: that is the only way to check
+/// that the attestations produced on the client side really are the ones the server accepts.
 pub struct TestAccount {
     pub handle: String,
     pub account: Account,
@@ -193,39 +192,39 @@ impl TestAccount {
             .await
             .unwrap();
 
-        assert!(response.status().is_success(), "création de compte refusée");
+        assert!(response.status().is_success(), "account creation refused");
         Self { handle: handle.to_owned(), account }
     }
 
-    /// Crée un appareil rattaché à ce compte et l'enregistre.
+    /// Creates a device attached to this account and registers it.
     ///
-    /// L'identifiant est qualifié par le handle, comme l'exige le serveur : l'espace de noms
-    /// des appareils est local au compte.
+    /// The identifier is qualified by the handle, as the server requires: the device
+    /// namespace is local to the account.
     pub async fn device(&self, server: &TestServer, id: &str) -> Device {
         let device = Device::new(server, &format!("{}:{id}", self.handle));
         let response = device.register_under(self).await;
-        assert!(response.status().is_success(), "enregistrement refusé : {:?}", response.status());
+        assert!(response.status().is_success(), "registration refused: {:?}", response.status());
         device
     }
 
-    /// Révoque un appareil du compte, certificat signé à l'appui.
+    /// Revokes a device from the account, backed by a signed certificate.
     ///
-    /// Passe par la vraie route et le vrai format signé : un raccourci en SQL ne testerait
-    /// que sa propre maquette, et c'est précisément la vérification du certificat qu'on veut
-    /// exercer.
+    /// Goes through the real route and the real signed format: an SQL shortcut would only
+    /// test its own mock-up, and certificate verification is precisely what we want to
+    /// exercise.
     pub async fn revoke(
         &self,
         caller: &Device,
         device_id: &str,
     ) -> reqwest::Response {
         let revoked_at = now();
-        let certificat = self.account.revoke(&self.handle, device_id, revoked_at).unwrap();
+        let certificate = self.account.revoke(&self.handle, device_id, revoked_at).unwrap();
 
         caller
             .post(
                 &format!("/v1/devices/{device_id}/revoke"),
                 serde_json::json!({
-                    "revocation": BASE64_STANDARD.encode(certificat),
+                    "revocation": BASE64_STANDARD.encode(certificate),
                     "revoked_at": revoked_at,
                 }),
             )
@@ -238,7 +237,7 @@ impl TestAccount {
 }
 
 impl Device {
-    /// Enregistre cet appareil sous un compte, avec l'attestation correspondante.
+    /// Registers this device under an account, with the matching attestation.
     pub async fn register_under(&self, owner: &TestAccount) -> reqwest::Response {
         let auth_key = self.signing_key.verifying_key().to_bytes();
         let attestation = owner
@@ -260,7 +259,7 @@ impl Device {
             .unwrap()
     }
 
-    /// Tente un enregistrement avec une attestation quelconque. Sert aux tests d'attaque.
+    /// Attempts a registration with an arbitrary attestation. Used by the attack tests.
     pub async fn register_with(&self, handle: &str, attestation: &[u8]) -> reqwest::Response {
         self.http
             .post(format!("{}/v1/devices", self.base_url))
@@ -280,16 +279,16 @@ impl Device {
         &self.mls_key
     }
 
-    /// Crée un appareil et son propre compte jetable.
+    /// Creates a device along with its own throwaway account.
     ///
-    /// Raccourci pour les tests qui ne s'intéressent pas au regroupement multi-appareils :
-    /// un appareil, un compte. Les tests de comptes passent par [`TestAccount`].
+    /// Shortcut for tests that do not care about multi-device grouping: one device, one
+    /// account. Account tests go through [`TestAccount`].
     pub async fn register(server: &TestServer, id: &str) -> Self {
-        let owner = TestAccount::create(server, &unique("compte")).await;
+        let owner = TestAccount::create(server, &unique("account")).await;
         owner.device(server, id).await
     }
 
-    /// Crée un appareil sans l'enregistrer : le serveur ne connaît pas sa clé.
+    /// Creates a device without registering it: the server does not know its key.
     pub fn new(server: &TestServer, id: &str) -> Self {
         Self {
             id: id.to_owned(),
@@ -304,19 +303,19 @@ impl Device {
         BASE64_STANDARD.encode(self.signing_key.verifying_key().as_bytes())
     }
 
-    /// Signe un défi de gateway, comme le ferait un vrai client.
+    /// Signs a gateway challenge, the way a real client would.
     ///
-    /// Passe par `attest::gateway_message` plutôt que de réécrire le format : une seconde
-    /// définition dans les tests validerait la maquette, pas le serveur.
+    /// Goes through `attest::gateway_message` rather than rewriting the format: a second
+    /// definition in the tests would validate the mock-up, not the server.
     pub fn sign_challenge(&self, challenge: &[u8]) -> String {
         let message = attest::gateway_message(&self.id, challenge).unwrap();
         BASE64_STANDARD.encode(self.signing_key.sign(&message).to_bytes())
     }
 
-    /// Signe un défi **avec le format d'une requête HTTP**.
+    /// Signs a challenge **using the format of an HTTP request**.
     ///
-    /// Sert au test qui vérifie qu'une signature captée sur le chemin HTTP n'ouvre pas de
-    /// session : c'est la séparation de domaine qui doit la rejeter, pas un hasard de format.
+    /// Used by the test checking that a signature captured on the HTTP path opens no session:
+    /// domain separation must reject it, not a coincidence of format.
     pub fn sign_challenge_as_http(&self, challenge: &[u8]) -> String {
         let payload =
             server::auth::signing_payload("GET", "/v1/gateway", now(), &[0u8; 16], challenge);
@@ -339,8 +338,8 @@ impl Device {
         self.signed_at(method, path, body, timestamp, path).await
     }
 
-    /// Variante brute pour les tests d'attaque : permet de signer un chemin, un horodatage
-    /// ou un corps différents de ceux réellement envoyés.
+    /// Raw variant for the attack tests: allows signing a path, a timestamp or a body
+    /// different from the ones actually sent.
     pub async fn signed_at(
         &self,
         method: &str,
@@ -353,8 +352,8 @@ impl Device {
         self.forge(method, path, body, signed_body, timestamp, signed_path).await
     }
 
-    /// Envoie `sent_body` en signant `signed_body`. Sert à vérifier que le serveur détecte
-    /// une altération du corps après signature.
+    /// Sends `sent_body` while signing `signed_body`. Used to check that the server detects a
+    /// body tampered with after signing.
     pub async fn forge(
         &self,
         method: &str,
@@ -364,17 +363,17 @@ impl Device {
         timestamp: u64,
         signed_path: &str,
     ) -> reqwest::Response {
-        // Tiré ici plutôt que passé en paramètre : aucun test ne s'intéresse à sa valeur, et le
-        // rendre explicite partout obligerait à en inventer un à chaque appel. Le test du rejeu,
-        // lui, passe par [`Device::forge_with_nonce`] — il doit présenter deux fois exactement
-        // les mêmes octets, ce qu'un nonce tiré au hasard rendrait impossible.
+        // Drawn here rather than passed in: no test cares about its value, and making it
+        // explicit everywhere would mean inventing one at every call. The replay test goes
+        // through [`Device::forge_with_nonce`] — it must present exactly the same bytes
+        // twice, which a randomly drawn nonce would make impossible.
         let nonce: [u8; 16] = rand_core::OsRng.gen_nonce();
 
         self.forge_with_nonce(method, path, sent_body, signed_body, timestamp, signed_path, nonce)
             .await
     }
 
-    /// Variante à nonce imposé, pour rejouer une requête à l'octet près.
+    /// Variant with an imposed nonce, to replay a request byte for byte.
     #[allow(clippy::too_many_arguments)]
     pub async fn forge_with_nonce(
         &self,
@@ -386,8 +385,9 @@ impl Device {
         signed_path: &str,
         nonce: [u8; 16],
     ) -> reqwest::Response {
-        // `server::auth::signing_payload` plutôt qu'une seconde écriture du format : deux
-        // définitions divergeraient, et c'est la copie oubliée qui rend un test vert à tort.
+        // `server::auth::signing_payload` rather than a second writing of the format: two
+        // definitions would drift, and it is the forgotten copy that turns a test green for
+        // the wrong reason.
         let payload = server::auth::signing_payload(
             method,
             signed_path,
@@ -415,7 +415,7 @@ impl Device {
     }
 }
 
-/// Tirage d'un nonce de requête.
+/// Draws a request nonce.
 trait NonceSource {
     fn gen_nonce(&mut self) -> [u8; 16];
 }
@@ -437,7 +437,7 @@ pub fn now() -> u64 {
         .as_secs()
 }
 
-// ---------------------------------------------------------------- session gateway
+// ---------------------------------------------------------------- gateway session
 
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
@@ -446,23 +446,23 @@ pub type Socket = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
-/// Ouvre une socket et retourne le défi reçu dans `hello`.
-pub async fn ouvrir(server: &TestServer) -> (Socket, Vec<u8>) {
+/// Opens a socket and returns the challenge received in `hello`.
+pub async fn open_socket(server: &TestServer) -> (Socket, Vec<u8>) {
     let url = format!("{}/v1/gateway", server.base_url.replace("http://", "ws://"));
-    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.expect("upgrade refusé");
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.expect("upgrade refused");
 
-    let hello = lire(&mut socket).await.expect("le serveur ouvre par un hello");
+    let hello = read_frame(&mut socket).await.expect("the server opens with a hello");
     assert_eq!(hello["op"], "hello");
 
     let nonce = BASE64_STANDARD.decode(hello["nonce"].as_str().unwrap()).unwrap();
     (socket, nonce)
 }
 
-/// Lit la prochaine trame JSON, en ignorant ping et pong.
+/// Reads the next JSON frame, ignoring ping and pong.
 ///
-/// Un délai borne l'attente : sans lui, un test qui n'obtient pas la trame attendue pendrait au
-/// lieu d'échouer, et un test qui pend ne dit rien à personne.
-pub async fn lire(socket: &mut Socket) -> Option<serde_json::Value> {
+/// A timeout bounds the wait: without it, a test that never gets the expected frame would hang
+/// instead of failing, and a hanging test tells nobody anything.
+pub async fn read_frame(socket: &mut Socket) -> Option<serde_json::Value> {
     let deadline = std::time::Duration::from_secs(5);
 
     tokio::time::timeout(deadline, async {
@@ -480,15 +480,15 @@ pub async fn lire(socket: &mut Socket) -> Option<serde_json::Value> {
     .flatten()
 }
 
-pub async fn envoyer(socket: &mut Socket, frame: serde_json::Value) {
+pub async fn send_frame(socket: &mut Socket, frame: serde_json::Value) {
     socket.send(Message::Text(frame.to_string().into())).await.unwrap();
 }
 
-/// Ouvre une session authentifiée et consomme le `ready`.
+/// Opens an authenticated session and consumes the `ready`.
 pub async fn session(server: &TestServer, device: &Device, cursors: serde_json::Value) -> Socket {
-    let (mut socket, challenge) = ouvrir(server).await;
+    let (mut socket, challenge) = open_socket(server).await;
 
-    envoyer(
+    send_frame(
         &mut socket,
         serde_json::json!({
             "op": "identify",
@@ -502,4 +502,3 @@ pub async fn session(server: &TestServer, device: &Device, cursors: serde_json::
 
     socket
 }
-

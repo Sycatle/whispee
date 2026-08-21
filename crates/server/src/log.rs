@@ -1,31 +1,31 @@
-//! Journal auditable des clés de compte, côté serveur.
+//! Auditable log of account keys, server side.
 //!
-//! # Ce que le serveur fait ici, et ce qu'il ne fait pas
+//! # What the server does here, and what it does not
 //!
-//! Il **construit** l'arbre et **signe** les têtes. Il ne vérifie rien pour le compte du
-//! client : toutes les preuves qu'il émet sont revérifiées côté client, avec la même crate
-//! [`transparency`], contre la clé publique du journal. C'est la seule façon dont un journal
-//! a un sens — sinon on demande au surveillé de garantir la surveillance.
+//! It **builds** the tree and **signs** the heads. It verifies nothing on the client's behalf:
+//! every proof it emits is re-verified client side, with the same [`transparency`] crate, against
+//! the log's public key. That is the only way a log means anything — otherwise you are asking the
+//! watched party to guarantee the watching.
 //!
-//! # La faiblesse structurelle, à ne pas masquer
+//! # The structural weakness, not to be hidden
 //!
-//! Le journal est signé par la même partie que celle qu'il surveille. Un serveur malveillant
-//! peut donc tenir **deux journaux** cohérents et en servir un à chacun. Rien dans ce fichier
-//! ne l'en empêche, et rien ne le pourrait : la détection appartient au *gossip* entre clients,
-//! qui compare les têtes dans des messages que le serveur ne peut pas lire ni falsifier.
+//! The log is signed by the same party it watches. A malicious server can therefore keep **two**
+//! consistent logs and serve one to each side. Nothing in this file prevents that, and nothing
+//! could: detection belongs to *gossip* between clients, comparing heads inside messages the
+//! server can neither read nor forge.
 //!
-//! Un déploiement sérieux confierait le journal à un ou plusieurs opérateurs distincts. Ici il
-//! y a un seul processus, et le dire est préférable à le laisser deviner.
+//! A serious deployment would hand the log to one or more separate operators. Here there is a
+//! single process, and saying so beats letting people guess.
 
 use ed25519_dalek::SigningKey;
 use sqlx::PgPool;
 use transparency::{Hash, TreeHead};
 
-/// Charge la clé de signature du journal, en la créant au premier démarrage.
+/// Loads the log's signing key, creating it on first start.
 ///
-/// `ON CONFLICT DO NOTHING` plutôt qu'un « lire puis écrire » : deux processus qui démarrent
-/// ensemble produiraient sinon deux clés, donc deux journaux, et les clients verraient une
-/// bifurcation causée par nous-mêmes.
+/// `ON CONFLICT DO NOTHING` rather than a "read then write": two processes starting together
+/// would otherwise produce two keys, hence two logs, and clients would see a fork we caused
+/// ourselves.
 pub async fn ensure_signing_key(pool: &PgPool) -> Result<(), sqlx::Error> {
     let fresh = SigningKey::generate(&mut rand_core::OsRng);
 
@@ -37,27 +37,27 @@ pub async fn ensure_signing_key(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Relit la clé du journal.
+/// Re-reads the log key.
 ///
-/// Relue à chaque requête plutôt que mise en cache dans l'état de l'application. C'est un
-/// aller-retour de base par preuve, assumé pour ce projet : un cache de la clé de signature
-/// est le genre d'état qui survit à une rotation qu'on croyait effectuée.
+/// Re-read on every request rather than cached in the application state. That is one database
+/// round trip per proof, accepted for this project: a cached signing key is the kind of state
+/// that survives a rotation you believed had happened.
 pub async fn signing_key(pool: &PgPool) -> Result<SigningKey, sqlx::Error> {
     let (stored,): (Vec<u8>,) =
         sqlx::query_as("SELECT signing_key FROM log_key WHERE id = TRUE").fetch_one(pool).await?;
 
-    let bytes: [u8; 32] = stored.try_into().expect("contrainte log_signing_key_is_ed25519");
+    let bytes: [u8; 32] = stored.try_into().expect("log_signing_key_is_ed25519 constraint");
     Ok(SigningKey::from_bytes(&bytes))
 }
 
-/// Ajoute une clé de compte au journal.
+/// Appends an account key to the log.
 ///
-/// Le hash de feuille est calculé **ici**, par la crate partagée, et jamais en SQL : une
-/// seconde implémentation de la formule diverge tôt ou tard, et une divergence silencieuse
-/// dans un journal auditable est pire que pas de journal du tout.
+/// The leaf hash is computed **here**, by the shared crate, and never in SQL: a second
+/// implementation of the formula diverges sooner or later, and a silent divergence in an
+/// auditable log is worse than no log at all.
 ///
-/// À appeler dans la même transaction que l'écriture du compte : une clé publiée sans entrée
-/// de journal serait rejetée par tous les clients.
+/// To be called in the same transaction as the account write: a key published without a log entry
+/// would be rejected by every client.
 pub async fn append(
     tx: &mut sqlx::PgConnection,
     handle: &str,
@@ -75,15 +75,15 @@ pub async fn append(
     Ok(())
 }
 
-/// Fait entrer dans le journal les comptes créés avant son introduction.
+/// Brings accounts created before the log existed into it.
 ///
-/// Sans ce rattrapage, leurs clés n'auraient aucune preuve d'inclusion et les clients les
-/// rejetteraient toutes — le journal rendrait le système moins utilisable plutôt que plus sûr.
+/// Without this catch-up their keys would have no inclusion proof and clients would reject them
+/// all — the log would make the system less usable rather than safer.
 ///
-/// L'ordre est déterministe (`created_at, handle`) : deux exécutions doivent produire le même
-/// arbre, sans quoi un redémarrage ressemblerait à une réécriture.
+/// The order is deterministic (`created_at, handle`): two runs must produce the same tree, or a
+/// restart would look like a rewrite.
 pub async fn backfill(pool: &PgPool) -> Result<usize, sqlx::Error> {
-    let manquants: Vec<(String, Vec<u8>)> = sqlx::query_as(
+    let missing: Vec<(String, Vec<u8>)> = sqlx::query_as(
         "SELECT a.handle, a.identity_key FROM accounts a
          WHERE NOT EXISTS (SELECT 1 FROM log_entries l WHERE l.handle = a.handle)
          ORDER BY a.created_at, a.handle",
@@ -92,34 +92,34 @@ pub async fn backfill(pool: &PgPool) -> Result<usize, sqlx::Error> {
     .await?;
 
     let mut tx = pool.begin().await?;
-    for (handle, identity_key) in &manquants {
+    for (handle, identity_key) in &missing {
         append(&mut tx, handle, identity_key).await?;
     }
     tx.commit().await?;
 
-    Ok(manquants.len())
+    Ok(missing.len())
 }
 
-/// Toutes les feuilles, dans l'ordre de l'arbre.
+/// Every leaf, in tree order.
 ///
-/// Relues intégralement à chaque preuve. C'est assumé pour ce projet : un journal réel tiendrait
-/// les nœuds intermédiaires en cache, mais recalculer garantit qu'aucun état dérivé ne peut
-/// diverger de la table — et c'est la table qui fait foi.
+/// Re-read in full for each proof. Accepted for this project: a real log would cache the
+/// intermediate nodes, but recomputing guarantees no derived state can diverge from the table —
+/// and the table is what counts.
 pub async fn leaves(pool: &PgPool) -> Result<Vec<Hash>, sqlx::Error> {
     let rows: Vec<(Vec<u8>,)> =
         sqlx::query_as("SELECT leaf FROM log_entries ORDER BY seq").fetch_all(pool).await?;
 
     Ok(rows
         .into_iter()
-        .map(|(leaf,)| leaf.try_into().expect("contrainte log_leaf_is_sha256"))
+        .map(|(leaf,)| leaf.try_into().expect("log_leaf_is_sha256 constraint"))
         .collect())
 }
 
-/// Position de la dernière entrée d'un compte, et sa clé.
+/// Position of an account's latest entry, and its key.
 ///
-/// La **dernière** : une rotation ajoute une entrée sans en retirer aucune, et c'est la plus
-/// récente qui fait foi. Les anciennes restent dans l'arbre — c'est ce qui permet à un client
-/// de constater qu'une clé a changé, plutôt que de la voir disparaître.
+/// The **latest**: a rotation adds an entry without removing any, and the most recent one is
+/// authoritative. The older ones stay in the tree — that is what lets a client observe that a key
+/// changed, rather than watch it disappear.
 pub async fn latest(
     pool: &PgPool,
     handle: &str,
@@ -134,12 +134,12 @@ pub async fn latest(
     Ok(row)
 }
 
-/// Indice d'une entrée dans l'arbre.
+/// Index of an entry in the tree.
 ///
-/// `seq` est un `BIGSERIAL` : il croît strictement mais peut sauter (transaction annulée). On
-/// ne peut donc pas s'en servir directement comme indice, il faut compter les entrées qui
-/// précèdent. Confondre les deux produirait des preuves d'inclusion valides pour la mauvaise
-/// position — le genre d'erreur qui ne se voit qu'une fois qu'un rollback a eu lieu.
+/// `seq` is a `BIGSERIAL`: it grows strictly but can skip (aborted transaction). It therefore
+/// cannot be used directly as an index; the preceding entries have to be counted. Confusing the
+/// two would produce inclusion proofs valid for the wrong position — the kind of bug that only
+/// shows up once a rollback has happened.
 pub async fn index_of(pool: &PgPool, seq: i64) -> Result<usize, sqlx::Error> {
     let (count,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM log_entries WHERE seq < $1").bind(seq).fetch_one(pool).await?;
@@ -147,7 +147,7 @@ pub async fn index_of(pool: &PgPool, seq: i64) -> Result<usize, sqlx::Error> {
     Ok(count as usize)
 }
 
-/// Tête courante du journal, signée.
+/// The log's current head, signed.
 pub fn head(leaves: &[Hash], key: &SigningKey) -> (TreeHead, [u8; 64]) {
     let head = TreeHead {
         size: leaves.len() as u64,

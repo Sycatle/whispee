@@ -1,163 +1,157 @@
-//! Limite de débit des routes ouvertes.
+//! Rate limit on the open routes.
 //!
-//! # Ce que cela ferme
+//! # What this closes
 //!
-//! Quatre routes s'exercent **sans aucune authentification**, parce qu'elles précèdent
-//! l'existence d'une identité : création de compte, enregistrement d'appareil, dépôt et
-//! relève d'appairage. Rien ne les bornait.
+//! Four routes run **with no authentication at all**, because they come before an identity
+//! exists: account creation, device registration, pairing post and pairing fetch. Nothing
+//! bounded them.
 //!
-//! La création de compte est la plus coûteuse à laisser ouverte. Elle écrit une entrée dans
-//! `log_entries` — le journal de transparence — et cette écriture est faite pour ne jamais être
-//! reprise : un journal append-only dont on retire une feuille cesse de pouvoir prouver sa
-//! consistance. Un tiers sans identité pouvait donc faire grossir indéfiniment la seule table du
-//! schéma qu'on ne sait pas nettoyer. La clé étrangère `ON DELETE CASCADE` de `log_entries` offre
-//! bien une sortie — supprimer les comptes — mais elle troue le journal, c'est-à-dire qu'elle
-//! choisit de casser les preuves plutôt que de garder le déchet. Aucune des deux issues n'est
-//! bonne : il fallait empêcher l'entrée.
+//! Account creation is the most expensive one to leave open. It writes an entry into
+//! `log_entries` — the transparency log — and that write is designed never to be undone: an
+//! append-only log you remove a leaf from can no longer prove its own consistency. A stranger
+//! with no identity could therefore grow the one table in the schema we cannot clean up. The
+//! `ON DELETE CASCADE` foreign key on `log_entries` does offer a way out — delete the accounts —
+//! but it punches a hole in the log, choosing to break the proofs rather than keep the garbage.
+//! Neither exit is good: the entry had to be prevented.
 //!
-//! # Ce que cela ne ferme pas
+//! # What this does not close
 //!
-//! **Le compteur vit en mémoire, donc par instance.** Deux instances derrière un répartiteur
-//! offrent deux fois le quota, et un redémarrage remet tout à zéro. C'est la même réserve que
-//! celle déjà écrite dans `crate::presence` sur son cache — à ceci près qu'ici, contrairement à
-//! la présence, il n'y a pas de garde en base derrière pour rattraper. Un déploiement sérieux
-//! mettrait cette limite devant le serveur, dans le répartiteur, où elle voit tout le trafic.
+//! **The counter lives in memory, so per instance.** Two instances behind a load balancer offer
+//! twice the quota, and a restart resets everything. Same caveat as the one already written in
+//! `crate::presence` about its cache — except that here, unlike presence, there is no database
+//! guard behind it to catch what slips through. A serious deployment would put this limit in
+//! front of the server, in the load balancer, where it sees all the traffic.
 //!
-//! **L'adresse n'est pas une identité.** Un attaquant qui en change contourne la limite ; des
-//! utilisateurs légitimes derrière un même NAT la partagent. C'est un ralentisseur, pas une
-//! barrière, et le présenter autrement serait se mentir.
+//! **An address is not an identity.** An attacker who changes it bypasses the limit; legitimate
+//! users behind the same NAT share it. This is a speed bump, not a barrier, and presenting it
+//! otherwise would be lying to ourselves.
 //!
-//! **Derrière un proxy, l'adresse vue est celle du proxy.** Le serveur lit la socket et rien
-//! d'autre : il ne fait aucune confiance à `X-Forwarded-For`, qui se falsifie librement et
-//! transformerait la limite en formalité. La contrepartie est qu'un déploiement derrière un
-//! proxy limite le proxy entier ; c'est à lui de porter la limite dans ce cas.
+//! **Behind a proxy, the address seen is the proxy's.** The server reads the socket and nothing
+//! else: it places no trust in `X-Forwarded-For`, which is freely forged and would turn the limit
+//! into a formality. The trade-off is that a deployment behind a proxy limits the whole proxy;
+//! carrying the limit is then the proxy's job.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Quota par défaut des routes ouvertes, par adresse et par minute.
+/// Default quota for the open routes, per address and per minute.
 ///
-/// Généreux pour un usage humain — créer un compte, y rattacher quelques appareils, appairer —
-/// et étroit devant ce qu'il faut de requêtes pour faire grossir une table de façon gênante.
-pub const DEFAUT_PAR_MINUTE: u32 = 60;
+/// Generous for human use — create an account, attach a few devices, pair them — and narrow next
+/// to the number of requests it takes to grow a table inconveniently.
+pub const DEFAULT_PER_MINUTE: u32 = 60;
 
-/// Quota par défaut de consommation de KeyPackages, par couple appelant-cible et par minute.
+/// Default quota for KeyPackage claims, per caller-target pair and per minute.
 ///
-/// **Deux ordres de grandeur en dessous du précédent, et c'est le point.** Un appelant honnête
-/// n'a besoin que d'un KeyPackage par appareil visé ; la marge couvre les reprises après échec
-/// réseau. Reprendre ici le quota des routes ouvertes laisserait soixante consommations par
-/// minute sur une même victime, soit une attaque toujours efficace : la borne aurait l'air
-/// posée sans rien empêcher.
-pub const DEFAUT_CLAIMS_PAR_MINUTE: u32 = 5;
+/// **Two orders of magnitude below the previous one, and that is the point.** An honest caller
+/// only needs one KeyPackage per targeted device; the margin covers retries after a network
+/// failure. Reusing the open-route quota here would allow sixty claims a minute against a single
+/// victim — an attack that still works: the limit would look set without preventing anything.
+pub const DEFAULT_CLAIMS_PER_MINUTE: u32 = 5;
 
-/// Au-delà de ce nombre d'adresses suivies, les entrées périmées sont balayées.
+/// Past this many tracked addresses, stale entries are swept.
 ///
-/// Sans ce nettoyage, la table grandirait d'une entrée par adresse rencontrée et ne
-/// rétrécirait jamais : on aurait remplacé un vecteur de remplissage de disque par un vecteur
-/// de remplissage de mémoire, ce qui n'est pas un progrès.
-const SEUIL_DE_BALAYAGE: usize = 4096;
+/// Without that cleanup, the table would grow by one entry per address seen and never shrink:
+/// we would have traded a way to fill a disk for a way to fill memory, which is no progress.
+const SWEEP_THRESHOLD: usize = 4096;
 
 pub struct Throttle {
     quota: u32,
-    fenetre: Duration,
-    vues: Mutex<HashMap<String, Compteur>>,
+    window: Duration,
+    seen: Mutex<HashMap<String, Counter>>,
 }
 
-struct Compteur {
-    depuis: Instant,
-    requetes: u32,
+struct Counter {
+    since: Instant,
+    requests: u32,
 }
 
 impl Throttle {
-    /// Limiteur au quota donné, par minute.
+    /// A limiter at the given quota, per minute.
     ///
-    /// `0` désactive la limite. Les tests d'intégration s'en servent : ils créent des dizaines de
-    /// comptes en quelques secondes depuis la boucle locale, ce qu'aucun quota réaliste ne
-    /// laisserait passer. Le test qui vérifie que la limite mord, lui, construit son propre
-    /// limiteur avec un quota bas.
-    pub fn par_minute(quota: u32) -> Self {
+    /// `0` disables the limit. The integration tests rely on that: they create dozens of accounts
+    /// in a few seconds from the loopback, which no realistic quota would let through. The test
+    /// that checks the limit actually bites builds its own limiter with a low quota.
+    pub fn per_minute(quota: u32) -> Self {
         Self {
             quota,
-            fenetre: Duration::from_secs(60),
-            vues: Mutex::new(HashMap::new()),
+            window: Duration::from_secs(60),
+            seen: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Quota lu depuis `THROTTLE_PER_MINUTE`, ou [`DEFAUT_PAR_MINUTE`].
-    pub fn depuis_environnement() -> Self {
+    /// Quota read from `THROTTLE_PER_MINUTE`, or [`DEFAULT_PER_MINUTE`].
+    pub fn from_environment() -> Self {
         let quota = std::env::var("THROTTLE_PER_MINUTE")
             .ok()
-            .and_then(|valeur| valeur.parse().ok())
-            .unwrap_or(DEFAUT_PAR_MINUTE);
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DEFAULT_PER_MINUTE);
 
-        Self::par_minute(quota)
+        Self::per_minute(quota)
     }
 
-    /// Décompte une requête sous une clé, et dit si elle peut passer.
+    /// Counts a request under a key, and says whether it may pass.
     ///
-    /// La clé est textuelle plutôt qu'une adresse : le sujet à limiter n'est pas toujours celui
-    /// qui appelle. La consommation de KeyPackages se compte par couple appelant-cible, parce
-    /// que ce qu'on veut borner est l'acharnement d'un appelant **sur une victime précise**, et
-    /// non son activité en général.
+    /// The key is textual rather than an address: the subject to limit is not always the caller.
+    /// KeyPackage claims are counted per caller-target pair, because what we want to bound is a
+    /// caller's persistence **against one specific victim**, not their activity in general.
     ///
-    /// Fenêtre fixe et non glissante : à la bascule, un appelant peut émettre deux quotas en
-    /// peu de temps. C'est connu, et sans importance ici — la limite existe pour empêcher une
-    /// pression soutenue, pas une rafale.
-    pub fn autorise(&self, cle: &str) -> bool {
+    /// A fixed window, not a sliding one: at the boundary, a caller can emit two quotas in a
+    /// short time. That is known, and irrelevant here — the limit exists to prevent sustained
+    /// pressure, not a burst.
+    pub fn allows(&self, key: &str) -> bool {
         if self.quota == 0 {
             return true;
         }
 
-        let maintenant = Instant::now();
-        let mut vues = self.vues.lock().unwrap_or_else(|erreur| erreur.into_inner());
+        let now = Instant::now();
+        let mut seen = self.seen.lock().unwrap_or_else(|error| error.into_inner());
 
-        if vues.len() > SEUIL_DE_BALAYAGE {
-            vues.retain(|_, compteur| maintenant.duration_since(compteur.depuis) < self.fenetre);
+        if seen.len() > SWEEP_THRESHOLD {
+            seen.retain(|_, counter| now.duration_since(counter.since) < self.window);
         }
 
-        let compteur = vues
-            .entry(cle.to_owned())
-            .or_insert(Compteur { depuis: maintenant, requetes: 0 });
+        let counter = seen
+            .entry(key.to_owned())
+            .or_insert(Counter { since: now, requests: 0 });
 
-        if maintenant.duration_since(compteur.depuis) >= self.fenetre {
-            *compteur = Compteur { depuis: maintenant, requetes: 0 };
+        if now.duration_since(counter.since) >= self.window {
+            *counter = Counter { since: now, requests: 0 };
         }
 
-        compteur.requetes += 1;
-        compteur.requetes <= self.quota
+        counter.requests += 1;
+        counter.requests <= self.quota
     }
 }
 
-/// Limite de consommation des KeyPackages, par couple appelant-cible.
+/// Limit on KeyPackage claims, per caller-target pair.
 ///
-/// # Pourquoi un type distinct plutôt qu'un second [`Throttle`]
+/// # Why a distinct type rather than a second [`Throttle`]
 ///
-/// Parce que confondre les deux est précisément l'erreur à empêcher. Ils comptent des choses
-/// différentes — des adresses d'un côté, des couples de l'autre — et leurs quotas diffèrent de
-/// deux ordres de grandeur. Un type qui ne se substitue pas à l'autre rend impossible de brancher
-/// le mauvais quota sur la mauvaise route, ce qui poserait une borne d'apparence sérieuse et sans
-/// effet.
+/// Because confusing the two is precisely the mistake to prevent. They count different things —
+/// addresses on one side, pairs on the other — and their quotas differ by two orders of
+/// magnitude. A type that cannot substitute for the other makes it impossible to wire the wrong
+/// quota onto the wrong route, which would set a serious-looking limit with no effect.
 pub struct Claims(Throttle);
 
 impl Claims {
-    pub fn par_minute(quota: u32) -> Self {
-        Self(Throttle::par_minute(quota))
+    pub fn per_minute(quota: u32) -> Self {
+        Self(Throttle::per_minute(quota))
     }
 
-    /// Quota lu depuis `CLAIM_QUOTA_PER_MINUTE`, ou [`DEFAUT_CLAIMS_PAR_MINUTE`].
-    pub fn depuis_environnement() -> Self {
+    /// Quota read from `CLAIM_QUOTA_PER_MINUTE`, or [`DEFAULT_CLAIMS_PER_MINUTE`].
+    pub fn from_environment() -> Self {
         let quota = std::env::var("CLAIM_QUOTA_PER_MINUTE")
             .ok()
-            .and_then(|valeur| valeur.parse().ok())
-            .unwrap_or(DEFAUT_CLAIMS_PAR_MINUTE);
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DEFAULT_CLAIMS_PER_MINUTE);
 
-        Self::par_minute(quota)
+        Self::per_minute(quota)
     }
 
-    /// `couple` identifie l'appelant **et** sa cible.
-    pub fn autorise(&self, couple: &str) -> bool {
-        self.0.autorise(couple)
+    /// `pair` identifies the caller **and** its target.
+    pub fn allows(&self, pair: &str) -> bool {
+        self.0.allows(pair)
     }
 }
 
@@ -165,38 +159,38 @@ impl Claims {
 mod tests {
     use super::*;
 
-    fn ip(dernier: u8) -> String {
-        format!("ip:127.0.0.{dernier}")
+    fn ip(last: u8) -> String {
+        format!("ip:127.0.0.{last}")
     }
 
     #[test]
-    fn le_quota_laisse_passer_puis_refuse() {
-        let throttle = Throttle::par_minute(3);
+    fn the_quota_lets_through_then_refuses() {
+        let throttle = Throttle::per_minute(3);
 
-        for tour in 1..=3 {
-            assert!(throttle.autorise(&ip(1)), "la requête {tour} devait passer");
+        for round in 1..=3 {
+            assert!(throttle.allows(&ip(1)), "request {round} should have passed");
         }
 
-        assert!(!throttle.autorise(&ip(1)), "la quatrième dépasse le quota");
+        assert!(!throttle.allows(&ip(1)), "the fourth exceeds the quota");
     }
 
     #[test]
-    fn une_adresse_n_epuise_pas_le_quota_d_une_autre() {
-        let throttle = Throttle::par_minute(1);
+    fn one_address_does_not_exhaust_the_quota_of_another() {
+        let throttle = Throttle::per_minute(1);
 
-        assert!(throttle.autorise(&ip(1)));
-        assert!(!throttle.autorise(&ip(1)));
+        assert!(throttle.allows(&ip(1)));
+        assert!(!throttle.allows(&ip(1)));
 
-        assert!(throttle.autorise(&ip(2)), "le compteur est par adresse, pas global");
+        assert!(throttle.allows(&ip(2)), "the counter is per address, not global");
     }
 
-    /// Le quota nul rend le limiteur transparent — ce dont dépend le harnais de test.
+    /// A zero quota makes the limiter transparent — which the test harness depends on.
     #[test]
-    fn un_quota_nul_ne_refuse_jamais() {
-        let throttle = Throttle::par_minute(0);
+    fn a_zero_quota_never_refuses() {
+        let throttle = Throttle::per_minute(0);
 
         for _ in 0..1000 {
-            assert!(throttle.autorise(&ip(1)));
+            assert!(throttle.allows(&ip(1)));
         }
     }
 }

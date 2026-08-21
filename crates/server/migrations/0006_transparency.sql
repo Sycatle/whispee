@@ -1,27 +1,26 @@
--- Journal auditable des clés de compte.
+-- Auditable log of account keys.
 --
--- Ce que cette migration change dans le modèle de menace : jusqu'ici, le serveur ne pouvait pas
--- ajouter d'appareil à un compte (attestations) ni inventer de révocation (certificats). Il
--- pouvait encore mentir sur la clé du compte elle-même **au premier contact** — quand Alice
--- demande le compte de Bob pour la première fois, elle n'a rien à quoi comparer.
+-- What this migration changes in the threat model: until now the server could not add a device
+-- to an account (attestations) nor invent a revocation (certificates). It could still lie
+-- about the account key itself **on first contact** — when Alice asks for Bob's account for
+-- the first time, she has nothing to compare against.
 --
--- Chaque clé publiée entre désormais dans un arbre de Merkle append-only. Le serveur signe une
--- tête (STH) et fournit, à la demande, la preuve qu'une clé y figure et que le journal
--- d'aujourd'hui prolonge celui d'hier.
+-- Every published key now enters an append-only Merkle tree. The server signs a head (STH)
+-- and provides, on request, proof that a key is in the tree and that today's log extends
+-- yesterday's.
 --
--- Ce que cela ne règle pas, et qui doit rester dit : le serveur peut tenir DEUX journaux et en
--- servir un à chacun. Chaque victime voit un journal parfaitement cohérent. Seule la
--- comparaison des têtes entre clients — hors de la base, dans les messages chiffrés — attrape
--- cette bifurcation.
+-- What this does not fix, and must be said: the server can keep TWO logs and serve one to
+-- each party. Every victim sees a perfectly consistent log. Only comparing heads between
+-- clients — outside the database, inside encrypted messages — catches that fork.
 
 CREATE TABLE log_entries (
-    -- L'indice dans l'arbre. `BIGSERIAL` garantit la croissance stricte ; c'est l'ordre
-    -- d'insertion qui définit l'arbre, et il ne doit jamais être réordonné.
+    -- The index in the tree. `BIGSERIAL` guarantees strict growth; insertion order defines the
+    -- tree and must never be reordered.
     seq          BIGSERIAL PRIMARY KEY,
     handle       TEXT NOT NULL REFERENCES accounts(handle) ON DELETE CASCADE,
     identity_key BYTEA NOT NULL,
-    -- Hash de feuille pré-calculé. Le recalculer à chaque preuve serait correct mais rendrait
-    -- une divergence de formule silencieuse : figée ici, elle se constate.
+    -- Pre-computed leaf hash. Recomputing it for every proof would be correct but would make a
+    -- formula mismatch silent: pinned here, it becomes observable.
     leaf         BYTEA NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -29,30 +28,30 @@ CREATE TABLE log_entries (
     CONSTRAINT log_leaf_is_sha256 CHECK (octet_length(leaf) = 32)
 );
 
--- Un compte peut apparaître plusieurs fois : c'est le principe même d'un journal append-only.
--- Une rotation ajoute une entrée, elle n'en remplace aucune.
+-- An account may appear several times: that is the whole point of an append-only log. A
+-- rotation adds an entry, it replaces none.
 CREATE INDEX log_entries_handle_idx ON log_entries (handle, seq DESC);
 
--- Clé de signature du journal.
+-- Log signing key.
 --
--- Elle vit en base parce que ce projet n'a qu'un seul processus. **C'est la faiblesse
--- structurelle du dispositif** : le journal est signé par la même partie que celle qu'il
--- surveille. Un déploiement sérieux confierait le journal à un opérateur distinct, ou à
--- plusieurs, dont aucun ne serait le serveur de messagerie. Voir les limites du README.
+-- It lives in the database because this project has a single process. **That is the structural
+-- weakness of the scheme**: the log is signed by the same party it watches. A serious
+-- deployment would hand the log to a distinct operator, or to several, none of them the
+-- messaging server. See the README's limitations.
 CREATE TABLE log_key (
     id          BOOLEAN PRIMARY KEY DEFAULT TRUE,
     signing_key BYTEA NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- Une seule ligne possible : deux clés de journal signeraient deux journaux.
+    -- Only one row possible: two log keys would sign two logs.
     CONSTRAINT log_key_unique CHECK (id),
     CONSTRAINT log_signing_key_is_ed25519 CHECK (octet_length(signing_key) = 32)
 );
 
--- Le rattrapage des comptes déjà créés se fait **en Rust au démarrage**, pas ici.
+-- Backfilling already-created accounts happens **in Rust at startup**, not here.
 --
--- Recalculer le hash de feuille en SQL exigerait de réécrire la formule (préfixe de domaine,
--- longueurs préfixées) dans un second langage. Deux définitions qui divergent d'un octet
--- produisent des preuves refusées — ou, bien pire, acceptées pour un arbre différent. C'est
--- exactement le problème que la crate `transparency` existe pour supprimer, il serait absurde
--- de le réintroduire dans une migration.
+-- Recomputing the leaf hash in SQL would mean rewriting the formula (domain prefix,
+-- length-prefixed fields) in a second language. Two definitions that differ by one byte
+-- produce rejected proofs — or, far worse, proofs accepted for a different tree. That is
+-- exactly the problem the `transparency` crate exists to remove; reintroducing it in a
+-- migration would be absurd.

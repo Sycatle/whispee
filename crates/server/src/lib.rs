@@ -1,18 +1,18 @@
-//! Delivery service : le transport que MLS ne définit pas.
+//! Delivery service: the transport MLS does not define.
 //!
-//! # Ce que ce serveur peut voir
+//! # What this server can see
 //!
-//! Rien du contenu. Mais il voit, et c'est important de l'énoncer :
+//! Nothing of the content. But it does see, and saying so matters:
 //!
-//! * qui est enregistré, et depuis quand ;
-//! * quel appareil appartient à quel groupe (table `group_members`) ;
-//! * qui écrit dans quel groupe, quand, et la taille de chaque message ;
-//! * qui réclame le KeyPackage de qui — donc qui ouvre une conversation avec qui ;
-//! * quand chaque compte est éveillé, à la minute près (`devices.last_seen_at`).
+//! * who is registered, and since when;
+//! * which device belongs to which group (table `group_members`);
+//! * who writes in which group, when, and the size of each message;
+//! * who claims whose KeyPackage — hence who starts a conversation with whom;
+//! * when each account is awake, to the minute (`devices.last_seen_at`).
 //!
-//! C'est le compromis de WhatsApp. Le réduire demande du sealed sender, du padding et des
-//! credentials à divulgation nulle. Ce n'est pas fait ici, et le prétendre serait pire que
-//! de ne pas le faire.
+//! That is WhatsApp's trade-off. Shrinking it takes sealed sender, padding and zero-knowledge
+//! credentials. None of that is done here, and claiming otherwise would be worse than not
+//! doing it.
 
 pub mod auth;
 pub mod error;
@@ -30,29 +30,29 @@ use axum::extract::FromRef;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-/// État partagé par les handlers : la base, et les auditeurs connectés.
+/// State shared by the handlers: the database, and the connected listeners.
 ///
-/// `FromRef` est ce qui permet aux handlers existants de continuer à extraire `State<PgPool>`
-/// sans être touchés — y compris l'extracteur [`auth::Signed`], qui exige seulement qu'un
-/// `PgPool` soit dérivable de l'état.
+/// `FromRef` is what lets existing handlers keep extracting `State<PgPool>` untouched —
+/// including the [`auth::Signed`] extractor, which only requires that a `PgPool` be derivable
+/// from the state.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub hub: Arc<stream::Hub>,
-    /// Limite de débit des routes ouvertes, comptée par adresse.
+    /// Rate limit on the open routes, counted per address.
     pub throttle: Arc<throttle::Throttle>,
-    /// Limite de consommation des KeyPackages, comptée par couple appelant-cible.
+    /// Limit on KeyPackage consumption, counted per caller-target pair.
     ///
-    /// Séparée de la précédente parce que les deux n'ont pas le même ordre de grandeur : une
-    /// borne unique serait soit trop lâche pour protéger un stock, soit trop serrée pour laisser
-    /// quelqu'un s'inscrire.
+    /// Kept separate from the previous one because the two are not the same order of magnitude:
+    /// a single bound would be either too loose to protect a stock, or too tight to let anyone
+    /// sign up.
     pub claims: Arc<throttle::Claims>,
-    /// Ce qui réveille les appareils endormis.
+    /// What wakes sleeping devices.
     ///
-    /// [`push::Silencieux`] par défaut, et c'est un choix de conception, pas un provisoire : un
-    /// déploiement qui ne parle ni à Apple ni à Google doit rester pleinement fonctionnel. Voir
-    /// `push` pour ce que ce réveil coûte en métadonnées.
-    pub push: Arc<dyn push::Emetteur>,
+    /// [`push::Silent`] by default, and that is a design choice, not a placeholder: a deployment
+    /// that talks to neither Apple nor Google must stay fully functional. See `push` for what
+    /// this wake-up costs in metadata.
+    pub push: Arc<dyn push::Waker>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -73,7 +73,7 @@ impl FromRef<AppState> for Arc<throttle::Throttle> {
     }
 }
 
-impl FromRef<AppState> for Arc<dyn push::Emetteur> {
+impl FromRef<AppState> for Arc<dyn push::Waker> {
     fn from_ref(state: &AppState) -> Self {
         state.push.clone()
     }
@@ -86,9 +86,9 @@ impl FromRef<AppState> for Arc<throttle::Claims> {
 }
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
-    // Une connexion de plus qu'avant : l'écoute inter-instances (`stream::Hub::attach`) en
-    // immobilise une en permanence sur son `LISTEN`. Ne pas ajuster ce chiffre reviendrait à
-    // retirer une connexion au service des requêtes.
+    // One connection more than before: inter-instance listening (`stream::Hub::attach`) holds
+    // one permanently on its `LISTEN`. Not adjusting this number would amount to taking a
+    // connection away from serving requests.
     let pool = PgPoolOptions::new()
         .max_connections(11)
         .connect(database_url)
@@ -96,107 +96,106 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
-    // La clé du journal est créée au premier démarrage, jamais deux fois : deux clés
-    // signeraient deux journaux, et les clients verraient une bifurcation causée par nous.
+    // The log's key is created on first start, never twice: two keys would sign two logs, and
+    // clients would see a fork caused by us.
     log::ensure_signing_key(&pool).await?;
 
-    // Les comptes antérieurs au journal doivent y entrer, sans quoi les clients rejetteraient
-    // toutes leurs clés faute de preuve d'inclusion.
+    // Accounts predating the log must enter it, otherwise clients would reject all their keys
+    // for lack of an inclusion proof.
     log::backfill(&pool).await?;
 
     Ok(pool)
 }
 
-/// Refuse une requête ouverte quand l'adresse a dépassé son quota.
+/// Refuses an open request when the address has exceeded its quota.
 ///
-/// # Pourquoi l'adresse de la socket, et rien d'autre
+/// # Why the socket address, and nothing else
 ///
-/// `X-Forwarded-For` se falsifie librement : le lire ferait de la limite une formalité, un
-/// en-tête à écrire pour la contourner. Le serveur ne connaît donc que ce que la pile TCP lui
-/// dit. La contrepartie est réelle et assumée — derrière un proxy, toutes les requêtes portent
-/// l'adresse du proxy, et c'est alors à lui de porter la limite.
+/// `X-Forwarded-For` is freely forged: reading it would make the limit a formality, a header to
+/// write in order to bypass it. The server therefore only knows what the TCP stack tells it.
+/// The trade-off is real and accepted — behind a proxy, every request carries the proxy's
+/// address, and it is then up to the proxy to carry the limit.
 ///
-/// # Pourquoi 429 et pas 403
+/// # Why 429 and not 403
 ///
-/// L'appelant n'a rien fait d'interdit ; il en a seulement trop fait. Le distinguer permet à un
-/// client honnête de réessayer plus tard au lieu de conclure qu'il est banni.
-async fn limiter_le_debit(
+/// The caller did nothing forbidden; it only did too much. Distinguishing the two lets an
+/// honest client retry later instead of concluding it is banned.
+async fn rate_limit(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::ConnectInfo(pair): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    requete: axum::extract::Request,
-    suite: axum::middleware::Next,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
 
-    if state.throttle.autorise(&format!("ip:{}", pair.ip())) {
-        return suite.run(requete).await;
+    if state.throttle.allows(&format!("ip:{}", pair.ip())) {
+        return next.run(request).await;
     }
 
-    tracing::debug!(adresse = %pair.ip(), "quota de route ouverte dépassé");
-    (axum::http::StatusCode::TOO_MANY_REQUESTS, "trop de requêtes").into_response()
+    tracing::debug!(address = %pair.ip(), "open route quota exceeded");
+    (axum::http::StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
 }
 
-/// Efface les nonces devenus inutiles à l'anti-rejeu.
+/// Erases nonces that have become useless to replay protection.
 ///
-/// Un nonce n'a besoin d'être mémorisé que le temps où la requête pourrait encore être acceptée,
-/// c'est-à-dire la fenêtre de tolérance d'horloge. Au-delà, `auth::Signed` la refuse sur son
-/// horodatage, et le garder ne protégerait plus de rien.
+/// A nonce only needs to be remembered for as long as the request could still be accepted, that
+/// is, the clock tolerance window. Beyond it, `auth::Signed` rejects the request on its
+/// timestamp, and keeping the nonce would protect nothing.
 ///
-/// Le double de la fenêtre est retenu, pour ne pas courir avec l'horloge : effacer un nonce
-/// encore acceptable rouvrirait exactement le trou que la table existe pour fermer.
+/// Twice the window is kept, so as not to race the clock: erasing a still-acceptable nonce would
+/// reopen exactly the hole the table exists to close.
 ///
-/// Cette tâche n'est pas une commodité — sans elle, `request_nonces` grossit d'une ligne par
-/// requête authentifiée, indéfiniment.
-fn purger_les_nonces(pool: PgPool) {
+/// This task is not a convenience — without it, `request_nonces` grows by one row per
+/// authenticated request, forever.
+fn purge_nonces(pool: PgPool) {
     tokio::spawn(async move {
-        let mut rythme = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut pace = tokio::time::interval(std::time::Duration::from_secs(60));
 
         loop {
-            rythme.tick().await;
+            pace.tick().await;
 
-            let effacees = sqlx::query(&format!(
+            let erased = sqlx::query(&format!(
                 "DELETE FROM request_nonces WHERE seen_at < now() - interval '{} seconds'",
                 auth::MAX_CLOCK_SKEW * 2
             ))
             .execute(&pool)
             .await;
 
-            match effacees {
-                Ok(resultat) if resultat.rows_affected() > 0 => {
-                    tracing::debug!(lignes = resultat.rows_affected(), "nonces purgés");
+            match erased {
+                Ok(result) if result.rows_affected() > 0 => {
+                    tracing::debug!(rows = result.rows_affected(), "nonces purged");
                 }
                 Ok(_) => {}
-                // Une base momentanément indisponible n'est pas fatale : la purge suivante
-                // rattrapera le retard. La faire échouer bruyamment ferait passer un incident
-                // d'exploitation pour un défaut de sécurité.
-                Err(error) => tracing::debug!(%error, "purge des nonces reportée"),
+                // A momentarily unavailable database is not fatal: the next purge catches up.
+                // Failing loudly would make an operational incident look like a security defect.
+                Err(error) => tracing::debug!(%error, "nonce purge deferred"),
             }
         }
     });
 }
 
-/// Plafond d'une pièce jointe, chiffré compris.
+/// Ceiling for an attachment, encryption included.
 ///
-/// Le chiffrement AES-GCM n'ajoute que 16 octets de tag : la limite porte donc en pratique
-/// sur la taille du fichier d'origine.
+/// AES-GCM encryption only adds a 16-byte tag: in practice the limit therefore applies to the
+/// size of the original file.
 pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
-/// Origines autorisées à appeler l'API depuis un navigateur.
+/// Origins allowed to call the API from a browser.
 ///
-/// Jamais de joker : `Access-Control-Allow-Origin: *` laisserait n'importe quel site
-/// déclencher des requêtes vers ce serveur depuis le navigateur d'un utilisateur. Les
-/// requêtes restent signées, donc un site tiers ne pourrait rien authentifier — mais
-/// autoriser large sans raison est exactement ce qui transforme un défaut mineur en faille.
+/// Never a wildcard: `Access-Control-Allow-Origin: *` would let any site trigger requests to
+/// this server from a user's browser. Requests stay signed, so a third-party site could not
+/// authenticate anything — but allowing broadly without reason is exactly what turns a minor
+/// defect into a breach.
 fn cors_layer() -> tower_http::cors::CorsLayer {
     use axum::http::{HeaderName, Method, HeaderValue};
     use tower_http::cors::CorsLayer;
 
-    // Les origines de l'application de bureau figurent dans le défaut, et pas seulement dans la
-    // documentation : elles sont fixes — le système d'exploitation les impose, elles ne dépendent
-    // d'aucun déploiement — et les oublier produit un « Failed to fetch » que le navigateur émet
-    // avant d'envoyer quoi que ce soit, donc sans rien laisser dans les journaux du serveur.
+    // The desktop application's origins are in the default, not only in the documentation: they
+    // are fixed — the operating system imposes them, they depend on no deployment — and
+    // forgetting them produces a "Failed to fetch" the browser emits before sending anything, so
+    // without leaving a trace in the server logs.
     //
-    // `tauri://localhost` sur Linux et macOS, `http://tauri.localhost` sur Windows et Android.
+    // `tauri://localhost` on Linux and macOS, `http://tauri.localhost` on Windows and Android.
     let origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
         .unwrap_or_else(|_| {
             "http://127.0.0.1:5173,http://localhost:5173,tauri://localhost,http://tauri.localhost"
@@ -209,19 +208,19 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
     CorsLayer::new()
         .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST])
-        // Tout en-tête que le client envoie doit figurer ici, sinon le navigateur bloque la
-        // requête **avant** qu'elle ne parte : le serveur ne voit rien, et le client ne reçoit
-        // qu'un « Failed to fetch » qui ne désigne pas la cause. Les tests d'intégration ne
-        // passent pas par le préflight et ne peuvent donc pas attraper l'oubli.
+        // Every header the client sends must be listed here, otherwise the browser blocks the
+        // request **before** it leaves: the server sees nothing, and the client only gets a
+        // "Failed to fetch" that does not name the cause. Integration tests do not go through
+        // the preflight and therefore cannot catch the omission.
         .allow_headers([
             HeaderName::from_static("content-type"),
             HeaderName::from_static("x-device-id"),
             HeaderName::from_static("x-timestamp"),
             HeaderName::from_static("x-signature"),
-            // Anti-rejeu. Absent d'ici, le navigateur bloque **toute** requête signée au
-            // préflight, avant l'envoi : le serveur ne voit rien passer.
+            // Replay protection. Missing from here, the browser blocks **every** signed request
+            // at the preflight, before it is sent: the server never sees it.
             HeaderName::from_static("x-nonce"),
-            // Dépôt anonyme (sealed sender), utilisé aussi par les signaux éphémères.
+            // Anonymous post (sealed sender), also used by ephemeral signals.
             HeaderName::from_static("x-group-nonce"),
             HeaderName::from_static("x-group-mac"),
         ])
@@ -230,73 +229,72 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
 pub fn app(pool: PgPool) -> axum::Router {
     app_with(
         pool,
-        throttle::Throttle::depuis_environnement(),
-        throttle::Claims::depuis_environnement(),
+        throttle::Throttle::from_environment(),
+        throttle::Claims::from_environment(),
     )
 }
 
-/// Variante à limite de débit imposée.
+/// Variant with an imposed rate limit.
 ///
-/// Existe pour les tests : le harnais désactive la limite — il crée des dizaines de comptes en
-/// quelques secondes depuis la boucle locale, ce qu'aucun quota réaliste ne laisserait passer —
-/// et le test qui vérifie qu'elle mord se construit une application avec un quota bas.
+/// Exists for the tests: the harness disables the limit — it creates dozens of accounts in a few
+/// seconds from the loopback, which no realistic quota would allow — and the test that checks
+/// the limit bites builds itself an application with a low quota.
 pub fn app_with(
     pool: PgPool,
     throttle: throttle::Throttle,
     claims: throttle::Claims,
 ) -> axum::Router {
-    app_avec_reveil(pool, throttle, claims, Arc::new(push::Silencieux))
+    app_with_waker(pool, throttle, claims, Arc::new(push::Silent))
 }
 
-/// La même application, avec un émetteur de réveil choisi.
+/// The same application, with a chosen wake-up emitter.
 ///
-/// Existe pour les tests : ce que le serveur envoie au fournisseur — et surtout **à qui** — est
-/// une propriété de confidentialité, pas un détail d'acheminement. La vérifier demande de voir
-/// passer les adresses, donc de pouvoir substituer l'émetteur.
-pub fn app_avec_reveil(
+/// Exists for the tests: what the server sends to the provider — and above all **to whom** — is
+/// a confidentiality property, not a routing detail. Checking it requires seeing the addresses
+/// go by, hence being able to substitute the emitter.
+pub fn app_with_waker(
     pool: PgPool,
     throttle: throttle::Throttle,
     claims: throttle::Claims,
-    push: Arc<dyn push::Emetteur>,
+    push: Arc<dyn push::Waker>,
 ) -> axum::Router {
     use tower_http::limit::RequestBodyLimitLayer;
     use tower_http::trace::TraceLayer;
 
-    // Les KeyPackages et les enveloppes MLS sont petits : un plafond serré empêche qu'une
-    // requête unique épuise la mémoire du serveur. Les pièces jointes ont leur propre
-    // plafond, nettement plus haut, appliqué à leurs seules routes.
+    // KeyPackages and MLS envelopes are small: a tight ceiling prevents a single request from
+    // exhausting the server's memory. Attachments have their own, far higher ceiling, applied
+    // to their routes only.
     let state = AppState {
         pool: pool.clone(),
         hub: stream::Hub::new(),
         throttle: Arc::new(throttle),
         claims: Arc::new(claims),
-        // Le défaut est `Silencieux`, posé par `app_with` : brancher Apple ou Google demande
-        // des secrets qu'un déploiement doit fournir sciemment, après avoir lu ce que le réveil
-        // laisse fuir.
+        // The default is `Silent`, set by `app_with`: wiring up Apple or Google requires secrets
+        // a deployment must provide knowingly, after reading what the wake-up leaks.
         push,
     };
 
-    // Branche le hub sur Postgres, ce qui permet de faire tourner plusieurs instances sans que
-    // leurs clients cessent de se voir. Détache des tâches : cette fonction doit donc être
-    // appelée depuis un runtime tokio.
+    // Wires the hub onto Postgres, which allows running several instances without their clients
+    // losing sight of each other. Detaches tasks: this function must therefore be called from a
+    // tokio runtime.
     state.hub.attach(pool.clone());
 
-    purger_les_nonces(pool.clone());
+    purge_nonces(pool.clone());
 
     let messages = routes::router(state.clone()).layer(RequestBodyLimitLayer::new(1024 * 1024));
     let attachments =
         routes::attachment_router(pool).layer(RequestBodyLimitLayer::new(MAX_ATTACHMENT_BYTES));
 
-    // Les routes ouvertes portent en plus la limite de débit. Elle ne s'applique qu'à elles :
-    // ailleurs, la signature identifie l'appelant, et un abus se traite en révoquant l'appareil
-    // plutôt qu'en pénalisant une adresse partagée par des innocents.
-    let publiques = routes::public_router(state.clone())
-        .layer(axum::middleware::from_fn_with_state(state, limiter_le_debit))
+    // The open routes additionally carry the rate limit. It applies to them alone: elsewhere the
+    // signature identifies the caller, and abuse is handled by revoking the device rather than
+    // by penalising an address shared with innocents.
+    let public = routes::public_router(state.clone())
+        .layer(axum::middleware::from_fn_with_state(state, rate_limit))
         .layer(RequestBodyLimitLayer::new(1024 * 1024));
 
     messages
         .merge(attachments)
-        .merge(publiques)
+        .merge(public)
         .layer(cors_layer())
         .layer(TraceLayer::new_for_http())
 }

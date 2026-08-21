@@ -1,18 +1,18 @@
--- Pièces jointes.
+-- Attachments.
 --
--- Le serveur stocke des blobs déjà chiffrés par le client, avec une clé qui ne lui parvient
--- jamais : elle voyage à l'intérieur du message MLS. Le serveur ne peut donc pas déchiffrer
--- un fichier, même en le stockant intégralement.
+-- The server stores blobs already encrypted by the client, under a key it never receives: the
+-- key travels inside the MLS message. The server cannot decrypt a file even though it stores
+-- the whole thing.
 --
--- Rien n'est conservé sur le fichier lui-même — ni nom, ni type, ni empreinte. Ces
--- informations sont du contenu, et voyagent chiffrées dans le message. La seule chose que
--- le serveur apprend est qu'un membre de tel groupe a déposé tant d'octets à tel moment.
+-- Nothing about the file itself is kept — no name, no type, no fingerprint. That is content,
+-- and it travels encrypted in the message. All the server learns is that some member of a
+-- given group deposited that many bytes at that time.
 CREATE TABLE attachments (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     group_id    BYTEA NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     payload     BYTEA NOT NULL,
-    -- Pour la purge des pièces jointes orphelines. Même réserve que sur `envelopes` :
-    -- c'est une métadonnée temporelle, aucune fonctionnalité ne doit s'y adosser.
+    -- For purging orphaned attachments. Same caveat as on `envelopes`: temporal metadata, no
+    -- feature may lean on it.
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

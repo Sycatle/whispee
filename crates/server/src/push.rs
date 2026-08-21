@@ -1,74 +1,73 @@
-//! Réveil des appareils endormis.
+//! Waking sleeping devices.
 //!
-//! # Ce que ce module dégrade
+//! # What this module degrades
 //!
-//! Tout le reste du serveur tend à en savoir le moins possible. Celui-ci va dans l'autre sens, et
-//! il faut le dire avant d'expliquer ce qu'il apporte : pour qu'un téléphone endormi apprenne
-//! qu'un message l'attend, le serveur doit demander à Google ou Apple de le réveiller. Ce tiers
-//! apprend alors le **rythme** des conversations d'un appareil qu'il sait rattacher à un compte.
+//! The rest of the server tries to know as little as possible; this module goes the other way,
+//! and that has to be said before anything else: for a sleeping phone to learn that a message is
+//! waiting, the server must ask Google or Apple to wake it. That third party then learns the
+//! **rhythm** of the conversations of a device it can tie to an account.
 //!
-//! Le contenu reste chiffré. Ce qui fuit, ce sont les métadonnées d'activité, et c'est
-//! irréductible : c'est le principe du push, pas un défaut d'implémentation. Voir
-//! `migrations/0011_push.sql` pour les trois bornes qui en découlent.
+//! The content stays encrypted. What leaks is activity metadata, and it is irreducible: that is
+//! how push works, not an implementation defect. See `migrations/0011_push.sql` for the three
+//! limits that follow from it.
 //!
-//! # Le réveil ne transporte rien
+//! # The wake-up carries nothing
 //!
-//! Ni texte, ni expéditeur, ni identifiant de groupe : « réveille-toi », et c'est tout.
-//! L'application relève ensuite par le chemin normal, déchiffre, et compose la notification
-//! localement. Mettre le message dans la notification le montrerait au fournisseur **et** à
-//! l'écran verrouillé — c'est-à-dire exactement ce que ce projet existe pour éviter.
+//! No text, no sender, no group id: "wake up", and nothing more. The app then fetches through the
+//! normal path, decrypts, and composes the notification locally. Putting the message in the
+//! notification would show it to the provider **and** to the lock screen — exactly what this
+//! project exists to avoid.
 //!
-//! C'est ce qui explique la forme de [`Emetteur`] : il ne prend que des jetons. Il n'y a rien
-//! d'autre à lui donner, et l'interface le rend impossible plutôt que déconseillé.
+//! That explains the shape of [`Waker`]: it takes only tokens. There is nothing else to give it,
+//! and the interface makes that impossible rather than merely discouraged.
 //!
-//! # Inerte sans configuration
+//! # Inert without configuration
 //!
-//! [`Silencieux`] est l'émetteur par défaut. Un déploiement auto-hébergé qui ne parle ni à Apple
-//! ni à Google enregistre les jetons et n'envoie rien : la fonctionnalité manque, l'application
-//! non. C'est le comportement à préserver en priorité si un jour quelqu'un branche un vrai
-//! fournisseur ici.
+//! [`Silent`] is the default waker. A self-hosted deployment that talks to neither Apple nor
+//! Google records tokens and sends nothing: the feature is missing, the app is not. That is the
+//! behaviour to preserve first if anyone ever wires a real provider in here.
 
 use std::sync::Arc;
 
 use sqlx::PgPool;
 
-/// Où joindre un appareil, et par quel fournisseur.
+/// Where to reach a device, and through which provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Adresse {
+pub struct Address {
     pub provider: String,
     pub token: String,
 }
 
-/// Ce qui sait réveiller des appareils.
+/// Whatever knows how to wake devices.
 ///
-/// Volontairement borné aux adresses : ce trait ne peut pas transporter de contenu parce qu'il
-/// n'y en a pas à transporter. Une signature qui accepterait un texte inviterait, un jour de
-/// hâte, à y mettre l'aperçu du message.
-pub trait Emetteur: Send + Sync {
-    fn reveiller(&self, adresses: Vec<Adresse>);
+/// Deliberately bounded to addresses: this trait cannot carry content because there is none to
+/// carry. A signature accepting a text would invite someone, on a hurried day, to put the message
+/// preview in it.
+pub trait Waker: Send + Sync {
+    fn wake(&self, addresses: Vec<Address>);
 }
 
-/// L'émetteur par défaut : il ne réveille personne.
+/// The default waker: it wakes nobody.
 ///
-/// Ce n'est pas un bouchon en attendant mieux, c'est le comportement d'un déploiement sans
-/// fournisseur configuré — et ce déploiement doit rester pleinement fonctionnel.
-pub struct Silencieux;
+/// Not a stub pending something better — this is the behaviour of a deployment with no configured
+/// provider, and that deployment must stay fully functional.
+pub struct Silent;
 
-impl Emetteur for Silencieux {
-    fn reveiller(&self, adresses: Vec<Adresse>) {
-        // Compté et non ignoré : sans trace, un déploiement dont la configuration a disparu
-        // ressemble trait pour trait à un déploiement qui n'en a jamais eu.
-        if !adresses.is_empty() {
-            tracing::debug!(appareils = adresses.len(), "réveil ignoré : aucun fournisseur");
+impl Waker for Silent {
+    fn wake(&self, addresses: Vec<Address>) {
+        // Counted rather than ignored: with no trace, a deployment whose configuration went
+        // missing looks exactly like one that never had any.
+        if !addresses.is_empty() {
+            tracing::debug!(devices = addresses.len(), "wake-up skipped: no provider");
         }
     }
 }
 
-/// Enregistre ou remplace le jeton d'un appareil.
+/// Records or replaces a device's token.
 ///
-/// Le remplacement est la règle : les fournisseurs font tourner leurs jetons sans prévenir, et
-/// garder les anciens n'accumulerait que des adresses mortes.
-pub async fn enregistrer(
+/// Replacement is the rule: providers rotate their tokens without warning, and keeping the old
+/// ones would only pile up dead addresses.
+pub async fn register(
     pool: &PgPool,
     device_id: &str,
     provider: &str,
@@ -88,8 +87,8 @@ pub async fn enregistrer(
     .map(|_| ())
 }
 
-/// Retire le jeton d'un appareil. Le silence redevient l'état normal.
-pub async fn oublier(pool: &PgPool, device_id: &str) -> sqlx::Result<()> {
+/// Drops a device's token. Silence becomes the normal state again.
+pub async fn forget(pool: &PgPool, device_id: &str) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM push_tokens WHERE device_id = $1")
         .bind(device_id)
         .execute(pool)
@@ -97,19 +96,19 @@ pub async fn oublier(pool: &PgPool, device_id: &str) -> sqlx::Result<()> {
         .map(|_| ())
 }
 
-/// Les adresses des membres d'un groupe, sauf celle qu'on exclut.
+/// The addresses of a group's members, minus the one being excluded.
 ///
-/// # Pourquoi l'exclusion est optionnelle
+/// # Why the exclusion is optional
 ///
-/// L'émetteur d'un dépôt **anonyme** est inconnu du serveur : le sealed sender lui a retiré ce
-/// pouvoir, et il n'est pas question de le lui rendre pour économiser une notification. Cet
-/// appareil se réveillera donc pour un message qu'il vient d'écrire — un défaut d'élégance, à
-/// corriger côté client qui, lui, sait ce qu'il a envoyé.
-pub async fn adresses_du_groupe(
+/// The sender of an **anonymous** post is unknown to the server: sealed sender took that power
+/// away, and there is no question of handing it back to save one notification. That device will
+/// therefore wake up for a message it just wrote — an inelegance, to be fixed on the client,
+/// which does know what it sent.
+pub async fn group_addresses(
     pool: &PgPool,
     group_id: &[u8],
-    sauf: Option<&str>,
-) -> sqlx::Result<Vec<Adresse>> {
+    except: Option<&str>,
+) -> sqlx::Result<Vec<Address>> {
     sqlx::query_as::<_, (String, String)>(
         "SELECT p.provider, p.token
          FROM push_tokens p
@@ -117,30 +116,30 @@ pub async fn adresses_du_groupe(
          WHERE m.group_id = $1 AND ($2::text IS NULL OR p.device_id <> $2)",
     )
     .bind(group_id)
-    .bind(sauf)
+    .bind(except)
     .fetch_all(pool)
     .await
-    .map(|lignes| {
-        lignes.into_iter().map(|(provider, token)| Adresse { provider, token }).collect()
+    .map(|rows| {
+        rows.into_iter().map(|(provider, token)| Address { provider, token }).collect()
     })
 }
 
-/// Réveille les membres d'un groupe après un dépôt.
+/// Wakes a group's members after a post.
 ///
-/// Détaché, comme la présence : un fournisseur lent ou en panne ne doit pas retarder la réponse à
-/// celui qui vient d'envoyer son message. Le message, lui, est déjà écrit et déjà annoncé aux
-/// clients connectés — le réveil ne sert qu'à ceux qui ne le sont pas.
-pub fn reveiller_detache(
+/// Detached, like presence: a slow or broken provider must not delay the response to whoever just
+/// sent their message. The message itself is already written and already announced to connected
+/// clients — the wake-up only serves those who are not.
+pub fn wake_detached(
     pool: PgPool,
-    emetteur: Arc<dyn Emetteur>,
+    waker: Arc<dyn Waker>,
     group_id: Vec<u8>,
-    sauf: Option<String>,
+    except: Option<String>,
 ) {
     tokio::spawn(async move {
-        match adresses_du_groupe(&pool, &group_id, sauf.as_deref()).await {
-            Ok(adresses) if !adresses.is_empty() => emetteur.reveiller(adresses),
+        match group_addresses(&pool, &group_id, except.as_deref()).await {
+            Ok(addresses) if !addresses.is_empty() => waker.wake(addresses),
             Ok(_) => {}
-            Err(erreur) => tracing::warn!(?erreur, "réveil impossible"),
+            Err(error) => tracing::warn!(?error, "cannot wake devices"),
         }
     });
 }
@@ -150,39 +149,39 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Un émetteur qui note ce qu'on lui demande, pour vérifier ce qui lui parvient.
+    /// A waker that records what it is asked for, to check what reaches it.
     #[derive(Default)]
-    struct Espion(Mutex<Vec<Adresse>>);
+    struct Spy(Mutex<Vec<Address>>);
 
-    impl Emetteur for Espion {
-        fn reveiller(&self, adresses: Vec<Adresse>) {
-            self.0.lock().expect("espion empoisonné").extend(adresses);
+    impl Waker for Spy {
+        fn wake(&self, addresses: Vec<Address>) {
+            self.0.lock().expect("poisoned spy").extend(addresses);
         }
     }
 
-    /// **Le test qui porte la propriété du module.**
+    /// **The test that carries the module's property.**
     ///
-    /// Le trait ne doit pas pouvoir transporter de contenu. Ce test ne l'exprime pas par une
-    /// assertion — le compilateur s'en charge — mais il fige l'usage : ce qui traverse la
-    /// frontière est une liste d'adresses, et rien d'autre. Si un jour quelqu'un ajoute un
-    /// paramètre de message, ce fichier cessera de compiler et la discussion aura lieu.
+    /// The trait must not be able to carry content. This test does not state that through an
+    /// assertion — the compiler handles it — but it freezes the usage: what crosses the boundary
+    /// is a list of addresses, and nothing else. If anyone ever adds a message parameter, this
+    /// file stops compiling and the discussion happens.
     #[test]
-    fn le_reveil_ne_transporte_que_des_adresses() {
-        let espion = Espion::default();
-        let adresse = Adresse { provider: "fcm".into(), token: "abc".into() };
+    fn the_wake_up_only_carries_addresses() {
+        let spy = Spy::default();
+        let address = Address { provider: "fcm".into(), token: "abc".into() };
 
-        espion.reveiller(vec![adresse.clone()]);
+        spy.wake(vec![address.clone()]);
 
-        assert_eq!(espion.0.lock().unwrap().as_slice(), &[adresse]);
+        assert_eq!(spy.0.lock().unwrap().as_slice(), &[address]);
     }
 
-    /// L'émetteur par défaut n'envoie rien et ne panique pas.
+    /// The default waker sends nothing and does not panic.
     ///
-    /// C'est le comportement d'un déploiement sans fournisseur, pas un cas dégradé : il doit
-    /// rester le chemin le mieux tenu du module.
+    /// That is the behaviour of a deployment with no provider, not a degraded case: it must stay
+    /// the best-kept path in the module.
     #[test]
-    fn sans_fournisseur_rien_ne_part() {
-        Silencieux.reveiller(vec![Adresse { provider: "fcm".into(), token: "abc".into() }]);
-        Silencieux.reveiller(Vec::new());
+    fn without_a_provider_nothing_is_sent() {
+        Silent.wake(vec![Address { provider: "fcm".into(), token: "abc".into() }]);
+        Silent.wake(Vec::new());
     }
 }

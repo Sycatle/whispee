@@ -1,19 +1,18 @@
-//! Registre de présence : qui est éveillé, à la minute près.
+//! Presence registry: who is awake, to the minute.
 //!
-//! # Ce que ce module ajoute au modèle de menace
+//! # What this module adds to the threat model
 //!
-//! Un registre transverse aux conversations, et il n'y a pas de formulation chiffrée qui
-//! l'évite : pour afficher qu'un compte est connecté, il faut que quelqu'un le sache. Ce
-//! quelqu'un est le serveur, et ce qu'il apprend, ce sont les horaires d'éveil de chacun.
-//! Voir `migrations/0008_presence.sql` pour ce qui borne la fuite.
+//! A registry that cuts across conversations, and no encrypted formulation avoids it: to show
+//! that an account is connected, someone has to know. That someone is the server, and what it
+//! learns is everyone's waking hours. See `migrations/0008_presence.sql` for what bounds the
+//! leak.
 //!
-//! # Ce que ce module ne doit jamais faire
+//! # What this module must never do
 //!
-//! **Être appelé depuis un chemin anonyme.** Les dépôts d'enveloppes scellées et les signaux de
-//! frappe prouvent l'appartenance à un groupe par un MAC, pas l'identité : le serveur ne sait
-//! pas qui dépose, et il ne doit pas l'apprendre. Y écrire une touche de présence demanderait
-//! de ré-attribuer le dépôt à un appareil — précisément le pouvoir que le sealed sender lui a
-//! retiré. Un test le gèle.
+//! **Be called from an anonymous path.** Sealed envelope posts and typing signals prove group
+//! membership with a MAC, not identity: the server does not know who posts, and must not learn
+//! it. Writing a presence touch there would require re-attributing the post to a device —
+//! exactly the power sealed sender took away. A test freezes that.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -21,36 +20,37 @@ use std::time::{Duration, Instant};
 
 use sqlx::PgPool;
 
-/// Rythme de réécriture. Borne la fraîcheur de la valeur, et c'est le seul chiffre qui coûte.
+/// Rewrite cadence. Bounds the freshness of the value, and is the only number that costs
+/// anything.
 ///
-/// Le seuil « en ligne », lui, est un choix d'affichage et vit côté client : le serveur renvoie
-/// un horodatage, jamais un booléen. Un booléen figerait la politique dans le protocole et
-/// interdirait le « vu à 14:02 » à partir de la même donnée.
+/// The "online" threshold is a display choice and lives on the client: the server returns a
+/// timestamp, never a boolean. A boolean would freeze the policy into the protocol and rule out
+/// "last seen at 14:02" from the same data.
 pub const PRESENCE_REFRESH: Duration = Duration::from_secs(60);
 
-/// Amortissement en mémoire, devant la garde SQL.
+/// In-memory damping, in front of the SQL guard.
 ///
-/// Placé dans un `static` plutôt que dans l'état applicatif : le routeur des pièces jointes n'a
-/// que `PgPool` comme état, et l'extracteur `Signed` est générique sur `S`. De toute façon, la
-/// protection réelle est la clause `WHERE` ci-dessous — elle reste juste avec plusieurs
-/// instances, ce cache non.
-static DERNIERE_TOUCHE: LazyLock<Mutex<HashMap<String, Instant>>> =
+/// Kept in a `static` rather than in the application state: the attachment router only has
+/// `PgPool` as state, and the `Signed` extractor is generic over `S`. In any case the real
+/// protection is the `WHERE` clause below — it stays correct across several instances, this cache
+/// does not.
+static LAST_TOUCH: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Note qu'un appareil est éveillé, au plus une fois par `PRESENCE_REFRESH`.
+/// Notes that a device is awake, at most once per `PRESENCE_REFRESH`.
 ///
-/// Sans amortissement, un client ferait une écriture par requête : à dix conversations et une
-/// relève toutes les trente secondes, c'est une écriture par seconde et par appareil, pour une
-/// information inchangée entre deux battements.
+/// Without damping, a client would write once per request: with ten conversations and a fetch
+/// every thirty seconds, that is one write per second per device, for information unchanged
+/// between two heartbeats.
 ///
-/// La mise à jour reste HOT — `last_seen_at` n'est pas indexée — donc elle ne réécrit aucune
-/// entrée d'index. Le compte qui a refusé la présence n'est jamais écrit : le refus est honoré
-/// ici, à la source, et non au filtrage en lecture.
+/// The update stays HOT — `last_seen_at` is not indexed — so it rewrites no index entry. An
+/// account that opted out of presence is never written: the opt-out is honoured here, at the
+/// source, and not by filtering on read.
 pub async fn touch(pool: &PgPool, device_id: &str) -> sqlx::Result<()> {
     {
-        let mut cache = DERNIERE_TOUCHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(dernier) = cache.get(device_id)
-            && dernier.elapsed() < PRESENCE_REFRESH
+        let mut cache = LAST_TOUCH.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(last) = cache.get(device_id)
+            && last.elapsed() < PRESENCE_REFRESH
         {
             return Ok(());
         }
@@ -73,44 +73,44 @@ pub async fn touch(pool: &PgPool, device_id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Touche sans jamais faire échouer l'appelant.
+/// Touches without ever failing the caller.
 ///
-/// Utilisée depuis l'extracteur d'authentification, qui est sur le chemin de latence de toutes
-/// les requêtes signées. Une présence qui ferait échouer un envoi de message serait une
-/// régression de la fonction principale au profit d'un point de couleur.
+/// Used from the authentication extractor, which sits on the latency path of every signed
+/// request. A presence write that failed a message send would be a regression of the main
+/// function in exchange for a coloured dot.
 pub fn touch_detached(pool: PgPool, device_id: String) {
     tokio::spawn(async move {
         if let Err(error) = touch(&pool, &device_id).await {
-            tracing::debug!(%error, "présence non enregistrée");
+            tracing::debug!(%error, "presence not recorded");
         }
     });
 }
 
-/// Dernière activité d'un compte, en secondes depuis l'époque.
+/// Last activity of an account, in seconds since the epoch.
 pub struct Seen {
     pub handle: String,
     pub last_seen: i64,
 }
 
-/// Lit la présence des comptes demandés, pour un appelant donné.
+/// Reads the presence of the requested accounts, for a given caller.
 ///
-/// # Contrôle d'accès
+/// # Access control
 ///
-/// Un handle n'est servi que si l'appelant partage au moins un groupe avec lui — ou s'il s'agit
-/// de son propre compte. Sans cette clause, la route serait un oracle d'activité sur n'importe
-/// quel pseudonyme du serveur.
+/// A handle is only served if the caller shares at least one group with it — or if it is their
+/// own account. Without that clause, the route would be an activity oracle on any pseudonym on
+/// the server.
 ///
-/// Réciprocité : un compte qui a refusé de diffuser sa présence n'obtient pas celle des autres.
-/// Le réglage permettrait sinon de voir sans être vu, c'est-à-dire exactement ce qu'il prétend
-/// empêcher.
+/// Reciprocity: an account that opted out of broadcasting its presence does not get anyone
+/// else's. Otherwise the setting would let you see without being seen, which is exactly what it
+/// claims to prevent.
 ///
-/// # Ce qui ne sort pas
+/// # What does not come out
 ///
-/// Le détail par appareil. Seul le `MAX` par compte est servi : le nombre d'appareils d'une
-/// personne et leurs habitudes respectives sont une fuite distincte de « en ligne ».
+/// Per-device detail. Only the `MAX` per account is served: how many devices a person has and
+/// their respective habits are a leak distinct from "online".
 ///
-/// Un handle inconnu et un handle sans groupe commun produisent le même résultat — leur absence.
-/// Les distinguer ferait de la route un oracle d'existence de compte.
+/// An unknown handle and a handle with no shared group produce the same result — their absence.
+/// Distinguishing them would make the route an account-existence oracle.
 pub async fn read(pool: &PgPool, device_id: &str, handles: &[String]) -> sqlx::Result<Vec<Seen>> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT d.handle, EXTRACT(EPOCH FROM MAX(d.last_seen_at))::BIGINT
@@ -118,18 +118,18 @@ pub async fn read(pool: &PgPool, device_id: &str, handles: &[String]) -> sqlx::R
           WHERE d.revoked_at IS NULL
             AND d.handle = ANY($2)
             AND EXISTS (
-                  SELECT 1 FROM devices moi
-                   JOIN accounts a ON a.handle = moi.handle
-                  WHERE moi.id = $1 AND a.presence_optout = false
+                  SELECT 1 FROM devices me
+                   JOIN accounts a ON a.handle = me.handle
+                  WHERE me.id = $1 AND a.presence_optout = false
                 )
             AND (
                  d.handle = (SELECT handle FROM devices WHERE id = $1)
               OR EXISTS (
                    SELECT 1
-                     FROM group_members moi
-                     JOIN group_members eux ON eux.group_id = moi.group_id
-                     JOIN devices autre ON autre.id = eux.device_id
-                    WHERE moi.device_id = $1 AND autre.handle = d.handle
+                     FROM group_members me
+                     JOIN group_members them ON them.group_id = me.group_id
+                     JOIN devices other ON other.id = them.device_id
+                    WHERE me.device_id = $1 AND other.handle = d.handle
                  )
             )
           GROUP BY d.handle

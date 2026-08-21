@@ -20,8 +20,8 @@ rand_core.workspace = true
 transparency = { path = "../transparency" }
 hmac.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-# Déjà présentes dans l'arbre via axum ; déclarées ici parce que le hub de diffusion les
-# utilise directement. Licences MIT et MIT/Apache-2.0, compatibles avec du code propriétaire.
+# Already in the tree through axum; declared here because the broadcast hub uses them
+# directly.
 tokio-stream = { version = "0.1", features = ["sync", "time"] }
 futures-util = "0.3"
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
@@ -40,6 +40,6 @@ serde_json = "1"
 attest = { path = "../attest" }
 transparency = { path = "../transparency" }
 aes-gcm.workspace = true
-# Client WebSocket des tests. Déjà dans l'arbre : axum l'utilise pour sa propre couche `ws`.
+# WebSocket client for the tests. Already in the tree: axum uses it for its own `ws` layer.
 tokio-tungstenite = "0.29"
 futures-util = "0.3"

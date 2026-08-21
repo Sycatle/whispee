@@ -4,29 +4,29 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("requête mal formée : {0}")]
+    #[error("malformed request: {0}")]
     BadRequest(&'static str),
 
-    #[error("authentification refusée")]
+    #[error("authentication refused")]
     Unauthorized,
 
-    #[error("accès refusé")]
+    #[error("access denied")]
     Forbidden,
 
-    #[error("introuvable")]
+    #[error("not found")]
     NotFound,
 
-    #[error("conflit : {0}")]
+    #[error("conflict: {0}")]
     Conflict(&'static str),
 
-    /// L'appelant n'a rien fait d'interdit ; il en a seulement trop fait.
+    /// The caller did nothing forbidden; it only did too much of it.
     ///
-    /// Distinct de `Forbidden` à dessein : un client honnête qui reçoit 429 réessaie plus tard,
-    /// là où un 403 lui ferait conclure qu'il est banni et abandonner.
-    #[error("trop de requêtes")]
+    /// Distinct from `Forbidden` on purpose: an honest client that gets a 429 retries later,
+    /// where a 403 would make it conclude it is banned and give up.
+    #[error("too many requests")]
     TooManyRequests,
 
-    #[error("erreur de stockage")]
+    #[error("storage error")]
     Database(#[from] sqlx::Error),
 }
 
@@ -42,20 +42,19 @@ impl IntoResponse for ApiError {
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
-        // Les erreurs de base de données sont journalisées mais jamais renvoyées au client :
-        // un message SQL divulgue le schéma, et parfois les données. Les autres variantes
-        // sont rédigées pour être sûres à exposer.
+        // Database errors are logged but never returned to the client: an SQL message leaks the
+        // schema, and sometimes the data. The other variants are worded to be safe to expose.
         let body = match &self {
             ApiError::Database(err) => {
-                tracing::error!(error = %err, "erreur de base de données");
-                "erreur interne".to_owned()
+                tracing::error!(error = %err, "database error");
+                "internal error".to_owned()
             }
             other => other.to_string(),
         };
 
-        // Volontairement indistinct entre « authentification invalide » et « appareil
-        // inconnu » : distinguer les deux transforme l'endpoint en oracle permettant
-        // d'énumérer les appareils enregistrés.
+        // Deliberately indistinguishable between "invalid authentication" and "unknown device":
+        // telling them apart turns the endpoint into an oracle for enumerating registered
+        // devices.
         (status, body).into_response()
     }
 }

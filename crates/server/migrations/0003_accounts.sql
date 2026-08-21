@@ -1,63 +1,63 @@
--- Comptes pseudonymes et rattachement attesté des appareils.
+-- Pseudonymous accounts and attested device enrolment.
 --
--- Ce que cette migration change dans le modèle de menace : jusqu'ici, le serveur ne pouvait
--- pas mentir, faute d'avoir quoi que ce soit à dire — un appareil était son propre contact.
--- Dès qu'un compte regroupe plusieurs appareils, le serveur devient la source de la liste,
--- et une liste qu'il compose librement lui permet d'y glisser un appareil qu'il contrôle.
+-- What this migration changes in the threat model: until now the server could not lie, having
+-- nothing to say — a device was its own contact. As soon as an account groups several
+-- devices, the server becomes the source of that list, and a list it composes freely lets it
+-- slip in a device it controls.
 --
--- D'où `attestation` : une signature du compte que le serveur ne peut pas produire. Il peut
--- encore OMETTRE un appareil de la liste (censure, détectable par l'utilisateur qui ne voit
--- pas arriver ses messages), jamais en AJOUTER un (écoute, indétectable). C'est cette
--- asymétrie qui justifie toute la migration.
+-- Hence `attestation`: an account signature the server cannot produce. It can still OMIT a
+-- device from the list (censorship, detectable by a user whose messages never arrive), never
+-- ADD one (eavesdropping, undetectable). That asymmetry is what justifies the whole
+-- migration.
 
 CREATE TABLE accounts (
-    -- Pseudonyme, en clair. Le serveur le voit, et tous les membres d'un groupe aussi — le
-    -- credential MLS transporte déjà le nom d'appareil en clair dans l'arbre public.
-    -- N'y rattacher ni numéro, ni e-mail, ni rien de réel : voir les limites du README.
+    -- Pseudonym, in the clear. The server sees it, and so does every member of a group — the
+    -- MLS credential already carries the device name in the clear in the public tree.
+    -- Attach no phone number, no e-mail, nothing real: see the README's limitations.
     handle       TEXT PRIMARY KEY,
-    -- Clé Ed25519 publique du compte (AIK). Dérivée côté client de la phrase de
-    -- récupération ; le serveur n'en voit que la moitié publique et ne peut rien signer.
+    -- Account Ed25519 public key (AIK). Derived client-side from the recovery phrase; the
+    -- server only ever sees the public half and can sign nothing.
     identity_key BYTEA NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT handle_non_vide CHECK (handle <> '' AND octet_length(handle) <= 64),
+    CONSTRAINT handle_not_empty CHECK (handle <> '' AND octet_length(handle) <= 64),
     CONSTRAINT identity_key_is_ed25519 CHECK (octet_length(identity_key) = 32)
 );
 
--- Les appareils antérieurs n'ont pas de compte et ne peuvent pas s'en voir attribuer un :
--- personne ne détient la clé qui les attesterait. Base de démonstration, données jetables.
--- Sur un déploiement réel il faudrait une période de transition avec `handle` nullable.
+-- Pre-existing devices have no account and cannot be granted one: nobody holds the key that
+-- would attest them. Demo database, disposable data. A real deployment would need a
+-- transition period with a nullable `handle`.
 DELETE FROM devices;
 
 ALTER TABLE devices
     ADD COLUMN handle      TEXT NOT NULL REFERENCES accounts(handle) ON DELETE CASCADE,
-    -- Clé publique de signature MLS. Attestée EN MÊME TEMPS que `auth_key` : les attester
-    -- séparément permettrait de recombiner l'attestation d'un appareil légitime avec la clé
-    -- MLS d'un appareil hostile.
+    -- MLS signature public key. Attested AT THE SAME TIME as `auth_key`: attesting them
+    -- separately would allow recombining a legitimate device's attestation with a hostile
+    -- device's MLS key.
     ADD COLUMN mls_key     BYTEA NOT NULL,
     ADD COLUMN attestation BYTEA NOT NULL,
-    -- Révocation douce. Effacer la ligne casserait les clés étrangères de `group_members`
-    -- et effacerait l'appareil de conversations où il a réellement participé ; on veut
-    -- l'empêcher d'être ajouté ailleurs, pas réécrire le passé.
+    -- Soft revocation. Deleting the row would break `group_members` foreign keys and erase the
+    -- device from conversations it really took part in; the goal is to stop it being added
+    -- elsewhere, not to rewrite the past.
     ADD COLUMN revoked_at  TIMESTAMPTZ,
 
     ADD CONSTRAINT attestation_is_ed25519 CHECK (octet_length(attestation) = 64);
 
--- L'index ne couvre que les appareils actifs : c'est la seule liste qu'on sert.
+-- The index covers active devices only: that is the only list we serve.
 CREATE INDEX devices_handle_idx ON devices (handle) WHERE revoked_at IS NULL;
 
--- Boîte de dépôt pour l'appairage par QR code.
+-- Drop box for QR-code pairing.
 --
--- Le serveur ne voit qu'un blob scellé sous un secret X25519 dont les deux moitiés publiques
--- ont transité par le QR — hors de sa portée. Il ne sert que de relais asynchrone entre deux
--- appareils qui ne peuvent pas se parler directement.
+-- The server only sees a blob sealed under an X25519 secret whose two public halves travelled
+-- through the QR code — out of its reach. It is merely an asynchronous relay between two
+-- devices that cannot talk to each other directly.
 CREATE TABLE pairings (
     id         BYTEA PRIMARY KEY,
     payload    BYTEA NOT NULL,
-    -- Le blob périme vite : il contient de quoi prendre le contrôle du compte. Une fenêtre
-    -- courte limite la valeur d'un vol de base.
+    -- The blob expires fast: it contains enough to take over the account. A short window
+    -- limits the value of a stolen database.
     expires_at TIMESTAMPTZ NOT NULL,
-    -- Lecture unique. Une seconde lecture réussie signalerait qu'un tiers a récupéré le blob.
+    -- Single read. A second successful read would signal that a third party grabbed the blob.
     claimed_at TIMESTAMPTZ,
 
     CONSTRAINT pairing_id_len CHECK (octet_length(id) = 16)

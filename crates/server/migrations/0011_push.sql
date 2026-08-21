@@ -1,59 +1,56 @@
--- Réveil des appareils endormis, et ce que cela coûte.
+-- Waking sleeping devices, and what it costs.
 --
--- # Ce que cette table dégrade, avant ce qu'elle apporte
+-- # What this table degrades, before what it brings
 --
--- Tout le reste de ce schéma tend vers un serveur qui en sait le moins possible. Cette table va
--- dans l'autre sens, et il faut le dire dans cet ordre.
+-- All the rest of this schema aims at a server that knows as little as possible. This table
+-- goes the other way, and that has to be said first.
 --
--- Pour qu'un téléphone endormi apprenne qu'un message l'attend, quelqu'un doit le réveiller.
--- Sur Android et iOS, ce quelqu'un ne peut être que Google ou Apple : le système refuse à une
--- application de tenir une connexion en arrière-plan, et c'est un refus qu'aucune astuce ne
--- contourne durablement. Le serveur doit donc dire à un tiers « réveille cet appareil,
--- maintenant » — et ce tiers apprend, à chaque message, le **rythme** des conversations d'un
--- appareil qu'il sait par ailleurs rattacher à un compte Google ou Apple.
+-- For a sleeping phone to learn a message is waiting, someone has to wake it. On Android and
+-- iOS that someone can only be Google or Apple: the system refuses to let an application hold
+-- a background connection, and no trick works around that for long. The server must therefore
+-- tell a third party "wake this device, now" — and that third party learns, with every
+-- message, the **rhythm** of the conversations of a device it can otherwise tie to a Google or
+-- Apple account.
 --
--- Le contenu reste chiffré, personne n'y touche. Ce qui fuit, ce sont les métadonnées
--- d'activité : quand, à quelle fréquence, et pour quel appareil. C'est irréductible — c'est le
--- principe même du push, pas un défaut d'implémentation.
+-- The content stays encrypted, nobody touches it. What leaks is activity metadata: when, how
+-- often, and for which device. That is irreducible — it is the very principle of push, not an
+-- implementation flaw.
 --
--- # D'où les trois bornes
+-- # Hence the three limits
 --
---  * **Facultatif.** L'absence de ligne est l'état normal. Un compte qui n'en veut pas garde une
---    application pleinement fonctionnelle : elle relève quand elle est ouverte, comme
---    aujourd'hui. Le choix appartient à l'appareil, jamais au serveur.
+--  * **Optional.** No row is the normal state. An account that does not want push keeps a
+--    fully functional application: it fetches while open, as it does today. The choice belongs
+--    to the device, never to the server.
 --
---  * **Inerte sans configuration.** Un déploiement auto-hébergé qui refuse de parler à Apple et
---    Google doit fonctionner intégralement. Les jetons s'y enregistrent sans que rien ne parte :
---    c'est l'émetteur qui est absent, pas la table.
+--  * **Inert without configuration.** A self-hosted deployment that refuses to talk to Apple
+--    and Google must work in full. Tokens register there without anything being sent: it is
+--    the sender that is absent, not the table.
 --
---  * **Vide.** Le réveil ne transporte ni texte, ni expéditeur, ni identifiant de groupe. Rien
---    d'autre que « réveille-toi ». L'application relève ensuite par le chemin normal, déchiffre,
---    et compose la notification localement. Faire autrement montrerait à Apple, à Google et à
---    l'écran verrouillé qui écrit à qui — c'est-à-dire précisément ce que tout ce projet cherche
---    à ne pas divulguer.
+--  * **Empty.** The wake-up carries no text, no sender, no group identifier. Nothing but "wake
+--    up". The application then fetches through the normal path, decrypts, and composes the
+--    notification locally. Doing otherwise would show Apple, Google and the lock screen who
+--    writes to whom — precisely what this whole project tries not to disclose.
 --
--- # Le jeton est un secret d'acheminement
+-- # The token is a routing secret
 --
--- Qui le détient peut faire vibrer le téléphone quand il veut. Il ne déchiffre rien et ne prouve
--- aucune identité, mais il désigne un appareil de façon stable : c'est une donnée à traiter comme
--- une adresse privée, pas comme un identifiant public. D'où l'absence d'index qui le rendrait
--- énumérable, et l'unicité portée par l'appareil.
+-- Whoever holds it can buzz the phone at will. It decrypts nothing and proves no identity, but
+-- it designates a device stably: treat it as a private address, not a public identifier. Hence
+-- the absence of any index that would make it enumerable, and uniqueness carried by the device.
 
 CREATE TABLE push_tokens (
-    -- Un appareil, un jeton. Le remplacement est la règle et non l'exception : les fournisseurs
-    -- font tourner leurs jetons sans prévenir, et conserver les anciens accumulerait des adresses
-    -- mortes qui ne servent qu'à en garder trace.
+    -- One device, one token. Replacement is the rule, not the exception: providers rotate
+    -- their tokens without warning, and keeping the old ones would accumulate dead addresses
+    -- whose only use is to keep a record of them.
     device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
 
-    -- `fcm` ou `apns`. Stocké parce que le même serveur sert les deux plateformes et que
-    -- l'acheminement n'est pas le même ; il ne dit rien de plus que ce que le jeton trahit déjà
-    -- par sa forme.
+    -- `fcm` or `apns`. Stored because the same server serves both platforms and routing
+    -- differs; it says nothing more than the token's own shape already gives away.
     provider TEXT NOT NULL,
 
     token TEXT NOT NULL,
 
-    -- Sert à repérer les jetons abandonnés. Pas d'historique : une table qui garderait les
-    -- enregistrements successifs dirait quand un appareil se réinstalle, se met à jour ou change
-    -- de main — un journal de vie de l'appareil, pour un bénéfice nul.
+    -- Used to spot abandoned tokens. No history: a table keeping successive registrations
+    -- would say when a device is reinstalled, updated or changes hands — a life journal of the
+    -- device, for zero benefit.
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

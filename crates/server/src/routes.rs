@@ -1,7 +1,7 @@
-//! Endpoints HTTP.
+//! HTTP endpoints.
 //!
-//! Le serveur est une boîte aux lettres aveugle : il route des blobs opaques, tient l'ordre
-//! total des messages par groupe, et ne peut rien déchiffrer.
+//! The server is a blind mailbox: it routes opaque blobs, keeps the total message order per
+//! group, and can decrypt nothing.
 
 use std::sync::Arc;
 
@@ -19,46 +19,44 @@ use crate::error::{ApiError, ApiResult};
 use crate::presence;
 use crate::stream::{Hub, Notice};
 
-/// Plafond du nombre de KeyPackages déposés en une requête. Sans plafond, un appareil peut
-/// remplir la base à lui seul.
+/// Cap on the number of KeyPackages published in one request. Without it, a single device can
+/// fill the database on its own.
 const MAX_KEY_PACKAGES_PER_REQUEST: usize = 100;
 
-/// Ligne d'appareil telle que servie : identifiant, clé d'authentification, clé MLS,
-/// attestation. Nommée pour que la signature des requêtes reste lisible.
+/// A device row as served: id, auth key, MLS key, attestation. Named so that the query
+/// signatures stay readable.
 type DeviceRow = (String, Vec<u8>, Vec<u8>, Vec<u8>);
 
-/// Un appareil et l'état de sa révocation, tel que servi aux clients.
+/// A device and its revocation state, as served to clients.
 type RevocableDeviceRow =
     (String, Vec<u8>, Vec<u8>, Vec<u8>, Option<i64>, Option<Vec<u8>>, Option<i64>);
 
-/// Plafond du corps d'un dépôt, aligné sur la limite de la couche HTTP.
+/// Cap on a post body, aligned with the HTTP layer's limit.
 ///
-/// Défini ici parce que le chemin anonyme lit le corps lui-même, hors de l'extracteur `Signed`
-/// et donc hors de la limite posée par la couche. Sans plafond explicite, ce chemin serait le
-/// seul non borné du serveur.
+/// Defined here because the anonymous path reads the body itself, outside the `Signed` extractor
+/// and therefore outside the layer's limit. Without an explicit cap it would be the only
+/// unbounded path in the server.
 const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
 
-/// Plafond d'enveloppes retournées par appel. Le client pagine avec le curseur `after`.
+/// Cap on envelopes returned per call. The client pages with the `after` cursor.
 const MAX_ENVELOPES_PER_PAGE: i64 = 200;
 
-/// Routes aux corps petits : messages MLS, KeyPackages, gestion de groupe.
+/// Small-body routes: MLS messages, KeyPackages, group management.
 ///
-/// Séparées des pièces jointes pour que chaque famille porte sa propre limite de taille.
-/// Un plafond unique obligerait soit à interdire les fichiers, soit à autoriser des
-/// mégaoctets sur des endpoints qui n'en ont aucun besoin.
-/// Routes **ouvertes**, c'est-à-dire sans authentification possible.
+/// Kept apart from attachments so each family carries its own size limit. A single cap would
+/// force us either to forbid files or to allow megabytes on endpoints that never need them.
+/// **Open** routes, meaning routes where authentication is not even possible.
 ///
-/// Elles précèdent l'existence d'une identité : on ne peut pas signer une création de compte avec
-/// une clé que le serveur ne connaît pas encore. Elles sont donc isolées ici pour porter la seule
-/// borne qui leur reste — une limite de débit par adresse.
+/// They predate the existence of an identity: an account creation cannot be signed with a key
+/// the server does not know yet. They are isolated here to carry the only bound left to them —
+/// a per-address rate limit.
 ///
-/// Séparées comme l'est déjà [`attachment_router`], et pour la même raison : une famille de
-/// routes qui a besoin d'une couche particulière la porte seule, plutôt que de l'imposer à
-/// toutes.
+/// Split out like [`attachment_router`] already is, for the same reason: a family of routes that
+/// needs a particular layer carries it alone, rather than imposing it on all of them.
 ///
-/// **La création de compte est celle qui justifie le dispositif.** Elle écrit dans le journal de
-/// transparence, dont les entrées ne se reprennent pas sans casser les preuves de consistance.
-/// Voir `crate::throttle` pour ce que la limite ferme, et pour ce qu'elle ne ferme pas.
+/// **Account creation is what justifies the whole thing.** It writes to the transparency log,
+/// whose entries cannot be taken back without breaking the consistency proofs. See
+/// `crate::throttle` for what the limit closes, and for what it does not.
 pub fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/accounts", post(create_account))
@@ -95,7 +93,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Routes des pièces jointes, isolées pour porter une limite de corps plus élevée.
+/// Attachment routes, isolated to carry a higher body limit.
 pub fn attachment_router(pool: PgPool) -> Router {
     Router::new()
         .route("/v1/groups/{group_id}/attachments", post(upload_attachment))
@@ -109,59 +107,58 @@ pub fn attachment_router(pool: PgPool) -> Router {
 fn decode_b64(value: &str) -> ApiResult<Vec<u8>> {
     BASE64_STANDARD
         .decode(value)
-        .map_err(|_| ApiError::BadRequest("base64 invalide"))
+        .map_err(|_| ApiError::BadRequest("invalid base64"))
 }
 
 pub(crate) fn decode_group_id(value: &str) -> ApiResult<Vec<u8>> {
-    let bytes = hex::decode(value).map_err(|_| ApiError::BadRequest("group_id invalide"))?;
+    let bytes = hex::decode(value).map_err(|_| ApiError::BadRequest("invalid group_id"))?;
     if bytes.is_empty() || bytes.len() > 64 {
-        return Err(ApiError::BadRequest("longueur de group_id invalide"));
+        return Err(ApiError::BadRequest("invalid group_id length"));
     }
     Ok(bytes)
 }
 
-/// Plafond d'un signal éphémère.
+/// Cap on an ephemeral signal.
 ///
-/// Un indicateur de frappe chiffré tient en quelques dizaines d'octets ; ce plafond n'est pas
-/// une contrainte de format mais la borne qui empêche ce chemin — qui lit le corps lui-même,
-/// hors de la couche HTTP — d'être le seul non borné du serveur.
+/// An encrypted typing indicator fits in a few dozen bytes; this cap is not a format constraint
+/// but the bound that keeps this path — which reads the body itself, outside the HTTP layer —
+/// from being the only unbounded one in the server.
 pub(crate) const MAX_SIGNAL_BYTES: usize = 4096;
 
-/// Vérifie un MAC d'appartenance sur un message canonique déjà construit.
+/// Verifies a membership MAC over an already built canonical message.
 ///
-/// Extrait pour que le dépôt d'enveloppe et le dépôt de signal partagent exactement la même
-/// vérification : deux copies divergeraient, et c'est la copie oubliée qui devient la faille.
+/// Extracted so that envelope posting and signal posting share exactly the same check: two
+/// copies would drift apart, and the forgotten copy is the one that becomes the hole.
 fn verify_group_mac(posting_key: &[u8], message: &[u8], mac: &[u8]) -> ApiResult<()> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
     let mut hmac = <Hmac<Sha256>>::new_from_slice(posting_key)
-        .expect("HMAC-SHA256 accepte toute longueur de clé");
+        .expect("HMAC-SHA256 accepts any key length");
     hmac.update(message);
     hmac.verify_slice(mac).map_err(|_| ApiError::Forbidden)
 }
 
-/// Relaie un signal éphémère aux membres connectés, **sans rien écrire**.
+/// Relays an ephemeral signal to connected members, **writing nothing**.
 ///
-/// # Pourquoi une route séparée du dépôt d'enveloppe
+/// # Why a route separate from envelope posting
 ///
-/// Parce que `envelopes` n'est jamais purgée, et ne peut pas l'être : chaque enveloppe consomme
-/// une génération du ratchet applicatif MLS, et un trou trop large empêcherait le déchiffrement
-/// de la suite. Faire passer un indicateur de frappe par ce chemin conserverait pour toujours
-/// la trace de qui a hésité à répondre.
+/// Because `envelopes` is never purged, and cannot be: each envelope consumes a generation of
+/// the MLS application ratchet, and too wide a gap would break decryption of what follows.
+/// Routing a typing indicator through that path would keep, forever, the trace of who hesitated
+/// before answering.
 ///
-/// Ce chemin-ci n'a pas de table. Le signal existe le temps d'un relais, puis n'existe plus.
+/// This path has no table. The signal exists for the duration of a relay, then no longer exists.
 ///
-/// # Pas d'anti-rejeu, délibérément
+/// # No replay protection, deliberately
 ///
-/// Contrairement au dépôt d'enveloppe, aucun nonce n'est consommé : rejouer un signal périmé
-/// n'a aucun effet observable au-delà de son expiration côté client, et enregistrer un nonce
-/// toutes les trois secondes et par conversation ferait grossir une table pour rien —
-/// c'est-à-dire écrire sur disque ce que cette route existe précisément pour ne pas écrire.
+/// Unlike envelope posting, no nonce is consumed: replaying a stale signal has no observable
+/// effect past its client-side expiry, and recording a nonce every three seconds per
+/// conversation would grow a table for nothing — writing to disk exactly what this route exists
+/// not to write.
 ///
-/// L'abus reste borné par ce qui compte : il faut détenir la clé du groupe, donc en être
-/// membre, et un membre dispose déjà d'un moyen plus nuisible — déposer des enveloppes, qui,
-/// elles, sont conservées.
+/// Abuse stays bounded by what matters: you must hold the group key, hence be a member, and a
+/// member already has a more harmful option — posting envelopes, which *are* kept.
 async fn post_signal(
     State(pool): State<PgPool>,
     State(hub): State<Arc<Hub>>,
@@ -170,7 +167,7 @@ async fn post_signal(
 ) -> ApiResult<axum::http::StatusCode> {
     let group_id = decode_group_id(&group_id)?;
 
-    // Extraction possédée avant le premier `await` : voir la note d'`anonymous_body`.
+    // Owned extraction before the first `await`: see the note in `anonymous_body`.
     let (nonce, mac) = {
         let headers = request.headers();
         let header = |name: &str| -> ApiResult<Vec<u8>> {
@@ -178,7 +175,7 @@ async fn post_signal(
                 .get(name)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| BASE64_STANDARD.decode(value).ok())
-                .ok_or(ApiError::BadRequest("en-tête de signal manquant ou illisible"))
+                .ok_or(ApiError::BadRequest("signal header missing or unreadable"))
         };
 
         (header(HEADER_NONCE)?, header(HEADER_MAC)?)
@@ -186,7 +183,7 @@ async fn post_signal(
 
     let body = axum::body::to_bytes(request.into_body(), MAX_SIGNAL_BYTES)
         .await
-        .map_err(|_| ApiError::BadRequest("corps illisible"))?;
+        .map_err(|_| ApiError::BadRequest("unreadable body"))?;
 
     verify_signal(&pool, &group_id, &nonce, &mac, &body).await?;
 
@@ -195,15 +192,14 @@ async fn post_signal(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// Vérifie qu'un signal éphémère émane d'un membre du groupe, sans apprendre lequel.
+/// Checks that an ephemeral signal comes from a group member, without learning which one.
 ///
-/// Extraite pour que le chemin HTTP et la trame `signal` de la gateway partagent **exactement**
-/// la même vérification. C'est le même argument que celui qui a fait extraire
-/// [`verify_group_mac`] : deux copies divergent, et c'est celle qu'on a oublié de corriger qui
-/// devient la faille.
+/// Extracted so that the HTTP path and the gateway's `signal` frame share **exactly** the same
+/// check. Same argument that led to extracting [`verify_group_mac`]: two copies drift apart, and
+/// the one nobody remembered to fix becomes the hole.
 ///
-/// Ne publie rien : l'appelant décide de la diffusion, parce que la gateway et la route HTTP
-/// n'ont pas la même façon de tenir le hub.
+/// Publishes nothing: the caller decides on the broadcast, because the gateway and the HTTP
+/// route do not hold the hub the same way.
 pub(crate) async fn verify_signal(
     pool: &PgPool,
     group_id: &[u8],
@@ -214,11 +210,11 @@ pub(crate) async fn verify_signal(
     use sha2::{Digest, Sha256};
 
     if nonce.len() != 16 {
-        return Err(ApiError::BadRequest("nonce de signal invalide"));
+        return Err(ApiError::BadRequest("invalid signal nonce"));
     }
 
     if body.len() > MAX_SIGNAL_BYTES {
-        return Err(ApiError::BadRequest("signal trop volumineux"));
+        return Err(ApiError::BadRequest("signal too large"));
     }
 
     let (posting_key,): (Option<Vec<u8>>,) =
@@ -228,30 +224,30 @@ pub(crate) async fn verify_signal(
             .await?
             .ok_or(ApiError::NotFound)?;
 
-    // Un groupe sans clé de dépôt n'a pas encore migré vers le chemin anonyme : refuser plutôt
-    // que de retomber sur une vérification par identité, qui ferait de la gateway le seul
-    // endroit du serveur où un signal révèle son auteur.
+    // A group with no posting key has not migrated to the anonymous path yet: refuse rather
+    // than fall back to an identity check, which would make the gateway the one place in the
+    // server where a signal reveals its author.
     let posting_key = posting_key.ok_or(ApiError::Forbidden)?;
 
     let message = attest::signal_message(group_id, nonce, &Sha256::digest(body))
-        .map_err(|_| ApiError::BadRequest("signal mal formé"))?;
+        .map_err(|_| ApiError::BadRequest("malformed signal"))?;
 
     verify_group_mac(&posting_key, &message, mac)
 }
 
-/// Vérifie que l'appelant est membre du groupe.
+/// Checks that the caller is a member of the group.
 ///
-/// Un identifiant de groupe aléatoire n'est **pas** un contrôle d'accès : sans cette
-/// vérification, quiconque devine ou intercepte un identifiant lit toute la boîte.
+/// A random group id is **not** access control: without this check, anyone who guesses or
+/// intercepts an id reads the whole mailbox.
 async fn require_membership(pool: &PgPool, group_id: &[u8], device_id: &str) -> ApiResult<()> {
-    // La jointure sur `devices` est ce qui coupe un appareil révoqué du flux, sans attendre
-    // que le groupe ait commité son retrait.
+    // The join on `devices` is what cuts a revoked device off from the stream, without waiting
+    // for the group to commit its removal.
     //
-    // **C'est de la défense en profondeur, pas la protection réelle.** Un appareil révoqué
-    // détient encore les secrets du groupe : il déchiffre tout ce qu'il intercepte par un
-    // autre chemin, et rien ici ne l'en empêche. Seul le `Remove` MLS — qui re-clé l'arbre —
-    // le prive effectivement de la suite. Ce filtre ferme la fuite immédiate pendant les
-    // secondes ou les heures qui séparent la révocation du commit.
+    // **This is defence in depth, not the real protection.** A revoked device still holds the
+    // group secrets: it decrypts anything it intercepts by another route, and nothing here
+    // stops it. Only the MLS `Remove` — which re-keys the tree — actually cuts it off from what
+    // follows. This filter closes the immediate leak during the seconds or hours between the
+    // revocation and the commit.
     let member: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM group_members m
          JOIN devices d ON d.id = m.device_id
@@ -265,11 +261,11 @@ async fn require_membership(pool: &PgPool, group_id: &[u8], device_id: &str) -> 
     member.map(|_| ()).ok_or(ApiError::Forbidden)
 }
 
-/// Même question, posée par un appelant qui n'échoue pas sur un refus.
+/// Same question, asked by a caller that does not fail on a refusal.
 ///
-/// La gateway répond à un `subscribe` refusé par une trame d'erreur et garde la session
-/// ouverte, là où une route HTTP renvoie un statut et s'arrête. Le contrôle reste celui de
-/// [`require_membership`] — une seule requête, une seule définition de « membre ».
+/// The gateway answers a rejected `subscribe` with an error frame and keeps the session open,
+/// where an HTTP route returns a status and stops. The check remains the one in
+/// [`require_membership`] — one query, one definition of "member".
 pub(crate) async fn is_member(
     pool: &PgPool,
     group_id: &[u8],
@@ -285,30 +281,29 @@ pub(crate) async fn is_member(
 #[derive(Deserialize)]
 struct CreateAccount {
     handle: String,
-    /// Clé Ed25519 publique du compte (AIK), en base64.
+    /// Account's Ed25519 public key (AIK), base64.
     identity_key: String,
 }
 
-/// Crée un compte pseudonyme. Non signé — il n'existe encore aucune clé connue.
+/// Creates a pseudonymous account. Unsigned — no known key exists yet.
 ///
-/// C'est du **trust on first use** : le serveur croit le premier qui réclame un handle.
-/// Réclamer le même handle avec la même clé est idempotent (réinstallation) ; avec une autre
-/// clé, c'est refusé, ce qui empêche la reprise silencieuse d'un pseudonyme.
+/// This is **trust on first use**: the server believes the first claimant of a handle. Claiming
+/// the same handle with the same key is idempotent (reinstall); with a different key it is
+/// refused, which prevents a pseudonym from being silently taken over.
 ///
-/// Ce que le TOFU ne prouve pas : que le premier arrivé était légitime. Il n'existe pas de
-/// réponse à cela sans autorité extérieure ou key transparency — hors périmètre, documenté
-/// dans le README.
+/// What TOFU does not prove: that the first claimant was legitimate. There is no answer to that
+/// without an external authority or key transparency — out of scope, documented in the README.
 async fn create_account(
     State(pool): State<PgPool>,
     Json(payload): Json<CreateAccount>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if payload.handle.is_empty() || payload.handle.len() > 64 {
-        return Err(ApiError::BadRequest("handle invalide"));
+        return Err(ApiError::BadRequest("invalid handle"));
     }
 
     let identity_key = decode_b64(&payload.identity_key)?;
     if identity_key.len() != 32 {
-        return Err(ApiError::BadRequest("clé Ed25519 attendue (32 octets)"));
+        return Err(ApiError::BadRequest("Ed25519 key expected (32 bytes)"));
     }
 
     let mut tx = pool.begin().await?;
@@ -321,9 +316,9 @@ async fn create_account(
     .execute(&mut *tx)
     .await?;
 
-    // Le compte et son entrée de journal dans la **même** transaction. Une clé publiée sans
-    // preuve d'inclusion serait rejetée par tous les clients : le compte existerait sans être
-    // joignable, et rien n'indiquerait pourquoi.
+    // The account and its log entry in the **same** transaction. A key published without an
+    // inclusion proof would be rejected by every client: the account would exist without being
+    // reachable, and nothing would say why.
     if inserted.rows_affected() > 0 {
         crate::log::append(&mut tx, &payload.handle, &identity_key).await?;
     }
@@ -338,7 +333,7 @@ async fn create_account(
                 .await?;
 
         if existing.0 != identity_key {
-            return Err(ApiError::Conflict("handle déjà pris par un autre compte"));
+            return Err(ApiError::Conflict("handle already taken by another account"));
         }
     }
 
@@ -349,54 +344,51 @@ async fn create_account(
 struct RegisterDevice {
     id: String,
     handle: String,
-    /// Clé Ed25519 publique servant à authentifier les requêtes HTTP, en base64.
+    /// Ed25519 public key used to authenticate HTTP requests, base64.
     auth_key: String,
-    /// Clé publique de signature MLS de cet appareil, en base64.
+    /// This device's MLS signature public key, base64.
     mls_key: String,
-    /// Signature du compte sur l'ensemble des champs ci-dessus, en base64.
+    /// Account signature over all of the fields above, base64.
     attestation: String,
 }
 
-/// Enregistre un appareil et son rattachement attesté à un compte.
+/// Registers a device and its attested attachment to an account.
 ///
-/// Non signé par l'appareil — il n'a pas encore de clé connue — mais **l'attestation est
-/// vérifiée**. C'est le seul endroit du serveur qui fait de la cryptographie, et c'est du
-/// contrôle d'accès : sans elle, n'importe qui déclarerait un appareil dans le compte de
-/// n'importe qui, ce qui reviendrait à donner au serveur (et à tout le monde) le pouvoir de
-/// se faire inviter dans les conversations d'autrui.
+/// Unsigned by the device — it has no known key yet — but **the attestation is verified**. This
+/// is the only place in the server that does cryptography, and it is access control: without it
+/// anyone could declare a device in anyone's account, which would hand the server (and everyone
+/// else) the power to get invited into other people's conversations.
 ///
-/// Cette vérification n'est **pas** la garantie sur laquelle les clients s'appuient : ils
-/// revérifient chacun pour eux-mêmes à la lecture. Un serveur qui mentirait ici ne tromperait
-/// que lui-même.
+/// This check is **not** the guarantee clients rely on: each of them re-verifies for itself on
+/// read. A server that lied here would only fool itself.
 async fn register_device(
     State(pool): State<PgPool>,
     Json(payload): Json<RegisterDevice>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if payload.id.is_empty() || payload.id.len() > 128 {
-        return Err(ApiError::BadRequest("identifiant d'appareil invalide"));
+        return Err(ApiError::BadRequest("invalid device id"));
     }
 
-    // L'identifiant d'appareil est qualifié par le handle : `alice:portable`.
+    // The device id is qualified by the handle: `alice:phone`.
     //
-    // Sans cela l'espace des identifiants est global, et le premier arrivé accapare les noms
-    // courants — le deuxième utilisateur à vouloir nommer son téléphone « portable » se voit
-    // refuser l'enregistrement, alors même qu'il détient un compte parfaitement légitime.
-    // Le préfixe rend l'espace de noms local au compte ; l'attestation garantit que personne
-    // ne peut réclamer le préfixe d'autrui.
+    // Otherwise the id space is global and the first arrival hogs the common names — the second
+    // user who wants to call their phone "phone" is refused registration, despite holding a
+    // perfectly legitimate account. The prefix makes the namespace local to the account; the
+    // attestation guarantees nobody can claim someone else's prefix.
     if !payload.id.starts_with(&format!("{}:", payload.handle)) {
         return Err(ApiError::BadRequest(
-            "l'identifiant d'appareil doit être préfixé par le handle du compte",
+            "device id must be prefixed with the account handle",
         ));
     }
 
     let auth_key = decode_b64(&payload.auth_key)?;
     if auth_key.len() != 32 {
-        return Err(ApiError::BadRequest("clé Ed25519 attendue (32 octets)"));
+        return Err(ApiError::BadRequest("Ed25519 key expected (32 bytes)"));
     }
 
     let mls_key = decode_b64(&payload.mls_key)?;
     if mls_key.is_empty() || mls_key.len() > 128 {
-        return Err(ApiError::BadRequest("clé de signature MLS invalide"));
+        return Err(ApiError::BadRequest("invalid MLS signature key"));
     }
 
     let attestation = decode_b64(&payload.attestation)?;
@@ -415,19 +407,18 @@ async fn register_device(
         mls_key: &mls_key,
     };
     attest::verify(&identity_key, &claim, &attestation)
-        .map_err(|_| ApiError::BadRequest("attestation invalide"))?;
+        .map_err(|_| ApiError::BadRequest("invalid attestation"))?;
 
-    // `DO UPDATE` sur la seule attestation, et seulement si les clés sont inchangées.
+    // `DO UPDATE` on the attestation only, and only if the keys are unchanged.
     //
-    // C'est ce qui permet à un appareil de se **ré-attester après une rotation de compte** :
-    // son attestation d'origine, signée par la clé morte, ne vérifie plus chez personne. Sans
-    // cette mise à jour, l'appareil qui a lui-même déclenché la rotation serait rejeté par
-    // tous les clients, y compris les siens.
+    // This is what lets a device **re-attest after an account rotation**: its original
+    // attestation, signed by the dead key, no longer verifies for anyone. Without this update,
+    // the very device that triggered the rotation would be rejected by every client, including
+    // its own.
     //
-    // L'opération ne peut pas installer une attestation douteuse : celle-ci vient d'être
-    // vérifiée contre la clé courante du compte, quelques lignes plus haut. La clause `WHERE`
-    // interdit en revanche de changer les clés d'un appareil existant — ce serait un autre
-    // appareil sous le même nom.
+    // The operation cannot install a dubious attestation: it was just verified against the
+    // account's current key, a few lines above. The `WHERE` clause does forbid changing an
+    // existing device's keys — that would be another device under the same name.
     let inserted = sqlx::query(
         "INSERT INTO devices (id, handle, auth_key, mls_key, attestation)
          VALUES ($1, $2, $3, $4, $5)
@@ -443,8 +434,8 @@ async fn register_device(
     .await?;
 
     if inserted.rows_affected() == 0 {
-        // Réenregistrement idempotent après réinstallation, refusé si un champ diffère : un
-        // appareil ne change ni de clés ni de compte, il s'en crée un nouveau.
+        // Idempotent re-registration after a reinstall, refused if any field differs: a device
+        // changes neither its keys nor its account, it creates a new one.
         let existing: (String, Vec<u8>, Vec<u8>) =
             sqlx::query_as("SELECT handle, auth_key, mls_key FROM devices WHERE id = $1")
                 .bind(&payload.id)
@@ -452,7 +443,7 @@ async fn register_device(
                 .await?;
 
         if existing != (payload.handle.clone(), auth_key, mls_key) {
-            return Err(ApiError::Conflict("identifiant déjà pris par un autre appareil"));
+            return Err(ApiError::Conflict("id already taken by another device"));
         }
     }
 
@@ -465,19 +456,18 @@ struct AccountDevice {
     auth_key: String,
     mls_key: String,
     attestation: String,
-    /// Horodatage de révocation en secondes Unix, `None` si l'appareil est actif.
+    /// Revocation timestamp in Unix seconds, `None` if the device is active.
     #[serde(skip_serializing_if = "Option::is_none")]
     revoked_at: Option<u64>,
-    /// Certificat correspondant, en base64. Présent exactement quand `revoked_at` l'est —
-    /// la base l'impose (`revocation_accompagne_revoked_at`, migration 0005).
+    /// Matching certificate, base64. Present exactly when `revoked_at` is — the database
+    /// enforces it (`revocation_matches_revoked_at`, migration 0005).
     #[serde(skip_serializing_if = "Option::is_none")]
     revocation: Option<String>,
-    /// Dernière activité de cet appareil, **servie au seul propriétaire du compte**.
+    /// This device's last activity, **served to the account owner only**.
     ///
-    /// Le détail par appareil ne sort jamais vers un tiers : il dirait combien d'appareils une
-    /// personne possède et lequel elle utilise à quelle heure, ce qui est une fuite distincte
-    /// de « en ligne ». Pour son propriétaire, en revanche, c'est ce qui rend visible un
-    /// appareil fantôme réellement actif.
+    /// Per-device detail never leaves towards a third party: it would say how many devices a
+    /// person owns and which one they use at what time, a leak distinct from "online". For the
+    /// owner, on the other hand, it is what makes a genuinely active ghost device visible.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_seen: Option<i64>,
 }
@@ -489,15 +479,15 @@ struct AccountDevices {
     devices: Vec<AccountDevice>,
 }
 
-/// Liste les appareils actifs d'un compte, avec leurs attestations.
+/// Lists an account's devices, with their attestations.
 ///
-/// **L'appelant doit revérifier chaque attestation lui-même.** Cet endpoint est la surface
-/// exacte par laquelle un serveur malveillant tenterait d'introduire un appareil fantôme ;
-/// tout ce qui en sort est une revendication, pas un fait. Le test
-/// `un_appareil_fantome_injecte_en_sql_ne_passe_pas_la_verification_du_client` le figent.
+/// **The caller must re-verify every attestation itself.** This endpoint is the exact surface a
+/// malicious server would use to slip in a ghost device; everything it returns is a claim, not
+/// a fact. The test
+/// `a_ghost_device_injected_in_sql_does_not_pass_client_verification` pins that down.
 ///
-/// Ce que le serveur peut encore faire : omettre un appareil légitime. La victime constate
-/// alors qu'un de ses appareils ne reçoit rien — bruyant, et sans intérêt pour un espion.
+/// What the server can still do: omit a legitimate device. The victim then notices that one of
+/// their devices receives nothing — noisy, and of no use to a spy.
 async fn list_account_devices(
     State(pool): State<PgPool>,
     Path(handle): Path<String>,
@@ -510,10 +500,10 @@ async fn list_account_devices(
             .await?;
     let (identity_key,) = account.ok_or(ApiError::NotFound)?;
 
-    // Les appareils révoqués sont servis EUX AUSSI, avec leur certificat. Les taire
-    // laisserait le client incapable de distinguer une révocation d'une omission — et
-    // l'omission est précisément ce que ce serveur peut encore faire. Un appareil qui
-    // disparaît sans certificat est donc un signal, pas un événement normal.
+    // Revoked devices are served TOO, with their certificate. Hiding them would leave the
+    // client unable to tell a revocation from an omission — and omission is precisely what this
+    // server can still do. A device that vanishes without a certificate is therefore a signal,
+    // not a normal event.
     let rows: Vec<RevocableDeviceRow> = sqlx::query_as(
         "SELECT id, auth_key, mls_key, attestation,
                 EXTRACT(EPOCH FROM revoked_at)::BIGINT, revocation,
@@ -526,8 +516,8 @@ async fn list_account_devices(
     .fetch_all(&pool)
     .await?;
 
-    // Le détail par appareil n'est servi qu'au propriétaire du compte.
-    let proprietaire = caller_handle(&pool, &signed.device_id).await? == handle;
+    // Per-device detail is served to the account owner only.
+    let owner = caller_handle(&pool, &signed.device_id).await? == handle;
 
     Ok(Json(AccountDevices {
         handle,
@@ -543,7 +533,7 @@ async fn list_account_devices(
                         attestation: BASE64_STANDARD.encode(attestation),
                         revoked_at: revoked_at.map(|t| t as u64),
                         revocation: revocation.map(|r| BASE64_STANDARD.encode(r)),
-                        last_seen: if proprietaire { last_seen } else { None },
+                        last_seen: if owner { last_seen } else { None },
                     }
                 },
             )
@@ -551,7 +541,7 @@ async fn list_account_devices(
     }))
 }
 
-// ---------------------------------------------------------------- journal de transparence
+// ------------------------------------------------------------------- transparency log
 
 #[derive(Serialize)]
 struct SignedHead {
@@ -559,12 +549,12 @@ struct SignedHead {
     root: String,
     timestamp: u64,
     signature: String,
-    /// Clé publique du journal, pour que le client puisse vérifier la signature.
+    /// The log's public key, so the client can verify the signature.
     ///
-    /// La servir ici est un pis-aller **assumé** : un client qui la découvre auprès du serveur
-    /// qu'elle est censée surveiller ne gagne rien contre un serveur malveillant dès le premier
-    /// contact. Elle devrait être livrée avec l'application, ou attestée par un opérateur
-    /// distinct. Le gossip entre clients est ce qui rattrape partiellement ce défaut.
+    /// Serving it here is a **knowing** compromise: a client that discovers it from the very
+    /// server it is meant to watch gains nothing against a malicious server on first contact.
+    /// It should ship with the application, or be attested by a separate operator. Gossip
+    /// between clients is what partially makes up for this flaw.
     log_key: String,
 }
 
@@ -585,11 +575,11 @@ async fn signed_head(pool: &PgPool) -> ApiResult<(SignedHead, Vec<transparency::
     ))
 }
 
-/// Tête courante du journal.
+/// Current head of the log.
 ///
-/// C'est ce que les clients s'échangent entre eux, dans leurs conversations chiffrées, pour
-/// détecter un serveur qui tiendrait deux journaux. Chacun voit un journal cohérent ; seule la
-/// comparaison des têtes révèle la bifurcation.
+/// This is what clients exchange with each other, inside their encrypted conversations, to
+/// detect a server keeping two logs. Each of them sees a consistent log; only comparing heads
+/// reveals the fork.
 async fn log_head(State(pool): State<PgPool>, _signed: Signed) -> ApiResult<Json<SignedHead>> {
     let (head, _) = signed_head(&pool).await?;
     Ok(Json(head))
@@ -604,11 +594,11 @@ struct InclusionProof {
     head: SignedHead,
 }
 
-/// Preuve que la clé servie pour ce compte figure bien dans le journal.
+/// Proof that the key served for this account really is in the log.
 ///
-/// **Le client doit revérifier.** Cette route ne prouve rien par elle-même : elle fournit les
-/// éléments qui permettent au client de conclure seul, avec la même crate `transparency`, sans
-/// nous faire confiance. C'est tout l'objet du dispositif.
+/// **The client must re-verify.** This route proves nothing by itself: it supplies the material
+/// that lets the client conclude on its own, with the same `transparency` crate, without
+/// trusting us. That is the entire point.
 async fn log_proof(
     State(pool): State<PgPool>,
     Path(handle): Path<String>,
@@ -621,7 +611,7 @@ async fn log_proof(
     let index = crate::log::index_of(&pool, seq).await?;
 
     let proof = transparency::inclusion_proof(&leaves, index)
-        .map_err(|_| ApiError::BadRequest("indice hors du journal"))?;
+        .map_err(|_| ApiError::BadRequest("index outside the log"))?;
 
     Ok(Json(InclusionProof {
         handle,
@@ -634,7 +624,7 @@ async fn log_proof(
 
 #[derive(Deserialize)]
 struct ConsistencyQuery {
-    /// Taille du journal telle que le client l'a vue la dernière fois.
+    /// Log size as the client last saw it.
     from: usize,
 }
 
@@ -644,11 +634,10 @@ struct ConsistencyProof {
     head: SignedHead,
 }
 
-/// Preuve que le journal d'aujourd'hui prolonge celui que le client a déjà vu.
+/// Proof that today's log extends the one the client has already seen.
 ///
-/// C'est la propriété qui distingue un journal auditable d'une base de données : le serveur ne
-/// peut pas revenir en arrière et remplacer une clé déjà publiée sans que tous ceux qui ont vu
-/// l'ancienne tête le constatent.
+/// This is the property that separates an auditable log from a database: the server cannot go
+/// back and replace an already published key without everyone who saw the old head noticing.
 async fn log_consistency(
     State(pool): State<PgPool>,
     Query(query): Query<ConsistencyQuery>,
@@ -657,7 +646,7 @@ async fn log_consistency(
     let (head, leaves) = signed_head(&pool).await?;
 
     let proof = transparency::consistency_proof(&leaves, query.from)
-        .map_err(|_| ApiError::BadRequest("taille de journal invalide"))?;
+        .map_err(|_| ApiError::BadRequest("invalid log size"))?;
 
     Ok(Json(ConsistencyProof {
         proof: proof.iter().map(|h| BASE64_STANDARD.encode(h)).collect(),
@@ -667,33 +656,32 @@ async fn log_consistency(
 
 #[derive(Deserialize)]
 struct RotateAccount {
-    /// Nouvelle clé Ed25519 publique du compte, en base64.
+    /// New Ed25519 public key for the account, base64.
     new_identity_key: String,
-    /// Signature de la rotation par l'**ancienne** clé, en base64.
+    /// Signature of the rotation by the **old** key, base64.
     rotation: String,
     rotated_at: u64,
 }
 
-/// Change la clé d'identité d'un compte.
+/// Changes an account's identity key.
 ///
-/// # Pourquoi cette route existe
+/// # Why this route exists
 ///
-/// Tous les appareils d'un compte détiennent la graine : c'est la condition de leur parité,
-/// chacun pouvant attester et révoquer comme les autres. La contrepartie est qu'un appareil
-/// volé détient le compte entier, et que le révoquer ne sert à rien — son porteur en atteste
-/// un nouveau dans la seconde.
+/// Every device on an account holds the seed: that is what makes them peers, each able to
+/// attest and revoke like the others. The price is that a stolen device holds the whole
+/// account, and revoking it achieves nothing — whoever holds it attests a new one a second
+/// later.
 ///
-/// La rotation est la seule réponse. Son effet principal est **mécanique et gratuit** : en
-/// changeant `identity_key`, elle rend invérifiables toutes les attestations existantes, que
-/// les clients recalculent contre la clé courante. L'appareil qui tourne se ré-atteste
-/// aussitôt ; les autres devront être ré-appairés.
+/// Rotation is the only answer. Its main effect is **mechanical and free**: by changing
+/// `identity_key` it makes every existing attestation unverifiable, since clients recompute
+/// them against the current key. The rotating device re-attests immediately; the others will
+/// have to be re-paired.
 ///
-/// # Ce que le serveur ne peut pas arbitrer
+/// # What the server cannot arbitrate
 ///
-/// Le voleur détient la même clé et peut tourner le premier. Le serveur n'a aucun moyen de
-/// distinguer les deux : il applique la première rotation valide qui se présente. Le seul
-/// recours est l'alerte de changement d'empreinte chez les correspondants — d'où l'importance
-/// de ne pas la banaliser.
+/// The thief holds the same key and can rotate first. The server has no way to tell the two
+/// apart: it applies the first valid rotation it sees. The only recourse is the fingerprint
+/// change alert on the correspondents' side — hence the importance of not making it routine.
 async fn rotate_account(
     State(pool): State<PgPool>,
     Path(handle): Path<String>,
@@ -704,7 +692,7 @@ async fn rotate_account(
     let rotation = decode_b64(&payload.rotation)?;
 
     if new_identity_key.len() != 32 {
-        return Err(ApiError::BadRequest("clé d'identité de taille invalide"));
+        return Err(ApiError::BadRequest("identity key of invalid length"));
     }
 
     let now = std::time::SystemTime::now()
@@ -712,11 +700,11 @@ async fn rotate_account(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if now.abs_diff(payload.rotated_at) > crate::auth::MAX_CLOCK_SKEW {
-        return Err(ApiError::BadRequest("horodatage de rotation hors fenêtre"));
+        return Err(ApiError::BadRequest("rotation timestamp outside the window"));
     }
 
-    // L'appelant doit être un appareil du compte : la signature de rotation le prouve déjà,
-    // mais l'exiger ici évite de traiter une requête d'un tiers jusqu'à la vérification.
+    // The caller must be a device of the account: the rotation signature already proves it, but
+    // requiring it here avoids processing a stranger's request all the way to the verification.
     let caller: Option<(String,)> = sqlx::query_as("SELECT handle FROM devices WHERE id = $1")
         .bind(&signed.device_id)
         .fetch_optional(&pool)
@@ -748,14 +736,14 @@ async fn rotate_account(
         .execute(&mut *tx)
         .await?;
 
-    // Une rotation **ajoute** au journal, elle n'y remplace rien : c'est ce qui permet à un
-    // client de constater qu'une clé a changé plutôt que de la voir disparaître, et ce qui
-    // interdit au serveur de réécrire discrètement une identité.
+    // A rotation **appends** to the log, it replaces nothing: this is what lets a client see
+    // that a key changed rather than watch it vanish, and what stops the server from quietly
+    // rewriting an identity.
     crate::log::append(&mut tx, &handle, &new_identity_key).await?;
 
-    // Les KeyPackages des autres appareils partent avec l'ancienne clé : ils portent des
-    // credentials que plus personne ne peut relier au compte, et serviraient à les ajouter à
-    // de nouveaux groupes. Ceux de l'appelant restent — il va se ré-attester.
+    // The other devices' KeyPackages go with the old key: they carry credentials nobody can
+    // tie back to the account any more, and would be used to add those devices to new groups.
+    // The caller's are kept — it is about to re-attest.
     sqlx::query(
         "DELETE FROM key_packages WHERE device_id IN
          (SELECT id FROM devices WHERE handle = $1 AND id <> $2)",
@@ -767,32 +755,30 @@ async fn rotate_account(
 
     tx.commit().await?;
 
-    // Les attestations en base ne sont pas effacées : elles deviennent simplement
-    // invérifiables, et c'est ce qu'on veut donner à voir. Un client qui reçoit une
-    // attestation qui ne vérifie pas la rejette — le même chemin que pour un appareil
-    // fantôme, et le même test le couvre.
+    // Stored attestations are not erased: they simply become unverifiable, and that is exactly
+    // what we want visible. A client that receives an attestation which fails to verify rejects
+    // it — the same path as for a ghost device, covered by the same test.
     Ok(Json(serde_json::json!({ "handle": handle, "rotated_at": payload.rotated_at })))
 }
 
 #[derive(Deserialize)]
 struct RevokeDevice {
-    /// Certificat de révocation signé par le compte (domaine `wac-revoke-v1`), en base64.
+    /// Revocation certificate signed by the account (domain `wac-revoke-v1`), base64.
     ///
-    /// Ce n'est plus l'attestation de l'appareil qui sert de preuve. Elle prouvait la
-    /// détention de l'AIK, ce qui suffisait au serveur — mais elle ne dit rien d'une
-    /// révocation, et le serveur restait donc la seule source pour les autres clients. Un
-    /// certificat distinct est vérifiable par n'importe quel membre du groupe, ce qui est la
-    /// condition pour qu'il puisse commiter le retrait MLS sans nous croire sur parole.
+    /// The device attestation no longer serves as the proof. It proved possession of the AIK,
+    /// which was enough for the server — but it says nothing about a revocation, so the server
+    /// remained the only source for other clients. A separate certificate is verifiable by any
+    /// group member, which is what lets them commit the MLS removal without taking our word.
     revocation: String,
-    /// Horodatage couvert par la signature, en secondes Unix.
+    /// Timestamp covered by the signature, in Unix seconds.
     revoked_at: u64,
 }
 
-/// Révoque un appareil. Exige la détention de la clé du compte.
+/// Revokes a device. Requires possession of the account key.
 ///
-/// La signature de requête HTTP ne suffirait pas : elle prouve qu'on détient *un* appareil du
-/// compte, or un appareil compromis se révoquerait alors lui-même hors de danger, ou
-/// révoquerait les autres pour rester seul en place.
+/// The HTTP request signature would not be enough: it proves possession of *some* device of the
+/// account, so a compromised device could revoke itself out of danger, or revoke the others to
+/// be left alone in place.
 async fn revoke_device(
     State(pool): State<PgPool>,
     Path(device_id): Path<String>,
@@ -801,16 +787,15 @@ async fn revoke_device(
     let payload: RevokeDevice = signed.json()?;
     let revocation = decode_b64(&payload.revocation)?;
 
-    // Même fenêtre que la signature de requête. Sans elle, un compte pourrait fabriquer à
-    // l'avance des certificats datés du futur, et un vol de base les rendrait exploitables
-    // plus tard ; antidater servirait à prétendre qu'un appareil était déjà écarté au moment
-    // où il a légitimement reçu un message.
+    // Same window as the request signature. Without it, an account could pre-mint certificates
+    // dated in the future, and a database theft would make them usable later; backdating would
+    // serve to claim a device was already out at the time it legitimately received a message.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if now.abs_diff(payload.revoked_at) > crate::auth::MAX_CLOCK_SKEW {
-        return Err(ApiError::BadRequest("horodatage de révocation hors fenêtre"));
+        return Err(ApiError::BadRequest("revocation timestamp outside the window"));
     }
 
     let row: Option<DeviceRow> = sqlx::query_as(
@@ -823,8 +808,8 @@ async fn revoke_device(
     .await?;
     let (handle, _auth_key, _mls_key, identity_key) = row.ok_or(ApiError::NotFound)?;
 
-    // L'appelant doit appartenir au même compte que sa cible : sans cette vérification,
-    // n'importe quel compte pourrait révoquer les appareils d'un autre.
+    // The caller must belong to the same account as its target: without this check, any
+    // account could revoke another's devices.
     let caller: Option<(String,)> = sqlx::query_as("SELECT handle FROM devices WHERE id = $1")
         .bind(&signed.device_id)
         .fetch_optional(&pool)
@@ -841,13 +826,13 @@ async fn revoke_device(
     attest::verify_revocation(&identity_key, &claim, &revocation)
         .map_err(|_| ApiError::Forbidden)?;
 
-    // `revoked_at` prend la valeur signée et non `now()` : les deux doivent coïncider, sinon
-    // le certificat servi aux autres clients ne correspondrait pas à la ligne, et leur
-    // vérification échouerait. La fenêtre ci-dessus borne déjà l'écart.
+    // `revoked_at` takes the signed value, not `now()`: the two must coincide, otherwise the
+    // certificate served to other clients would not match the row and their verification would
+    // fail. The window above already bounds the gap.
     //
-    // Idempotent : une seconde révocation du même appareil ne remplace pas le certificat en
-    // place. Sans ce garde-fou, un appareil compromis mais toujours détenteur de l'AIK
-    // pourrait réécrire l'horodatage à volonté.
+    // Idempotent: a second revocation of the same device does not replace the certificate in
+    // place. Without that guard, a compromised device still holding the AIK could rewrite the
+    // timestamp at will.
     sqlx::query(
         "UPDATE devices SET revoked_at = to_timestamp($2), revocation = $3
          WHERE id = $1 AND revoked_at IS NULL",
@@ -858,8 +843,8 @@ async fn revoke_device(
     .execute(&pool)
     .await?;
 
-    // Le stock de KeyPackages part avec l'appareil : ils ne doivent plus pouvoir servir à
-    // l'ajouter à un nouveau groupe.
+    // The KeyPackage stock goes with the device: they must no longer be usable to add it to a
+    // new group.
     sqlx::query("DELETE FROM key_packages WHERE device_id = $1")
         .bind(&device_id)
         .execute(&pool)
@@ -868,45 +853,44 @@ async fn revoke_device(
     Ok(Json(serde_json::json!({ "revoked": device_id })))
 }
 
-/// Durée de vie d'un paquet d'appairage.
+/// Lifetime of a pairing packet.
 ///
-/// Il contient de quoi prendre le contrôle d'un compte. Une fenêtre courte limite la valeur
-/// d'un vol de base : au-delà, le paquet ne vaut plus rien même s'il n'a jamais été relevé.
+/// It contains what it takes to take over an account. A short window limits the value of a
+/// database theft: past it, the packet is worthless even if it was never claimed.
 const PAIRING_TTL_SECONDS: i64 = 300;
 
 #[derive(Deserialize)]
 struct DepositPairing {
-    /// Paquet déjà scellé, en base64.
+    /// Already sealed packet, base64.
     payload: String,
 }
 
-/// Dépose un paquet d'appairage scellé.
+/// Deposits a sealed pairing packet.
 ///
-/// Signé par l'appareil d'origine : sans cela n'importe qui remplirait la table, et surtout
-/// écraserait le paquet légitime par le sien pendant que l'utilisateur regarde son QR code.
+/// Signed by the origin device: otherwise anyone could fill the table, and above all overwrite
+/// the legitimate packet with their own while the user is looking at their QR code.
 ///
-/// Le serveur ne voit qu'un blob. Les deux moitiés publiques X25519 ont transité par le QR,
-/// hors de sa portée ; il ne peut donc ni l'ouvrir ni en fabriquer un que le nouvel appareil
-/// accepterait.
+/// The server only sees a blob. Both X25519 public halves travelled through the QR, out of its
+/// reach; it can neither open the packet nor forge one the new device would accept.
 async fn deposit_pairing(
     State(pool): State<PgPool>,
     Path(pairing_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<serde_json::Value>> {
     let pairing_id = hex::decode(&pairing_id)
-        .map_err(|_| ApiError::BadRequest("identifiant d'appairage invalide"))?;
+        .map_err(|_| ApiError::BadRequest("invalid pairing id"))?;
     if pairing_id.len() != 16 {
-        return Err(ApiError::BadRequest("identifiant d'appairage de taille invalide"));
+        return Err(ApiError::BadRequest("pairing id of invalid length"));
     }
 
     let payload: DepositPairing = signed.json()?;
     let blob = decode_b64(&payload.payload)?;
     if blob.is_empty() || blob.len() > 64 * 1024 {
-        return Err(ApiError::BadRequest("paquet d'appairage de taille invalide"));
+        return Err(ApiError::BadRequest("pairing packet of invalid length"));
     }
 
-    // `ON CONFLICT DO NOTHING` : un identifiant déjà utilisé n'est pas réécrit. Autrement, un
-    // appareil malveillant qui devinerait l'identifiant remplacerait le paquet légitime.
+    // `ON CONFLICT DO NOTHING`: an id already in use is not overwritten. Otherwise a malicious
+    // device that guessed the id would replace the legitimate packet.
     let inserted = sqlx::query(
         "INSERT INTO pairings (id, payload, expires_at)
          VALUES ($1, $2, now() + make_interval(secs => $3))
@@ -919,27 +903,26 @@ async fn deposit_pairing(
     .await?;
 
     if inserted.rows_affected() == 0 {
-        return Err(ApiError::Conflict("appairage déjà en cours pour cet identifiant"));
+        return Err(ApiError::Conflict("pairing already in progress for this id"));
     }
 
     Ok(Json(serde_json::json!({ "deposited": true })))
 }
 
-/// Relève le paquet d'appairage. **Non signé** : le nouvel appareil n'a pas encore d'identité
-/// connue du serveur — c'est précisément ce que l'appairage va lui donner.
+/// Claims the pairing packet. **Unsigned**: the new device has no identity known to the server
+/// yet — that is precisely what pairing is about to give it.
 ///
-/// La sécurité ne tient donc pas à l'authentification mais au chiffrement : sans la clé privée
-/// éphémère, le paquet est illisible. L'identifiant seul ne sert à rien.
+/// Security therefore rests on encryption, not authentication: without the ephemeral private
+/// key the packet is unreadable. The id alone is worth nothing.
 ///
-/// La lecture est **unique**. Une seconde relève qui réussirait signifierait qu'un tiers a
-/// pu récupérer le paquet ; mieux vaut un appairage qui échoue qu'un appairage silencieusement
-/// partagé.
+/// The read is **single-use**. A second claim that succeeded would mean a third party got hold
+/// of the packet; a pairing that fails beats a pairing silently shared.
 async fn claim_pairing(
     State(pool): State<PgPool>,
     Path(pairing_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let pairing_id = hex::decode(&pairing_id)
-        .map_err(|_| ApiError::BadRequest("identifiant d'appairage invalide"))?;
+        .map_err(|_| ApiError::BadRequest("invalid pairing id"))?;
 
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
         "UPDATE pairings SET claimed_at = now()
@@ -957,14 +940,14 @@ async fn claim_pairing(
 
 #[derive(Deserialize)]
 struct PublishKeyPackages {
-    /// KeyPackages sérialisés, en base64.
+    /// Serialized KeyPackages, base64.
     packages: Vec<String>,
 }
 
-/// Réapprovisionne le stock de KeyPackages de l'appelant.
+/// Replenishes the caller's KeyPackage stock.
 ///
-/// Le client doit surveiller son stock et le recharger : à zéro, plus personne ne peut
-/// ouvrir de conversation avec cet appareil.
+/// The client must watch its stock and top it up: at zero, nobody can open a conversation with
+/// this device any more.
 async fn publish_key_packages(
     State(pool): State<PgPool>,
     signed: Signed,
@@ -972,10 +955,10 @@ async fn publish_key_packages(
     let payload: PublishKeyPackages = signed.json()?;
 
     if payload.packages.is_empty() {
-        return Err(ApiError::BadRequest("aucun key package fourni"));
+        return Err(ApiError::BadRequest("no key package provided"));
     }
     if payload.packages.len() > MAX_KEY_PACKAGES_PER_REQUEST {
-        return Err(ApiError::BadRequest("trop de key packages en une requête"));
+        return Err(ApiError::BadRequest("too many key packages in one request"));
     }
 
     let packages: Vec<Vec<u8>> = payload
@@ -984,9 +967,9 @@ async fn publish_key_packages(
         .map(|p| decode_b64(p))
         .collect::<ApiResult<_>>()?;
 
-    // Le serveur ne valide pas le contenu des KeyPackages : il ne parle pas MLS. C'est le
-    // client qui les valide à la réception — et cette validation ne prouve de toute façon
-    // rien sur l'identité derrière (voir `crypto_core::identity::parse_key_package`).
+    // The server does not validate KeyPackage contents: it does not speak MLS. The client
+    // validates them on receipt — and that validation proves nothing about the identity behind
+    // them anyway (see `crypto_core::identity::parse_key_package`).
     sqlx::query(
         "INSERT INTO key_packages (device_id, payload)
          SELECT $1, * FROM UNNEST($2::bytea[])",
@@ -1000,65 +983,63 @@ async fn publish_key_packages(
 }
 
 #[derive(Serialize)]
-struct Stock {
+struct Store {
     remaining: i64,
 }
 
-async fn key_package_stock(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Json<Stock>> {
+async fn key_package_stock(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Json<Store>> {
     let (remaining,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM key_packages WHERE device_id = $1")
             .bind(&signed.device_id)
             .fetch_one(&pool)
             .await?;
 
-    Ok(Json(Stock { remaining }))
+    Ok(Json(Store { remaining }))
 }
 
 #[derive(Serialize)]
 struct ClaimedKeyPackage {
     package: String,
-    /// Stock restant de l'appareil visé, pour que le client puisse l'avertir.
+    /// Remaining stock of the target device, so the client can warn it.
     remaining: i64,
 }
 
-/// Consomme un KeyPackage de l'appareil visé.
+/// Consumes a KeyPackage from the target device.
 ///
-/// `DELETE ... RETURNING` sur une sous-requête `FOR UPDATE SKIP LOCKED` : le retrait est
-/// atomique et deux appels concurrents ne peuvent pas obtenir le même KeyPackage. C'est le
-/// point critique de tout le serveur — la clé d'initialisation d'un KeyPackage est à usage
-/// unique, et OpenMLS n'empêche pas sa réutilisation.
+/// `DELETE ... RETURNING` over a `FOR UPDATE SKIP LOCKED` subquery: the removal is atomic and
+/// two concurrent calls cannot get the same KeyPackage. This is the critical point of the whole
+/// server — a KeyPackage's init key is single-use, and OpenMLS does not prevent its reuse.
 async fn claim_key_package(
     State(pool): State<PgPool>,
     State(claims): State<Arc<crate::throttle::Claims>>,
     Path(device_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<ClaimedKeyPackage>> {
-    // **Quota par couple appelant-cible.**
+    // **Quota per caller-target pair.**
     //
-    // Cette route consomme irréversiblement un KeyPackage de la cible, et n'importe quel
-    // appareil authentifié peut la viser — l'appelant n'a aucun lien à prouver avec elle. Sans
-    // borne, un compte quelconque vide le stock de qui il veut, et le rend **injoignable pour
-    // toute nouvelle conversation** : c'est ce que dit déjà le client à propos de son propre
-    // stock, « à zéro, plus personne ne peut ouvrir de conversation avec cet appareil ».
+    // This route irreversibly consumes a KeyPackage from the target, and any authenticated
+    // device can aim at it — the caller has no relationship to prove. Unbounded, any account
+    // could empty anyone's stock and make them **unreachable for any new conversation**: exactly
+    // what the client already says about its own stock, "at zero, nobody can open a conversation
+    // with this device any more".
     //
-    // Le réapprovisionnement automatique du client atténue sans supprimer : il ne tourne qu'à la
-    // relève, et une victime hors ligne ne réapprovisionne pas du tout.
+    // The client's automatic replenishment mitigates without fixing: it only runs on fetch, and
+    // an offline victim does not replenish at all.
     //
-    // Le quota porte sur le couple et non sur l'appelant seul : ouvrir des conversations avec
-    // beaucoup de correspondants est légitime, s'acharner sur un seul ne l'est pas. Un appelant
-    // honnête n'a besoin que d'un KeyPackage par appareil visé ; la marge couvre les reprises
-    // après échec réseau.
+    // The quota is on the pair, not on the caller alone: opening conversations with many
+    // correspondents is legitimate, hammering a single one is not. An honest caller needs only
+    // one KeyPackage per target device; the margin covers retries after a network failure.
     //
-    // Ce que cela ne ferme pas : le compteur vit en mémoire, donc par instance, et plusieurs
-    // comptes complices contournent la borne. Voir `crate::throttle`.
+    // What this does not close: the counter lives in memory, hence per instance, and several
+    // colluding accounts get around the bound. See `crate::throttle`.
     let quota = format!("{}:{}", signed.device_id, device_id);
-    if !claims.autorise(&quota) {
+    if !claims.allows(&quota) {
         return Err(ApiError::TooManyRequests);
     }
 
-    // Un appareil révoqué ne doit plus pouvoir être ajouté à un groupe. Le stock est déjà
-    // purgé à la révocation ; cette clause ferme la fenêtre entre les deux requêtes et
-    // protège d'un stock républié par un appareil volé.
+    // A revoked device must no longer be addable to a group. The stock is already purged on
+    // revocation; this clause closes the window between the two queries and guards against a
+    // stock republished by a stolen device.
     let revoked: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM devices WHERE id = $1 AND revoked_at IS NOT NULL")
             .bind(&device_id)
@@ -1097,14 +1078,13 @@ async fn claim_key_package(
     }))
 }
 
-/// Liste les groupes où l'appelant est déclaré membre.
+/// Lists the groups where the caller is declared a member.
 ///
-/// C'est ainsi qu'un appareil découvre qu'on l'a ajouté à une conversation pendant qu'il
-/// était hors ligne : il n'a aucun autre moyen d'apprendre l'identifiant du groupe.
+/// This is how a device finds out it was added to a conversation while offline: it has no other
+/// way to learn the group id.
 ///
-/// L'endpoint ne fait que refléter une métadonnée que le serveur détient déjà
-/// (`group_members`). Il ne divulgue donc rien de neuf — mais il rappelle que le serveur
-/// sait qui parle avec qui.
+/// The endpoint only reflects metadata the server already holds (`group_members`). It therefore
+/// discloses nothing new — but it is a reminder that the server knows who talks to whom.
 async fn list_groups(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Json<Vec<String>>> {
     let rows: Vec<(Vec<u8>,)> =
         sqlx::query_as("SELECT group_id FROM group_members WHERE device_id = $1 ORDER BY group_id")
@@ -1118,21 +1098,21 @@ async fn list_groups(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Js
 #[derive(Deserialize)]
 struct AddMembers {
     device_ids: Vec<String>,
-    /// Clé de dépôt du groupe, en base64. Fournie **uniquement à la création**.
+    /// The group's posting key, base64. Supplied **at creation only**.
     ///
-    /// Elle ne peut pas être changée ensuite : un membre qui la remplacerait rendrait muets
-    /// tous les autres, sans qu'aucune erreur ne l'explique. Une rotation demanderait de la
-    /// redistribuer d'abord par MLS, ce qui n'est pas fait ici.
+    /// It cannot be changed afterwards: a member replacing it would silence all the others,
+    /// with no error to explain why. Rotating it would require redistributing it over MLS
+    /// first, which is not done here.
     #[serde(default)]
     posting_key: Option<String>,
 }
 
-/// Déclare qui peut lire la boîte d'un groupe.
+/// Declares who may read a group's mailbox.
 ///
-/// Le serveur ne connaît pas la composition réelle du groupe — elle est dans l'arbre MLS,
-/// chiffré. Cette liste est un contrôle d'accès au transport, distinct et potentiellement
-/// divergent de l'appartenance cryptographique. La vérité reste l'arbre MLS : un appareil
-/// listé ici sans être dans l'arbre récupère des blobs qu'il ne peut pas déchiffrer.
+/// The server does not know the group's real composition — it lives in the MLS tree, encrypted.
+/// This list is transport-level access control, distinct from and potentially divergent with
+/// cryptographic membership. The truth stays the MLS tree: a device listed here but absent from
+/// the tree fetches blobs it cannot decrypt.
 async fn add_members(
     State(pool): State<PgPool>,
     Path(group_id): Path<String>,
@@ -1142,19 +1122,19 @@ async fn add_members(
     let payload: AddMembers = signed.json()?;
 
     if payload.device_ids.is_empty() {
-        return Err(ApiError::BadRequest("aucun appareil fourni"));
+        return Err(ApiError::BadRequest("no device provided"));
     }
 
     let mut tx = pool.begin().await?;
 
-    // Crée le groupe s'il n'existe pas. `RETURNING` ne renvoie rien en cas de conflit, d'où
-    // le `fetch_optional` : la présence d'une ligne indique que l'appelant vient de créer
-    // le groupe et en devient donc légitimement le premier membre.
+    // Creates the group if it does not exist. `RETURNING` yields nothing on conflict, hence the
+    // `fetch_optional`: a row means the caller just created the group and therefore legitimately
+    // becomes its first member.
     let posting_key = match &payload.posting_key {
         Some(encoded) => {
             let key = decode_b64(encoded)?;
             if key.len() != 32 {
-                return Err(ApiError::BadRequest("clé de dépôt de taille invalide"));
+                return Err(ApiError::BadRequest("posting key of invalid length"));
             }
             Some(key)
         }
@@ -1176,7 +1156,7 @@ async fn add_members(
             .execute(&mut *tx)
             .await?;
     } else {
-        // Groupe existant : seul un membre peut en ajouter d'autres.
+        // Existing group: only a member can add others.
         let member: Option<(i32,)> =
             sqlx::query_as("SELECT 1 FROM group_members WHERE group_id = $1 AND device_id = $2")
                 .bind(&group_id)
@@ -1208,23 +1188,23 @@ struct RemoveMembers {
     device_ids: Vec<String>,
 }
 
-/// Retire des appareils de la liste de diffusion d'un groupe.
+/// Removes devices from a group's distribution list.
 ///
-/// Pendant symétrique d'[`add_members`], et soumis à la même règle : seul un membre agit. Le
-/// serveur n'en sait pas plus ici qu'ailleurs — il ignore le contenu du groupe et **n'applique
-/// aucune politique d'administration**.
+/// Symmetric counterpart to [`add_members`], under the same rule: only a member acts. The server
+/// knows no more here than anywhere else — it is blind to the group's contents and **enforces no
+/// administration policy**.
 ///
-/// # Pourquoi le serveur n'arbitre pas les rôles
+/// # Why the server does not arbitrate roles
 ///
-/// Les rôles d'admin vivent dans une extension du group context MLS, donc dans l'état chiffré.
-/// Le serveur ne peut pas les lire, et les lui confier en clair reviendrait à lui rendre le
-/// pouvoir que tout le reste lui retire. Ce sont les **clients** qui refusent un commit non
-/// autorisé, chacun de son côté. Cet endpoint ne fait que du contrôle d'accès au transport.
+/// Admin roles live in an MLS group context extension, hence in the encrypted state. The server
+/// cannot read them, and handing them over in the clear would give it back the power everything
+/// else takes away. It is the **clients** that reject an unauthorized commit, each on its own.
+/// This endpoint does transport-level access control and nothing more.
 ///
-/// Conséquence assumée : un membre peut retirer n'importe qui de la liste de diffusion sans
-/// que le serveur s'y oppose. Il ne gagne rien à le faire — les autres continuent de recevoir
-/// le commit MLS par leur propre lecture, et la victime constate qu'elle ne reçoit plus rien.
-/// C'est de la censure bruyante, le même registre que l'omission d'appareil.
+/// Accepted consequence: a member can remove anyone from the distribution list without the
+/// server objecting. There is nothing to gain — the others keep receiving the MLS commit through
+/// their own fetches, and the victim notices it receives nothing any more. This is noisy
+/// censorship, the same register as device omission.
 async fn remove_members(
     State(pool): State<PgPool>,
     Path(group_id): Path<String>,
@@ -1234,11 +1214,11 @@ async fn remove_members(
     let payload: RemoveMembers = signed.json()?;
 
     if payload.device_ids.is_empty() {
-        return Err(ApiError::BadRequest("aucun appareil fourni"));
+        return Err(ApiError::BadRequest("no device provided"));
     }
 
-    // On ne passe pas par `require_membership` : un appareil révoqué doit pouvoir être retiré
-    // par un membre, et c'est bien l'appelant qu'on vérifie ici, pas la cible.
+    // Note this checks the caller, not the target: a revoked device must still be removable by
+    // a member.
     require_membership(&pool, &group_id, &signed.device_id).await?;
 
     let removed = sqlx::query(
@@ -1254,13 +1234,13 @@ async fn remove_members(
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
-/// Plafond d'entrées de coffre par requête et par page.
+/// Cap on vault entries per request and per page.
 const MAX_VAULT_ENTRIES: usize = 200;
 
 #[derive(Deserialize)]
 struct VaultEntry {
     seq: i64,
-    /// Message déjà chiffré sous la clé du coffre, en base64.
+    /// Message already encrypted under the vault key, base64.
     payload: String,
 }
 
@@ -1269,10 +1249,10 @@ struct StoreVault {
     entries: Vec<VaultEntry>,
 }
 
-/// Retourne le compte de l'appareil signataire.
+/// Returns the account of the signing device.
 ///
-/// Le coffre est indexé par compte, jamais par appareil : c'est ce qui permet à un appareil
-/// neuf de retrouver l'historique déposé par un autre.
+/// The vault is indexed by account, never by device: that is what lets a brand new device
+/// recover the history deposited by another.
 async fn caller_handle(pool: &PgPool, device_id: &str) -> ApiResult<String> {
     let row: Option<(String,)> = sqlx::query_as("SELECT handle FROM devices WHERE id = $1")
         .bind(device_id)
@@ -1282,11 +1262,11 @@ async fn caller_handle(pool: &PgPool, device_id: &str) -> ApiResult<String> {
     row.map(|(handle,)| handle).ok_or(ApiError::Forbidden)
 }
 
-/// Dépose des entrées dans le coffre de l'appelant.
+/// Stores entries in the caller's vault.
 ///
-/// Le serveur ne voit que des blobs : la clé est dérivée de la phrase de récupération, qu'il
-/// ne détient pas. `ON CONFLICT DO NOTHING` rend le dépôt idempotent — deux appareils du même
-/// compte archivent la même conversation sans se marcher dessus.
+/// The server only sees blobs: the key is derived from the recovery phrase, which it does not
+/// hold. `ON CONFLICT DO NOTHING` makes the store idempotent — two devices of the same account
+/// archive the same conversation without stepping on each other.
 async fn store_vault(
     State(pool): State<PgPool>,
     Path(group_id): Path<String>,
@@ -1296,14 +1276,14 @@ async fn store_vault(
     let payload: StoreVault = signed.json()?;
 
     if payload.entries.is_empty() {
-        return Err(ApiError::BadRequest("aucune entrée fournie"));
+        return Err(ApiError::BadRequest("no entry provided"));
     }
     if payload.entries.len() > MAX_VAULT_ENTRIES {
-        return Err(ApiError::BadRequest("trop d'entrées en une requête"));
+        return Err(ApiError::BadRequest("too many entries in one request"));
     }
 
-    // L'appartenance au groupe est exigée : sans cela, un compte archiverait n'importe quel
-    // identifiant de groupe et s'en servirait comme d'un stockage gratuit.
+    // Group membership is required: otherwise an account could archive under any group id and
+    // use it as free storage.
     require_membership(&pool, &group_id, &signed.device_id).await?;
     let handle = caller_handle(&pool, &signed.device_id).await?;
 
@@ -1332,11 +1312,11 @@ struct VaultRow {
     payload: String,
 }
 
-/// Restitue le coffre de l'appelant pour un groupe.
+/// Returns the caller's vault for a group.
 ///
-/// Seul le compte propriétaire y accède : le `handle` vient de l'appareil signataire, jamais
-/// d'un paramètre. C'est ce qui empêche de lire le coffre d'un autre en connaissant son
-/// pseudonyme.
+/// Only the owning account gets in: the `handle` comes from the signing device, never from a
+/// parameter. That is what stops someone from reading another's vault by knowing their
+/// pseudonym.
 async fn fetch_vault(
     State(pool): State<PgPool>,
     Path(group_id): Path<String>,
@@ -1368,7 +1348,7 @@ async fn fetch_vault(
 
 #[derive(Deserialize)]
 struct PostEnvelope {
-    /// Blob MLS opaque, en base64.
+    /// Opaque MLS blob, base64.
     payload: String,
 }
 
@@ -1377,24 +1357,23 @@ struct EnvelopePosted {
     seq: i64,
 }
 
-/// Dépose une enveloppe et lui attribue son numéro de séquence.
+/// Posts an envelope and assigns it its sequence number.
 ///
-/// L'incrément et l'insertion sont dans la même transaction, et l'`UPDATE` verrouille la
-/// ligne du groupe : deux envois concurrents sont sérialisés. MLS exige que tous les membres
-/// appliquent les commits dans le même ordre — deux membres qui divergent d'epoch ne peuvent
-/// plus se lire du tout.
-/// Vérifie un dépôt anonyme et retourne l'enveloppe.
+/// The increment and the insert are in the same transaction, and the `UPDATE` locks the group
+/// row: two concurrent posts are serialized. MLS requires every member to apply commits in the
+/// same order — two members whose epochs diverge cannot read each other at all any more.
+/// Verifies an anonymous post and returns the envelope.
 ///
-/// # Ce qui est authentifié
+/// # What is authenticated
 ///
-/// `HMAC(clé du groupe, "wac-post-v1" ‖ group_id ‖ nonce ‖ SHA256(corps))`.
+/// `HMAC(group key, "wac-post-v1" ‖ group_id ‖ nonce ‖ SHA256(body))`.
 ///
-/// Le `group_id` empêche de rejouer un MAC dans un autre groupe. Le nonce le rend unique, et
-/// son unicité est imposée **par la base**, pas par une lecture suivie d'une écriture — un
-/// contrôle applicatif laisserait une fenêtre de concurrence entre les deux.
+/// The `group_id` prevents replaying a MAC in another group. The nonce makes it unique, and its
+/// uniqueness is enforced **by the database**, not by a read followed by a write — an
+/// application-level check would leave a concurrency window between the two.
 ///
-/// L'empreinte du corps est incluse plutôt que le corps lui-même : sans elle, un intermédiaire
-/// substituerait l'enveloppe sous un MAC légitime.
+/// The body's digest is included rather than the body itself: without it, a middleman could
+/// substitute the envelope under a legitimate MAC.
 async fn anonymous_body(
     pool: &PgPool,
     group_id: &[u8],
@@ -1402,10 +1381,10 @@ async fn anonymous_body(
 ) -> ApiResult<Vec<u8>> {
     use sha2::{Digest, Sha256};
 
-    // Les en-têtes sont extraits en valeurs possédées **avant** le premier `await`. Garder un
-    // emprunt sur `request` à travers un point de suspension rendrait le futur non-`Send`, et
-    // axum exige des handlers `Send` — l'erreur qui en résulte ne désigne pas la cause. Voir
-    // la même précaution dans `auth::Signed`.
+    // Headers are extracted as owned values **before** the first `await`. Holding a borrow on
+    // `request` across a suspension point would make the future non-`Send`, and axum requires
+    // `Send` handlers — the resulting error does not point at the cause. Same precaution as in
+    // `auth::Signed`.
     let (nonce, mac) = {
         let headers = request.headers();
         let header = |name: &str| -> ApiResult<Vec<u8>> {
@@ -1413,14 +1392,14 @@ async fn anonymous_body(
                 .get(name)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| BASE64_STANDARD.decode(value).ok())
-                .ok_or(ApiError::BadRequest("en-tête de dépôt anonyme manquant ou illisible"))
+                .ok_or(ApiError::BadRequest("anonymous post header missing or unreadable"))
         };
 
         (header(HEADER_NONCE)?, header(HEADER_MAC)?)
     };
 
     if nonce.len() != 16 {
-        return Err(ApiError::BadRequest("nonce de dépôt invalide"));
+        return Err(ApiError::BadRequest("invalid post nonce"));
     }
 
     let (posting_key,): (Option<Vec<u8>>,) =
@@ -1430,26 +1409,26 @@ async fn anonymous_body(
             .await?
             .ok_or(ApiError::NotFound)?;
 
-    // Un groupe sans clé de dépôt n'accepte pas l'anonyme. Répondre 403 plutôt que de basculer
-    // silencieusement sur le chemin signé : un client qui se croit anonyme et ne l'est pas est
-    // pire qu'un client qui échoue.
+    // A group with no posting key does not accept anonymous posts. Answer 403 rather than
+    // silently fall back to the signed path: a client that believes itself anonymous and is not
+    // is worse than a client that fails.
     let posting_key = posting_key.ok_or(ApiError::Forbidden)?;
 
     let body = axum::body::to_bytes(request.into_body(), MAX_ENVELOPE_BYTES)
         .await
-        .map_err(|_| ApiError::BadRequest("corps illisible"))?;
+        .map_err(|_| ApiError::BadRequest("unreadable body"))?;
 
     let payload: PostEnvelope =
-        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("corps invalide"))?;
+        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("invalid body"))?;
     let blob = decode_b64(&payload.payload)?;
 
     let message = attest::post_message(group_id, &nonce, &Sha256::digest(&body))
-        .map_err(|_| ApiError::BadRequest("dépôt mal formé"))?;
+        .map_err(|_| ApiError::BadRequest("malformed post"))?;
 
     verify_group_mac(&posting_key, &message, &mac)?;
 
-    // L'unicité est une contrainte de clé primaire : un rejeu échoue à l'insertion, sans
-    // fenêtre de concurrence possible.
+    // Uniqueness is a primary key constraint: a replay fails on insert, with no possible
+    // concurrency window.
     let inserted =
         sqlx::query("INSERT INTO posting_nonces (group_id, nonce) VALUES ($1, $2) ON CONFLICT DO NOTHING")
             .bind(group_id)
@@ -1464,88 +1443,85 @@ async fn anonymous_body(
     Ok(blob)
 }
 
-/// En-têtes du dépôt **anonyme**.
+/// Headers of the **anonymous** post.
 ///
-/// Leur présence bascule la route sur le chemin sealed sender : aucune signature d'appareil
-/// n'est alors exigée ni acceptée, et le serveur n'apprend pas qui dépose.
+/// Their presence switches the route to the sealed sender path: no device signature is then
+/// required or accepted, and the server does not learn who posts.
 const HEADER_NONCE: &str = "x-group-nonce";
 const HEADER_MAC: &str = "x-group-mac";
 
-/// Dépose une enveloppe dans un groupe.
+/// Posts an envelope into a group.
 ///
-/// # Deux chemins d'autorisation, un seul effet
+/// # Two authorization paths, one effect
 ///
-/// **Signé** : l'appareil prouve son identité. Le serveur apprend qui écrit, quand, et dans
-/// quel groupe. C'est le chemin historique, conservé pour les groupes créés avant le sealed
-/// sender.
+/// **Signed**: the device proves its identity. The server learns who writes, when, and in which
+/// group. This is the historical path, kept for groups created before sealed sender.
 ///
-/// **Anonyme** : le déposant prouve seulement qu'il détient la clé du groupe, donc qu'il en est
-/// membre. Le serveur ne peut pas dire lequel. C'est tout ce dont il a besoin pour ne pas
-/// servir de boîte aux lettres ouverte.
+/// **Anonymous**: the poster only proves it holds the group key, hence that it is a member. The
+/// server cannot say which one. That is all it needs in order not to act as an open mailbox.
 ///
-/// Les deux aboutissent à la même enveloppe : l'expéditeur réel est authentifié **par MLS**, à
-/// l'intérieur du chiffré, et les destinataires le lisent. Ce qui disparaît, c'est ce que le
-/// serveur en sait.
+/// Both end in the same envelope: the real sender is authenticated **by MLS**, inside the
+/// ciphertext, and the recipients read it. What disappears is what the server knows about it.
 #[derive(Deserialize)]
 struct PushToken {
     provider: String,
     token: String,
 }
 
-/// Enregistre le jeton de réveil de l'appareil appelant.
+/// Registers the calling device's wake token.
 ///
-/// Signé, donc rattaché à un appareil déjà connu : sans cela, n'importe qui pourrait faire
-/// vibrer le téléphone d'autrui en devinant un identifiant.
+/// Signed, hence tied to an already known device: otherwise anyone could make someone else's
+/// phone buzz by guessing an id.
 ///
-/// Le fournisseur est repris tel quel et non vérifié contre une liste : le serveur n'a rien à
-/// décider ici, et une liste fermée obligerait à le redéployer le jour où une plateforme change
-/// de nom. Un jeton adressé à un fournisseur non branché est simplement ignoré à l'émission.
+/// The provider is taken as-is and not checked against a list: the server has nothing to decide
+/// here, and a closed list would force a redeploy the day a platform changes its name. A token
+/// aimed at a provider that is not wired up is simply ignored when waking.
 async fn set_push_token(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
     let payload: PushToken = signed.json()?;
 
     if payload.token.is_empty() || payload.provider.is_empty() {
-        return Err(ApiError::BadRequest("jeton de réveil vide"));
+        return Err(ApiError::BadRequest("empty wake token"));
     }
 
-    crate::push::enregistrer(&pool, &signed.device_id, &payload.provider, &payload.token).await?;
+    crate::push::register(&pool, &signed.device_id, &payload.provider, &payload.token).await?;
     Ok(())
 }
 
-/// Retire le jeton. L'appareil cesse d'être réveillé, et le serveur cesse d'avoir une adresse.
+/// Drops the token. The device stops being woken, and the server stops having an address.
 ///
-/// Distinct d'un réglage « désactivé » qui garderait la ligne : ce qui n'est pas stocké ne peut
-/// pas être exigé plus tard, ni fuiter avec une base.
+/// Distinct from a "disabled" setting that would keep the row: what is not stored cannot be
+/// subpoenaed later, nor leak with a database.
 async fn forget_push_token(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
-    crate::push::oublier(&pool, &signed.device_id).await?;
+    crate::push::forget(&pool, &signed.device_id).await?;
     Ok(())
 }
 
 async fn post_envelope(
     State(pool): State<PgPool>,
     State(hub): State<Arc<Hub>>,
-    State(reveil): State<Arc<dyn crate::push::Emetteur>>,
+    State(waker): State<Arc<dyn crate::push::Waker>>,
     Path(group_id): Path<String>,
     request: axum::extract::Request,
 ) -> ApiResult<Json<EnvelopePosted>> {
     let group_id = decode_group_id(&group_id)?;
 
-    let anonyme = request.headers().contains_key(HEADER_MAC);
+    let anonymous = request.headers().contains_key(HEADER_MAC);
 
-    let mut expediteur = None;
+    let mut sender = None;
 
-    let blob = if anonyme {
+    let blob = if anonymous {
         anonymous_body(&pool, &group_id, request).await?
     } else {
         let signed = <Signed as axum::extract::FromRequest<PgPool>>::from_request(request, &pool)
             .await?;
         let payload: PostEnvelope = signed.json()?;
         require_membership(&pool, &group_id, &signed.device_id).await?;
-        expediteur = Some(signed.device_id.clone());
+        sender = Some(signed.device_id.clone());
         decode_b64(&payload.payload)?
     };
 
     if blob.is_empty() {
-        return Err(ApiError::BadRequest("enveloppe vide"));
+        return Err(ApiError::BadRequest("empty envelope"));
     }
 
     let mut tx = pool.begin().await?;
@@ -1565,19 +1541,17 @@ async fn post_envelope(
 
     tx.commit().await?;
 
-    // Après le commit, jamais avant : annoncer une enveloppe qu'une transaction annulée aurait
-    // fait disparaître enverrait les clients chercher un `seq` inexistant.
+    // After the commit, never before: announcing an envelope that a rolled back transaction
+    // would have made vanish would send clients looking for a `seq` that does not exist.
     hub.publish(Notice::Envelope { group_id: group_id.clone(), seq });
 
-    // Le réveil ne concerne que les appareils **non connectés** : ceux qui le sont viennent
-    // d'être servis par la ligne au-dessus. Le serveur ne sait pas lesquels le sont, donc il les
-    // réveille tous — un réveil de trop coûte une notification silencieuse, un réveil manquant
-    // coûte un message qui n'arrive pas.
+    // Waking only concerns **disconnected** devices: the connected ones were just served by the
+    // line above. The server does not know which is which, so it wakes them all — one wake too
+    // many costs a silent notification, one wake missing costs a message that never arrives.
     //
-    // `expediteur` est `None` sur un dépôt anonyme : le sealed sender a retiré au serveur le
-    // pouvoir de savoir qui dépose, et il n'est pas question de le lui rendre pour économiser
-    // une notification.
-    crate::push::reveiller_detache(pool.clone(), reveil, group_id, expediteur);
+    // `sender` is `None` on an anonymous post: sealed sender took from the server the power to
+    // know who posts, and it is out of the question to hand it back to save one notification.
+    crate::push::wake_detached(pool.clone(), waker, group_id, sender);
 
     Ok(Json(EnvelopePosted { seq }))
 }
@@ -1587,11 +1561,11 @@ struct AttachmentUploaded {
     id: String,
 }
 
-/// Dépose une pièce jointe déjà chiffrée.
+/// Uploads an already encrypted attachment.
 ///
-/// Le corps est le blob brut, sans encodage : le base64 coûterait un tiers de bande passante
-/// pour rien. Le serveur ne l'inspecte pas et n'en connaît ni le nom, ni le type, ni la clé —
-/// tout cela voyage chiffré dans le message MLS qui référencera cet identifiant.
+/// The body is the raw blob, unencoded: base64 would cost a third of the bandwidth for nothing.
+/// The server does not inspect it and knows neither its name, nor its type, nor its key — all
+/// of that travels encrypted in the MLS message that will reference this id.
 async fn upload_attachment(
     State(pool): State<PgPool>,
     Path(group_id): Path<String>,
@@ -1601,7 +1575,7 @@ async fn upload_attachment(
     require_membership(&pool, &group_id, &signed.device_id).await?;
 
     if signed.body.is_empty() {
-        return Err(ApiError::BadRequest("pièce jointe vide"));
+        return Err(ApiError::BadRequest("empty attachment"));
     }
 
     let (id,): (uuid::Uuid,) = sqlx::query_as(
@@ -1615,14 +1589,14 @@ async fn upload_attachment(
     Ok(Json(AttachmentUploaded { id: id.to_string() }))
 }
 
-/// Restitue une pièce jointe chiffrée.
+/// Serves an encrypted attachment back.
 ///
-/// Le blob est servi tel quel. S'il a été altéré ou substitué, l'AEAD du client échouera à
-/// l'ouverture : c'est le client, et non le serveur, qui garantit l'intégrité du fichier.
+/// The blob is served as-is. If it was tampered with or substituted, the client's AEAD will fail
+/// to open it: it is the client, not the server, that guarantees the file's integrity.
 ///
-/// Le type MIME renvoyé est volontairement `application/octet-stream` : ces octets sont
-/// opaques pour le serveur, et annoncer un type deviné inviterait le navigateur à les
-/// interpréter — un SVG ou un HTML rendu inline exécuterait du script sur cette origine.
+/// The MIME type returned is deliberately `application/octet-stream`: these bytes are opaque to
+/// the server, and announcing a guessed type would invite the browser to interpret them — an SVG
+/// or an HTML rendered inline would execute script on this origin.
 async fn download_attachment(
     State(pool): State<PgPool>,
     Path((group_id, attachment_id)): Path<(String, String)>,
@@ -1636,10 +1610,10 @@ async fn download_attachment(
 
     let attachment_id: uuid::Uuid = attachment_id
         .parse()
-        .map_err(|_| ApiError::BadRequest("identifiant de pièce jointe invalide"))?;
+        .map_err(|_| ApiError::BadRequest("invalid attachment id"))?;
 
-    // Le `group_id` fait partie de la clause : sans lui, un membre d'un groupe pourrait
-    // lire les pièces jointes d'un autre en devinant un identifiant.
+    // The `group_id` is part of the clause: without it, a member of one group could read
+    // another group's attachments by guessing an id.
     let row: Option<(Vec<u8>,)> =
         sqlx::query_as("SELECT payload FROM attachments WHERE id = $1 AND group_id = $2")
             .bind(attachment_id)
@@ -1662,7 +1636,7 @@ async fn download_attachment(
 
 #[derive(Deserialize)]
 struct FetchQuery {
-    /// Curseur : ne retourne que les enveloppes strictement postérieures.
+    /// Cursor: only return envelopes strictly after this.
     #[serde(default)]
     after: i64,
 }
@@ -1701,11 +1675,11 @@ async fn fetch_envelopes(
     ))
 }
 
-/// Plafond de handles par requête de présence.
+/// Cap on handles per presence request.
 ///
-/// Même raison que pour les KeyPackages : borner ce qu'une seule requête peut demander. Ici
-/// s'ajoute une raison propre — sans plafond, la route deviendrait un moyen commode de balayer
-/// tout le carnet d'un coup.
+/// Same reason as for KeyPackages: bound what a single request can ask for. With one reason of
+/// its own on top — unbounded, this route would be a convenient way to sweep an entire address
+/// book in one go.
 const MAX_PRESENCE_HANDLES: usize = 64;
 
 #[derive(Deserialize)]
@@ -1721,38 +1695,38 @@ struct PresenceEntry {
 
 #[derive(Serialize)]
 struct PresenceResponse {
-    /// Horloge du serveur, servie avec la réponse.
+    /// The server clock, served with the response.
     ///
-    /// Le client compare deux horloges pour décider si quelqu'un est en ligne. `MAX_CLOCK_SKEW`
-    /// existe précisément parce qu'elles divergent : comparer un horodatage serveur à l'heure
-    /// locale ferait clignoter le point chez tout utilisateur mal réglé.
+    /// The client compares two clocks to decide whether someone is online. `MAX_CLOCK_SKEW`
+    /// exists precisely because they drift: comparing a server timestamp against local time
+    /// would make the dot flicker for every user with a badly set clock.
     now: i64,
     accounts: Vec<PresenceEntry>,
 }
 
-/// Présence des correspondants demandés.
+/// Presence of the requested correspondents.
 ///
-/// # Pourquoi POST plutôt que GET
+/// # Why POST rather than GET
 ///
-/// Pour que les handles restent hors de l'URL, donc hors des journaux d'accès de tout proxy
-/// traversé. C'est le même argument que celui qui a écarté `EventSource` pour le flux. Le corps
-/// est déjà couvert par la signature, il n'y a rien à ajouter.
+/// So the handles stay out of the URL, hence out of the access logs of every proxy crossed. Same
+/// argument that ruled out `EventSource` for the stream. The body is already covered by the
+/// signature, there is nothing to add.
 ///
-/// # Pourquoi pas une poussée par le flux
+/// # Why not push it over the stream
 ///
-/// Le hub est indexé par groupe, la présence est un fait de compte : pousser demanderait une
-/// diffusion par groupe et par battement, dans des canaux qui existent pour la correction. Et
-/// surtout, le point vert dépendrait alors du flux — un flux bloqué afficherait tout le monde
-/// hors ligne, ce qui est une interface *fausse*, pas seulement en retard.
+/// The hub is indexed by group, presence is an account-level fact: pushing would mean a
+/// broadcast per group and per heartbeat, through channels that exist for correctness. And above
+/// all, the green dot would then depend on the stream — a stalled stream would show everyone
+/// offline, which is a *wrong* interface, not merely a late one.
 async fn read_presence(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Json<PresenceResponse>> {
     let payload: PresenceRequest = signed.json()?;
 
     if payload.handles.len() > MAX_PRESENCE_HANDLES {
-        return Err(ApiError::BadRequest("trop de handles"));
+        return Err(ApiError::BadRequest("too many handles"));
     }
 
     let seen = presence::read(&pool, &signed.device_id, &payload.handles).await?;
-    // `SystemTime` plutôt qu'une dépendance de date : on ne sert qu'un nombre de secondes.
+    // `SystemTime` rather than a date dependency: we only serve a number of seconds.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1772,14 +1746,14 @@ struct OptoutRequest {
     optout: bool,
 }
 
-/// Active ou lève le refus de diffuser sa présence.
+/// Turns the presence opt-out on or off.
 ///
-/// Le refus est **réciproque** : il coupe aussi la lecture. Sans cette symétrie, le réglage
-/// permettrait de voir sans être vu, c'est-à-dire exactement ce qu'il prétend empêcher. La même
-/// règle vaut déjà pour les accusés de lecture.
+/// The opt-out is **reciprocal**: it cuts reading too. Without that symmetry the setting would
+/// let you see without being seen, which is exactly what it claims to prevent. The same rule
+/// already applies to read receipts.
 ///
-/// Il est honoré à l'écriture, dans `presence::touch` : rien n'est enregistré. Un réglage qui se
-/// contenterait de filtrer en lecture laisserait le serveur tenir le registre quand même.
+/// It is honoured on write, in `presence::touch`: nothing is recorded. A setting that merely
+/// filtered on read would leave the server keeping the register anyway.
 async fn set_presence_optout(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
     let payload: OptoutRequest = signed.json()?;
     let handle = caller_handle(&pool, &signed.device_id).await?;
@@ -1790,9 +1764,9 @@ async fn set_presence_optout(State(pool): State<PgPool>, signed: Signed) -> ApiR
         .execute(&pool)
         .await?;
 
-    // Le passé n'a pas à survivre au refus : ce qui a déjà été enregistré cesse d'être servi,
-    // et cesse aussi d'exister. Le garder ferait mentir le réglage à l'instant même où il est
-    // pris.
+    // The past has no business surviving the opt-out: what was already recorded stops being
+    // served, and stops existing too. Keeping it would make the setting a lie the moment it is
+    // set.
     if payload.optout {
         sqlx::query("UPDATE devices SET last_seen_at = NULL WHERE handle = $1")
             .bind(&handle)

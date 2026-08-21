@@ -1,54 +1,52 @@
--- Présence : le registre que les migrations précédentes refusaient de tenir.
+-- Presence: the register the previous migrations refused to keep.
 --
--- L'en-tête de 0001 interdit les colonnes ajoutées « pour le confort » — et cet en-tête ne peut
--- pas être amendé : sqlx vérifie l'empreinte de chaque migration déjà appliquée, donc le texte
--- de 0001 est immuable au sens propre. La règle y reste donc écrite telle quelle, et c'est ici
--- que se déclare l'exception, une seule, nommée : `last_seen_at`. Elle n'est pas un contournement
--- de la règle, elle l'enfreint sciemment, parce qu'aucune formulation chiffrée ne permet
--- d'afficher qu'un compte est connecté. Pour le savoir, il faut que
--- quelqu'un le sache ; ce quelqu'un est le serveur, et ce qu'il apprend ce faisant, ce sont les
--- horaires de sommeil, les fuseaux et les absences de chacun.
+-- The header of 0001 forbids columns added "for convenience" — and that header cannot be
+-- amended: sqlx checks the checksum of every applied migration, so the text of 0001 is
+-- immutable in the literal sense. The rule stays written there as is, and the exception is
+-- declared here, one single named exception: `last_seen_at`. It does not work around the
+-- rule, it knowingly breaks it, because no cryptographic construction lets you display that
+-- an account is online. For that to be known, someone has to know it; that someone is the
+-- server, and what it learns in the process is everyone's sleep schedule, time zone and
+-- absences.
 --
--- Ce qui borne la fuite, et qui est le vrai contenu de cette migration :
+-- What bounds the leak, and is the real content of this migration:
 --
---  * la colonne est sur l'APPAREIL, mais n'est jamais servie par appareil à un tiers — seul le
---    MAX par compte sort du serveur. Servir le détail dirait combien d'appareils une personne
---    possède et lequel elle utilise à quelle heure ;
---  * elle n'est écrite que par des chemins authentifiés par identité. Les dépôts anonymes
---    (0007) ne la touchent pas : le serveur ne sait pas qui dépose, et une présence dérivée
---    d'un dépôt reviendrait à le lui apprendre ;
---  * elle est tronquée à la minute. Le serveur voit de toute façon l'instant exact de la
---    requête ; la troncature ne le protège pas de lui-même, elle empêche seulement de diffuser
---    à tous les correspondants une horloge à la seconde ;
---  * il n'y a PAS d'historique. Une table `presence_log` serait un journal de déplacements.
---    L'écrasement est la fonctionnalité, pas un raccourci d'implémentation.
+--  * the column is on the DEVICE, but is never served per device to a third party — only the
+--    per-account MAX leaves the server. Serving the detail would say how many devices a
+--    person owns and which one they use at what hour;
+--  * it is written only by identity-authenticated paths. Anonymous posts (0007) never touch
+--    it: the server does not know who posted, and presence derived from a post would tell it;
+--  * it is truncated to the minute. The server sees the exact request time anyway; truncation
+--    does not protect it from itself, it only stops broadcasting a second-accurate clock to
+--    every correspondent;
+--  * there is NO history. A `presence_log` table would be a movement journal. Overwriting is
+--    the feature, not an implementation shortcut.
 
 ALTER TABLE devices
-    -- Nullable, sans DEFAULT : un appareil jamais vu depuis cette migration doit être
-    -- indiscernable d'un appareil hors ligne. `DEFAULT now()` déclarerait en ligne, à l'instant
-    -- du déploiement, l'intégralité du parc — un mensonge, et le premier que les clients
-    -- afficheraient.
+    -- Nullable, no DEFAULT: a device never seen since this migration must be
+    -- indistinguishable from an offline one. `DEFAULT now()` would declare the entire fleet
+    -- online at deployment time — a lie, and the first one clients would display.
     ADD COLUMN last_seen_at TIMESTAMPTZ;
 
--- Volontairement PAS d'index sur `last_seen_at`.
+-- Deliberately NO index on `last_seen_at`.
 --
--- Ce n'est pas une omission : une colonne indexée interdit les mises à jour HOT, et chaque
--- battement réécrirait alors une entrée d'index en plus de la ligne. Le MAX porte sur les
--- quelques appareils d'un compte, que l'index partiel `devices_handle_idx` ramène déjà.
+-- Not an oversight: an indexed column rules out HOT updates, so every heartbeat would rewrite
+-- an index entry on top of the row. The MAX runs over an account's handful of devices, which
+-- the partial index `devices_handle_idx` already narrows down.
 --
--- L'index qui manque vraiment est ailleurs : la clé primaire de `group_members` est
--- (group_id, device_id), donc toute recherche PAR APPAREIL balaye la table. Le contrôle d'accès
--- de la présence — « partageons-nous un groupe ? » — le ferait à chaque lecture.
+-- The index that is genuinely missing is elsewhere: the primary key of `group_members` is
+-- (group_id, device_id), so any lookup BY DEVICE scans the table. The presence access check —
+-- "do we share a group?" — would do that on every read.
 CREATE INDEX group_members_device_idx ON group_members (device_id);
 
--- Refus de présence, réciproque.
+-- Presence opt-out, reciprocal.
 --
--- Honoré À L'ÉCRITURE, dans `presence::touch` : rien n'est enregistré pour ce compte. Un réglage
--- qui se contenterait de filtrer en lecture laisserait le serveur tenir le registre quand même,
--- et une case à cocher purement cliente serait un mensonge à l'écran.
+-- Honoured ON WRITE, in `presence::touch`: nothing is recorded for that account. A setting
+-- that merely filtered on read would let the server keep the register anyway, and a purely
+-- client-side checkbox would be a lie on screen.
 --
--- Réciproque, comme la désactivation des accusés de lecture : ne plus diffuser sa présence,
--- c'est aussi cesser de voir celle des autres. Sans cette symétrie, le réglage permettrait de
--- voir sans être vu, c'est-à-dire exactement ce qu'il prétend empêcher.
+-- Reciprocal, like disabling read receipts: no longer broadcasting your presence also means
+-- no longer seeing others'. Without that symmetry the setting would allow seeing without
+-- being seen, which is exactly what it claims to prevent.
 ALTER TABLE accounts
     ADD COLUMN presence_optout BOOLEAN NOT NULL DEFAULT false;

@@ -1,41 +1,41 @@
--- Sealed sender : retirer au serveur la connaissance de l'expéditeur.
+-- Sealed sender: taking knowledge of the sender away from the server.
 --
--- Ce que le serveur voyait jusqu'ici, et qui n'a rien d'anodin : chaque enveloppe portait la
--- signature de l'appareil émetteur. Le contenu était chiffré, mais « qui écrit à qui, quand,
--- à quelle fréquence » était lisible en clair — et c'est souvent plus révélateur que le
--- contenu lui-même.
+-- What the server saw until now, and it is far from harmless: every envelope carried the
+-- sending device's signature. The content was encrypted, but "who writes to whom, when, how
+-- often" was readable in the clear — and that is often more revealing than the content.
 --
--- # L'idée : prouver l'appartenance, pas l'identité
+-- # The idea: prove membership, not identity
 --
--- Le serveur n'a aucun besoin de savoir QUI poste. Il a besoin de savoir que le posteur est
--- membre du groupe, pour ne pas servir de boîte aux lettres ouverte. Ce sont deux choses
--- différentes, et la seconde suffit.
+-- The server has no need to know WHO posts. It needs to know the poster is a member of the
+-- group, so as not to be an open mailbox. Those are two different things, and the second one
+-- suffices.
 --
--- Chaque groupe porte donc une clé de dépôt, partagée par tous ses membres et connue du
--- serveur. Poster demande un MAC sous cette clé : le serveur vérifie qu'il vient d'un membre,
--- sans pouvoir dire lequel.
+-- Each group therefore carries a posting key, shared by all its members and known to the
+-- server. Posting requires a MAC under that key: the server checks it comes from a member,
+-- without being able to say which one.
 --
--- # Ce que cela ne cache pas, et qu'il faut dire
+-- # What this does not hide, and must be said
 --
--- L'adresse IP, l'horaire, et le fait qu'un message soit déposé dans CE groupe. Un serveur qui
--- observe le réseau recoupe sans peine. Le masquer demanderait un relais tiers — hors périmètre.
+-- The IP address, the timing, and the fact that a message was posted to THIS group. A server
+-- watching the network correlates all of it easily. Hiding that would take a third-party
+-- relay — out of scope.
 --
--- Le serveur détient la clé, donc il peut poster lui-même : il ne produira que du bruit, faute
--- de pouvoir chiffrer sous MLS, mais il peut polluer. C'est le prix d'un MAC symétrique ; des
--- jetons à divulgation nulle l'éviteraient, au prix d'une machinerie sans commune mesure.
+-- The server holds the key, so it can post itself: it can only produce noise, being unable to
+-- encrypt under MLS, but it can pollute. That is the price of a symmetric MAC; zero-knowledge
+-- tokens would avoid it, at the cost of vastly more machinery.
 
 ALTER TABLE groups
-    -- Nullable : les groupes existants continuent d'utiliser le dépôt signé. Imposer la clé
-    -- rendrait muettes toutes les conversations en cours.
+    -- Nullable: existing groups keep using signed posting. Making the key mandatory would
+    -- silence every ongoing conversation.
     ADD COLUMN posting_key BYTEA,
     ADD CONSTRAINT posting_key_is_256_bits
         CHECK (posting_key IS NULL OR octet_length(posting_key) = 32);
 
--- Anti-rejeu.
+-- Replay protection.
 --
--- Sans elle, quiconque intercepte un dépôt anonyme peut le rejouer indéfiniment : le MAC reste
--- valide, puisqu'il ne dépend d'aucun horodatage. La contrainte d'unicité est la protection —
--- pas le code applicatif, qui aurait une fenêtre de concurrence entre le SELECT et l'INSERT.
+-- Without it, anyone who intercepts an anonymous post can replay it forever: the MAC stays
+-- valid, since it depends on no timestamp. The uniqueness constraint is the protection — not
+-- application code, which would have a race window between the SELECT and the INSERT.
 CREATE TABLE posting_nonces (
     group_id BYTEA NOT NULL,
     nonce    BYTEA NOT NULL,
@@ -45,5 +45,5 @@ CREATE TABLE posting_nonces (
     CONSTRAINT posting_nonce_len CHECK (octet_length(nonce) = 16)
 );
 
--- Les nonces d'un groupe supprimé n'ont plus d'objet.
+-- Nonces of a deleted group serve no purpose any more.
 CREATE INDEX posting_nonces_used_at_idx ON posting_nonces (used_at);

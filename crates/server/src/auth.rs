@@ -1,45 +1,42 @@
-//! Authentification des requêtes par signature Ed25519.
+//! Request authentication by Ed25519 signature.
 //!
-//! Chaque appareil enregistre une clé publique d'authentification, **distincte de sa clé de
-//! signature MLS**. Réutiliser une même clé pour deux protocoles est une erreur classique :
-//! si les formats de message se recouvrent, une signature produite dans l'un devient une
-//! signature valide dans l'autre.
+//! Every device registers an authentication public key, **distinct from its MLS signature key**.
+//! Reusing one key for two protocols is a classic mistake: if the message formats overlap, a
+//! signature produced in one becomes a valid signature in the other.
 //!
-//! Il n'y a donc ni mot de passe, ni jeton de session à voler côté serveur : la base ne
-//! contient que des clés publiques.
+//! So there is no password and no session token to steal server side: the database holds only
+//! public keys.
 //!
-//! # Anti-rejeu
+//! # Anti-replay
 //!
-//! Chaque requête porte un nonce, couvert par la signature et mémorisé à la première
-//! présentation : le rejouer est refusé.
+//! Every request carries a nonce, covered by the signature and remembered on first presentation:
+//! replaying it is refused.
 //!
-//! Le nonce est **indispensable**, et il ne peut pas être remplacé par la signature elle-même :
-//! Ed25519 est déterministe, donc deux requêtes identiques dans la même seconde portent la même
-//! signature — l'une pouvant être un rejeu quand l'autre est légitime. Réclamer deux KeyPackages
-//! coup sur coup suffit à produire le cas.
+//! The nonce is **indispensable**, and cannot be replaced by the signature itself: Ed25519 is
+//! deterministic, so two identical requests in the same second carry the same signature — one of
+//! them possibly a replay while the other is legitimate. Claiming two KeyPackages back to back is
+//! enough to produce the case.
 //!
-//! La mémoire n'a pas besoin de dépasser [`MAX_CLOCK_SKEW`] : au-delà, l'horodatage refuse la
-//! requête de toute façon. Voir `migrations/0010_anti_rejeu.sql` pour ce que cela permet.
+//! The memory need not outlive [`MAX_CLOCK_SKEW`]: beyond that, the timestamp refuses the request
+//! anyway. See `migrations/0010_replay_protection.sql` for what that allows.
 //!
-//! **Limite de la table `UNLOGGED`**, non dite dans la migration et qui ne peut plus y être
-//! ajoutée — sqlx vérifie l'empreinte de chaque migration appliquée, son texte est donc figé.
-//! PostgreSQL vide une table `UNLOGGED` après un arrêt brutal. Les nonces mémorisés sont alors
-//! perdus, et une requête captée redevient rejouable jusqu'à la fin de sa fenêtre de tolérance.
-//! La fenêtre est courte et l'événement rare, mais la propriété n'est pas « aucun rejeu
-//! possible » : elle est « aucun rejeu tant que la base ne s'est pas effondrée ».
+//! **Limitation of the `UNLOGGED` table**, unstated in the migration and no longer addable there
+//! — sqlx checks the fingerprint of every applied migration, so its text is frozen. PostgreSQL
+//! empties an `UNLOGGED` table after a crash. The remembered nonces are then lost, and a captured
+//! request becomes replayable again until the end of its tolerance window. The window is short
+//! and the event rare, but the property is not "no replay possible": it is "no replay as long as
+//! the database has not collapsed".
 //!
-//! # Ce que cet extracteur ne fait plus
+//! # What this extractor no longer does
 //!
-//! Noter l'appareil comme éveillé. La présence se lisait ici de toute requête signée, ce qui
-//! plaçait une écriture SQL potentielle sur le chemin de latence de tout le serveur — pour un
-//! point de couleur. Elle est désormais alimentée par le battement de [`crate::gateway`], qui
-//! est un signal plus juste : une session ouverte dit qu'un client est là, là où une requête
-//! peut venir d'un onglet oublié.
+//! Mark the device as awake. Presence used to be read here from every signed request, which put a
+//! potential SQL write on the latency path of the whole server — for a coloured dot. It is now
+//! fed by the [`crate::gateway`] heartbeat, a truer signal: an open session says a client is
+//! there, where a request may come from a forgotten tab.
 //!
-//! Conséquence à assumer : un client qui n'ouvre jamais de session n'apparaît jamais en ligne,
-//! même s'il interroge le serveur. C'est cohérent — sans session, il n'est de toute façon pas
-//! joignable en temps réel — mais c'est un changement de comportement, pas une optimisation
-//! transparente.
+//! Consequence to own: a client that never opens a session never appears online, even if it
+//! queries the server. That is coherent — without a session it is not reachable in real time
+//! anyway — but it is a behaviour change, not a transparent optimisation.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -53,7 +50,7 @@ use sqlx::PgPool;
 
 use crate::error::{ApiError, ApiResult};
 
-/// Tolérance d'horloge acceptée entre le client et le serveur.
+/// Clock skew tolerated between client and server.
 pub const MAX_CLOCK_SKEW: u64 = 60;
 
 pub const HEADER_DEVICE: &str = "x-device-id";
@@ -61,29 +58,29 @@ pub const HEADER_TIMESTAMP: &str = "x-timestamp";
 pub const HEADER_SIGNATURE: &str = "x-signature";
 pub const HEADER_NONCE: &str = "x-nonce";
 
-/// Longueur du nonce anti-rejeu.
+/// Length of the anti-replay nonce.
 ///
-/// Seize octets tirés au hasard : la probabilité qu'un appareil en retire un déjà mémorisé est
-/// négligeable devant la fenêtre de soixante secondes, et une collision coûterait de toute façon
-/// un simple refus, pas une faille.
+/// Sixteen random bytes: the odds of a device drawing one already remembered are negligible
+/// against the sixty-second window, and a collision would cost a plain refusal anyway, not a
+/// vulnerability.
 pub const NONCE_LEN: usize = 16;
 
-/// Requête authentifiée : l'appelant a prouvé la possession de la clé privée de `device_id`.
+/// Authenticated request: the caller proved possession of `device_id`'s private key.
 pub struct Signed {
     pub device_id: String,
     pub body: Bytes,
 }
 
-/// Message effectivement signé.
+/// The message actually signed.
 ///
-/// La méthode et le chemin en font partie : sans eux, une signature valide pour
-/// `GET /stock` serait rejouable sur `POST /envelopes`. Le corps est inclus par son
-/// empreinte, ce qui évite de le garder deux fois en mémoire.
+/// The method and the path are part of it: without them, a signature valid for `GET /stock` would
+/// be replayable on `POST /envelopes`. The body is included by its fingerprint, which avoids
+/// holding it in memory twice.
 ///
-/// Le nonce est ce qui rend le message unique quand tout le reste est identique — deux requêtes
-/// semblables dans la même seconde produiraient sinon la même signature, Ed25519 étant
-/// déterministe. Il est **dans le message signé**, donc un tiers ne peut pas rejouer une requête
-/// captée en changeant simplement le nonce de l'en-tête.
+/// The nonce is what makes the message unique when everything else is identical — two similar
+/// requests in the same second would otherwise produce the same signature, Ed25519 being
+/// deterministic. It is **inside the signed message**, so a third party cannot replay a captured
+/// request by merely changing the header's nonce.
 pub fn signing_payload(
     method: &str,
     path: &str,
@@ -114,9 +111,9 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         use axum::extract::FromRef;
 
-        // Tout ce qui vient de la requête est extrait en valeurs possédées avant le
-        // premier `await` : garder un emprunt sur `request` à travers un point de suspension
-        // rendrait le futur non-`Send`, et axum exige des handlers `Send`.
+        // Everything coming from the request is extracted into owned values before the first
+        // `await`: holding a borrow on `request` across a suspension point would make the future
+        // non-`Send`, and axum requires `Send` handlers.
         let (device_id, timestamp, signature, nonce, method, path) = {
             let headers = request.headers();
             let header = |name: &str| -> Option<String> {
@@ -157,7 +154,7 @@ where
         let pool = PgPool::from_ref(state);
         let body = Bytes::from_request(request, state)
             .await
-            .map_err(|_| ApiError::BadRequest("corps illisible"))?;
+            .map_err(|_| ApiError::BadRequest("unreadable body"))?;
 
         let auth_key: Option<(Vec<u8>,)> =
             sqlx::query_as("SELECT auth_key FROM devices WHERE id = $1")
@@ -165,8 +162,8 @@ where
                 .fetch_optional(&pool)
                 .await?;
 
-        // Appareil inconnu et signature invalide renvoient la même erreur : les distinguer
-        // permettrait d'énumérer les appareils enregistrés.
+        // An unknown device and an invalid signature return the same error: telling them apart
+        // would allow enumerating registered devices.
         let (auth_key,) = auth_key.ok_or(ApiError::Unauthorized)?;
 
         let verifying_key: [u8; 32] = auth_key.try_into().map_err(|_| ApiError::Unauthorized)?;
@@ -184,16 +181,16 @@ where
             .verify_strict(&signing_payload(&method, &path, timestamp, &nonce, &body), &signature)
             .map_err(|_| ApiError::Unauthorized)?;
 
-        // Anti-rejeu, **après** la vérification : mémoriser une signature invalide permettrait
-        // de remplir la table sans détenir aucune clé.
+        // Anti-replay, **after** verification: remembering an invalid signature would let anyone
+        // fill the table without holding a key.
         //
-        // Attendu, contrairement à ce qu'était la présence. Une écriture détachée ne protégerait
-        // rien — le rejeu passerait pendant qu'elle est en vol. C'est le prix de la garantie, et
-        // il porte sur toutes les requêtes signées.
+        // Awaited, unlike presence used to be. A detached write would protect nothing — the
+        // replay would pass while it is in flight. That is the price of the guarantee, and it
+        // applies to every signed request.
         //
-        // L'unicité est portée par la clé primaire : un `SELECT` puis un `INSERT` laisserait
-        // deux requêtes simultanées passer toutes les deux.
-        let premiere_fois = sqlx::query(
+        // Uniqueness is carried by the primary key: a `SELECT` then an `INSERT` would let two
+        // concurrent requests both through.
+        let first_time = sqlx::query(
             "INSERT INTO request_nonces (device_id, nonce) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         )
         .bind(&device_id)
@@ -201,7 +198,7 @@ where
         .execute(&pool)
         .await?;
 
-        if premiere_fois.rows_affected() == 0 {
+        if first_time.rows_affected() == 0 {
             return Err(ApiError::Unauthorized);
         }
 
@@ -210,9 +207,9 @@ where
 }
 
 impl Signed {
-    /// Désérialise le corps signé. La signature couvre les octets exacts reçus, donc la
-    /// désérialisation n'a lieu qu'après vérification.
+    /// Deserialises the signed body. The signature covers the exact bytes received, so
+    /// deserialisation only happens after verification.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> ApiResult<T> {
-        serde_json::from_slice(&self.body).map_err(|_| ApiError::BadRequest("JSON invalide"))
+        serde_json::from_slice(&self.body).map_err(|_| ApiError::BadRequest("invalid JSON"))
     }
 }

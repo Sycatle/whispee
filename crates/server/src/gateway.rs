@@ -1,47 +1,44 @@
-//! Session gateway : une connexion, tous les groupes.
+//! Session gateway: one connection, all groups.
 //!
-//! # Ce que ce module remplace
+//! # What this module replaces
 //!
-//! Le flux SSE de `routes::stream`, qui reste en place le temps que les clients migrent. Trois
-//! choses que ce flux ne pouvait pas faire, et qui ont chacune un coût réel :
+//! The SSE stream of `routes::stream`, which stays in place while clients migrate. Three things
+//! that stream could not do, each with a real cost:
 //!
-//! * **s'abonner à un groupe rejoint après l'ouverture.** Le SSE fige sa liste au moment de la
-//!   connexion ; découvrir un groupe obligeait le client à tout rouvrir.
-//! * **rattraper le retard à l'ouverture.** Le client relevait chaque conversation par une
-//!   requête signée pour découvrir qu'il n'avait rien manqué. Ici, il annonce ses curseurs et
-//!   le serveur ne parle que s'il a quelque chose à dire.
-//! * **savoir que le client est parti.** Le keep-alive SSE va du serveur vers le client : un
-//!   client disparu reste indistinguable d'un client silencieux, et sa présence continue d'être
-//!   écrite.
+//! * **subscribing to a group joined after opening.** SSE freezes its list at connection time;
+//!   discovering a group forced the client to reopen everything.
+//! * **catching up at open time.** The client polled every conversation with a signed request
+//!   only to find out it had missed nothing. Here it announces its cursors and the server only
+//!   speaks if it has something to say.
+//! * **knowing the client is gone.** The SSE keep-alive goes from server to client: a vanished
+//!   client stays indistinguishable from a silent one, and its presence keeps being written.
 //!
-//! # Ce qui ne transite pas ici
+//! # What does not travel through here
 //!
-//! Aucun contenu, exactement comme le flux SSE. Une trame `envelope` ne porte que le numéro de
-//! séquence ; le client va chercher l'enveloppe par le chemin HTTP normal, qui revérifie son
-//! appartenance et applique la pagination. Dupliquer ce chemin ici aurait dupliqué son contrôle
-//! d'accès, et c'est la copie oubliée qui devient la faille.
+//! No content, exactly as with the SSE stream. An `envelope` frame carries only the sequence
+//! number; the client fetches the envelope by the normal HTTP path, which rechecks its
+//! membership and applies pagination. Duplicating that path here would have duplicated its
+//! access control, and it is the forgotten copy that becomes the hole.
 //!
-//! # Ce que ce module change dans le modèle de menace
+//! # What this module changes in the threat model
 //!
-//! **L'authentification passe d'une signature par requête à une signature par session.** C'est
-//! le changement à peser, et il coupe dans les deux sens.
+//! **Authentication moves from a signature per request to a signature per session.** That is the
+//! change to weigh, and it cuts both ways.
 //!
-//! Ce qu'on gagne : le défi est émis par le serveur et consommé à la première utilisation, donc
-//! la fenêtre de rejeu de soixante secondes que documente [`crate::auth`] n'existe pas sur ce
-//! chemin.
+//! What we gain: the challenge is issued by the server and consumed on first use, so the
+//! sixty-second replay window [`crate::auth`] documents does not exist on this path.
 //!
-//! Ce qu'on perd : une session ouverte survit à la révocation de l'appareil qui l'a ouverte, et
-//! à son retrait d'un groupe. Une signature par requête faisait cette vérification à chaque
-//! appel, gratuitement. C'est pourquoi [`Session::revalidate`] existe et tourne à chaque
-//! battement — sans elle, révoquer un appareil ne le couperait de rien tant qu'il garde sa
-//! socket ouverte.
+//! What we lose: an open session survives the revocation of the device that opened it, and its
+//! removal from a group. A signature per request made that check on every call, for free. That
+//! is why [`Session::revalidate`] exists and runs on every heartbeat — without it, revoking a
+//! device would cut it off from nothing as long as it keeps its socket open.
 //!
-//! # Ce que ce module n'authentifie pas, délibérément
+//! # What this module deliberately does not authenticate
 //!
-//! La trame `signal`. Elle est authentifiée par le MAC de groupe, comme sur le chemin HTTP :
-//! le serveur vérifie que l'expéditeur détient la clé de dépôt, donc qu'il est membre, sans
-//! apprendre lequel. Lier le signal à l'identité de la session — qui est pourtant connue ici —
-//! défairait le sealed sender pour la seule commodité de ne pas revérifier un MAC.
+//! The `signal` frame. It is authenticated by the group MAC, as on the HTTP path: the server
+//! checks that the sender holds the posting key, hence that it is a member, without learning
+//! which one. Tying the signal to the session's identity — known here, as it happens — would
+//! undo sealed sender for the sole convenience of not rechecking a MAC.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -65,71 +62,69 @@ use crate::AppState;
 use crate::error::{ApiError, ApiResult};
 use crate::stream::{Hub, Notice};
 
-/// Rythme de battement imposé au client, annoncé dans `hello`.
+/// Heartbeat pace imposed on the client, announced in `hello`.
 ///
-/// Il fixe aussi la granularité de [`Session::revalidate`] : une révocation prend effet sur les
-/// sessions ouvertes en au plus deux battements. Le raccourcir rendrait la coupure plus vive au
-/// prix d'une requête par session et par battement — et ce n'est pas là que se joue la
-/// protection, puisqu'un appareil révoqué détient encore les secrets du groupe.
+/// It also sets the granularity of [`Session::revalidate`]: a revocation takes effect on open
+/// sessions within at most two heartbeats. Shortening it would make the cut-off sharper at the
+/// cost of one query per session per heartbeat — and that is not where the protection lies,
+/// since a revoked device still holds the group's secrets.
 const HEARTBEAT: Duration = Duration::from_secs(30);
 
-/// Silence au-delà duquel la session est fermée.
+/// Silence beyond which the session is closed.
 ///
-/// Deux battements plus une marge : un client qui perd un battement sur une bascule de réseau
-/// ne doit pas être déconnecté pour autant, puisque la reconnexion lui coûterait un défi, une
-/// signature et un rattrapage complet.
+/// Two heartbeats plus a margin: a client that loses a heartbeat on a network switch must not be
+/// disconnected for it, since reconnecting would cost it a challenge, a signature and a full
+/// catch-up.
 const SILENCE_MAX: Duration = Duration::from_secs(80);
 
-/// Délai laissé au client pour répondre au défi.
+/// Time allowed the client to answer the challenge.
 ///
-/// Court, et c'est le point : une socket non authentifiée ne consomme aucune requête et
-/// n'apparaît nulle part, ce qui en fait le moyen le moins cher d'occuper un serveur.
+/// Short, and that is the point: an unauthenticated socket consumes no request and appears
+/// nowhere, which makes it the cheapest way to tie up a server.
 const IDENTIFY_MAX: Duration = Duration::from_secs(10);
 
-/// Plafond d'abonnements simultanés pour une session.
+/// Ceiling on simultaneous subscriptions for one session.
 ///
-/// Chaque abonnement est un `broadcast::Receiver` avec sa file. Sans plafond, un client
-/// authentifié fait grossir la mémoire du serveur en s'abonnant en boucle — y compris à des
-/// groupes dont il est réellement membre, donc sans rien violer.
+/// Each subscription is a `broadcast::Receiver` with its queue. Without a ceiling, an
+/// authenticated client grows the server's memory by subscribing in a loop — including to groups
+/// it really is a member of, hence without violating anything.
 const MAX_SUBSCRIPTIONS: usize = 512;
 
-/// Plafond de taille d'une trame, dans les deux sens.
+/// Size ceiling for a frame, in both directions.
 ///
-/// Vaut avant l'authentification : c'est là qu'il compte, puisque le pair n'a alors rien prouvé.
+/// Applies before authentication: that is where it counts, since the peer has proved nothing yet.
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-/// Plafond de curseurs acceptés dans un `identify`.
+/// Ceiling on cursors accepted in an `identify`.
 ///
-/// **Sans cette borne, une seule trame achète autant de requêtes SQL qu'elle contient d'entrées.**
-/// Le filtre d'appartenance ne suffit pas : il écarte les groupes étrangers, mais rien n'empêche
-/// de répéter mille fois un groupe dont on est réellement membre. L'amplification est le
-/// problème, pas l'accès.
+/// **Without this bound, a single frame buys as many SQL queries as it contains entries.** The
+/// membership filter is not enough: it rules out foreign groups, but nothing stops repeating a
+/// thousand times a group one really belongs to. Amplification is the problem, not access.
 ///
-/// Aligné sur [`MAX_SUBSCRIPTIONS`] : un client n'a pas de raison d'annoncer un curseur pour un
-/// groupe auquel il ne peut pas s'abonner.
+/// Aligned on [`MAX_SUBSCRIPTIONS`]: a client has no reason to announce a cursor for a group it
+/// cannot subscribe to.
 const MAX_CURSORS: usize = MAX_SUBSCRIPTIONS;
 
-/// Plafond d'enveloppes annoncées par groupe lors du rattrapage.
+/// Ceiling on envelopes announced per group during catch-up.
 ///
-/// Aligné sur la pagination du chemin HTTP. Un client très en retard reçoit les premières et
-/// découvre le reste en paginant : c'est déjà ce que fait la relève normale, et annoncer dix
-/// mille séquences d'un coup ne l'aiderait pas à les lire plus vite.
+/// Aligned on the HTTP path's pagination. A client far behind receives the first ones and
+/// discovers the rest by paginating: that is already what the normal poll does, and announcing
+/// ten thousand sequences at once would not help it read them any faster.
 const MAX_RESUME_PER_GROUP: i64 = 200;
 
-/// Trames émises par le client.
+/// Frames emitted by the client.
 ///
-/// `deny_unknown_fields` n'est **pas** posé : un client plus récent qu'un serveur doit pouvoir
-/// ajouter un champ sans que la session soit refusée. Un champ inconnu est ignoré, jamais
-/// interprété.
+/// `deny_unknown_fields` is **not** set: a client newer than a server must be able to add a
+/// field without the session being refused. An unknown field is ignored, never interpreted.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum ClientFrame {
     Identify {
         device_id: String,
-        /// Le défi reçu dans `hello`, renvoyé tel quel.
+        /// The challenge received in `hello`, echoed back as is.
         nonce: String,
         signature: String,
-        /// Dernière séquence connue par groupe. Absent vaut « je ne sais rien ».
+        /// Last known sequence per group. Absent means "I know nothing".
         #[serde(default)]
         cursors: Vec<Cursor>,
     },
@@ -154,7 +149,7 @@ struct Cursor {
     seq: i64,
 }
 
-/// Trames émises par le serveur.
+/// Frames emitted by the server.
 #[derive(Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum ServerFrame<'a> {
@@ -163,65 +158,65 @@ enum ServerFrame<'a> {
     Envelope { group_id: String, seq: i64 },
     Signal { group_id: String, payload: String },
     HeartbeatAck,
-    /// Motif volontairement grossier : voir [`reason`].
+    /// Deliberately coarse reason: see [`reason`].
     Error { reason: &'a str },
 }
 
-/// Traduit une erreur interne en motif servi au client.
+/// Translates an internal error into a reason served to the client.
 ///
-/// Les motifs sont délibérément grossiers, pour la même raison que `ApiError` refuse de
-/// distinguer « appareil inconnu » de « signature invalide » : la distinction transformerait la
-/// gateway en oracle d'énumération. Le détail part dans les traces du serveur, pas sur le fil.
+/// The reasons are deliberately coarse, for the same reason `ApiError` refuses to distinguish
+/// "unknown device" from "invalid signature": the distinction would turn the gateway into an
+/// enumeration oracle. The detail goes to the server traces, not onto the wire.
 fn reason(error: &ApiError) -> &'static str {
     match error {
-        ApiError::BadRequest(_) => "trame invalide",
-        ApiError::Unauthorized | ApiError::Forbidden | ApiError::NotFound => "refusé",
-        ApiError::Conflict(_) => "conflit",
-        ApiError::TooManyRequests => "trop de requêtes",
+        ApiError::BadRequest(_) => "invalid frame",
+        ApiError::Unauthorized | ApiError::Forbidden | ApiError::NotFound => "denied",
+        ApiError::Conflict(_) => "conflict",
+        ApiError::TooManyRequests => "too many requests",
         ApiError::Database(err) => {
-            tracing::error!(error = %err, "erreur de base de données dans la gateway");
-            "erreur interne"
+            tracing::error!(error = %err, "database error in the gateway");
+            "internal error"
         }
     }
 }
 
 type Sender = SplitSink<WebSocket, Message>;
 
-/// Point d'entrée HTTP : bascule la connexion en WebSocket.
+/// HTTP entry point: switches the connection over to WebSocket.
 ///
-/// Aucun extracteur authentifiant ici, et c'est délibéré. L'API `WebSocket` du navigateur
-/// n'accepte pas d'en-tête personnalisé — même limite qu'`EventSource`, pour laquelle
-/// `routes::stream` a déjà dû renoncer. Mettre la signature en paramètre d'URL la ferait
-/// atterrir dans les journaux d'accès de tout proxy traversé ; on ouvre donc la socket sans
-/// identité et rien n'est servi avant le défi.
+/// No authenticating extractor here, and that is deliberate. The browser's `WebSocket` API
+/// accepts no custom header — the same limit as `EventSource`, which `routes::stream` already
+/// had to give in to. Putting the signature in a URL parameter would land it in the access logs
+/// of every proxy crossed; the socket is therefore opened without an identity and nothing is
+/// served before the challenge.
 pub async fn handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    // **Plafond de taille, avant toute authentification.**
+    // **Size ceiling, before any authentication.**
     //
-    // Sans lui, la valeur par défaut de tungstenite s'applique : 64 Mio par message. Un pair
-    // qui n'a encore rien prouvé peut donc faire allouer 64 Mio, autant de fois qu'il ouvre de
-    // sockets. Le chemin HTTP se protège depuis toujours par `RequestBodyLimitLayer` à 1 Mio ;
-    // cette route est arrivée sans son équivalent.
+    // Without it, tungstenite's default applies: 64 MiB per message. A peer that has proved
+    // nothing yet can therefore cause 64 MiB to be allocated, as many times as it opens sockets.
+    // The HTTP path has always protected itself with `RequestBodyLimitLayer` at 1 MiB; this
+    // route arrived without its equivalent.
     //
-    // La borne est large devant ce que le protocole transporte — la plus grosse trame est un
-    // `signal`, plafonné à 4 Kio par `MAX_SIGNAL_BYTES`, plus son encodage base64 — et étroite
-    // devant ce qu'une machine peut encaisser.
+    // The bound is wide compared with what the protocol carries — the largest frame is a
+    // `signal`, capped at 4 KiB by `MAX_SIGNAL_BYTES`, plus its base64 encoding — and narrow
+    // compared with what a machine can take.
     ws.max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
         .on_upgrade(move |socket| async move {
             if let Err(error) = session(state, socket).await {
-                tracing::debug!(%error, "session gateway terminée");
+                tracing::debug!(%error, "gateway session ended");
             }
         })
 }
 
-/// État d'une session authentifiée.
+/// State of an authenticated session.
 struct Session {
     pool: PgPool,
     hub: Arc<Hub>,
     device_id: String,
-    /// Un `BroadcastStream` par groupe écouté. `StreamMap` plutôt que `select_all` : les
-    /// abonnements changent pendant la vie de la connexion, et un `select_all` sur `Vec` fige
-    /// son contenu à la construction.
+    /// One `BroadcastStream` per listened group. `StreamMap` rather than `select_all`:
+    /// subscriptions change during the life of the connection, and a `select_all` over a `Vec`
+    /// freezes its contents at construction.
     subscriptions: StreamMap<Vec<u8>, BroadcastStream<Notice>>,
 }
 
@@ -240,7 +235,7 @@ async fn session(state: AppState, socket: WebSocket) -> Result<(), axum::Error> 
     )
     .await?;
 
-    // Rien n'est abonné, rien n'est lu, tant que le défi n'a pas été relevé.
+    // Nothing is subscribed, nothing is read, until the challenge has been answered.
     let identified = tokio::time::timeout(IDENTIFY_MAX, async {
         while let Some(message) = receiver.next().await {
             let Ok(Message::Text(text)) = message else { continue };
@@ -252,8 +247,8 @@ async fn session(state: AppState, socket: WebSocket) -> Result<(), axum::Error> 
 
     let Ok(Some(ClientFrame::Identify { device_id, nonce, signature, cursors })) = identified
     else {
-        // Aucun motif : à ce stade le pair n'a rien prouvé, et lui dire ce qui manquait
-        // l'aiderait à sonder.
+        // No reason given: at this stage the peer has proved nothing, and telling it what was
+        // missing would help it probe.
         return sender.close().await;
     };
 
@@ -283,8 +278,8 @@ async fn session(state: AppState, socket: WebSocket) -> Result<(), axum::Error> 
     )
     .await?;
 
-    // Rattrapage. Il vient après `ready` pour que le client ait déjà sa liste de groupes quand
-    // les séquences manquées arrivent.
+    // Catch-up. It comes after `ready` so that the client already has its group list when the
+    // missed sequences arrive.
     if let Err(error) = session.resume(&mut sender, &cursors, &groups).await {
         let _ = send(&mut sender, &ServerFrame::Error { reason: reason(&error) }).await;
         return sender.close().await;
@@ -293,7 +288,7 @@ async fn session(state: AppState, socket: WebSocket) -> Result<(), axum::Error> 
     session.pump(sender, receiver).await
 }
 
-/// Vérifie le défi et ouvre la session.
+/// Checks the challenge and opens the session.
 async fn authenticate(
     state: &AppState,
     device_id: &str,
@@ -301,15 +296,15 @@ async fn authenticate(
     nonce: &str,
     signature: &str,
 ) -> ApiResult<Session> {
-    // Le nonce renvoyé doit être **celui qui a été servi**. Le comparer plutôt que de signer
-    // aveuglément ce que le client propose est ce qui empêche de rejouer une signature obtenue
-    // sur une session précédente.
+    // The echoed nonce must be **the one that was served**. Comparing it rather than blindly
+    // signing what the client proposes is what prevents replaying a signature obtained on a
+    // previous session.
     let echoed = BASE64_STANDARD.decode(nonce).map_err(|_| ApiError::Unauthorized)?;
     if echoed != challenge {
         return Err(ApiError::Unauthorized);
     }
 
-    // Appareil révoqué : refusé à l'ouverture, et coupé en cours de session par `revalidate`.
+    // Revoked device: refused at open time, and cut off mid-session by `revalidate`.
     let auth_key: Option<(Vec<u8>,)> =
         sqlx::query_as("SELECT auth_key FROM devices WHERE id = $1 AND revoked_at IS NULL")
             .bind(device_id)
@@ -342,10 +337,10 @@ async fn authenticate(
 }
 
 impl Session {
-    /// Groupes dont l'appareil est actuellement membre.
+    /// Groups the device is currently a member of.
     ///
-    /// Relue à chaque battement plutôt que mémorisée : c'est le seul moyen qu'un retrait de
-    /// groupe prenne effet sur une session déjà ouverte.
+    /// Re-read on every heartbeat rather than memorised: it is the only way for a removal from a
+    /// group to take effect on an already open session.
     async fn membership(&self) -> ApiResult<Vec<Vec<u8>>> {
         let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
             "SELECT m.group_id FROM group_members m
@@ -369,34 +364,34 @@ impl Session {
         self.subscriptions.insert(group_id, receiver);
     }
 
-    /// Annonce les séquences déposées depuis le curseur du client.
+    /// Announces the sequences posted since the client's cursor.
     ///
-    /// Ne sert que des numéros : le client ira lire par le chemin HTTP, qui revérifie son
-    /// appartenance. Un curseur portant sur un groupe dont l'appareil n'est pas membre est
-    /// **ignoré silencieusement** — répondre « inconnu » plutôt que « pas membre » ferait de ce
-    /// rattrapage un oracle d'existence de groupe.
+    /// Serves numbers only: the client will go and read by the HTTP path, which rechecks its
+    /// membership. A cursor on a group the device is not a member of is **silently ignored** —
+    /// answering "unknown" rather than "not a member" would make this catch-up an oracle for
+    /// group existence.
     async fn resume(
         &self,
         sender: &mut Sender,
         cursors: &[Cursor],
         groups: &[Vec<u8>],
     ) -> ApiResult<()> {
-        let membres: HashSet<&[u8]> = groups.iter().map(Vec::as_slice).collect();
+        let members: HashSet<&[u8]> = groups.iter().map(Vec::as_slice).collect();
 
-        // Les curseurs excédentaires sont ignorés en silence plutôt que la session refusée : un
-        // client honnête n'en produit jamais autant, et refuser transformerait une borne de
-        // sécurité en panne pour un cas qui ne se présente pas.
-        let mut vus: HashSet<&str> = HashSet::new();
+        // Excess cursors are silently ignored rather than the session refused: an honest client
+        // never produces that many, and refusing would turn a security bound into an outage for
+        // a case that does not arise.
+        let mut seen: HashSet<&str> = HashSet::new();
 
         for cursor in cursors.iter().take(MAX_CURSORS) {
-            // Un même groupe répété n'achète qu'une requête. C'est la seconde moitié de la
-            // borne : sans elle, `MAX_CURSORS` entrées identiques passeraient toutes.
-            if !vus.insert(cursor.group_id.as_str()) {
+            // A repeated group buys only one query. This is the second half of the bound:
+            // without it, `MAX_CURSORS` identical entries would all go through.
+            if !seen.insert(cursor.group_id.as_str()) {
                 continue;
             }
 
             let Ok(group_id) = hex::decode(&cursor.group_id) else { continue };
-            if !membres.contains(group_id.as_slice()) {
+            if !members.contains(group_id.as_slice()) {
                 continue;
             }
 
@@ -424,94 +419,94 @@ impl Session {
         Ok(())
     }
 
-    /// Recale les abonnements sur l'appartenance réelle, et dit si la session doit survivre.
+    /// Realigns the subscriptions on actual membership, and says whether the session should
+    /// survive.
     ///
-    /// C'est la contrepartie du passage à une authentification par session : sans elle, un
-    /// appareil révoqué ou évincé continuerait d'être servi tant qu'il garde sa socket ouverte.
+    /// This is the counterpart of moving to per-session authentication: without it, a revoked or
+    /// evicted device would keep being served as long as it holds its socket open.
     async fn revalidate(&mut self) -> ApiResult<bool> {
         let groups = self.membership().await?;
 
-        // Aucun groupe **et** appareil disparu ou révoqué : la session n'a plus d'objet. On
-        // distingue les deux cas, parce qu'un appareil parfaitement valide peut légitimement
-        // n'être membre d'aucun groupe — c'est l'état d'un appareil fraîchement enregistré.
-        let vivant: Option<(i32,)> =
+        // No group **and** device gone or revoked: the session has no purpose left. The two
+        // cases are distinguished, because a perfectly valid device may legitimately belong to
+        // no group — that is the state of a freshly registered device.
+        let alive: Option<(i32,)> =
             sqlx::query_as("SELECT 1 FROM devices WHERE id = $1 AND revoked_at IS NULL")
                 .bind(&self.device_id)
                 .fetch_optional(&self.pool)
                 .await?;
 
-        if vivant.is_none() {
+        if alive.is_none() {
             return Ok(false);
         }
 
-        let actuels: HashSet<Vec<u8>> = groups.into_iter().collect();
+        let current: HashSet<Vec<u8>> = groups.into_iter().collect();
 
-        let perdus: Vec<Vec<u8>> = self
+        let lost: Vec<Vec<u8>> = self
             .subscriptions
             .keys()
-            .filter(|group_id| !actuels.contains(*group_id))
+            .filter(|group_id| !current.contains(*group_id))
             .cloned()
             .collect();
 
-        for group_id in perdus {
+        for group_id in lost {
             self.subscriptions.remove(&group_id);
         }
 
         Ok(true)
     }
 
-    /// Boucle principale : trames du client d'un côté, diffusion du hub de l'autre.
+    /// Main loop: client frames on one side, hub fanout on the other.
     async fn pump(
         mut self,
         mut sender: Sender,
         mut receiver: futures_util::stream::SplitStream<WebSocket>,
     ) -> Result<(), axum::Error> {
-        let mut battement = tokio::time::interval(HEARTBEAT);
-        battement.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut heartbeat = tokio::time::interval(HEARTBEAT);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        let mut dernier_signe_de_vie = tokio::time::Instant::now();
+        let mut last_sign_of_life = tokio::time::Instant::now();
 
         loop {
             tokio::select! {
-                // `biased` pour que le hub ne puisse pas affamer les trames du client : sans
-                // lui, un groupe très bavard retarderait indéfiniment un `unsubscribe`.
+                // `biased` so the hub cannot starve the client's frames: without it, a very
+                // chatty group would delay an `unsubscribe` indefinitely.
                 biased;
 
                 message = receiver.next() => {
                     let Some(message) = message else { return Ok(()) };
                     let message = message?;
 
-                    dernier_signe_de_vie = tokio::time::Instant::now();
+                    last_sign_of_life = tokio::time::Instant::now();
 
                     match message {
                         Message::Text(text) => {
-                            // Une trame illisible n'est pas fatale : un client plus récent peut
-                            // émettre une opération que ce serveur ne connaît pas encore.
+                            // An unreadable frame is not fatal: a newer client may emit an
+                            // operation this server does not know yet.
                             let Ok(frame) = serde_json::from_str::<ClientFrame>(&text) else {
                                 continue;
                             };
 
                             match self.handle(frame).await {
                                 Reaction::Silence => {}
-                                Reaction::Repondre(frame) => send(&mut sender, &frame).await?,
-                                Reaction::Terminer(frame) => {
+                                Reaction::Reply(frame) => send(&mut sender, &frame).await?,
+                                Reaction::Terminate(frame) => {
                                     let _ = send(&mut sender, &frame).await;
                                     return sender.close().await;
                                 }
                             }
                         }
                         Message::Close(_) => return sender.close().await,
-                        // Ping et Pong sont traités par la couche axum ; les trames binaires
-                        // n'ont pas de sens dans ce protocole et sont ignorées plutôt que
-                        // fatales.
+                        // Ping and Pong are handled by the axum layer; binary frames make no
+                        // sense in this protocol and are ignored rather than fatal.
                         _ => {}
                     }
                 }
 
                 Some((group_id, notice)) = self.subscriptions.next() => {
-                    // Un abonné distancé perd des événements plutôt que de faire grossir la
-                    // mémoire du serveur. Ce n'est pas une perte de données : le client
-                    // rattrape par la relève, comme le documente `crate::stream`.
+                    // A subscriber left behind loses events rather than growing the server's
+                    // memory. This is not a data loss: the client catches up by polling, as
+                    // `crate::stream` documents.
                     let Ok(notice) = notice else { continue };
 
                     let frame = match notice {
@@ -527,81 +522,80 @@ impl Session {
                     send(&mut sender, &frame).await?;
                 }
 
-                _ = battement.tick() => {
-                    if dernier_signe_de_vie.elapsed() > SILENCE_MAX {
+                _ = heartbeat.tick() => {
+                    if last_sign_of_life.elapsed() > SILENCE_MAX {
                         return sender.close().await;
                     }
 
                     match self.revalidate().await {
                         Ok(true) => {}
                         Ok(false) => return sender.close().await,
-                        // Une base momentanément indisponible ne doit pas déconnecter tout le
-                        // monde : on retentera au battement suivant. La session garde ses
-                        // abonnements, ce qui est le comportement d'avant cette vérification.
-                        Err(error) => tracing::debug!(%error, "revalidation reportée"),
+                        // A momentarily unavailable database must not disconnect everyone: we
+                        // retry on the next heartbeat. The session keeps its subscriptions,
+                        // which is the behaviour from before this check.
+                        Err(error) => tracing::debug!(%error, "revalidation deferred"),
                     }
 
-                    // La présence n'est **pas** écrite ici : voir la trame `heartbeat`. Ce tick
-                    // ne constate rien sur le client, il ne fait que compter le temps du serveur.
+                    // Presence is **not** written here: see the `heartbeat` frame. This tick
+                    // observes nothing about the client, it only counts the server's time.
                 }
             }
         }
     }
 
-    /// Traite une trame du client.
+    /// Handles a frame from the client.
     async fn handle(&mut self, frame: ClientFrame) -> Reaction {
         match frame {
-            // Une seconde ouverture sur une session déjà ouverte : ignorée. L'accepter
-            // permettrait de changer d'identité en cours de route sans que les abonnements en
-            // place soient recalculés.
+            // A second open on an already open session: ignored. Accepting it would allow
+            // changing identity mid-flight without the subscriptions in place being recomputed.
             ClientFrame::Identify { .. } => Reaction::Silence,
 
-            // Le battement du client est ce qui déclenche la revalidation, plutôt que le seul
-            // tick du serveur : il la rend prompte — un appareil révoqué est coupé au battement
-            // suivant, pas au prochain tick — sans rien coûter à une session inactive.
+            // The client's heartbeat is what triggers revalidation, rather than the server tick
+            // alone: it makes it prompt — a revoked device is cut off on the next heartbeat, not
+            // on the next tick — without costing an idle session anything.
             //
-            // Une requête par battement, donc, et sans amortissement. C'est le même ordre de
-            // grandeur qu'une trame `subscribe` ou `signal`, qui interrogent déjà la base à
-            // chaque appel ; un client qui martèlerait ses battements se limiterait lui-même
-            // par sa bande passante bien avant d'inquiéter la base.
+            // One query per heartbeat, then, and unamortised. That is the same order of
+            // magnitude as a `subscribe` or `signal` frame, which already query the database on
+            // every call; a client hammering its heartbeats would limit itself by its own
+            // bandwidth long before troubling the database.
             ClientFrame::Heartbeat => match self.revalidate().await {
                 Ok(true) => {
-                    // **La présence s'écrit ici, à la réception d'un battement, et non au tick
-                    // du serveur.**
+                    // **Presence is written here, on heartbeat receipt, and not on the server
+                    // tick.**
                     //
-                    // L'écrire au tick la faisait mentir : un téléphone suspendu par son système
-                    // laisse une socket que rien ne ferme avant `SILENCE_MAX`, et le serveur
-                    // continuait pendant tout ce temps à déclarer éveillé quelqu'un qui ne l'est
-                    // plus. En comptant la fenêtre d'affichage du client par-dessus, cela faisait
-                    // plusieurs minutes de « en ligne » pour un appareil au fond d'une poche.
+                    // Writing it on the tick made it lie: a phone suspended by its system leaves
+                    // a socket nothing closes before `SILENCE_MAX`, and the server kept
+                    // declaring awake, for all that time, someone who no longer was. Counting
+                    // the client's display window on top, that meant several minutes of "online"
+                    // for a device at the bottom of a pocket.
                     //
-                    // Un battement reçu est la seule preuve qu'il y a encore quelqu'un au bout.
-                    // C'est la même exigence que celle qui a fait sortir la présence du chemin des
-                    // requêtes : ne déclarer présent que ce qu'on constate.
+                    // A received heartbeat is the only proof that someone is still at the other
+                    // end. It is the same requirement that took presence out of the request
+                    // path: declare present only what is observed.
                     crate::presence::touch_detached(self.pool.clone(), self.device_id.clone());
-                    Reaction::Repondre(ServerFrame::HeartbeatAck)
+                    Reaction::Reply(ServerFrame::HeartbeatAck)
                 }
                 Ok(false) => {
-                    Reaction::Terminer(ServerFrame::Error { reason: "session révoquée" })
+                    Reaction::Terminate(ServerFrame::Error { reason: "session revoked" })
                 }
-                Err(error) => Reaction::Repondre(ServerFrame::Error { reason: reason(&error) }),
+                Err(error) => Reaction::Reply(ServerFrame::Error { reason: reason(&error) }),
             },
 
             ClientFrame::Subscribe { group_id } => {
                 let Ok(group_id) = crate::routes::decode_group_id(&group_id) else {
-                    return Reaction::Repondre(ServerFrame::Error { reason: "trame invalide" });
+                    return Reaction::Reply(ServerFrame::Error { reason: "invalid frame" });
                 };
 
-                // Revérifié en base, à chaque fois. Se fier à la liste calculée à l'ouverture
-                // laisserait un appareil s'abonner à un groupe dont il vient d'être retiré.
+                // Rechecked in the database, every time. Trusting the list computed at open time
+                // would let a device subscribe to a group it has just been removed from.
                 match crate::routes::is_member(&self.pool, &group_id, &self.device_id).await {
                     Ok(true) => {
                         self.subscribe(group_id);
                         Reaction::Silence
                     }
-                    Ok(false) => Reaction::Repondre(ServerFrame::Error { reason: "refusé" }),
+                    Ok(false) => Reaction::Reply(ServerFrame::Error { reason: "denied" }),
                     Err(error) => {
-                        Reaction::Repondre(ServerFrame::Error { reason: reason(&error) })
+                        Reaction::Reply(ServerFrame::Error { reason: reason(&error) })
                     }
                 }
             }
@@ -621,12 +615,12 @@ impl Session {
                     decode(&mac),
                     decode(&payload),
                 ) else {
-                    return Reaction::Repondre(ServerFrame::Error { reason: "trame invalide" });
+                    return Reaction::Reply(ServerFrame::Error { reason: "invalid frame" });
                 };
 
-                // Même vérification que le chemin HTTP, par la même fonction : le MAC de groupe
-                // prouve l'appartenance sans révéler qui poste. La session connaît pourtant
-                // l'identité de son propriétaire — s'en servir ici défairait le sealed sender.
+                // Same check as the HTTP path, by the same function: the group MAC proves
+                // membership without revealing who posts. The session does know its owner's
+                // identity — using it here would undo sealed sender.
                 match crate::routes::verify_signal(&self.pool, &group_id, &nonce, &mac, &payload)
                     .await
                 {
@@ -635,7 +629,7 @@ impl Session {
                         Reaction::Silence
                     }
                     Err(error) => {
-                        Reaction::Repondre(ServerFrame::Error { reason: reason(&error) })
+                        Reaction::Reply(ServerFrame::Error { reason: reason(&error) })
                     }
                 }
             }
@@ -643,21 +637,20 @@ impl Session {
     }
 }
 
-/// Ce que le serveur fait d'une trame reçue.
+/// What the server does with a received frame.
 ///
-/// Le troisième cas est celui qui justifie l'énumération : une session dont l'appareil vient
-/// d'être révoqué doit être **fermée**, pas seulement avertie. Renvoyer une erreur et poursuivre
-/// laisserait la socket servir les groupes déjà abonnés.
+/// The third case is what justifies the enum: a session whose device has just been revoked must
+/// be **closed**, not merely warned. Returning an error and carrying on would leave the socket
+/// serving the groups already subscribed.
 enum Reaction {
     Silence,
-    Repondre(ServerFrame<'static>),
-    Terminer(ServerFrame<'static>),
+    Reply(ServerFrame<'static>),
+    Terminate(ServerFrame<'static>),
 }
 
 async fn send(sender: &mut Sender, frame: &ServerFrame<'_>) -> Result<(), axum::Error> {
-    // `expect` plutôt qu'une erreur remontée : ces structures n'ont aucun champ qui puisse
-    // échouer à la sérialisation, et un échec signalerait un bug de ce module, pas une
-    // condition d'exécution.
-    let text = serde_json::to_string(frame).expect("les trames serveur sont sérialisables");
+    // `expect` rather than a propagated error: these structures have no field that can fail to
+    // serialise, and a failure would signal a bug in this module, not a runtime condition.
+    let text = serde_json::to_string(frame).expect("server frames are serialisable");
     sender.send(Message::Text(text.into())).await
 }

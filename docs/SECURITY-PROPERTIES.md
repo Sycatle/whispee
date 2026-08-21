@@ -132,7 +132,7 @@ moderator — that delay is exactly what revocation exists to remove.
 **Claim — and it is implemented.** `crates/transparency` is an RFC 6962 append-only Merkle log of
 account keys. The server publishes a signed tree head and, on request, inclusion and consistency
 proofs. The client checks the head's signature, then inclusion (recomputing the leaf from the
-handle and key it actually received, never from a hash the server supplies), then consistency
+account and key it actually received, never from a hash the server supplies), then consistency
 (today's log extends the one seen yesterday). All three are required: without consistency, a server
 replaces an already-published key and serves a log that is internally perfect —
 `a_rewritten_log_does_not_pass_consistency` pins that down.
@@ -164,7 +164,7 @@ the application. The client at least refuses to let it change afterwards.
 
 ## 6. Device attestation
 
-**Claim.** Each device carries a signature by the account over `(handle, device_id, auth_key,
+**Claim.** Each device carries a signature by the account over `(account, device_id, auth_key,
 mls_key)`, length-prefixed to forbid field confusion, and every client re-verifies it on receipt —
 never trusting the server's verification, since the server is what is under suspicion. The result
 is a single asymmetry: **the server can withhold a device, never add one.**
@@ -202,6 +202,13 @@ detectable.
 Registration itself is trust on first use. Reclaiming an existing handle with a different key is
 refused, but nothing proves the first arrival was legitimate. A real deployment would back that
 endpoint with a phone or email verification.
+
+An account is named by its key — `SHA256` of the genesis identity key — and a handle is an alias
+it answers to. That is what lets the alias move without the account moving with it, and it is why
+the directory that maps one to the other is allowed to lie: the id it returns is a hash of a key
+that is inside the credential the client then verifies, so a wrong answer never becomes a verifying
+one. Section 5 covers the key itself; the published rotation chain is what ties the id, which is
+computed from the *first* key, to whatever key is current.
 
 ---
 

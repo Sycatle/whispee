@@ -12,13 +12,13 @@ import { deviceNameCandidates, detectDeviceKind } from "./device";
 import { type PairingCode, decodePairingCode } from "./pairing";
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
-import { sanitize, validate } from "./display-name";
 import * as envelope from "./envelope";
 import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
 import * as derive from "./conversation-view.ts";
 import { PresenceTracker } from "./session-presence.ts";
 import { PreferencesStore } from "./session-preferences.ts";
+import { Names, type Profile } from "./session-naming.ts";
 import { composeStored } from "./session-persist.ts";
 import { fromBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
@@ -582,11 +582,9 @@ export class Session {
     // for an account that has never resolved anyone, so they have no anchor to hand over, and a
     // parameter they would all pass as `undefined` teaches nothing.
     session.settings = PreferencesStore.hydrate(stored);
-    session.profiles = stored.profiles ?? {};
-    session.petnames = stored.petnames ?? {};
+    session.names = Names.hydrate(stored);
     // Conditional, unlike the two above: absent is what makes the interface fall back to
     // `@handle`, and an empty string present on the field would be a third state nobody handles.
-    if (stored.displayName !== undefined) session.displayName = stored.displayName;
 
     if (stored.logHead) {
       session.seenHead = {
@@ -616,6 +614,13 @@ export class Session {
    * spread between a default here and a read there.
    */
   private settings = new PreferencesStore();
+
+  /**
+   * What people are called, and both directions of how that reaches the disk.
+   *
+   * Replaced wholesale by `open`, like `settings`: `hydrate` is a constructor in all but name.
+   */
+  private names = new Names();
 
   /** Last activity of an account, or `undefined` if the server has nothing to say about it. */
   presenceOf(handle: string): number | undefined {
@@ -826,9 +831,7 @@ export class Session {
     // as long as the page does, and `profiles` is the one field here that holds other people's
     // names in the clear — leaving it populated would keep an address book readable by anything
     // still holding the session after the user asked for it to be destroyed.
-    this.displayName = undefined;
-    this.profiles = {};
-    this.petnames = {};
+    this.names.forget();
     await this.anchor.store.clear();
   }
 
@@ -876,9 +879,7 @@ export class Session {
         knownDevices: this.knownDevices,
         signals: this.signals,
         preferences: this.settings.snapshot(),
-        displayName: this.displayName,
-        profiles: this.profiles,
-        petnames: this.petnames,
+        names: this.names.snapshot(),
         seenHead: this.seenHead,
         seal: (bytes) => this.atRest.seal(bytes),
       }),
@@ -2552,7 +2553,9 @@ export class Session {
    * writes it down and tells the other members. Absent means never set, and the display falls
    * back to `@handle` — which always exists, and is the thing that actually identifies somebody.
    */
-  displayName?: string;
+  get displayName(): string | undefined {
+    return this.names.mine;
+  }
 
   /**
    * The names other people have declared for themselves, by handle.
@@ -2561,7 +2564,9 @@ export class Session {
    * them can pick it precisely because the other has it. Nothing here disambiguates them; the
    * handle shown alongside does, and `petnames` is how somebody overrules the claim entirely.
    */
-  profiles: Record<string, { name: string; at: number }> = {};
+  get profiles(): Record<string, Profile> {
+    return this.names.profiles;
+  }
 
   /**
    * Names this device has given other people, by handle.
@@ -2569,7 +2574,9 @@ export class Session {
    * Never emitted. A petname is a note the reader took about somebody, and handing it back to its
    * subject would be a disclosure nobody asked for.
    */
-  petnames: Record<string, string> = {};
+  get petnames(): Record<string, string> {
+    return this.names.petnames;
+  }
 
   /**
    * Sets — or clears — the name this device gives somebody else.
@@ -2588,16 +2595,7 @@ export class Session {
    * has one representation and `naming.ts` has one thing to test for.
    */
   async setPetname(handle: string, name: string): Promise<void> {
-    const cleaned = sanitize(name);
-
-    if (cleaned !== "") {
-      const error = validate(cleaned);
-      if (error !== null) throw new Error(error);
-    }
-
-    if (cleaned === "") delete this.petnames[handle];
-    else this.petnames[handle] = cleaned;
-
+    this.names.setPetname(handle, name);
     await this.persist();
 
     // Every view, for the same reason `absorbProfile` touches every view: the person is drawn in
@@ -2621,14 +2619,7 @@ export class Session {
    * trying to avoid.
    */
   async setDisplayName(name: string): Promise<void> {
-    const cleaned = sanitize(name);
-
-    if (cleaned !== "") {
-      const error = validate(cleaned);
-      if (error !== null) throw new Error(error);
-    }
-
-    this.displayName = cleaned === "" ? undefined : cleaned;
+    this.names.setMine(name);
     await this.persist();
 
     for (const view of this.conversations.values()) {
@@ -2700,16 +2691,7 @@ export class Session {
    * absence is what the display falls back on, and one representation of "no name" is enough.
    */
   private absorbProfile(handle: string, declared: string, at: number): void {
-    const known = this.profiles[handle];
-    if (known && known.at >= at) return;
-
-    const name = sanitize(declared);
-    // Refused rather than truncated, on the same grounds as the input field: cutting somebody's
-    // name to fit would show a name they never chose, and the wire format bounds this anyway.
-    if (name !== "" && validate(name) !== null) return;
-
-    if (name === "") delete this.profiles[handle];
-    else this.profiles[handle] = { name, at };
+    if (!this.names.absorb(handle, declared, at)) return;
 
     // Every conversation, not only the one the message arrived in. The name is drawn wherever the
     // person is — the thread, the conversation list, the member roster — and the revision counter

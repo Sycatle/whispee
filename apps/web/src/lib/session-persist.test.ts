@@ -49,9 +49,7 @@ function input(over: Partial<PersistInput> = {}): PersistInput {
     knownDevices: {},
     signals: { readReceipts: true, typingIndicator: true, presence: true },
     preferences: {},
-    displayName: undefined,
-    profiles: {},
-    petnames: {},
+    names: {},
     seenHead: undefined,
     seal,
     ...over,
@@ -121,30 +119,25 @@ test("the history carries each conversation's thread, outbox and read cursor", a
   ]);
 });
 
-test("a name nobody has given is absent, not undefined", async () => {
+test("a log head nobody has accepted is absent, not undefined", async () => {
   const stored = await composeStored(input());
 
   // `in` rather than a comparison with `undefined`: the two are indistinguishable to a reader and
   // different to the store, and it is absence that keeps an untouched account's on-disk shape
-  // exactly what it was before these fields existed.
-  assert.equal("displayName" in stored, false);
-  assert.equal("profiles" in stored, false);
-  assert.equal("petnames" in stored, false);
+  // exactly what it was before this field existed.
   assert.equal("logHead" in stored, false);
 });
 
-test("a name somebody has given is written", async () => {
+test("the names slice is spread in exactly as given", async () => {
+  // `composeStored` no longer knows what a name is: `Names` owns that mapping in both directions,
+  // and `session-naming.test.ts` is where the round trip is asserted.
   const stored = await composeStored(
-    input({
-      displayName: "Alice",
-      profiles: { bob: { name: "Bob", at: 3 } },
-      petnames: { bob: "the neighbour" },
-    }),
+    input({ names: { displayName: "Alice", petnames: { bob: "the neighbour" } } }),
   );
 
   assert.equal(stored.displayName, "Alice");
-  assert.deepEqual(stored.profiles, { bob: { name: "Bob", at: 3 } });
   assert.deepEqual(stored.petnames, { bob: "the neighbour" });
+  assert.equal("profiles" in stored, false);
 });
 
 test("the preferences slice is spread in exactly as given", async () => {

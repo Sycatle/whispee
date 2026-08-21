@@ -81,9 +81,15 @@ export interface PersistInput {
    * the only arrangement in which a test can assert they agree. See `session-preferences.ts`.
    */
   preferences: Partial<StoredSession>;
-  displayName: string | undefined;
-  profiles: Record<string, { name: string; at: number }>;
-  petnames: Record<string, string>;
+  /**
+   * What `Names` contributes, already mapped.
+   *
+   * A slice for the same reason as `preferences`: the names own both directions of their own
+   * mapping, and keeping the two together is the only arrangement in which a test can assert they
+   * agree. It matters more here — two of those fields are keyed by account, so they are what a
+   * change to how an account is identified has to travel through. See `session-naming.ts`.
+   */
+  names: Partial<StoredSession>;
   seenHead: SeenHead | undefined;
   /**
    * What encrypts the three things that must never touch the disk in the clear.
@@ -126,11 +132,7 @@ export async function composeStored(input: PersistInput): Promise<StoredSession>
         .map((view) => [view.key, toBase64(view.postingKey as Uint8Array)]),
     ),
     ...input.preferences,
-    // Written only when there is something to write. An account that never named itself and never
-    // received a name keeps the exact on-disk shape it had before this feature existed.
-    ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
-    ...(Object.keys(input.profiles).length === 0 ? {} : { profiles: input.profiles }),
-    ...(Object.keys(input.petnames).length === 0 ? {} : { petnames: input.petnames }),
+    ...input.names,
     history: await input.seal(
       encodeHistory(
         new Map<string, Cached>(

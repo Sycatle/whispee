@@ -60,7 +60,7 @@ apps/
     src/app/       The shell: three columns, the rail, the detail column, the settings screen.
     src/components/  React components. Screens, not logic.
     src/lib/generated/  wasm-bindgen glue and emoji-index.json, committed build artefacts.
-    public/        crypto_wasm_bg.wasm, the fonts, and emoji/ — 3,145 Fluent SVGs, committed.
+    public/        crypto_wasm_bg.wasm, the fonts, and emoji/ — seven Twemoji sheets, committed.
     scripts/       patch-wasm-glue.mjs, emoji-assets.mjs.
   desktop/         Tauri 2. One crate serving desktop, Android and iOS.
     src/           store.rs (atomic session files), cipher.rs (device secrets), commands.rs
@@ -295,19 +295,20 @@ cryptographic fault, not a safety net.
 
 ## Emoji are artwork, not glyphs
 
-Every emoji in the interface is an SVG served from `public/emoji`, substituted into the text at
-render time by `ui/Emoji.tsx`. This is the same thing Discord, Slack and X do, and it is worth
-writing down why, because the obvious alternative looks better on paper and does not work here.
+Every emoji in the interface is Twemoji artwork, substituted into the text at render time by
+`ui/Emoji.tsx`. This is the same thing Discord, Slack and X do — and Telegram and Signal too, from
+Apple's set. It is worth writing down why, because the obvious alternative looks better on paper
+and does not work here.
 
 **The system font was the previous answer and it fails our own targets.** A Linux distribution
 that ships no colour emoji font draws tofu, and the three platforms that do ship one draw three
 different pictures for the same message. "The sender and the receiver see the same thing" is not
-a nicety in a messenger.
+a nicety in a messenger. There is now **no fallback to it anywhere**: an emoji with no artwork
+draws a neutral placeholder from the sheet, never the raw character.
 
 **A self-hosted colour font would be the tidy fix, and no format delivers it.** The glyphs would
 stay text: selection, copy, the composer's `<textarea>` and the system notification would all
-work with no code at all. But the artwork is Microsoft's Fluent Emoji, which is drawn with
-gradients, and:
+work with no code at all. But this artwork uses gradients, and:
 
 - **COLRv1** carries gradients and **WebKit does not implement it**.
 - **OT-SVG** carries gradients and **WebKitGTK leaves it switched off by default**.
@@ -317,18 +318,72 @@ WebKitGTK is the engine behind the Tauri build on Linux, and WKWebView behind th
 is no format that renders this artwork on all four engines, so the font route is closed — not
 inconvenient, closed.
 
-**Flat rather than Color.** Measured on the pinned upstream tree: `Color` is 41 kB per file and
-132 MB in total, `Flat` is 5.4 kB and 17 MB, for the same 3,145 files. A picker grid of 1,595
-cells cannot be made of 41 kB files whatever the loading strategy, and Flat is the variant that
-survives being displayed at 16 to 20 pixels, which is the size of a reaction pill.
+### Twemoji replaced Fluent, for coverage rather than taste
 
-`scripts/emoji-assets.mjs` regenerates the tree from a pinned commit of `microsoft/fluentui-emoji`
-(MIT) and records its digest in `public/emoji/MANIFEST.json`. The output is committed for the
-reason the WebAssembly module is: the build must work offline, and an application whose argument
-is that you can verify what you run should not fetch a third of its interface at build time.
+Microsoft's Fluent Emoji draws 1,595 sequences and **no country flag at all**, no keycap, no `©️`
+and no `®️`. `🇫🇷` from a peer had nothing to draw and fell back to the platform — the letters
+"FR" on Windows. Worse, fourteen of those gaps were *in the catalogue*, because the generator
+never checked that an entry it indexed had a file behind it.
 
-What this does not solve: **Microsoft ships no country flags at all.** `🇫🇷` has no artwork, is
-absent from the picker, and falls back to the platform font when it arrives from a peer.
+Twemoji (`jdecked/twemoji`, CC-BY 4.0) covers Unicode completely, so the question stops being a
+question and one set means one licence. Emojibase (MIT) supplies what Twemoji does not ship at
+all: names, keywords, groups, canonical order, tone relationships and `:shortcodes:`.
+
+Apple's set is what Telegram and Signal actually use — Telegram embeds it as five webp sheets in
+`tdesktop/Telegram/Resources/emoji`. Its licence does not permit that, so it is not an option
+here whatever the precedent.
+
+### Seven sheets, not four thousand files
+
+The first version shipped one SVG per emoji and let `loading="lazy"` fetch them. It was slow, and
+the intuition points the wrong way about why: the whole untoned set is **3.3 MB**, which is one
+photograph. The cost was **4,009 requests** — six at a time over HTTP/1.1 in development, one
+round trip apiece through Tauri's custom protocol on the desktop.
+
+`scripts/emoji-assets.mjs` now emits seven JSON sheets, keyed by sequence, holding inner SVG
+markup. `lib/emoji-sprite.ts` fetches one, injects the whole thing as `<symbol>` elements in a
+single mutation, and every emoji on screen is a `<use>` pointing into it — so a thread with thirty
+👍 holds one copy of the path data rather than thirty decoded images.
+
+Which sheet holds a sequence is *computed*, with no table to consult: no tone modifier means
+`base`, one modifier means that tone's sheet, two means `mixed`. A reader who never opens the
+picker never fetches the 4.5 MB of tone variants.
+
+**Injecting a sheet whole is not an optimisation, it is the fix.** Injecting one `<symbol>` per
+emoji on first sight — which is what a sane person writes first — froze the tab for over eight
+seconds on the picker's 1,914 cells: appending to a sprite that hundreds of live `<use>` already
+point into makes every one of them re-resolve. The whole sheet in one `innerHTML` costs 55 ms.
+The price, stated plainly, is roughly 16,000 inert nodes and 24 MB in the document whether or not
+anybody looks at those emoji. That is what the word "preloaded" costs.
+
+### The naming rule, which is not the obvious one
+
+Twemoji drops `FE0F` from its filenames — **except** when the sequence also contains a zero-width
+joiner, where it keeps it. 972 of the 4,009 names depend on that, and there is exactly one
+sequence filed against the rule (`👁️‍🗨️`). `keyOf()` in `lib/emoji.ts` is the single definition,
+imported by the generator rather than restated, because getting it wrong is invisible to whoever
+picked the emoji and only breaks for whoever receives it.
+
+The generator refuses to emit a catalogue entry it has no artwork for, and fails the run with the
+list. That check is what the fourteen orphaned keycaps were missing.
+
+### Two ways to reach an emoji, plus the grid
+
+`components/EmojiPicker.tsx` is the grid: search, a jump bar of category icons, sections in
+Unicode's own order, and six skin-tone swatches. `lib/shortcode.ts` and `components/Shortcodes.tsx`
+are the other route — typing `:smi` opens a completion list in the composer, and typing `:joy:`
+whole substitutes it with no menu at all. Both read the same generated catalogue, which is a
+dynamic import so its 296 kB stay out of the initial bundle.
+
+The output is committed, for the reason the WebAssembly module is: the build must work offline,
+and an application whose argument is that you can verify what you run should not fetch a third of
+its interface at build time. `public/emoji/MANIFEST.json` records the upstream tag, commit and
+archive digest; `public/emoji/LICENSE` carries the CC-BY attribution, which is an obligation and
+not a courtesy.
+
+What this still does not cover: display names, group names and attachment filenames are drawn by
+the platform font, as are the composer and every other text input — a `<textarea>` cannot hold an
+image without becoming a rich-text editor.
 
 ## Why the desktop application exists
 

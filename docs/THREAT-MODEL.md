@@ -69,7 +69,8 @@ authenticates *membership*, not identity. Cannot read the ephemeral signal paylo
   `the_welcome_exposes_identities_but_never_the_content`. The server already knows those identities
   from `devices` and `group_members`, so the leak adds nothing to what it knows — but it is real.
 - **vault volume** — how many messages each account archives, and when.
-- **attachment sizes**, to within the sixteen bytes of the GCM tag.
+- **attachment sizes**, to an order of magnitude: they now go into the same doubling buckets as
+  messages, with a top bucket just under the server's 25 MiB ceiling.
 - `created_at` on envelopes, kept for a purge that is never performed.
 
 #### 2.2.1 What bounds the presence register
@@ -166,9 +167,11 @@ nothing else. Against an attacker who has the device but not the password, the m
 only in memory of a running unlocked session — so a device that has been closed holds ciphertext.
 
 **Can still**: attack the password offline, bounded only by Argon2id's cost and the password's
-actual entropy. The rejected-password list is short and the displayed entropy figure is an
-optimistic ceiling (see the limitations table). And once the device has been unlocked once, state
-stays in the clear in memory until the tab closes — there is **no re-lock after inactivity**.
+actual guessability. Passwords are now scored by zxcvbn against the common breach corpus, so that
+attack starts from a real estimate rather than an optimistic bit count. A locked session re-locks
+after five minutes without the user, in the foreground as well as in the background — but
+re-locking drops the interface's state, not the key: it stays in the WebAssembly module's memory
+until the tab closes.
 
 The lock is **not a recovery factor**: forgetting it loses nothing permanently, since the
 twelve-word phrase remains the only restoration path. Making it a second vault factor would double
@@ -266,9 +269,9 @@ The full table, in order of real importance. Nothing here is softened.
 | **Backups** | Not implemented. A cleartext backup entirely defeats E2EE; it is the most common production failure. |
 | **Post-quantum** | No PQXDH, no PQ ratchet. Vulnerable to *harvest-now-decrypt-later*. |
 | **The web** | The server delivers the JS on every load and can therefore deliver a version that exfiltrates the keys. No amount of WebCrypto fixes that — only a native application or a signed extension does. |
-| **Password list** | The list of rejected passwords is short: it catches the obvious cases, no more. A real deployment would use the first 10 000 of rockyou, or the k-anonymous Have I Been Pwned API. |
-| **Entropy estimate** | The number of bits displayed assumes characters drawn at random, which a human never does. It is an optimistic ceiling, presented as such; a real estimator (zxcvbn) recognises words and substitutions, at a cost of 400 KB. |
-| **Lock and memory** | Once unlocked, state is in the clear in memory until the tab closes. There is no re-lock after inactivity. |
+| **Password list** | Rejection uses zxcvbn's common pack — the top of the breach corpora — loaded on demand. HIBP's range API was declined: it would send a SHA-1 prefix, narrowing the password to a few hundred candidates, to a third party at the very moment it is chosen. The long tail of once-breached passwords therefore passes. |
+| **Entropy estimate** | The figure shown is zxcvbn's guess count, which accounts for words, dates, keyboard runs and substitutions. It only knows the patterns it ships: the English word lists are left out for their 1.2 MB, so an English word that is not also a common password is overrated, and nothing here models an attacker who knows the user. |
+| **Lock and memory** | The session re-locks after five minutes without the user, backgrounded or not. That drops the state the interface holds; the key remains in the WebAssembly module's memory until the tab closes, and no browser API lets us demand otherwise. |
 | **Vault volume** | The server learns how many messages each account archives and when. It already knew who talks to whom; this adds a volume and a chronology. That leak is no longer borne by a minority who chose it: it is the normal regime. Avoiding it would require padding and decoy deposits. |
 | **Vault deletion** | No erasure endpoint. Even if there were one, nothing would prove the server really deleted the copies. |
 | **Compromised endpoint** | Out of scope by nature. A compromised device reads the decrypted messages. |

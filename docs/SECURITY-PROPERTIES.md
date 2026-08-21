@@ -25,10 +25,11 @@ and MIME type. Reusing a key across files would mean one leaked descriptor opens
 per file bounds the damage and lets a specific attachment be shared without granting the rest.
 
 **Caveat.** Length is not content. Message bodies are padded into doubling buckets from 256 bytes,
-so the server learns an order of magnitude and no more — but attachment size leaks to within the
-sixteen bytes of the GCM tag, which is often enough to identify a known document. Only padding
-would hide it, and attachments are not padded. And the server holds each group's posting key, so it
-can deposit envelopes into a group: they will never decrypt, but it can pollute.
+so the server learns an order of magnitude and no more. Attachments go into the same buckets,
+applied to the plaintext before encryption, with a top bucket capped just under the server's 25 MiB
+ceiling — so their size also reduces to an order of magnitude, at up to twice the bytes over the
+wire. And the server holds each group's posting key, so it can deposit envelopes into a group: they
+will never decrypt, but it can pollute.
 
 `ratchet-lab` — a teaching reimplementation of X3DH and the Double Ratchet — is **never** part of
 this. It is not imported by `crypto-core` nor by any code a user runs, and the absence of that
@@ -236,13 +237,17 @@ the end, inside a space attackers know better than we do. NIST dropped those rul
 - **It is not a recovery factor.** Forgetting it loses nothing permanently: the twelve-word phrase
   is still the only restoration path. Making it a second vault factor would double the loss surface
   for zero gain against a server that never sees the password anyway.
-- **No re-lock after inactivity.** Once unlocked, state is in the clear in memory until the tab
-  closes.
-- **The rejected-password list is short.** It catches the obvious cases and no more. A real
-  deployment would use the first 10 000 of rockyou, or the k-anonymous Have I Been Pwned API.
-- **The entropy figure is an optimistic ceiling.** It assumes characters drawn at random, which a
-  human never does. It is presented as such; a real estimator (zxcvbn) recognises words and
-  substitutions, at a cost of 400 KB.
+- **It re-locks after five minutes without the user**, backgrounded or not. That drops the state
+  the interface holds; the key stays in the WebAssembly module's memory until the tab closes, and
+  no browser API lets us demand otherwise.
+- **The rejected-password list is zxcvbn's common pack** — the top of the breach corpora, loaded on
+  demand. The k-anonymous Have I Been Pwned API was declined: it would send a SHA-1 prefix to a
+  third party at the very moment the password is chosen. The long tail of once-breached passwords
+  therefore passes.
+- **The figure shown is a guess count, not a bit count.** It accounts for words, dates, keyboard
+  runs and substitutions — but only the patterns it ships with. The English word lists are left out
+  for their 1.2 MB, so an English word that is not also a common password is overrated, and nothing
+  here models an attacker who knows the user.
 
 One more thing the lock does not change, on web and desktop alike: the cryptography still runs in
 WebAssembly inside the webview, so private keys live in the module's linear memory, reachable by

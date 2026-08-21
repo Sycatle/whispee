@@ -20,13 +20,13 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Device revocation, account rotation | Signed certificates other members can check without trusting us |
 | Key transparency | RFC 6962 append-only log, inclusion and consistency proofs, gossip over the encrypted conversation |
 | Sealed sender | Group post MAC; the server learns that a member posted, not which one |
-| Padding | Doubling steps from 256 bytes |
+| Padding | Doubling steps from 256 bytes, on messages and attachments alike |
 | Delivery service | Axum + Postgres, signed requests, nonces, rate limits, `envelopes` partitioned by `HASH(group_id)` |
 | Gateway | WebSocket, one connection for every group, dynamic subscription, catch-up by cursor |
 | Multi-instance fan-out | Postgres `LISTEN/NOTIFY` |
 | Receipts, typing, presence, reactions, replies | All four signals, with their settings |
-| Attachments | Per-file AES-256-GCM key, carried inside the MLS message |
-| Local lock | Argon2id 64 MiB / 3 passes, unlock key → master key indirection |
+| Attachments | Per-file AES-256-GCM key carried inside the MLS message, padded into doubling buckets |
+| Local lock | Argon2id 64 MiB / 3 passes, unlock key → master key indirection, re-locking after five minutes without the user |
 | History vault | On by default, revocable in settings |
 | Desktop application | Tauri 2, interface packaged in the binary |
 | Reproducible signed releases | `scripts/release.sh` and `scripts/verify-release.sh` |

@@ -305,8 +305,12 @@ Removal raises on malformed padding rather than guessing. Those bytes were authe
 so they do come from a member — but a member can send anything, by mistake or on purpose, and a
 lenient reading here would become an interpretation difference between clients.
 
-Attachments do not go through this path: they travel separately and their size is dominated by the
-file anyway. Attachment size therefore leaks, to within the sixteen bytes of the GCM tag.
+Attachments go through the same buckets, applied to the plaintext before AES-GCM. Their ceiling is
+the server's 25 MiB request limit, so the doubling stops at 16 MiB and everything above pads into
+one final bucket sixteen bytes below the limit — the GCM tag — with the client's own maximum one
+byte below that, for the marker. Above 16 MiB the padding therefore costs a great deal: a 17 MiB
+file goes out as nearly 25. What the cap fails to hide is that it is the client's cap: the top
+bucket identifies the version as much as it conceals the file.
 
 ---
 

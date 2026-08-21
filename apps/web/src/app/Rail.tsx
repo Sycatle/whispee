@@ -1,9 +1,10 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { PresenceDot } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
 import { compactNameOf, nameMatches, nameOf } from "@/lib/naming";
 import { roster } from "@/lib/roster";
+import { move } from "@/lib/roving";
 import type { ConversationView } from "@/lib/session";
 import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
@@ -20,6 +21,70 @@ import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useRevision, useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
+
+/** The id the filter's own button carries, so Escape can hand the focus back to it. */
+const FILTER_TOGGLE_ID = "rail-filter-toggle";
+
+/** And the field itself, so the top of the list can hand the focus back up to it. */
+const FILTER_FIELD_ID = "rail-filter";
+
+/**
+ * One list, one tab stop.
+ *
+ * Every row in this column used to be a tab stop of its own, so reaching the composer from the
+ * rail meant crossing every conversation on the way — the reason the shell grew a "Skip to
+ * conversation" button, which routes around the problem rather than removing it. With a roving
+ * tabindex the list is one stop and the arrows move within it.
+ *
+ * The ring is computed from React's own arrays rather than read back out of the DOM. The rail
+ * already holds `listed` and `contacts`, so the identifiers are to hand and are right on the
+ * first paint, before any element exists to query. The DOM is touched for one thing only, which
+ * is the one thing it is needed for: moving the focus.
+ *
+ * `preferred` is where Tab lands when the user has not arrowed anywhere yet — the open
+ * conversation, so that entering the rail puts you where you already are. `anchor` takes over
+ * once they have, and is dropped the moment the filter excludes it, which is what makes typing
+ * in the filter and pressing Down land on the first of what is left.
+ */
+function useRoving(ids: readonly string[], preferred: string | null) {
+  const list = useRef<HTMLUListElement>(null);
+  const [anchor, setAnchor] = useState<string | null>(null);
+
+  const held = (id: string | null) => (id !== null && ids.includes(id) ? id : null);
+  const at = held(anchor) ?? held(preferred) ?? ids[0] ?? null;
+
+  const focus = (id: string) => {
+    setAnchor(id);
+    // `CSS.escape`: a conversation key is hex and a handle is not, and a selector built from
+    // somebody else's handle is a selector built from input we did not choose.
+    list.current?.querySelector<HTMLElement>(`[data-row="${CSS.escape(id)}"]`)?.focus();
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    const next = move(ids, at, event.key);
+    if (next === null) return;
+
+    // Only once a move actually happened: at the bottom of the list ArrowDown has to stay with
+    // the browser, or the list becomes a place the page can no longer be scrolled from.
+    event.preventDefault();
+    focus(next);
+  };
+
+  /**
+   * The anchor follows the focus, wherever the focus came from.
+   *
+   * Tracking it only in `onKeyDown` would mean a row reached with the mouse leaves the tab stop
+   * somewhere else, so the next Tab into the rail lands on a row nobody has touched. Focus is the
+   * one event every route into a row shares — click, arrow, and `focus()` from the filter alike —
+   * so reading the identifier off it covers all three with one listener.
+   */
+  const onFocus = (event: React.FocusEvent) => {
+    const row = (event.target as HTMLElement).closest<HTMLElement>("[data-row]")?.dataset.row;
+    if (row !== undefined) setAnchor(row);
+  };
+
+  return { list, at, onKeyDown, onFocus, focus, first: ids[0] ?? null };
+}
 
 /**
  * The left column: everybody this account knows, in one scroll.
@@ -205,6 +270,16 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
     nameMatches(handle, names, filter),
   );
 
+  // One ring per list rather than one for the column. Down stops at the bottom of Conversations
+  // instead of falling into Contacts, which is a section boundary the eye can see and the arrow
+  // keys should not cross silently. The two `<summary>` elements between them stay ordinary tab
+  // stops, so Tab remains the way across.
+  const rows = useRoving(
+    listed.map((view) => view.key),
+    currentKey,
+  );
+  const people = useRoving(contacts, null);
+
   /**
    * Every handle the rail draws, in one set.
    *
@@ -258,6 +333,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         {conversations.length > 5 && (
           <Tooltip label="Filter by name">
             <IconButton
+              id={FILTER_TOGGLE_ID}
               label="Filter by name"
               icon="search"
               aria-expanded={searching}
@@ -280,10 +356,31 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
       {searching && (
         <div className="border-b border-(--color-border-subtle) p-snug">
           <Input
+            id={FILTER_FIELD_ID}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="Filter by name or handle"
             aria-label="Filter conversations by name or handle"
+            onKeyDown={(event) => {
+              // Down walks out of the field and into the results, the same one-way door the emoji
+              // picker puts between its search box and its grid. Without it the filter is a place
+              // you can type and not a place you can leave with the keyboard.
+              if (event.key === "ArrowDown" && rows.first !== null) {
+                event.preventDefault();
+                rows.focus(rows.first);
+                return;
+              }
+
+              if (event.key !== "Escape") return;
+
+              // `DetailPanel` listens for Escape on `window` in the bubble phase. Without this
+              // the same keystroke would close the filter *and* the details column — one press,
+              // two things dismissed, only one of them asked for.
+              event.stopPropagation();
+              setFilter("");
+              setSearching(false);
+              document.getElementById(FILTER_TOGGLE_ID)?.focus();
+            }}
             // The field does not exist until the user presses the search button, so the focus
             // follows an explicit request rather than stealing it on page load — which is the
             // case the rule is written against. Not focusing it would make the button take two
@@ -299,7 +396,29 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         <Section id="conversations" label="Conversations" count={listed.length}>
           {/* See the note on the thread's `<ol>`: the explicit role is the answer to preflight's
               `list-style: none`, not a redundancy anybody forgot to remove. */}
-          <ul role="list" aria-label="Conversations" className="px-snug pb-snug">
+          {/* The listener is on the list and not on each row: the key event bubbles up from
+              whichever `<button>` holds the focus, so one handler does what N would. The rule
+              reads the `<ul>` as the target and cannot see that the thing being typed into is
+              always an interactive child. */}
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+          <ul
+            ref={rows.list}
+            role="list"
+            aria-label="Conversations"
+            onKeyDown={(event) => {
+              // Up from the first row goes back to the filter, closing the loop the field's own
+              // Down opened. Only while the field is there to go back to.
+              if (event.key === "ArrowUp" && searching && rows.at === rows.first) {
+                event.preventDefault();
+                document.getElementById(FILTER_FIELD_ID)?.focus();
+                return;
+              }
+
+              rows.onKeyDown(event);
+            }}
+            onFocus={rows.onFocus}
+            className="px-snug pb-snug"
+          >
             {listed.map((view) => {
               const unread = session.unreadIn(view);
               const line = preview(view);
@@ -323,6 +442,9 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                 <li key={view.key}>
                   <button
                     type="button"
+                    // The ring is addressed by identity, and a conversation's identity is its key.
+                    data-row={view.key}
+                    tabIndex={rows.at === view.key ? 0 : -1}
                     onClick={() =>
                       navigate({
                         kind: "conversation",
@@ -419,7 +541,15 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         {/* Everybody we have a reason to know and no open thread with — see `lib/roster.ts` for
             what that means and what it cannot see. */}
         <Section id="contacts" label="Contacts" count={contacts.length}>
-          <ul role="list" aria-label="Contacts" className="px-snug pb-snug">
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+          <ul
+            ref={people.list}
+            role="list"
+            aria-label="Contacts"
+            onKeyDown={people.onKeyDown}
+            onFocus={people.onFocus}
+            className="px-snug pb-snug"
+          >
             {contacts.map((handle) => {
               const contact = nameOf(handle, names);
 
@@ -427,6 +557,8 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                 <li key={handle}>
                   <button
                     type="button"
+                    data-row={handle}
+                    tabIndex={people.at === handle ? 0 : -1}
                     onClick={() => void open(handle)}
                     className="flex w-full items-center gap-snug rounded-control px-snug py-snug text-left text-body hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
                   >

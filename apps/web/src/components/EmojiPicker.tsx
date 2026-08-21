@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { move } from "@/lib/roving";
 
 import { useDuo } from "@/lib/duo";
 import {
@@ -70,6 +71,9 @@ const COLUMNS = 12;
 
 const TONE_NAMES = ["default", "light", "medium-light", "medium", "medium-dark", "dark"];
 
+/** The tone ring, as identifiers: `move` works on identity, and a tone's identity is its index. */
+const TONE_IDS = TONE_NAMES.map((_, index) => String(index));
+
 /** The label the recents section carries. Written once: two spellings would be two sections. */
 const RECENTS = "Recently used";
 
@@ -137,6 +141,7 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
   // The tone lives in `Preferences`, but a click has to repaint the grid now rather than after
   // the write reaches disk, so the chosen value is mirrored here.
   const [tone, setTone] = useState<Tone>(session.preferences.skinTone ?? 0);
+  const tones = useRef<HTMLDivElement>(null);
   const grid = useRef<HTMLDivElement>(null);
   /** Index of the section the scroller is currently showing, for the jump bar's marker. */
   const [current, setCurrent] = useState(0);
@@ -389,9 +394,35 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
         )}
       </div>
 
+      {/* A radio group owes the arrow keys, and this one used to promise the role without
+          implementing any of it: six radios, six tab stops, and Left and Right doing nothing. The
+          promise is the problem rather than the missing keys — a screen reader announces "radio
+          group, 1 of 6" and tells the user to use the arrows.
+
+          Selection follows focus, which is what ARIA specifies for a radio group and what makes
+          it worth the role: arrowing through the tones previews each one on the grid above
+          instead of asking for a second keystroke to commit. */}
+      {/* Same exemption as the grid above: the roving tabindex lives on the radios, which is
+          where the arrow keys are answered and where the focus belongs. */}
+      {/* eslint-disable-next-line jsx-a11y/interactive-supports-focus */}
       <div
+        ref={tones}
         role="radiogroup"
         aria-label="Skin tone"
+        onKeyDown={(event) => {
+          const next = move(TONE_IDS, String(tone), event.key, {
+            orientation: "horizontal",
+            // ARIA specifies a radio group as circular, and unlike the rail this ring is six
+            // items whose ends are both on screen: wrapping cannot take anyone somewhere they
+            // cannot see.
+            wrap: true,
+          });
+          if (next === null) return;
+
+          event.preventDefault();
+          chooseTone(Number(next) as Tone);
+          tones.current?.querySelectorAll<HTMLElement>('[role="radio"]')[Number(next)]?.focus();
+        }}
         className="flex items-center gap-tight border-t border-(--color-border-subtle) p-snug"
       >
         {TONE_SAMPLES.map((sample, index) => (
@@ -401,6 +432,9 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
             role="radio"
             aria-checked={tone === index}
             aria-label={`Skin tone: ${TONE_NAMES[index]}`}
+            // The roving tabindex: the group is one tab stop, and which of the six it is follows
+            // the selection.
+            tabIndex={tone === index ? 0 : -1}
             onClick={() => chooseTone(index as Tone)}
             className={cn(
               "flex h-7 w-7 items-center justify-center rounded-control text-[1.1rem]",

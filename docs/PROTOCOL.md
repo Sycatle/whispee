@@ -33,7 +33,7 @@ A device carries two Ed25519 keys, and they are deliberately distinct:
 
 Reusing one key across two protocols is a classic mistake: as soon as the two message formats
 overlap, a signature produced under one becomes a valid signature under the other. Both keys are
-attested together (§6), so they cannot be recombined across devices either.
+attested together (§7), so they cannot be recombined across devices either.
 
 ### 1.2 The canonical signed request
 
@@ -234,7 +234,54 @@ same instant they lose the messages — post-compromise security applies here fo
 
 ---
 
-## 4. Padding
+## 4. Content framing
+
+The MLS plaintext is an opaque byte string; deciding whether it holds text, an attachment
+descriptor or a receipt is the application's job. `apps/web/src/lib/content.ts` does it with a
+single leading type byte:
+
+```
+0  text            UTF-8
+1  attachment      JSON descriptor: id, key, iv, name, mime, size
+2  gossip          u32 BE size ‖ 32-byte root
+3  posting key     32 bytes
+4  receipt         u8 state ‖ u64 BE seq
+5  reaction        u64 BE target ‖ UTF-8 emoji
+6  reply           u64 BE target ‖ UTF-8 text
+7  stamped         u64 BE milliseconds ‖ <any of the above>
+```
+
+Types 2, 3 and 4 are **protocol traffic**: they ride the encrypted channel because that is
+precisely what is wanted — a path the server carries without being able to read it — but they are
+not messages. `isControl` names them in one place, so a new control type does not have to be
+remembered on send *and* on receive.
+
+An unknown type is refused rather than skipped. Those bytes were authenticated by MLS, so they do
+come from a member, but a member can send anything; a lenient reading here would become an
+interpretation difference between clients. One message fails to display and the thread carries on.
+
+### 4.1 The stamp is a wrapper, and it is declared
+
+Type 7 wraps another encoded content instead of adding eight bytes to each of the six layouts
+above: one format to review rather than six, and whatever gains a type byte later is stamped
+without touching it. Unwrapping is **one level deep** — a wrapper inside a wrapper is not
+something a correct sender produces, and unwrapping recursively would let a member nest a few
+thousand of them and spend the client's stack on it.
+
+The time is **declared by the sender**. It travels inside the MLS message, so the server neither
+learns it nor can alter it — and any member of the group can put whatever they like in their own.
+It is an annotation on the thread, never its order: ordering stays `seq`, which the server assigns
+and no member controls. In a 1-to-1 there is exactly one other person who could lie about it, and
+they could equally lie in the text.
+
+Control traffic is never stamped: it is not displayed, so the eight bytes buy nothing. Neither is
+anything written before type 7 existed. Both decode to a message with no time, and the client
+shows an empty slot rather than a guess — dating a week-old message to "now" because it arrived
+during a catch-up is a worse answer than none.
+
+---
+
+## 5. Padding
 
 Content is encrypted; its **length** is not. Length alone separates "ok" from a sentence, spots a
 pasted password, and recognises a boilerplate message. Over a sustained conversation the sequence
@@ -263,18 +310,18 @@ file anyway. Attachment size therefore leaks, to within the sixteen bytes of the
 
 ---
 
-## 5. Group roles
+## 6. Group roles
 
 A group is an MLS group of more than two members; a 1-to-1 conversation stays **flat**, with no
 roles, because a hierarchy there would mean nothing.
 
-### 5.1 MLS provides no authorization
+### 6.1 MLS provides no authorization
 
 RFC 9420 describes who can *prove* what, not who is *allowed* to do what. Any member can commit
 any add or removal and the protocol will accept it. "Only admins may remove" is an application
 rule, and nothing in MLS enforces it.
 
-### 5.2 The `0xF100` group context extension
+### 6.2 The `0xF100` group context extension
 
 The roster lives in a **group context extension**, type `0xF100`, inside RFC 9420's private-use
 range `0xF000`–`0xFFFF`, so no standardised extension will ever collide with it. Being in the
@@ -288,14 +335,14 @@ The roster names **handles**, not signature keys. A handle covers every device o
 adding a phone needs no roster change and an admin is admin from any of their devices. It is also
 what the MLS credential already carries, so there is no extra binding to establish.
 
-### 5.3 `RequiredCapabilities`
+### 6.3 `RequiredCapabilities`
 
 MLS requires every group context extension to appear in the group's required capabilities, and
 here that constraint is useful rather than a formality: it stops a client that **cannot read the
 roster** from joining an administered group. Without it, such a client would join, apply an empty
 policy, accept commits the others refuse — and fork the group with nothing to signal it.
 
-### 5.4 Admin and moderators
+### 6.4 Admin and moderators
 
 One admin, exactly one. Several admins of equal rank have no tie-breaker: two of them can demote
 each other or contradict each other on the group's membership, and nothing in the protocol says
@@ -322,9 +369,9 @@ excluded from. Another member must pick it up.
 
 ---
 
-## 6. Device attestation
+## 7. Device attestation
 
-### 6.1 What an account signs over
+### 7.1 What an account signs over
 
 An account is an Ed25519 identity key (AIK) derived from a twelve-word BIP-39 phrase, plus a
 handle. No phone number and no email address anywhere.
@@ -338,7 +385,7 @@ The client re-verifies every attestation on receipt. It never relies on the serv
 since the server is precisely what is under suspicion — server-side verification only rejects
 early what is unusable anyway.
 
-### 6.2 The asymmetry
+### 7.2 The asymmetry
 
 The gain is one asymmetry, and it is the whole point: **the server can withhold a device, never
 add one.**
@@ -364,7 +411,7 @@ additions are signalled separately.
 Device identifiers are qualified by the handle (`alice:desktop`) and the server enforces that:
 otherwise the namespace would be global and the first arrival would seize "desktop" for everyone.
 
-### 6.3 Revocation and rotation
+### 7.3 Revocation and rotation
 
 Revocation produces a **certificate signed by the account** under `wac-revoke-v1`, covering
 `(handle, device_id, revoked_at)`. The timestamp is inside the signed message, so the server cannot
@@ -388,13 +435,13 @@ rotate first; the server cannot tell them apart and applies the first valid rota
 
 ---
 
-## 7. The transparency log
+## 8. The transparency log
 
 Attestations stop the server from adding a device. They do not stop it lying about the **account
 key on first contact**: asking for someone's account for the first time gives nothing to compare
 against. `crates/transparency` closes that gap.
 
-### 7.1 RFC 6962 Merkle tree
+### 8.1 RFC 6962 Merkle tree
 
 Every published account key is appended to an append-only Merkle tree.
 
@@ -414,7 +461,7 @@ empty leaves would make a 3-leaf tree and a 4-leaf tree whose last leaf is empty
 root. Entry contents are length-prefixed as in `attest`, for the same reason: without prefixes,
 `("ab", key)` and `("a", "b"‖key)` produce the same leaf.
 
-### 7.2 The signed tree head
+### 8.2 The signed tree head
 
 ```
 STH message = "wac-sth-v1" ‖ size (u64 BE) ‖ root (32 bytes) ‖ timestamp (u64 BE)
@@ -424,7 +471,7 @@ The timestamp is inside the signed message: without it, an old head could be rep
 hide the appends that followed. The domain is distinct from `attest`'s, so a head signature holds
 in no other context.
 
-### 7.3 The three checks
+### 8.3 The three checks
 
 The client verifies three things, and it takes all three:
 
@@ -437,7 +484,7 @@ Without the third, the server replaces an already-published key and serves a log
 internally consistent: the first two checks pass and the log proves nothing about the past. The
 test `a_rewritten_log_does_not_pass_consistency` pins it down.
 
-### 7.4 Gossip
+### 8.4 Gossip
 
 None of the three checks catches a server keeping **two logs** and serving one to each victim:
 each sees a signed, consistent log in which their own view is perfect.
@@ -450,7 +497,7 @@ The comparison does not confront roots, which legitimately differ because the si
 recipient asks the server to **prove that its log extends the one served to the other party**. If
 it has served two, no consistency proof relates two trees that have forked.
 
-### 7.5 The structural weakness
+### 8.5 The structural weakness
 
 The log is signed by the party it watches. A serious deployment would hand it to one or more
 distinct operators, none of which is the messaging server. Here there is a single process, and
@@ -461,7 +508,7 @@ the application. The client at least refuses to let it change afterwards.
 
 ---
 
-## 8. The gateway
+## 9. The gateway
 
 `GET /v1/gateway` (WebSocket), in `crates/server/src/gateway.rs`, replaces the 1.5-second poll and
 the SSE stream before it. A 30-second poll remains for upkeep that has no triggering event.
@@ -470,7 +517,7 @@ Counter-intuitively this **removes** information from the server: it used to rec
 request per conversation per round, that is, an activity log accurate to the second. A long
 connection replaces that with a single observation point, at open time.
 
-### 8.1 The handshake challenge
+### 9.1 The handshake challenge
 
 The browser's `WebSocket` API accepts no custom header — the same limit `EventSource` had.
 Authenticating the handshake would mean putting the signature in the URL, where it lands in the
@@ -488,7 +535,7 @@ be returned with Bob's signature captured elsewhere.
 The challenge is issued by the server and consumed on first use, so the sixty-second replay window
 that HTTP keeps does not exist on this path. The client has `IDENTIFY_MAX` = 10 seconds to answer.
 
-### 8.2 Frames
+### 9.2 Frames
 
 Client frames (`op` field, snake_case):
 
@@ -524,7 +571,7 @@ The `signal` frame is authenticated by the **group MAC**, not by the session. Th
 owner's identity, as it happens — using it would undo sealed sender for the sole convenience of not
 rechecking a MAC.
 
-### 8.3 Bounds
+### 9.3 Bounds
 
 | Bound | Value | Why |
 |---|---|---|
@@ -534,7 +581,7 @@ rechecking a MAC.
 | `MAX_RESUME_PER_GROUP` | 200 | aligned on the HTTP path's pagination |
 | `MAX_SIGNAL_BYTES` | 4096 | the largest thing the protocol carries in a frame |
 
-### 8.4 Heartbeats and revalidation
+### 9.4 Heartbeats and revalidation
 
 `HEARTBEAT` is 30 seconds, announced in `hello`. `SILENCE_MAX` is 80 seconds — two heartbeats plus
 a margin, so a client that loses one on a network switch is not disconnected for it.
@@ -545,7 +592,7 @@ An open session would survive both. Hence `Session::revalidate`, which runs on e
 closes the socket of a revoked device and drops the groups it has left. A revocation therefore
 takes effect on open sessions within at most two heartbeats. Two tests pin this down.
 
-### 8.5 Cursors, and why the session is never load-bearing
+### 9.5 Cursors, and why the session is never load-bearing
 
 The session is **never** a correctness dependency. Every frame says no more than "go look"; the
 normal poll is what reads, rechecks membership and advances the cursor. A browser that blocks the
@@ -559,7 +606,7 @@ here would have duplicated its access control, and it is the forgotten copy that
 At open time the client announces its cursors in `identify` and the server replies only if it has
 something to say. Catch-up serves sequence numbers only.
 
-### 8.6 Presence and multi-instance fan-out
+### 9.6 Presence and multi-instance fan-out
 
 `devices.last_seen_at` is written by the gateway heartbeat, and only from identity-authenticated
 paths — never from an anonymous post, which the server cannot attribute anyway. It is truncated to

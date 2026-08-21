@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { EmojiDrawer } from "@/components/EmojiPicker";
+import { COMPOSER_ID } from "@/components/ids";
 import { ShortcodeMenu, LISTBOX_ID, useShortcodes } from "@/components/Shortcodes";
 import { Messages } from "@/components/Messages";
 import { Verification } from "@/components/Verification";
@@ -17,8 +18,8 @@ import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
 
-/** The id the skip link aims at, so tabbing can jump the rail and the whole message list. */
-export const COMPOSER_ID = "conversation-composer";
+// Re-exported so that the shell, which has always imported it from here, keeps working.
+export { COMPOSER_ID };
 
 /**
  * Everybody this thread can attribute something to.

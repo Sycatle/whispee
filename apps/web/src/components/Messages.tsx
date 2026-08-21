@@ -45,10 +45,12 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { Attachment } from "@/components/Attachment";
 import { EmojiDrawer } from "@/components/EmojiPicker";
 import { dayLabel, timeOf } from "@/lib/datetime";
+import { COMPOSER_ID } from "@/components/ids";
 import { compactNameOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
 import { layout, textOf } from "@/lib/thread";
+import { useRoving } from "@/lib/useRoving";
 import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
@@ -121,6 +123,16 @@ export function Messages({
   const report = useReport();
   const names = useNames();
   const bottom = useRef<HTMLDivElement>(null);
+
+  /**
+   * Whether the reader is at the live end of the thread.
+   *
+   * Kept from the scroll event rather than measured when a message arrives, and the difference
+   * matters: by the time the effect runs, the new line is already in the DOM and has pushed the
+   * bottom further away, so a measurement taken then cannot tell "was at the end" from "is one
+   * message behind". Read at the moment the user last moved, the answer is about them.
+   */
+  const stuck = useRef(true);
 
   const messages = view.messages.slice().sort((a, b) => a.seq - b.seq);
 
@@ -220,6 +232,31 @@ export function Messages({
    */
   const rows = layout(visible, { authorOf, readCursor: boundary.current });
 
+  /**
+   * The thread as one tab stop.
+   *
+   * It was eight per message — five quick reactions, the emoji drawer, Reply, and the overflow
+   * menu — so crossing twenty messages with Tab took about a hundred and sixty presses. Reaching
+   * the fourth message from the top was not hard, it was unreasonable, and the skip link the
+   * shell grew only helps whoever wants to leave the list.
+   *
+   * The message is the unit now: Up and Down move between messages, Right steps into the row of
+   * actions, Left or Escape steps back out, Escape again returns to the composer.
+   *
+   * Where Tab lands is the newest message rather than the oldest, because that is the one on
+   * screen — entering the list should not scroll it. The separators (day headings, the "New
+   * messages" line) carry no `data-row` and are skipped: they are not places, they are seams.
+   *
+   * The outbox is deliberately outside the ring. Those lines have no `seq`, which is the whole
+   * reason they are kept apart, and their only controls appear when a send has failed. Leaving
+   * them out is also what removes the one case where a focused row could vanish underneath the
+   * focus: the protocol has no deletion, so a message that is in the ring stays in it.
+   */
+  const thread = useRoving<HTMLOListElement>(
+    rows.map((row) => row.key),
+    rows.length === 0 ? null : rows[rows.length - 1].key,
+  );
+
   // The outbox counts: a message the user just wrote appears there first, and not scrolling to it
   // would hide the very thing they are waiting to see.
   //
@@ -227,7 +264,21 @@ export function Messages({
   // motion is a symptom, not a preference, and a thread that slides on every arrival is the most
   // frequent motion in the whole application. Jumping is not a degraded version of it — for them
   // it is the correct one.
+  //
+  // It follows the arrival only when the reader is at the live end of the thread, or when the
+  // arrival is their own. Scrolling unconditionally is what a thread can do while it is only ever
+  // read from the bottom; it stops being acceptable the moment the list can hold the focus, since
+  // a message from somebody else would then carry the focused line off screen mid-sentence — and
+  // it was already wrong for anyone reading back through history with a conversation still
+  // running.
+  const sent = useRef(view.outbox.length);
+
   useEffect(() => {
+    const mine = view.outbox.length > sent.current;
+    sent.current = view.outbox.length;
+
+    if (!mine && !stuck.current) return;
+
     const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
     bottom.current?.scrollIntoView({ behavior: still ? "auto" : "smooth" });
   }, [visible.length, view.outbox.length]);
@@ -349,9 +400,70 @@ export function Messages({
           preflight sets `list-style: none`, and WebKit reads a list with no marker as one the
           author no longer means — VoiceOver stops saying "list, 20 items". The name matters as
           much: this was the one scrolling region in the application with nothing to call it. */}
+      {/* Said once for the list, rather than as a description on every row: repeated on each
+          message it would be read out twenty times and would treble the length of every line a
+          screen reader announces. */}
+      <p className="sr-only">
+        Use the up and down arrows to move between messages, the right arrow to reach a message’s
+        actions, and Escape to return to the composer.
+      </p>
+
+      {/* The listener is on the list rather than on every row: the event bubbles from whichever
+          row holds the focus, so one handler does what N would. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
       <ol
+        ref={thread.list}
         role="list"
         aria-label="Messages"
+        onScroll={() => {
+          const el = thread.list.current;
+          if (el === null) return;
+
+          // The 64 pixels are a tolerance, not a measurement: a thread scrolled to within a line
+          // of the end is one the reader is following, and browsers land a pixel or two short of
+          // `scrollHeight` often enough that an exact test would report "not at the end" for a
+          // list that visibly is.
+          stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64;
+        }}
+        onFocus={thread.onFocus}
+        onKeyDown={(event) => {
+          const row = (event.target as HTMLElement).closest<HTMLElement>("[data-row]");
+
+          // Right steps down a level, into the actions belonging to the focused message. Only
+          // from the row itself: inside the bar, Left and Right belong to the bar.
+          if (event.key === "ArrowRight" && event.target === row) {
+            const first = row?.querySelector<HTMLElement>("[data-actions] button");
+            if (first === null || first === undefined) return;
+
+            event.preventDefault();
+            first.focus();
+            return;
+          }
+
+          // And back up. Escape does the same from inside the bar, then leaves the thread
+          // entirely on a second press — which is the one gesture that has to work when somebody
+          // has arrowed into a message and wants to go back to writing.
+          if ((event.key === "ArrowLeft" || event.key === "Escape") && event.target !== row) {
+            if (row === null) return;
+
+            event.preventDefault();
+            // `stopPropagation` for the same reason the rail's filter does it: `DetailPanel`
+            // listens for Escape on `window`, and stepping out of an action bar is not a request
+            // to close the details column.
+            event.stopPropagation();
+            row.focus();
+            return;
+          }
+
+          if (event.key === "Escape" && event.target === row) {
+            event.preventDefault();
+            event.stopPropagation();
+            document.getElementById(COMPOSER_ID)?.focus();
+            return;
+          }
+
+          thread.onKeyDown(event);
+        }}
         className="min-h-0 flex-1 overflow-y-auto py-pane"
       >
         {rows.map(({ key, message, opensDay, continues, opensUnread }) => {
@@ -395,7 +507,15 @@ export function Messages({
               )}
 
               <li
+                data-row={key}
+                // The roving tabindex: one row of the thread is reachable with Tab, and which one
+                // it is follows wherever the reader last was.
+                tabIndex={thread.at === key ? 0 : -1}
                 className={cn(
+                  // The row is focusable now, so it needs to say when it is focused. Inset, like
+                  // the rail's rows, because an outline drawn outside a full-width row is clipped
+                  // by the scrolling list.
+                  "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)",
                   // `relative` is load-bearing: the action bar is absolutely positioned against
                   // this row so that it can overlap the row's top edge without reserving height
                   // inside it. Revealing it by reflow made the thread jump under the pointer.
@@ -577,6 +697,12 @@ export function Messages({
                   come back on hover, on keyboard focus anywhere inside the row, and unconditionally
                   on a touch device, where there is no other way to ask for them.
 
+                  `group-focus-within:` and not `focus-within:`, which is the difference between
+                  "the focus is inside this bar" and "the focus is inside this row". The row is
+                  what carries the roving tabindex, so with the old rule pressing Right on a
+                  focused message stepped into a bar that was still at zero opacity: the buttons
+                  were reachable and invisible, which is worse than either.
+
                   Anchored over the row's top edge rather than laid out under the text: a bar in
                   the flow claimed a line of height on every message whether or not it was wanted,
                   and it put the controls of the message above within a few pixels of the text of
@@ -590,7 +716,7 @@ export function Messages({
                   // and it faded out from under the surface it had just opened. The trigger keeps
                   // `data-state="open"` for as long as the panel is up, which is exactly the
                   // condition wanted.
-                  className="absolute -top-3 right-pane z-(--z-index-sticky) flex items-center gap-tight rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-tight text-body shadow-menu opacity-0 transition-opacity duration-(--duration-quick) ease-out focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100 motion-reduce:transition-none touch:opacity-100"
+                  className="absolute -top-3 right-pane z-(--z-index-sticky) flex items-center gap-tight rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-tight text-body shadow-menu opacity-0 transition-opacity duration-(--duration-quick) ease-out group-focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100 motion-reduce:transition-none touch:opacity-100"
                   data-actions
                 >
                   {quick.map((emoji) => (

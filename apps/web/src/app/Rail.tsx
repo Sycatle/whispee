@@ -1,10 +1,10 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 
 import { PresenceDot } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
 import { compactNameOf, nameMatches, nameOf } from "@/lib/naming";
 import { roster } from "@/lib/roster";
-import { move } from "@/lib/roving";
+import { useRoving } from "@/lib/useRoving";
 import type { ConversationView } from "@/lib/session";
 import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
@@ -27,64 +27,6 @@ const FILTER_TOGGLE_ID = "rail-filter-toggle";
 
 /** And the field itself, so the top of the list can hand the focus back up to it. */
 const FILTER_FIELD_ID = "rail-filter";
-
-/**
- * One list, one tab stop.
- *
- * Every row in this column used to be a tab stop of its own, so reaching the composer from the
- * rail meant crossing every conversation on the way — the reason the shell grew a "Skip to
- * conversation" button, which routes around the problem rather than removing it. With a roving
- * tabindex the list is one stop and the arrows move within it.
- *
- * The ring is computed from React's own arrays rather than read back out of the DOM. The rail
- * already holds `listed` and `contacts`, so the identifiers are to hand and are right on the
- * first paint, before any element exists to query. The DOM is touched for one thing only, which
- * is the one thing it is needed for: moving the focus.
- *
- * `preferred` is where Tab lands when the user has not arrowed anywhere yet — the open
- * conversation, so that entering the rail puts you where you already are. `anchor` takes over
- * once they have, and is dropped the moment the filter excludes it, which is what makes typing
- * in the filter and pressing Down land on the first of what is left.
- */
-function useRoving(ids: readonly string[], preferred: string | null) {
-  const list = useRef<HTMLUListElement>(null);
-  const [anchor, setAnchor] = useState<string | null>(null);
-
-  const held = (id: string | null) => (id !== null && ids.includes(id) ? id : null);
-  const at = held(anchor) ?? held(preferred) ?? ids[0] ?? null;
-
-  const focus = (id: string) => {
-    setAnchor(id);
-    // `CSS.escape`: a conversation key is hex and a handle is not, and a selector built from
-    // somebody else's handle is a selector built from input we did not choose.
-    list.current?.querySelector<HTMLElement>(`[data-row="${CSS.escape(id)}"]`)?.focus();
-  };
-
-  const onKeyDown = (event: React.KeyboardEvent) => {
-    const next = move(ids, at, event.key);
-    if (next === null) return;
-
-    // Only once a move actually happened: at the bottom of the list ArrowDown has to stay with
-    // the browser, or the list becomes a place the page can no longer be scrolled from.
-    event.preventDefault();
-    focus(next);
-  };
-
-  /**
-   * The anchor follows the focus, wherever the focus came from.
-   *
-   * Tracking it only in `onKeyDown` would mean a row reached with the mouse leaves the tab stop
-   * somewhere else, so the next Tab into the rail lands on a row nobody has touched. Focus is the
-   * one event every route into a row shares — click, arrow, and `focus()` from the filter alike —
-   * so reading the identifier off it covers all three with one listener.
-   */
-  const onFocus = (event: React.FocusEvent) => {
-    const row = (event.target as HTMLElement).closest<HTMLElement>("[data-row]")?.dataset.row;
-    if (row !== undefined) setAnchor(row);
-  };
-
-  return { list, at, onKeyDown, onFocus, focus, first: ids[0] ?? null };
-}
 
 /**
  * The left column: everybody this account knows, in one scroll.
@@ -274,11 +216,11 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
   // instead of falling into Contacts, which is a section boundary the eye can see and the arrow
   // keys should not cross silently. The two `<summary>` elements between them stay ordinary tab
   // stops, so Tab remains the way across.
-  const rows = useRoving(
+  const rows = useRoving<HTMLUListElement>(
     listed.map((view) => view.key),
     currentKey,
   );
-  const people = useRoving(contacts, null);
+  const people = useRoving<HTMLUListElement>(contacts, null);
 
   /**
    * Every handle the rail draws, in one set.

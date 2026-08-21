@@ -248,13 +248,10 @@ export function Conversation({ view }: { view: ConversationView }) {
         />
       ))}
 
-      <Messages
-        session={session}
-        view={view}
-        onChanged={bump}
-        onError={(message) => report.error(message)}
-        onReplyTo={setReplyTo}
-      />
+      {/* No `session`, no `onChanged`, no `onError`: the thread reaches all three through the
+          hooks now. What is left is what this component genuinely decides — which conversation
+          is on screen, and where a reply goes once one is asked for. */}
+      <Messages view={view} onReplyTo={setReplyTo} />
 
       {/* Off screen, never empty of purpose: it exists so that a reader already in this thread is
           told when it grows. */}

@@ -4,30 +4,50 @@
  * Split out of `page.tsx` once reactions turned a flat list into a tree: a reaction is not a
  * bubble, it is an annotation on another bubble, and the same goes for the quote in a reply.
  * Keeping that logic in the page render mixed the app layout with the shape of a conversation.
+ *
+ * # It reads the session rather than receiving it
+ *
+ * `session`, `onChanged` and `onError` used to arrive as props. They are now `useSession()`,
+ * `useBump()` and `useReport()` — the rule at the top of `state/SessionProvider.tsx` and the
+ * reason for it: a mutable object handed down a prop is only as fresh as its parent's render
+ * schedule. `view` stays a prop because the shell decides which conversation this is, and
+ * `onReplyTo` stays a prop because the composer that answers it lives in the parent.
+ *
+ * # What is deliberately not here
+ *
+ * Virtualisation. Every message in the thread is in the DOM, and a thread of ten thousand is
+ * ten thousand nodes. The windowing belongs in a module of its own alongside the grouping rules
+ * it has to respect; anticipating it here would only produce a shape to undo.
  */
 import { Fragment, useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
 import { continues, dayLabel, opensDay, timeOf } from "@/lib/datetime";
-import type { ConversationView, Session } from "@/lib/session";
+import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
+import { useReport } from "@/state/report";
+import { useBump, useSession } from "@/state/SessionProvider";
+import { Avatar } from "@/ui/Avatar";
+import { Banner } from "@/ui/Banner";
+import { Button } from "@/ui/Button";
+import { cn } from "@/ui/cn";
+import { IconButton } from "@/ui/IconButton";
+import { Spinner } from "@/ui/Spinner";
+import { Tooltip } from "@/ui/Tooltip";
 
 /** Palette offered on hover. Deliberately short: a full picker is a different subject. */
 const EMOJIS = ["👍", "❤️", "😂", "😮", "🙏"];
 
 export function Messages({
-  session,
   view,
-  onChanged,
-  onError,
   onReplyTo,
 }: {
-  session: Session;
   view: ConversationView;
-  onChanged: () => void;
-  onError: (message: string) => void;
   onReplyTo: (seq: number) => void;
 }) {
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
   const bottom = useRef<HTMLDivElement>(null);
 
   const messages = view.messages.slice().sort((a, b) => a.seq - b.seq);
@@ -64,6 +84,29 @@ export function Messages({
    */
   const authorOf = (message: (typeof visible)[number]) =>
     message.mine ? session.handle : message.sender;
+
+  /**
+   * Is there more than one person on the other side?
+   *
+   * Counted in devices rather than in accounts, which is the pre-existing test and is kept on
+   * purpose: `peers` is restored with the conversation, `accounts` is empty until the first poll
+   * answers. Deciding the layout from `accounts` would draw a one-to-one thread for a second and
+   * then reflow the whole list into a group one.
+   *
+   * What it does not solve: a one-to-one with someone who has two devices counts as a group, so
+   * that thread carries names and avatars it does not need. Wrong in the harmless direction —
+   * redundant identification rather than absent identification.
+   */
+  const group = view.peers.length > 1;
+
+  /**
+   * The fingerprint the author's avatar is drawn from, or `undefined`.
+   *
+   * `undefined` is a supported answer, not a failure: `Avatar` then draws the neutral
+   * placeholder rather than guessing from the handle, which is the whole argument in that file.
+   */
+  const seedOf = (handle: string | null) =>
+    handle === null ? undefined : view.accounts.find((a) => a.handle === handle)?.fingerprint;
 
   // Read once for the whole render: `dayLabel` compares calendar days, and asking the clock again
   // per message would let a thread rendered across midnight label two neighbours inconsistently.
@@ -103,23 +146,31 @@ export function Messages({
   // read. The browser already throttles hidden tabs, which roughly produces the right behaviour
   // — but leaning on that side effect would make a privacy rule depend on a battery-saving
   // heuristic.
+  //
+  // It fires on mount and on `visibilitychange`, and deliberately **not** on the visibility of
+  // individual bubbles. An `IntersectionObserver` would make a read receipt report *which*
+  // message the reader looked at and for how long — a change to what a receipt discloses,
+  // dressed up as an optimisation.
   useEffect(() => {
     const mark = () => {
       if (document.visibilityState === "visible") {
         session.markRead(view);
-        onChanged();
+        bump();
       }
     };
 
     mark();
     document.addEventListener("visibilitychange", mark);
     return () => document.removeEventListener("visibilitychange", mark);
-  }, [session, view, view.contentCursor, onChanged]);
+  }, [session, view, view.contentCursor, bump]);
 
   const react = (seq: number, emoji: string) => {
-    session.reactTo(view, seq, emoji).then(onChanged).catch((e: unknown) => {
-      onError(e instanceof Error ? e.message : String(e));
-    });
+    session
+      .reactTo(view, seq, emoji)
+      .then(bump)
+      .catch((e: unknown) => {
+        report.error(e instanceof Error ? e.message : String(e));
+      });
   };
 
   const isTyping = session.typingIn(view);
@@ -144,7 +195,29 @@ export function Messages({
 
   return (
     <>
-      <ol className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4">
+      {/*
+        The severed ratchet, said out loud.
+
+        Until now `view.stale` stopped the polling and rendered nothing, so the conversation
+        simply went quiet — the doc comment on the flag calls that the lesser of two wrongs and
+        still a wrong. This is the sentence that was owed.
+
+        Above the list rather than inside it, and not dismissible: the condition is still true,
+        and a banner waved away would leave a thread that looks alive and is not. It promises no
+        recovery, because none is implemented.
+      */}
+      {view.stale === true && (
+        <div className="p-pane pb-0">
+          <Banner tone="danger" title="This conversation stops here on this device">
+            Messages waiting on the server were deleted before this device could fetch them, and
+            they are part of what decrypts everything sent afterwards. Nothing further will arrive
+            in this thread here. What is already on screen stays readable, and the conversation
+            keeps working on your other devices and for the people you were talking to.
+          </Banner>
+        </div>
+      )}
+
+      <ol className="min-h-0 flex-1 space-y-snug overflow-y-auto p-pane">
         {visible.map((message, index) => {
           const before = index === 0 ? undefined : visible[index - 1];
           const heading = opensDay(message.sentAt, before?.sentAt) ? message.sentAt : undefined;
@@ -165,6 +238,17 @@ export function Messages({
           const cite = message.content.kind === "reply" ? message.content.target : null;
           const emojis = [...(reactions.get(message.seq)?.values() ?? [])];
 
+          /**
+           * Secondary text inside a bubble: the author's name, the quote, the time row.
+           *
+           * Muted on a received bubble, and **not** muted on one of ours. There is no muted ink
+           * defined against the accent, and the `opacity-70` this replaces put 12px text at
+           * roughly 3:1 on it — the same failure that cost the tree its `text-white`. Full
+           * `accent-ink` is the only honest answer there; the hierarchy is carried by size and
+           * position instead of by contrast.
+           */
+          const secondary = message.mine ? null : "text-(--color-ink-muted)";
+
           return (
             <Fragment key={message.seq}>
               {/*
@@ -177,7 +261,7 @@ export function Messages({
               {opensUnread && (
                 <li
                   role="separator"
-                  className="flex items-center gap-2 py-1 text-xs text-(--color-accent)"
+                  className="flex items-center gap-snug py-tight text-caption text-(--color-accent)"
                 >
                   <span className="h-px flex-1 bg-(--color-accent)/40" />
                   New messages
@@ -186,111 +270,182 @@ export function Messages({
               )}
 
               {heading !== undefined && (
-                <li role="separator" className="py-2 text-center">
-                  <span className="rounded-full bg-(--color-surface-raised) px-3 py-1 text-xs text-(--color-ink-muted)">
+                <li role="separator" className="py-snug text-center">
+                  <span className="rounded-(--radius-pill) bg-(--color-surface-raised) px-gutter py-tight text-caption text-(--color-ink-muted)">
                     {dayLabel(heading, now)}
                   </span>
                 </li>
               )}
 
-              <li className={`group ${message.mine ? "text-right" : ""} ${grouped ? "-mt-1" : ""}`}>
-              <div
-                // `whitespace-pre-wrap`: the composer accepts line breaks, and HTML collapses
-                // them. Without this a message written as a list arrives as one run-on sentence —
-                // the text is intact on the wire and mangled only on screen, which is the kind of
-                // loss nobody thinks to check.
-                className={`inline-block max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-lg px-3 py-2 text-left text-sm ${
-                  message.mine
-                    ? "bg-(--color-accent) text-(--color-accent-ink)"
-                    : "bg-(--color-surface-raised) border border-(--color-border-subtle)"
-                }`}
-              >
-                {/* The name is announced once per turn, not once per line: a burst of three
-                    sentences is one person speaking, not three announcements. */}
-                {!message.mine && view.peers.length > 1 && !grouped && (
-                  <span className="block text-xs opacity-70">{message.sender ?? "unknown"}</span>
+              <li
+                className={cn(
+                  "group flex items-end gap-snug",
+                  message.mine && "flex-row-reverse",
+                  grouped && "-mt-1",
                 )}
+              >
+                {/*
+                  The author's face, in a group and only there.
 
-                {cite !== null && (
-                  <span className="mb-1 block border-l-2 border-current/40 pl-2 text-xs opacity-70">
-                    {textOf(cite)}
+                  In a one-to-one the same two drawings alternate down the whole thread and
+                  identify nobody: the header already names who this is, and the side of the pane
+                  says which of the two is speaking. So the avatar is spent where it answers a
+                  question the reader actually has — who, out of several, said this.
+
+                  A fixed-width gutter holds the place inside a run of messages, so a burst of
+                  three sentences stays one column rather than stepping sideways under its own
+                  first line. `sm` and not `md`: the proof strip rides under an `md` avatar, and
+                  repeating a verification pattern on every bubble would turn evidence into
+                  wallpaper. It belongs in the detail column, once.
+                */}
+                {group && !message.mine && (
+                  <span className="w-6 shrink-0">
+                    {!grouped && (
+                      <Avatar
+                        seed={seedOf(message.sender)}
+                        label={`@${message.sender ?? "unknown"}`}
+                        size="sm"
+                      />
+                    )}
                   </span>
                 )}
 
-                {attachment ? (
-                  <Attachment
-                    attachment={attachment}
-                    onOpen={() => session.openAttachment(view, attachment)}
-                  />
-                ) : message.content.kind === "text" ? (
-                  message.content.text
-                ) : message.content.kind === "reply" ? (
-                  message.content.text
-                ) : null}
-
-                {/*
-                  Time and receipt on one line under the text.
-
-                  `<time>` with a machine-readable `dateTime`, so a screen reader announces the
-                  full date rather than reading "14:02" as two numbers, and the tooltip carries
-                  the day a bubble in the middle of a thread does not repeat.
-
-                  Nothing is shown when the sender did not stamp. An empty slot is honest; a
-                  guessed hour is not.
-                */}
-                <span className="mt-0.5 flex items-center justify-end gap-1 text-xs opacity-60">
-                  {message.sentAt !== undefined && (
-                    <time dateTime={new Date(message.sentAt).toISOString()} title={new Date(message.sentAt).toLocaleString()}>
-                      {timeOf(message.sentAt)}
-                    </time>
+                <div
+                  className={cn(
+                    "flex min-w-0 max-w-[75%] flex-col",
+                    message.mine && "items-end",
                   )}
-                  {message.mine && <Status state={session.statusOf(view, message.seq)} />}
-                </span>
-              </div>
-
-              {emojis.length > 0 && (
-                <div className="mt-0.5 text-xs" aria-label="reactions">
-                  {emojis.join(" ")}
-                </div>
-              )}
-
-              {/*
-                Reactions and Reply used to be `hidden group-hover:flex`, which put them out of
-                reach of everyone without a mouse: `display: none` takes an element out of the tab
-                order, and a finger has no hover to give. They were, in practice, features only
-                some people had.
-
-                Faded rather than hidden, so the buttons stay focusable and the row keeps its
-                height — revealing them by reflow made the thread jump under the pointer. They
-                come back on hover, on keyboard focus anywhere inside the row, and unconditionally
-                on a touch device, where there is no other way to ask for them.
-              */}
-              <div
-                className={`mt-0.5 flex gap-1 text-xs opacity-0 transition-opacity motion-reduce:transition-none focus-within:opacity-100 group-hover:opacity-100 touch:opacity-100 ${
-                  message.mine ? "justify-end" : ""
-                }`}
-                data-actions
-              >
-                {EMOJIS.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    onClick={() => react(message.seq, emoji)}
-                    className="rounded px-1 hover:bg-(--color-surface-raised) touch:min-h-11 touch:min-w-11"
-                    title={`React ${emoji}`}
-                    aria-label={`React with ${emoji}`}
-                  >
-                    {emoji}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => onReplyTo(message.seq)}
-                  className="rounded px-1 opacity-70 hover:bg-(--color-surface-raised) touch:min-h-11"
                 >
-                  Reply
-                </button>
-              </div>
+                  <div
+                    // `whitespace-pre-wrap`: the composer accepts line breaks, and HTML collapses
+                    // them. Without this a message written as a list arrives as one run-on
+                    // sentence — the text is intact on the wire and mangled only on screen, which
+                    // is the kind of loss nobody thinks to check.
+                    className={cn(
+                      "whitespace-pre-wrap wrap-anywhere rounded-bubble px-gutter py-snug text-left text-body",
+                      message.mine
+                        ? "bg-(--color-accent) text-(--color-accent-ink)"
+                        : "border border-(--color-border-subtle) bg-(--color-surface-raised)",
+                    )}
+                  >
+                    {/* The name is announced once per turn, not once per line: a burst of three
+                        sentences is one person speaking, not three announcements. */}
+                    {!message.mine && group && !grouped && (
+                      <span className={cn("block text-caption font-medium", secondary)}>
+                        {message.sender ?? "unknown"}
+                      </span>
+                    )}
+
+                    {cite !== null && (
+                      <span
+                        // The rule keeps `border-current/40`: an opacity on a hairline is not an
+                        // opacity on text, and it is the one way to draw a divider that works on
+                        // both the accent bubble and the raised one.
+                        className={cn(
+                          "mb-tight block border-l-2 border-current/40 pl-snug text-caption",
+                          secondary,
+                        )}
+                      >
+                        {textOf(cite)}
+                      </span>
+                    )}
+
+                    {attachment ? (
+                      <Attachment
+                        attachment={attachment}
+                        onOpen={() => session.openAttachment(view, attachment)}
+                      />
+                    ) : message.content.kind === "text" ? (
+                      message.content.text
+                    ) : message.content.kind === "reply" ? (
+                      message.content.text
+                    ) : null}
+
+                    {/*
+                      Time and receipt on one line under the text.
+
+                      `<time>` with a machine-readable `dateTime`, so a screen reader announces
+                      the full date rather than reading "14:02" as two numbers, and the tooltip
+                      carries the day a bubble in the middle of a thread does not repeat.
+
+                      Nothing is shown when the sender did not stamp. An empty slot is honest; a
+                      guessed hour is not.
+                    */}
+                    <span
+                      className={cn(
+                        "mt-tight flex items-center justify-end gap-tight text-caption",
+                        secondary,
+                      )}
+                    >
+                      {message.sentAt !== undefined && (
+                        <time
+                          dateTime={new Date(message.sentAt).toISOString()}
+                          title={new Date(message.sentAt).toLocaleString()}
+                        >
+                          {timeOf(message.sentAt)}
+                        </time>
+                      )}
+                      {message.mine && <Status state={session.statusOf(view, message.seq)} />}
+                    </span>
+                  </div>
+
+                  {emojis.length > 0 && (
+                    <div
+                      className="mt-tight flex flex-wrap gap-tight text-caption"
+                      aria-label="reactions"
+                    >
+                      {emojis.map((emoji, at) => (
+                        <span
+                          // Two people can send the same emoji, so the emoji is not a key. The
+                          // position in an already-deduplicated list is.
+                          key={at}
+                          className="rounded-(--radius-pill) border border-(--color-border-subtle) bg-(--color-surface-raised) px-tight"
+                        >
+                          {emoji}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/*
+                    Reactions and Reply used to be `hidden group-hover:flex`, which put them out of
+                    reach of everyone without a mouse: `display: none` takes an element out of the tab
+                    order, and a finger has no hover to give. They were, in practice, features only
+                    some people had.
+
+                    Faded rather than hidden, so the buttons stay focusable and the row keeps its
+                    height — revealing them by reflow made the thread jump under the pointer. They
+                    come back on hover, on keyboard focus anywhere inside the row, and unconditionally
+                    on a touch device, where there is no other way to ask for them.
+                  */}
+                  <div
+                    className={cn(
+                      "mt-tight flex items-center gap-tight text-body opacity-0 transition-opacity duration-(--duration-quick) ease-out motion-reduce:transition-none focus-within:opacity-100 group-hover:opacity-100 touch:opacity-100",
+                      message.mine && "justify-end",
+                    )}
+                    data-actions
+                  >
+                    {EMOJIS.map((emoji) => (
+                      <Tooltip key={emoji} label={`React ${emoji}`}>
+                        <IconButton
+                          label={`React with ${emoji}`}
+                          icon={emoji}
+                          size="sm"
+                          onClick={() => react(message.seq, emoji)}
+                        />
+                      </Tooltip>
+                    ))}
+                    {/*
+                      A word and not a glyph, alone in this row. `ui/Icon.tsx` is a closed
+                      inventory and holds no reply arrow; borrowing the back chevron would name
+                      the wrong action, and widening the table for one call site is the growth
+                      that file exists to prevent. "Reply" is also the shorter thing to read.
+                    */}
+                    <Button variant="quiet" size="sm" onClick={() => onReplyTo(message.seq)}>
+                      Reply
+                    </Button>
+                  </div>
+                </div>
               </li>
             </Fragment>
           );
@@ -301,19 +456,22 @@ export function Messages({
           mistake one for a message the server has numbered.
         */}
         {view.outbox.map((entry) => (
-          <li key={entry.localId} className="text-right">
+          <li key={entry.localId} className="flex justify-end">
             <div
-              className={`inline-block max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-bubble px-gutter py-snug text-left text-body ${
+              className={cn(
+                "max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-bubble px-gutter py-snug text-left text-body",
                 entry.state === "failed"
                   ? "bg-(--color-danger) text-(--color-state-ink)"
-                  : "bg-(--color-accent) text-(--color-accent-ink) opacity-60"
-              }`}
+                  : // The fade is the message: this one is not acquired yet. Not a muted ink —
+                    // an ink says what something is, and this says how far along it is.
+                    "bg-(--color-accent) text-(--color-accent-ink) opacity-60",
+              )}
             >
               {entry.text}
-              <span className="mt-0.5 flex items-center justify-end gap-2 text-xs">
+              <span className="mt-tight flex items-center justify-end gap-snug text-caption">
                 <time dateTime={new Date(entry.sentAt).toISOString()}>{timeOf(entry.sentAt)}</time>
                 {entry.state === "sending" ? (
-                  <span aria-label="sending">…</span>
+                  <Spinner size="sm" label="sending" />
                 ) : (
                   <>
                     {/* Named next to the message rather than in a banner: a banner at the bottom
@@ -321,15 +479,15 @@ export function Messages({
                     <span>not sent</span>
                     <button
                       type="button"
-                      onClick={() => void session.retry(view, entry.localId).then(onChanged)}
+                      onClick={() => void session.retry(view, entry.localId).then(bump)}
                       className="underline"
                     >
                       Retry
                     </button>
                     <button
                       type="button"
-                      onClick={() => void session.discard(view, entry.localId).then(onChanged)}
-                      className="underline opacity-80"
+                      onClick={() => void session.discard(view, entry.localId).then(bump)}
+                      className="underline"
                     >
                       Discard
                     </button>
@@ -352,7 +510,7 @@ export function Messages({
         woken by the timer above.
       */}
       {isTyping.length > 0 && (
-        <p className="px-4 pb-1 text-xs opacity-60" aria-live="polite">
+        <p className="px-pane pb-tight text-caption text-(--color-ink-muted)" aria-live="polite">
           {isTyping.map((handle) => `@${handle}`).join(", ")}{" "}
           {isTyping.length > 1 ? "are typing" : "is typing"}…
         </p>
@@ -367,6 +525,14 @@ export function Messages({
  * Three states and not two: "sent" means the server accepted it, "delivered" that a device
  * picked it up, "read" that a person had it on screen. Conflating them would pass a powered-on
  * phone off as human attention.
+ *
+ * The three used to be told apart by opacity, which is the thing this pass is removing from
+ * text: dimmed 12px ink on the accent bubble was under 3:1, so the distinction was invisible to
+ * exactly the readers it was meant for. Weight replaces it.
+ *
+ * What that does not solve: `delivered` and `read` still share the `✓✓` glyph and now differ
+ * only by a stroke. The accessible name and `title` carry the difference in full, and there is
+ * no colour to spend on it — a filled bubble already owns its foreground.
  */
 function Status({ state }: { state: "sent" | "delivered" | "read" }) {
   const label = { sent: "sent", delivered: "delivered", read: "read" }[state];
@@ -375,7 +541,7 @@ function Status({ state }: { state: "sent" | "delivered" | "read" }) {
   return (
     <span
       // No margin of its own: it now sits in the flex row that carries the time, which spaces it.
-      className={state === "read" ? "opacity-100" : "opacity-60"}
+      className={state === "read" ? "font-medium" : undefined}
       title={label}
       aria-label={label}
       data-receipt={state}

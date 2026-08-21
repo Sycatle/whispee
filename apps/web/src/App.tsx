@@ -1,13 +1,52 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { Shell } from "@/app/Shell";
 import { Unlock } from "@/components/Lock";
-import { Conversation } from "@/components/Conversation";
-import { ConversationList } from "@/components/ConversationList";
-import { Onboarding } from "@/components/Onboarding";
 import { MigrationBanner } from "@/components/Migration";
-import { type ConversationView, type ProposedMigration, Session, start } from "@/lib/session";
-import { useDuo } from "@/lib/duo";
-import { RELOCK_MS, observeIdle, observeLifecycle, networkReported } from "@/lib/lifecycle";
+import { Onboarding } from "@/components/Onboarding";
+import { RELOCK_MS, networkReported, observeIdle, observeLifecycle } from "@/lib/lifecycle";
 import { countUnreadInTitle, createNotifier } from "@/lib/notifications";
+import { type ProposedMigration, Session, start } from "@/lib/session";
+import { RouterProvider, useNavigate } from "@/routes/Router";
+import { ReportProvider, useReport, useReported } from "@/state/report";
+import { Revision } from "@/state/revision";
+import { SessionProvider, useBump, useSession, type SessionStore } from "@/state/SessionProvider";
+import { Banner } from "@/ui/Banner";
+import { OverlayProvider } from "@/ui/Overlays";
+import { Toasts } from "@/ui/Toast";
+import { TooltipProvider } from "@/ui/Tooltip";
+
+/**
+ * Gates, providers, and the lifecycle nobody else can own.
+ *
+ * # What is left here, and what left
+ *
+ * Everything this file used to draw is gone: the header, the conversation list, the settings
+ * buttons, the layout. What remains is what genuinely has nowhere else to live.
+ *
+ * **Three gates.** `busy`, `locked && !session` and `!session` are not routes and must not
+ * become ones. They are states in which navigation is moot: the absence of a session is not a
+ * place one goes to. `routes/route.ts` says so at length, and one consequence is free — a
+ * re-lock on `#/c/abc` leaves the URL alone, so the password drops the user back into their
+ * conversation.
+ *
+ * **Five providers**, in this order, because each one needs the ones outside it: the report
+ * channel wraps the gates so that a failed restore can speak; the session, then the router, then
+ * the overlay container, then tooltips.
+ *
+ * **The lifecycle effects**, unchanged in substance. The stream, the poll, the two lock paths,
+ * the notifications, the unread count in the title, the outbox flush. Their inputs and outputs
+ * were rewired — `onChanged` became `useBump()`, `onError` became `useReport()`, selecting a
+ * conversation became a navigation — and nothing about *when* they run was touched.
+ *
+ * # What was deleted outright
+ *
+ * The hand-written Android back gesture (`App.tsx:196-221` before this batch). It pushed a
+ * synthetic history entry and carried a flag so the cleanup would not pop one too many. Two
+ * things cannot share one history stack: both would answer the same `popstate`, and the URL and
+ * the React state would drift apart within a single gesture. Every guarantee that block made is
+ * now a property of the hash router, mapped one by one in the doc comment of `routes/Router.tsx`.
+ */
 
 /**
  * Polling interval, now a safety net rather than an engine.
@@ -22,9 +61,21 @@ import { countUnreadInTitle, createNotifier } from "@/lib/notifications";
 const POLL_MS = 30_000;
 
 export function App() {
+  return (
+    <ReportProvider>
+      <Boot />
+    </ReportProvider>
+  );
+}
+
+/**
+ * Restoring, unlocking, onboarding — and then handing over.
+ *
+ * It is a component of its own rather than the body of `App` for one reason: the gates need to
+ * report a failed restore, and `useReport()` only exists below `ReportProvider`.
+ */
+function Boot() {
   const [session, setSession] = useState<Session | null>(null);
-  const [active, setActive] = useState<ConversationView | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   /** Why migration is impossible, if it is. Informational: nothing is broken. */
   const [fallback, setFallback] = useState<string | null>(null);
@@ -35,36 +86,23 @@ export function App() {
    * "open the app" asks for that.
    */
   const [migration, setMigration] = useState<ProposedMigration | null>(null);
-  /**
-   * Does the system report a connection?
-   *
-   * Shown because `false` is trustworthy information and explains every failure that follows. The
-   * opposite proves nothing — a captive portal reports itself online — so nothing is prevented on
-   * the strength of this value.
-   */
-  const [offline, setOffline] = useState(false);
   const [locked, setLocked] = useState(false);
-  const [, forceRender] = useState(0);
-  const duo = useDuo();
-  const refresh = useCallback(() => forceRender((n) => n + 1), []);
+  const report = useReport();
+  const reported = useReported();
 
   /**
-   * Notices for messages that arrived while the user was elsewhere.
+   * One counter for the whole session, created once and never replaced.
    *
-   * Built once and kept in a ref: it holds the standing notices, so rebuilding it on a render
-   * would lose the handles and stop a conversation being able to retract its own notice when it
-   * is opened.
+   * A new `Revision` per render would hand `useSyncExternalStore` a new `subscribe` every time
+   * and resubscribe the entire tree on every keystroke. It is paired with the session in a store
+   * object for the same reason: the provider takes one value, and remaking it would re-render
+   * every consumer of the context for nothing.
    */
-  const notifier = useRef<ReturnType<typeof createNotifier>>(undefined);
-  const title = useRef<ReturnType<typeof countUnreadInTitle>>(undefined);
-  /**
-   * The content cursor of each conversation at the previous render.
-   *
-   * An arrival is a cursor that moved, which is the one signal available here that does not
-   * depend on guessing what the poll did. Only messages move it — receipts do not, by design —
-   * so a quiet exchange of acknowledgements raises nothing.
-   */
-  const seen = useRef(new Map<string, number>());
+  const revision = useMemo(() => new Revision(), []);
+  const store = useMemo<SessionStore | null>(
+    () => (session ? { session, revision } : null),
+    [session, revision],
+  );
 
   /**
    * Closing a locked session again.
@@ -80,7 +118,6 @@ export function App() {
    */
   const relock = useCallback(() => {
     setSession(null);
-    setActive(null);
     setLocked(true);
   }, []);
 
@@ -107,10 +144,106 @@ export function App() {
         // Unreadable state must not block the startup screen: better to offer a fresh identity
         // than to leave an eternal "Loading…".
         console.error("could not restore session", e);
-        setError("Could not restore the previous session. Erase the identity to start over.");
+        report.error("Could not restore the previous session. Erase the identity to start over.");
       })
       .finally(() => setBusy(false));
-  }, []);
+  }, [report]);
+
+  if (busy) return <Centered>Loading…</Centered>;
+
+  if (locked && !store) {
+    return (
+      <Unlock
+        onUnlocked={(s, proposed) => {
+          setSession(s);
+          if (proposed) setMigration(proposed);
+          setLocked(false);
+        }}
+        onError={report.error}
+      />
+    );
+  }
+
+  if (!store) {
+    return <Onboarding onReady={setSession} onError={report.error} error={reported.error} />;
+  }
+
+  return (
+    <SessionProvider value={store}>
+      <RouterProvider>
+        <OverlayProvider>
+          <TooltipProvider>
+            <Frame
+              relock={relock}
+              migration={migration}
+              onMigrated={(fresh) => {
+                setMigration(null);
+                setSession(fresh);
+              }}
+              fallback={fallback}
+              onDismissFallback={() => setFallback(null)}
+            />
+          </TooltipProvider>
+        </OverlayProvider>
+      </RouterProvider>
+    </SessionProvider>
+  );
+}
+
+/**
+ * The running application: the lifecycle effects, the shell, and the strips nobody navigates to.
+ *
+ * Inside every provider on purpose. These effects report errors, announce mutations and open
+ * conversations, which are three hooks that do not exist above.
+ */
+function Frame({
+  relock,
+  migration,
+  onMigrated,
+  fallback,
+  onDismissFallback,
+}: {
+  relock: () => void;
+  migration: ProposedMigration | null;
+  onMigrated: (session: Session) => void;
+  fallback: string | null;
+  onDismissFallback: () => void;
+}) {
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
+  const reported = useReported();
+  const navigate = useNavigate();
+  // Stable by construction, so the poll below can depend on it without restarting its interval
+  // every time a banner or a toast changes.
+  const { dismissError } = reported;
+
+  /**
+   * Does the system report a connection?
+   *
+   * Shown because `false` is trustworthy information and explains every failure that follows. The
+   * opposite proves nothing — a captive portal reports itself online — so nothing is prevented on
+   * the strength of this value.
+   */
+  const [offline, setOffline] = useState(false);
+
+  /**
+   * Notices for messages that arrived while the user was elsewhere.
+   *
+   * Built once and kept in a ref: it holds the standing notices, so rebuilding it on a render
+   * would lose the handles and stop a conversation being able to retract its own notice when it
+   * is opened.
+   */
+  const notifier = useRef<ReturnType<typeof createNotifier>>(undefined);
+  const title = useRef<ReturnType<typeof countUnreadInTitle>>(undefined);
+  /**
+   * The content cursor of each conversation at the previous render.
+   *
+   * An arrival is a cursor that moved, which is the one signal available here that does not
+   * depend on guessing what the poll did. Only messages move it — receipts do not, by design —
+   * so a quiet exchange of acknowledgements raises nothing.
+   */
+  const seen = useRef(new Map<string, number>());
 
   /**
    * Resuming after a spell in the background.
@@ -122,8 +255,6 @@ export function App() {
    * staying silently mute.
    */
   useEffect(() => {
-    if (!session) return;
-
     const stop = observeLifecycle((transition) => {
       if (transition.kind === "hidden") return;
 
@@ -136,19 +267,16 @@ export function App() {
         return;
       }
 
-      session.startStream(refresh);
+      session.startStream(bump);
       void session
         .poll()
-        .then(() => {
-          setError(null);
-          refresh();
-        })
-        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+        .then(bump)
+        .catch((e: unknown) => report.error(e instanceof Error ? e.message : String(e)));
 
       // Anything written while the network was gone goes out now. On a transition, not on a
       // timer: retrying on a schedule keeps hammering a server that is down, and the two moments
       // that actually change the answer — a reconnection, a resume — are reported right here.
-      void session.flushOutbox().then(refresh);
+      void session.flushOutbox().then(bump);
     });
 
     const lost = () => setOffline(true);
@@ -159,7 +287,7 @@ export function App() {
       stop();
       removeEventListener("offline", lost);
     };
-  }, [session, refresh, relock]);
+  }, [session, bump, report, relock]);
 
   /**
    * The same lock, for a device nobody has taken away.
@@ -173,55 +301,11 @@ export function App() {
    * dropping the session would only mean a reload with no gain.
    */
   useEffect(() => {
-    if (!session?.locked) return;
+    if (!session.locked) return;
     return observeIdle(relock, document);
   }, [session, relock]);
 
-  /**
-   * The system back gesture closes the conversation instead of quitting the app.
-   *
-   * # Why go through history
-   *
-   * On Android as in a mobile browser, the back gesture acts on history. A single-panel app that
-   * leaves history alone gets quit on the first back, when the user only wanted to return to their
-   * list — the most common reflex on mobile, and the one whose failure looks most like a crash.
-   *
-   * # The guard
-   *
-   * The pushed entry must be removed if the conversation closes some other way — via the header's
-   * back button, or because the screen got wider. The flag tells the two apart: without it, one
-   * `history.back()` too many would consume an entry that is not ours, and on Android that closes
-   * the app.
-   */
-  const pushedEntry = useRef(false);
-
   useEffect(() => {
-    // `active` and not the retained conversation: that one is only computed after the startup
-    // screens, hence after the hooks. The two coincide at one panel, where the selection falls
-    // back to nothing.
-    if (duo || !active) return;
-
-    history.pushState({ wac: "conversation" }, "");
-    pushedEntry.current = true;
-
-    const goBack = () => {
-      // Consumed by the system: there is nothing left to remove.
-      pushedEntry.current = false;
-      setActive(null);
-    };
-
-    addEventListener("popstate", goBack);
-    return () => {
-      removeEventListener("popstate", goBack);
-      if (pushedEntry.current) {
-        pushedEntry.current = false;
-        history.back();
-      }
-    };
-  }, [duo, active]);
-
-  useEffect(() => {
-    if (!session) return;
     let cancelled = false;
 
     const tick = async () => {
@@ -229,28 +313,15 @@ export function App() {
         await session.poll();
         if (cancelled) return;
 
-        // Open the first conversation while none is selected, **and only at two panels**.
-        //
-        // There it fills a void: a freshly paired device discovers its conversations during the
-        // poll, and without this it shows a list on the left and nothing on the right, as if the
-        // messages were not arriving when they are already decrypted.
-        //
-        // At one panel the same line does the opposite of what it intends: it opens a conversation
-        // nobody asked for and covers the list, which is the home screen. The only way out is the
-        // back button, on a screen the user never entered.
-        if (duo) {
-          setActive((current) => current ?? session.conversations.values().next().value ?? null);
-        }
-
         // A successful poll clears the previous error.
         //
         // Without this a passing incident — network cut, server restarted — leaves a red banner on
         // screen indefinitely while everything works again. An alert that outlives its cause
         // teaches people to ignore it, and the day it matters it has already become invisible.
-        setError(null);
-        refresh();
+        dismissError();
+        bump();
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) report.error(e instanceof Error ? e.message : String(e));
       }
     };
 
@@ -260,7 +331,7 @@ export function App() {
     // The stream is not a dependency of the poll: it triggers it earlier, nothing more. If it
     // never connects, the interval above is enough to keep everything working.
     session.startStream(() => {
-      if (!cancelled) refresh();
+      if (!cancelled) bump();
     });
 
     return () => {
@@ -268,16 +339,17 @@ export function App() {
       clearInterval(id);
       session.stopStream();
     };
-  }, [session, refresh, duo]);
+    // `duo` is deliberately absent, where it used to be listed: the poll no longer selects a
+    // conversation, so a resize no longer has any business restarting the interval and reopening
+    // the stream. Filling the empty right-hand panel is the shell's job now, and a layout change
+    // is not a reason to talk to the server.
+  }, [session, bump, report, dismissError]);
 
   useEffect(() => {
-    if (!session) return;
-
     notifier.current ??= createNotifier({
-      select: (key: string) => {
-        const view = session.conversations.get(key);
-        if (view) setActive(view);
-      },
+      // Opening the conversation is a navigation now, so a notice clicked from the system tray
+      // leaves an entry the back gesture can undo — and the URL says where we are.
+      select: (key: string) => navigate({ kind: "conversation", key }),
     });
     title.current ??= countUnreadInTitle();
 
@@ -291,11 +363,9 @@ export function App() {
       notices.dismissAll();
       counter.restore();
     };
-  }, [session]);
+  }, [session, navigate]);
 
   useEffect(() => {
-    if (!session) return;
-
     let unread = 0;
     for (const [key, view] of session.conversations) {
       unread += session.unreadIn(view);
@@ -326,175 +396,77 @@ export function App() {
     title.current?.show(unread);
   });
 
-  if (busy) return <Centered>Loading…</Centered>;
-
-  if (locked && !session) {
-    return (
-      <Unlock
-        onUnlocked={(s, proposed) => {
-          setSession(s);
-          if (proposed) setMigration(proposed);
-          setLocked(false);
-        }}
-        onError={setError}
-      />
-    );
-  }
-
-  if (!session) {
-    return <Onboarding onReady={setSession} onError={setError} error={error} />;
-  }
-
-  const conversations = [...session.conversations.values()];
-
-  // At two panels a conversation is always open: an empty right panel would be permanent
-  // emptiness. At one panel, having no selection **is** the list screen — falling back to the
-  // first conversation would make the list unreachable.
-  const retained = active && session.conversations.get(active.key) ? active : null;
-  const current = duo ? retained ?? conversations[0] ?? null : retained;
-
   return (
     <div
       // `h-dvh` and not `h-screen`: on mobile, `100vh` counts the height with the bars expanded, so
       // a hundred pixels or so end up below the screen — precisely the input field and the last
       // message.
-      className="safe-sides safe-top mx-auto flex h-dvh max-w-5xl flex-col"
+      //
+      // No `max-w-5xl` any more: a three column shell takes the window. Centring it left two
+      // grey margins on a wide monitor and pinched the thread to a third of the space it had.
+      className="flex h-dvh flex-col bg-(--color-surface) text-(--color-ink)"
     >
-      {/* At one panel, the header only shows on the list. In the conversation it cost a sixth of
-          the height to repeat an identity the user knows, while the screen already carries its own
-          header — the correspondent's, which is useful to them. The warning stays readable: the
-          list is the home screen. */}
-      {(duo || !current) && (
-        <Header session={session} onForget={() => session.forget().then(() => location.reload())} />
-      )}
-
       {/*
         Key log anomalies are shown at the app level, not inside a conversation: they concern
         account identities, hence every conversation at once.
       */}
       {session.logAlerts.length > 0 && (
-        <div role="alert" className="border-b border-(--color-danger) bg-(--color-danger)/20 px-4 py-3 text-sm">
-          <p className="font-medium text-(--color-danger)">Inconsistent key log</p>
+        <Banner tone="danger" title="Inconsistent key log" className="rounded-none border-x-0 border-t-0">
           {session.logAlerts.map((alert) => (
-            <p key={alert} className="mt-1 text-(--color-ink-muted)">
-              {alert}
-            </p>
+            <p key={alert}>{alert}</p>
           ))}
-          <p className="mt-2 text-xs text-(--color-ink-muted)">
+          <p className="mt-tight text-caption">
             The server failed to prove what it claims about account keys. This is not a network
             outage: it is exactly what this check exists to catch.
           </p>
-        </div>
+        </Banner>
       )}
 
-      <div className="flex min-h-0 flex-1">
-        {/* At one panel only one of the two is mounted — not hidden: a hidden conversation would
-            keep polling, scrolling and claiming keyboard focus. */}
-        {(duo || !current) && (
-          <ConversationList
-            session={session}
-            conversations={conversations}
-            current={current}
-            onSelect={setActive}
-            onError={setError}
-            onChanged={refresh}
-          />
-        )}
-        {current ? (
-          <Conversation
-            session={session}
-            view={current}
-            onChanged={refresh}
-            onError={setError}
-            onBack={duo ? undefined : () => setActive(null)}
-          />
-        ) : (
-          duo && <Centered>No conversations. Start one with someone&apos;s handle.</Centered>
-        )}
-      </div>
+      <Shell
+        onLock={relock}
+        onForget={() => void session.forget().then(() => location.reload())}
+      />
 
       {migration && (
         <MigrationBanner
           migration={migration}
-          onDone={(fresh) => {
-            setMigration(null);
-            setActive(null);
-            setSession(fresh);
-          }}
-          onError={setError}
+          onDone={onMigrated}
+          onError={report.error}
         />
       )}
 
       {offline && (
-        <p
-          role="status"
-          className="border-t border-(--color-warn) bg-(--color-warn)/10 px-4 py-2 text-sm text-(--color-warn)"
-        >
+        <Banner tone="warn" className="rounded-none border-x-0 border-b-0">
           Offline. Messages written now will not go out; anything already received stays readable.
-        </p>
+        </Banner>
       )}
 
       {fallback && (
-        <p className="flex items-baseline justify-between gap-4 border-t border-(--color-ink-muted)/30 bg-(--color-ink-muted)/10 px-4 py-2 text-sm text-(--color-ink-muted)">
-          <span>{fallback}</span>
-          <button type="button" onClick={() => setFallback(null)} className="shrink-0 underline">
-            Dismiss
-          </button>
-        </p>
+        <Banner onDismiss={onDismissFallback} className="rounded-none border-x-0 border-b-0">
+          {fallback}
+        </Banner>
       )}
 
-      {error && (
-        <p
-          role="alert"
-          className="flex items-baseline justify-between gap-4 border-t border-(--color-danger) bg-(--color-danger)/10 px-4 py-2 text-sm text-(--color-danger)"
+      {/* Always dismissible: an error you cannot wave away ends up part of the scenery. */}
+      {reported.error && (
+        <Banner
+          tone="danger"
+          onDismiss={reported.dismissError}
+          className="rounded-none border-x-0 border-b-0"
         >
-          <span>{error}</span>
-          {/* Always dismissible: an error you cannot wave away ends up part of the scenery. */}
-          <button type="button" onClick={() => setError(null)} className="shrink-0 underline">
-            Dismiss
-          </button>
-        </p>
+          {reported.error}
+        </Banner>
       )}
+
+      <Toasts />
     </div>
   );
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex flex-1 items-center justify-center p-8 text-center text-sm text-(--color-ink-muted)">
+    <div className="flex h-dvh items-center justify-center p-8 text-center text-body text-(--color-ink-muted)">
       {children}
     </div>
-  );
-}
-
-function Header({ session, onForget }: { session: Session; onForget: () => void }) {
-  return (
-    <header className="border-b border-(--color-border-subtle) px-4 py-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        {/*
-          The user's own fingerprint is no longer shown permanently: it is of no daily use to them.
-          It now lives in the verification panel, next to the correspondent's — the one place where
-          it is actually needed.
-        */}
-        <h1 className="font-medium">
-          @{session.handle}{" "}
-          <span className="font-normal text-(--color-ink-muted)">
-            · {session.deviceId.slice(session.handle.length + 1)}
-          </span>
-        </h1>
-        <button type="button" onClick={onForget} className="text-sm text-(--color-ink-muted) underline">
-          Erase this identity
-        </button>
-      </div>
-      {/*
-        This warning does stay, because it is not about one conversation but about the whole tool:
-        it is a limit the user has to know in order to decide what to trust it with.
-      */}
-      <p className="mt-2 text-xs text-(--color-ink-muted)">
-        Web client: the server delivers this code on every load, and could deliver a version that
-        exfiltrates your keys. No browser API fixes that. This is a learning project, unaudited —
-        for genuinely sensitive conversations, use Signal.
-      </p>
-    </header>
   );
 }

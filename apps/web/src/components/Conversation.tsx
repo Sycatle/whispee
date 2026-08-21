@@ -1,39 +1,104 @@
 import { useEffect, useRef, useState } from "react";
-import { useOcclusion } from "@/lib/viewport";
-import { GroupPanel, GroupToggle } from "@/components/Group";
+
 import { Messages } from "@/components/Messages";
 import { PresenceLine } from "@/components/Presence";
-import { Verification, VerificationPanel, VerificationToggle } from "@/components/Verification";
-import { type ConversationView, Session } from "@/lib/session";
+import { Verification } from "@/components/Verification";
+import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
+import { useDuo } from "@/lib/duo";
+import type { ConversationView } from "@/lib/session";
+import { useShortcut } from "@/lib/shortcuts";
+import { useOcclusion } from "@/lib/viewport";
+import { Button } from "@/ui/Button";
+import { Icon } from "@/ui/Icon";
+import { IconButton } from "@/ui/IconButton";
+import { Tooltip } from "@/ui/Tooltip";
+import { useReport } from "@/state/report";
+import { useBump, useSession } from "@/state/SessionProvider";
+import { useNavigate, useRoute } from "@/routes/Router";
 
-export function Conversation({
-  session,
-  view,
-  onChanged,
-  onError,
-  onBack,
-}: {
-  session: Session;
-  view: ConversationView;
-  onChanged: () => void;
-  onError: (message: string) => void;
-  /**
-   * Back to the list, when the list is not shown alongside.
-   *
-   * Absent in the two-pane layout: a back button there would point at an already visible screen.
-   * Its presence is therefore what tells this component it owns the whole screen.
-   */
-  onBack?: () => void;
-}) {
+/** The id the skip link aims at, so tabbing can jump the rail and the whole message list. */
+export const COMPOSER_ID = "conversation-composer";
+
+/**
+ * What a screen reader should hear when a message lands in the thread already on screen.
+ *
+ * Reactions are left out for the same reason the rail's preview leaves them out: "👍" announced
+ * on its own says nothing, and a busy thread would read a string of them over whatever the user
+ * was doing.
+ */
+function spoken(view: ConversationView): string | null {
+  const last = view.messages.at(-1);
+  if (!last || last.mine) return null;
+
+  const who = last.sender === null ? "Someone" : `@${last.sender}`;
+  const { content } = last;
+  if (content.kind === "text" || content.kind === "reply") return `${who}: ${content.text}`;
+  if (content.kind === "attachment") return `${who} sent ${content.ref.name}`;
+  return null;
+}
+
+export function Conversation({ view }: { view: ConversationView }) {
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
+  const route = useRoute();
+  const navigate = useNavigate();
+  const duo = useDuo();
   // Seeded from the session, which is what makes a half-written message survive a look at
   // another conversation. Keyed on the view, so switching remounts with the right draft.
   const [text, setText] = useState(() => session.draftIn(view));
-  const [verifying, setVerifying] = useState<string | null>(null);
-  const [group, setGroup] = useState(false);
   const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const occlusion = useOcclusion();
+
+  const detailOpen = route.kind === "conversation" && route.detail !== undefined;
+
+  const toggleDetail = () => {
+    if (detailOpen) {
+      navigate({ kind: "conversation", key: view.key });
+      return;
+    }
+    navigate({ kind: "conversation", key: view.key, detail: {} });
+  };
+
+  // The keyboard route into the detail column. It is a navigation like the button, so it lands
+  // in history and the back gesture closes the panel.
+  useShortcut("mod+i", toggleDetail);
+
+  /**
+   * Announces arrivals to a screen reader that is already on this conversation.
+   *
+   * The notifications in `App.tsx` fire for a thread the user is *not* looking at; on the open
+   * one they deliberately do not. Which left the case where nothing announced anything at all: a
+   * reader parked in the thread heard the message list grow in silence.
+   *
+   * `polite` and not `assertive`: an incoming message is not worth interrupting a sentence
+   * somebody is in the middle of hearing. What this does not solve — two messages arriving
+   * within one announcement means the first is skipped, because the region reports its current
+   * contents rather than a queue.
+   */
+  const [announcement, setAnnouncement] = useState("");
+  const announced = useRef<number | null>(null);
+
+  // No dependency array: the trigger is a cursor inside a mutating object, which no dependency
+  // list can name. Same reasoning as the arrival detection in `App.tsx`.
+  useEffect(() => {
+    const last = view.messages.at(-1);
+    if (!last) return;
+
+    // The first sight of a conversation is not an arrival: opening a thread with a hundred
+    // messages in it must not read the hundredth out loud.
+    if (announced.current === null) {
+      announced.current = last.seq;
+      return;
+    }
+    if (last.seq <= announced.current) return;
+    announced.current = last.seq;
+
+    const line = spoken(view);
+    if (line !== null) setAnnouncement(line);
+  });
 
   // Pulls the archived history back in when the conversation opens.
   //
@@ -44,10 +109,10 @@ export function Conversation({
     session
       .hydrate(view)
       .then((restored) => {
-        if (restored > 0) onChanged();
+        if (restored > 0) bump();
       })
-      .catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
-  }, [session, view, onChanged, onError]);
+      .catch((e: unknown) => report.error(e instanceof Error ? e.message : String(e)));
+  }, [session, view, bump, report]);
 
   const send = async (event: { preventDefault: () => void }) => {
     event.preventDefault();
@@ -63,15 +128,15 @@ export function Conversation({
     // exactly what a queued message has not got — so that one keeps the banner.
     if (cite === null) {
       await session.send(view, body);
-      onChanged();
+      bump();
       return;
     }
 
     try {
       await session.replyTo(view, cite, body);
-      onChanged();
+      bump();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      report.error(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -97,9 +162,9 @@ export function Conversation({
     setSending(true);
     try {
       await session.sendAttachment(view, file);
-      onChanged();
+      bump();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      report.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSending(false);
     }
@@ -113,17 +178,18 @@ export function Conversation({
     "empty conversation";
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col">
-      <header className="flex items-baseline justify-between gap-4 border-b border-(--color-border-subtle) px-4 py-2">
-        {onBack && (
-          <button
-            type="button"
-            onClick={onBack}
-            aria-label="Back to conversations"
-            className="-ml-2 shrink-0 self-center px-2 py-1 text-xl leading-none text-(--color-ink-muted) touch:min-h-11"
-          >
-            ‹
-          </button>
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-(--color-surface)">
+      <header className="safe-top flex items-center justify-between gap-pane border-b border-(--color-border-subtle) px-pane py-snug">
+        {/* Only where the list is not beside us. It undoes the navigation that opened this
+            conversation rather than going to `#/`, so a round trip between the list and a thread
+            does not stack one history entry per visit — see the rule in `routes/Router.tsx`. */}
+        {!duo && (
+          <IconButton
+            label="Back to conversations"
+            icon={<Icon name="back" size={20} />}
+            onClick={() => history.back()}
+            className="-ml-tight shrink-0"
+          />
         )}
         {/*
           The epoch is not displayed — it is a protocol detail that teaches the user nothing.
@@ -131,8 +197,8 @@ export function Conversation({
           read each other at all: it is the first thing to check when a message fails to
           arrive, and finding it any other way means instrumenting the WebAssembly module.
         */}
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-medium" data-epoch={String(view.epoch)}>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-body font-medium" data-epoch={String(view.epoch)}>
             {title}
           </h2>
           {/*
@@ -141,7 +207,7 @@ export function Conversation({
             say who it is talking about.
           */}
           {isTyping.length > 0 ? (
-            <span className="text-xs text-(--color-ink-muted)">
+            <span className="text-caption text-(--color-ink-muted)">
               {isTyping.map((handle) => `@${handle}`).join(", ")}{" "}
               {isTyping.length > 1 ? "are typing" : "is typing"}…
             </span>
@@ -151,34 +217,28 @@ export function Conversation({
             )
           )}
         </div>
-        <div className="flex shrink-0 gap-3">
-          {view.accounts.length > 1 && (
-            <GroupToggle count={view.accounts.length} onClick={() => setGroup(!group)} />
-          )}
-          {view.accounts.map((account) => (
-            <VerificationToggle
-              key={account.handle}
-              state={session.verificationOf(account)}
-              onClick={() => setVerifying(verifying === account.handle ? null : account.handle)}
-            />
-          ))}
-        </div>
-      </header>
 
-      {group && (
-        <GroupPanel
-          session={session}
-          view={view}
-          onError={onError}
-          onChanged={onChanged}
-          onClose={() => setGroup(false)}
-        />
-      )}
+        <Tooltip label="Conversation details">
+          <IconButton
+            id={INFO_TOGGLE_ID}
+            label="Conversation details"
+            icon={<Icon name="info" size={18} />}
+            aria-expanded={detailOpen}
+            aria-controls={DETAIL_PANEL_ID}
+            onClick={toggleDetail}
+            className="shrink-0"
+          />
+        </Tooltip>
+      </header>
 
       {/*
         Warns only when a fingerprint changes. In the nominal case this component renders
         nothing: a permanent warning teaches people to ignore it, and would make this one
         inaudible on the day it matters.
+
+        It stays at the level of the conversation and does **not** move into the detail column.
+        The column is closed by default and is reference material one goes looking for; this is an
+        alert, and an alert nobody opened the drawer for is an alert that was never raised.
       */}
       {view.accounts.map((account) => (
         <Verification
@@ -188,35 +248,26 @@ export function Conversation({
         />
       ))}
 
-      {view.accounts
-        .filter((account) => account.handle === verifying)
-        .map((account) => (
-          <VerificationPanel
-            key={account.handle}
-            account={account}
-            state={session.verificationOf(account)}
-            myName={`@${session.handle}`}
-            myFingerprint={session.accountFingerprint()}
-            onVerified={() => void session.markVerified(account).then(onChanged)}
-            onClose={() => setVerifying(null)}
-          />
-        ))}
-
       <Messages
         session={session}
         view={view}
-        onChanged={onChanged}
-        onError={onError}
+        onChanged={bump}
+        onError={(message) => report.error(message)}
         onReplyTo={setReplyTo}
       />
 
+      {/* Off screen, never empty of purpose: it exists so that a reader already in this thread is
+          told when it grows. */}
+      <p aria-live="polite" aria-atomic="true" className="sr-only">
+        {announcement}
+      </p>
 
       {replyTo !== null && (
-        <div className="flex items-center justify-between gap-2 border-t border-(--color-border-subtle) px-4 py-1 text-xs opacity-70">
+        <div className="flex items-center justify-between gap-snug border-t border-(--color-border-subtle) px-pane py-tight text-caption text-(--color-ink-muted)">
           <span className="truncate">Replying to message {replyTo}</span>
-          <button type="button" onClick={() => setReplyTo(null)} className="shrink-0">
-            cancel
-          </button>
+          <Button variant="quiet" size="sm" onClick={() => setReplyTo(null)} className="shrink-0">
+            Cancel
+          </Button>
         </div>
       )}
 
@@ -229,18 +280,16 @@ export function Conversation({
         // `safe-bottom` on top: the two never overlap — the gesture bar is there when the keyboard
         // is closed, and the keyboard replaces it when it opens.
         style={{ paddingBottom: occlusion || undefined }}
-        className="safe-bottom flex items-center gap-2 border-t border-(--color-border-subtle) p-3"
+        className="safe-bottom safe-sides flex items-center gap-snug border-t border-(--color-border-subtle) p-gutter"
       >
         <input ref={fileInput} type="file" onChange={attach} className="hidden" />
-        <button
-          type="button"
+        <IconButton
+          label="Attach a file"
+          icon={<Icon name="attach" size={18} />}
+          variant="secondary"
           onClick={() => fileInput.current?.click()}
           disabled={sending}
-          title="Attach a file"
-          className="rounded-md border border-(--color-border-subtle) px-3 py-2 text-sm touch:min-h-11 touch:min-w-11 disabled:opacity-50"
-        >
-          {sending ? "…" : "📎"}
-        </button>
+        />
         {/*
           A textarea, not an input. A messenger that cannot hold a line break refuses paragraphs,
           pasted addresses and anything with a list in it.
@@ -254,6 +303,7 @@ export function Conversation({
           grows without limit eats the conversation it belongs to.
         */}
         <textarea
+          id={COMPOSER_ID}
           value={text}
           onChange={(e) => typing(e.target.value)}
           onKeyDown={(e) => {
@@ -263,18 +313,16 @@ export function Conversation({
             void send(e);
           }}
           rows={1}
+          aria-label={replyTo === null ? "Message" : "Reply"}
           placeholder={replyTo === null ? "Message" : "Reply"}
           // `text-base` on purpose: below 16 pixels, iOS zooms into the field on focus and does
           // not zoom back out on blur. Fixing that by forbidding zoom would strip a fallback
           // from the people who need it; fixing it by font size costs nothing.
-          className="max-h-32 min-w-0 flex-1 resize-none rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2 text-base field-sizing-content touch:min-h-11"
+          className="max-h-32 min-w-0 flex-1 resize-none rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) px-gutter py-snug text-base field-sizing-content focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent) touch:min-h-11"
         />
-        <button
-          type="submit"
-          className="rounded-md bg-(--color-accent) px-4 py-2 text-sm font-medium text-white touch:min-h-11"
-        >
+        <Button type="submit" variant="primary" icon={<Icon name="send" size={16} />}>
           Send
-        </button>
+        </Button>
       </form>
     </section>
   );

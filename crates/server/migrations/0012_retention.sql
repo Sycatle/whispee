@@ -1,0 +1,78 @@
+-- Retention: the purge 0009 said would never happen.
+--
+-- This migration adds one index and changes no schema. Everything else it does is written
+-- rather than executed, because the decision is the artefact: `crate::purge_once` runs the
+-- statements, and the argument for why those statements are safe belongs next to the tables
+-- they delete from.
+--
+-- # What 0009 said, and what changed
+--
+-- The header of 0009 states that an age-based purge "would delete the messages of a device left
+-- offline too long, silently breaking its conversation", and it was right — about an age-based
+-- purge. The rule adopted here is a **conjunction**, and the conjunction is the whole design:
+--
+--     created_at < now() - 30 days   AND   seq <= groups.next_seq - 500
+--
+-- Age alone empties a quiet conversation: three hundred messages exchanged over two years
+-- vanish, and they weighed nothing. The tail alone evicts a device away for two hours from a
+-- talkative group. Together, **no conversation shorter than 500 envelopes is ever touched, at
+-- any age**, and a device that has to fall five hundred messages *and* thirty days behind to
+-- lose anything is a device that has been gone for a month.
+--
+-- What the conjunction does NOT solve, and nobody should read it as solving: a device offline
+-- for more than thirty days in a busy group still loses envelopes, and losing one envelope
+-- breaks the MLS application ratchet for everything that follows. It is not made safe, it is
+-- made rare and made *visible* — see the `oldest` field below, which is the half of this work
+-- that turns a corruption into a reported gap.
+--
+-- # Zero new information for the server
+--
+-- No column, no table, no new observation. `created_at` has existed since 0001 and is already
+-- declared an accepted leak in `docs/THREAT-MODEL.md` ("kept for a purge that is never
+-- performed" — that sentence stops being true with this migration and has been rewritten).
+-- `groups.next_seq` is already maintained in the same transaction as every insert.
+-- `envelopes_created_at_idx`, created by 0009 "for the operator who will one day have to
+-- intervene by hand", finally serves the query it has the right shape for.
+--
+-- # Why there are no server-side delivery cursors
+--
+-- The obvious alternative is to know what has actually been delivered: a table
+-- `delivery_cursors(group_id, device_id, seq)`, purge below `MIN(seq)`. It is refused, on two
+-- independent grounds, and the first is the one that settles it.
+--
+-- **It is a movement journal.** For every (person, conversation) pair it records when that
+-- person last collected their mail — a per-conversation activity history, updated on every
+-- fetch. That is exactly what `0008_presence.sql` refuses in as many words: it allowed one
+-- register, `last_seen_at`, deliberately *without history* and deliberately *not per
+-- conversation*, and wrote that a `presence_log` table would be a movement journal. This would
+-- be that table, indexed by conversation, which is strictly worse.
+--
+-- **And it bounds nothing.** `MIN(cursor)` is pinned by the straggler: one device that never
+-- comes back holds the whole group's history forever. A floor on age would have to sit on top
+-- of it anyway — so we would pay for the journal *and* purge by age regardless. A mechanism
+-- that costs a privacy property and does not remove the need for the thing it was meant to
+-- replace is not a trade-off, it is a loss.
+
+-- Serves the attachment purge, and nothing else.
+--
+-- Same shape and same justification as `request_nonces_seen_at_idx` in 0010: reads go through
+-- the primary key and through `(id, group_id)`, never through the date. Without it the purge
+-- scans the whole table — which, unlike `envelopes`, is not partitioned, so there is not even a
+-- per-partition scan to fall back on.
+--
+-- The write it costs is one index entry per upload. That is the right side of the trade here:
+-- an attachment is a rate-limited, multi-kilobyte insert, not a hot path.
+CREATE INDEX attachments_created_at_idx ON attachments (created_at);
+
+-- No foreign key from `posting_nonces` to `groups`, and none is added here.
+--
+-- Deleting an abandoned group below leaves its posting nonces behind, and the reflex fix is a
+-- cascading foreign key. It is refused for the reason already written for `request_nonces` in
+-- 0010: the check would land on the latency path of the sealed-sender post, which is the one
+-- path where the server deliberately knows least and works hardest. The gain is nil — the
+-- seven-day age purge in `crate::purge_once` already collects those rows, orphaned or not, and
+-- it collects them without asking the planner about a second table.
+--
+-- What that leaves open, stated rather than implied: for up to seven days, `posting_nonces`
+-- holds group ids for groups that no longer exist. The server already knew those ids; nothing
+-- new leaks, only something stale lingers.

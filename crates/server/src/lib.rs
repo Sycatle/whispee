@@ -169,12 +169,67 @@ async fn rate_limit(
 /// table that no longer grows for the lifetime of the deployment.
 const POSTING_NONCE_RETENTION_DAYS: u32 = 7;
 
+/// Age below which an envelope is never deleted, whatever else is true of it.
+///
+/// Thirty days is the offline window a device is allowed. Past it, and **only in conjunction
+/// with [`ENVELOPE_MIN_TAIL`]**, its mailbox may lose envelopes it never read — which breaks its
+/// MLS application ratchet, not merely its display. The number is therefore not a storage
+/// parameter dressed up as a policy: it is the answer to "how long may a phone stay in a drawer
+/// before its owner has to be re-added to their own conversations".
+///
+/// What it does not solve: a device gone longer than that, in a group busy enough to have moved
+/// five hundred envelopes on, is broken and has to be re-invited. The purge makes that case rare
+/// and — through the `oldest` field of the fetch response — detectable. It does not make it
+/// impossible, and no retention that actually deletes anything could.
+const ENVELOPE_RETENTION_DAYS: u32 = 30;
+
+/// Envelopes kept at the tail of every group, regardless of age.
+///
+/// This is the half of the rule that protects quiet conversations. Age alone would empty a
+/// two-person thread of three hundred messages exchanged over two years — messages that cost the
+/// server nothing to keep and whose deletion the participants would experience as data loss for
+/// no gain. With this clause, **a group that has never reached five hundred envelopes is never
+/// touched, at any age**.
+///
+/// Five hundred rather than a round hundred because it must comfortably exceed
+/// `routes::MAX_ENVELOPES_PER_PAGE` (200): a client that comes back and paginates must never
+/// have the ground move under it inside a single catch-up.
+///
+/// What it does not solve: it is a count, not a size. Five hundred envelopes carrying 25 MiB
+/// attachment descriptors and five hundred carrying "ok" occupy the same slot in this rule. The
+/// bound that would answer that is a stored-bytes quota per account, which `throttle` names and
+/// this server still does not have.
+const ENVELOPE_MIN_TAIL: i64 = 500;
+
+/// Age past which an attachment is deleted, whatever the state of its envelope.
+///
+/// Longer than [`ENVELOPE_RETENTION_DAYS`] on purpose, and the reason is specific: a message
+/// restored from the vault carries its attachment descriptor with it, so the descriptor outlives
+/// the envelope that delivered it and stays resolvable for a while afterwards. Three months is
+/// that "while".
+///
+/// **Stated plainly, because a user will meet it: an attachment older than three months is no
+/// longer downloadable.** The bytes are gone from the server, the vault archives the message and
+/// not the file, and saving what matters is the recipient's job. A server that promised
+/// otherwise would be promising to be a backup service.
+const ATTACHMENT_RETENTION_DAYS: u32 = 90;
+
 /// What one pass of the purge erased, per table.
 #[derive(Debug, Default)]
 pub struct Purged {
     pub request_nonces: u64,
     pub posting_nonces: u64,
     pub pairings: u64,
+    pub envelopes: u64,
+    pub attachments: u64,
+    /// Groups nobody is a member of any more.
+    ///
+    /// Counts the `groups` rows only. What the cascade takes with them — their envelopes and
+    /// attachments — is deliberately **not** added to the two counters above: those report what
+    /// the retention rules deleted, and mixing in a cascade would make the numbers unusable for
+    /// the only thing they are read for, which is noticing that a retention rule has started
+    /// biting harder than expected.
+    pub groups: u64,
 }
 
 /// Erases what replay protection and pairing no longer need.
@@ -206,7 +261,29 @@ pub struct Purged {
 /// five minutes, and an index on `expires_at` would cost a write on every deposit to speed up a
 /// scan over a handful of rows.
 ///
-/// # Why one task and not three
+/// # `envelopes`
+///
+/// The one this server said it would never do, and the argument for why it now can is in
+/// `migrations/0012_retention.sql` rather than repeated here. The short form: the condition is a
+/// **conjunction** of [`ENVELOPE_RETENTION_DAYS`] and [`ENVELOPE_MIN_TAIL`], so a quiet
+/// conversation is never emptied by age and a briefly absent device is never evicted by volume.
+///
+/// # `attachments`
+///
+/// Age alone, at [`ATTACHMENT_RETENTION_DAYS`] — longer than the envelope retention, for the
+/// reason written on that constant. There is no tail clause here and there should not be: an
+/// attachment is addressed by id, not by sequence, so "the last five hundred" means nothing
+/// about it.
+///
+/// # Abandoned `groups`
+///
+/// `remove_members` empties `group_members` and nothing has ever deleted the `groups` row, so a
+/// group everyone has left keeps its envelopes forever — out of reach of every human being,
+/// including the ones who wrote them, since every read path starts with a membership check.
+/// Deleting the row lets the `ON DELETE CASCADE` from 0001 and 0009 collect the envelopes and
+/// the attachments.
+///
+/// # Why one task and not six
 ///
 /// They share a cadence and each is a single statement. A second `tokio::spawn` would buy
 /// nothing but a second place to forget a table in — and forgetting one is precisely how
@@ -225,11 +302,20 @@ fn purge_expired(pool: PgPool) {
 
             match purge_once(&pool).await {
                 Ok(purged) => {
-                    if purged.request_nonces + purged.posting_nonces + purged.pairings > 0 {
+                    let total = purged.request_nonces
+                        + purged.posting_nonces
+                        + purged.pairings
+                        + purged.envelopes
+                        + purged.attachments
+                        + purged.groups;
+                    if total > 0 {
                         tracing::debug!(
                             request_nonces = purged.request_nonces,
                             posting_nonces = purged.posting_nonces,
                             pairings = purged.pairings,
+                            envelopes = purged.envelopes,
+                            attachments = purged.attachments,
+                            groups = purged.groups,
                             "expired rows purged"
                         );
                     }
@@ -271,7 +357,63 @@ pub async fn purge_once(pool: &PgPool) -> Result<Purged, sqlx::Error> {
         .await?
         .rows_affected();
 
-    Ok(Purged { request_nonces, posting_nonces, pairings })
+    // The join on `groups` is what makes the tail clause meaningful: `next_seq` is the only place
+    // the length of a conversation is recorded, and it is maintained in the same transaction as
+    // every insert, so it cannot lag behind the rows it is compared against.
+    //
+    // `<=` rather than `<`, and the arithmetic is worth spelling out because an off-by-one here
+    // deletes one envelope more than the tail promises. Sequences start at 1: `post_envelope`
+    // increments `next_seq` and returns the incremented value. A group holding exactly five
+    // hundred envelopes therefore has `next_seq = 500` and sequences 1..=500, so `next_seq - 500`
+    // is 0 and nothing matches. The five hundred and first post makes seq 1 deletable, and five
+    // hundred still remain.
+    let envelopes = sqlx::query(&format!(
+        "DELETE FROM envelopes e
+         USING groups g
+         WHERE e.group_id = g.id
+           AND e.created_at < now() - interval '{ENVELOPE_RETENTION_DAYS} days'
+           AND e.seq <= g.next_seq - {ENVELOPE_MIN_TAIL}"
+    ))
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    let attachments = sqlx::query(&format!(
+        "DELETE FROM attachments WHERE created_at < now() - interval '{ATTACHMENT_RETENTION_DAYS} days'"
+    ))
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    // Last, so the two counters above report what the retention rules deleted rather than what a
+    // cascade happened to carry off with a group.
+    //
+    // The second clause is what stops this from racing group creation. `add_members` creates the
+    // `groups` row and inserts its first member in one transaction, so under READ COMMITTED no
+    // reader ever sees the row without its member — but that is an invariant of one function, and
+    // this statement runs every sixty seconds against whatever the codebase becomes. Requiring
+    // that no envelope younger than the retention exists makes the deletion depend on observable
+    // silence rather than on a transaction boundary holding somewhere else.
+    //
+    // What that clause does NOT do, and it is worth saying since it reads as a grace period: a
+    // group with no envelope at all satisfies it vacuously and is deleted the moment its last
+    // member leaves. That is intended. A member-less, envelope-less group holds nothing, nobody
+    // can read it, and the only thing its row carries is a posting key for a mailbox with no
+    // mail.
+    let groups = sqlx::query(&format!(
+        "DELETE FROM groups g
+         WHERE NOT EXISTS (SELECT 1 FROM group_members m WHERE m.group_id = g.id)
+           AND NOT EXISTS (
+               SELECT 1 FROM envelopes e
+               WHERE e.group_id = g.id
+                 AND e.created_at >= now() - interval '{ENVELOPE_RETENTION_DAYS} days'
+           )"
+    ))
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    Ok(Purged { request_nonces, posting_nonces, pairings, envelopes, attachments, groups })
 }
 
 /// Ceiling for an attachment, encryption included.

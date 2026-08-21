@@ -58,6 +58,7 @@ export function encodeSession(session: StoredSession): Uint8Array {
     signals: session.signals,
     postingKeys: session.postingKeys,
     logHead: session.logHead,
+    history: session.history === undefined ? undefined : toBase64(session.history),
   };
 
   return new TextEncoder().encode(JSON.stringify(raw));
@@ -111,6 +112,9 @@ export function decodeSession(bytes: Uint8Array): StoredSession {
     ...(field.logHead === undefined
       ? {}
       : { logHead: field.logHead as StoredSession["logHead"] }),
+    ...(field.history === undefined
+      ? {}
+      : { history: fromBase64(requireString(field.history, "history")) }),
   };
 }
 

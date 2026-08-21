@@ -135,6 +135,16 @@ interface StoredSession {
    * and a `Uint8Array` handed to `JSON.stringify` comes back as an object keyed by strings.
    */
   logHead?: { size: number; root: string; logKey: string };
+  /**
+   * The recent thread of each conversation, **encrypted**, like the MLS state.
+   *
+   * The first decrypted content ever written to this disk. `history.ts` argues the trade in full;
+   * the short version is that the plaintext was already being written down — into the server
+   * vault, under a key that never rotates — and that a sealed local copy is the same data in the
+   * better place. Without it a conversation opens empty and waits for the network, and offline
+   * there is nothing to read at all.
+   */
+  history?: Uint8Array;
 }
 
 /** What the user agrees to emit. */

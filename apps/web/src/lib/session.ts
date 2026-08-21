@@ -12,6 +12,7 @@ import { type PairingCode, awaitPairing, decodePairingCode, encodePairingCode } 
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
 import * as envelope from "./envelope";
+import { decodeHistory, encodeHistory } from "./history";
 import { fromBase64, toBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
@@ -597,12 +598,16 @@ export class Session {
     // with the lock — the server must see no difference.
     const api = new Api(stored.deviceId, anchor.cipher);
 
+    // Decrypted before the views are built, so each one opens with its thread already in it
+    // rather than with an empty list the network fills in a moment later.
+    const cached = stored.history ? decodeHistory(await atRest.open(stored.history)) : new Map();
+
     const conversations = new Map<string, ConversationView>();
     for (const groupId of stored.groupIds) {
       conversations.set(toHex(groupId), {
         groupId,
         key: toHex(groupId),
-        messages: [],
+        messages: cached.get(toHex(groupId)) ?? [],
         peers: client.peerFingerprints(groupId) as Peer[],
         accounts: [],
         epoch: client.epoch(groupId),
@@ -893,11 +898,11 @@ export class Session {
    * To be called after **every** operation that moves a group forward. A state persisted late
    * and then restored would roll epochs back and replay keys already used.
    *
-   * **History does not go through here.** Nothing written to this disk contains a message:
-   * keeping them locally would mean encrypting them under the state key, which is doable, but
-   * would manufacture a second per-device history to keep consistent with the first. The server
-   * vault (`vault.ts`) plays that role, now by default, and the conversation refills itself on
-   * open through `hydrate`.
+   * **The recent thread goes through here too**, sealed by the same cipher as the state. That
+   * used not to be true, and `history.ts` argues the change: the plaintext was already being
+   * written down, into the server vault under a key that never rotates, and a sealed local copy
+   * is the same data somewhere better. Only a window of it is kept — the vault remains the
+   * archive, and `hydrate` still fetches what falls outside.
    */
   private async persist(): Promise<void> {
     // See `forget`: a write that won the race against the reload would resurrect an identity the
@@ -926,6 +931,11 @@ export class Session {
         [...this.conversations.values()]
           .filter((view) => view.postingKey)
           .map((view) => [view.key, toBase64(view.postingKey as Uint8Array)]),
+      ),
+      history: await this.atRest.seal(
+        encodeHistory(
+          new Map([...this.conversations].map(([key, view]) => [key, view.messages])),
+        ),
       ),
       ...(this.seenHead
         ? {

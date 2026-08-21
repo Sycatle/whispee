@@ -59,16 +59,19 @@ const FILTER_FIELD_ID = "rail-filter";
  * as the latest news of a conversation says nothing about it. An attachment shows its name — the
  * name is content, encrypted like the rest, and it is what the person would recognise.
  */
-function preview(view: ConversationView): string {
+function preview(view: ConversationView): { text: string; mine: boolean } {
+  // Anything still in the outbox is ours by definition — that is what the outbox is.
   const queued = view.outbox.at(-1);
-  if (queued) return queued.text;
+  if (queued) return { text: queued.text, mine: true };
 
   for (let i = view.messages.length - 1; i >= 0; i -= 1) {
-    const { content } = view.messages[i];
-    if (content.kind === "text" || content.kind === "reply") return content.text;
-    if (content.kind === "attachment") return content.ref.name;
+    const message = view.messages[i];
+    const { content } = message;
+    if (content.kind === "text" || content.kind === "reply")
+      return { text: content.text, mine: message.mine };
+    if (content.kind === "attachment") return { text: content.ref.name, mine: message.mine };
   }
-  return "";
+  return { text: "", mine: false };
 }
 
 /**
@@ -400,7 +403,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                 looks at this list. So the name shown here has to be able to stand alone, which
                 is precisely what `compactNameOf` refuses to let it do when it cannot.
               */
-              const title = titleOf(view, names, rendered);
+              const title = titleOf(view, names, rendered, session.handle);
 
               return (
                 <li key={view.key}>
@@ -452,6 +455,22 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     <PresenceBadge session={session} handle={only?.handle ?? ""}>
                       <Avatar
                         seed={only?.fingerprint ?? (only ? undefined : view.key)}
+                        // The faces in the room rather than a shape standing for it. Falls back
+                        // to the group's seeded identicon until the first poll resolves anybody,
+                        // which is what keeps a fresh install from showing an empty circle.
+                        members={
+                          only
+                            ? undefined
+                            : [
+                                // Ours first, so a group always opens on a face the reader knows
+                                // is theirs; the rest sorted, so the tiles do not rearrange when
+                                // a poll returns the members in another order.
+                                session.accountFingerprint(),
+                                ...[...view.accounts]
+                                  .sort((a, b) => a.handle.localeCompare(b.handle))
+                                  .map((a) => a.fingerprint),
+                              ]
+                        }
                         label={title}
                         size="md"
                         {...(only ? { proof: session.verificationOf(only) } : {})}
@@ -476,7 +495,13 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                       </span>
                       <span className="mt-0.5 flex items-baseline gap-snug">
                         <span className="min-w-0 flex-1 truncate text-caption font-normal text-(--color-ink-muted)">
-                          <EmojiText text={line} />
+                          {/* Whose turn it was, where the row cannot show a face for it. Without
+                              this, our own last message and a reply to it read identically, and
+                              the list says "there is news here" when there is only our own voice.
+                              Muted further than the text: it is a label on the line, not part of
+                              what was said. */}
+                          {line.mine && <span className="text-(--color-ink-muted)/70">You: </span>}
+                          <EmojiText text={line.text} />
                         </span>
                         {unread > 0 && (
                           // The count sits inside the row's `<button>`, so it is read as part of

@@ -190,7 +190,9 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
       case "settings":
         return route.section === null ? "Settings" : `Settings, ${TITLES[route.section]}`;
       case "conversation":
-        return view === null ? "Conversation" : titleOf(view, names, membersOf(view));
+        return view === null
+          ? "Conversation"
+          : titleOf(view, names, membersOf(view), session.handle);
     }
   };
 

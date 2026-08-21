@@ -103,7 +103,7 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
   */
   // Still needed below: the typing line names people against the same set the title does.
   const members = membersOf(view);
-  const title = titleOf(view, names, members);
+  const title = titleOf(view, names, members, session.handle);
 
   const isTyping = session.typingIn(view);
 

@@ -205,11 +205,38 @@ export interface Named {
  * never nameless: an empty title in the rail would be a row that cannot be described, and in the
  * announcement it would be silence where a name was expected.
  */
-export function titleOf(view: Named, sources: NameSources, among: Iterable<string>): string {
-  const listed = [...among];
+export function titleOf(
+  view: Named,
+  sources: NameSources,
+  among: Iterable<string>,
+  self?: string,
+): string {
+  /*
+   * Our own handle joins the comparison set, not just the list of names.
+   *
+   * Ambiguity is symmetric: if somebody in the room asserts the same display name we do, then
+   * *both* names are ambiguous and both have to fall back to their handle. Adding ourselves only
+   * to the output would have produced "Sam, @me1234" — one of the two colliding names still
+   * claiming the word, which is exactly the confusion `compactNameOf` exists to prevent.
+   */
+  const group = self !== undefined && view.accounts.length > 1;
+  const listed = group ? [...among, self] : [...among];
+  const named = view.accounts.map((account) => compactNameOf(account.handle, sources, listed));
+
+  /*
+   * A group is named by everybody in it, and we are in it.
+   *
+   * Left out, the title disagreed with the member list beside it and with the count above that
+   * — a room of three read as "Bob, Bernard" while its own panel listed three people. Ours goes
+   * last: the reader knows they are there, and the names they are scanning for are the others'.
+   *
+   * One-to-one is untouched. A thread with one other person is named after that person, and
+   * "Alice, you" would be two words to say what one says.
+   */
+  if (group) named.push(compactNameOf(self, sources, listed));
 
   return (
-    view.accounts.map((account) => compactNameOf(account.handle, sources, listed)).join(", ") ||
+    named.join(", ") ||
     [...new Set(view.peers.map((peer) => peer.name))]
       .map((name) => compactNameOf(name, sources, listed))
       .join(", ") ||

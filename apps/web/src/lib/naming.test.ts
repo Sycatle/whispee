@@ -131,3 +131,32 @@ test("a conversation with nobody in it is still named", () => {
   // a name was expected.
   assert.equal(titleOf({ accounts: [], peers: [] }, sources(), []), "empty conversation");
 });
+
+test("a group is named by everybody in it, ourselves last", () => {
+  const claims = sources({}, { charlie8295: "Charlie", dana4417: "Dana", me1234: "Me" });
+  const view = {
+    accounts: [{ handle: "charlie8295" }, { handle: "dana4417" }],
+    peers: [],
+  };
+
+  assert.equal(titleOf(view, claims, ["charlie8295", "dana4417"], "me1234"), "Charlie, Dana, Me");
+});
+
+test("a one-to-one is named after the other person alone", () => {
+  // "Alice, you" would be two words to say what one says, and the reader knows they are there.
+  const claims = sources({}, { charlie8295: "Charlie", me1234: "Me" });
+  const view = { accounts: [{ handle: "charlie8295" }], peers: [] };
+
+  assert.equal(titleOf(view, claims, ["charlie8295"], "me1234"), "Charlie");
+});
+
+test("our own name is disambiguated against the group like everybody else's", () => {
+  // Somebody else in the room asserting our display name means ours falls back to the handle too.
+  const claims = sources({}, { charlie8295: "Sam", dana4417: "Dana", me1234: "Sam" });
+  const view = { accounts: [{ handle: "charlie8295" }, { handle: "dana4417" }], peers: [] };
+
+  assert.equal(
+    titleOf(view, claims, ["charlie8295", "dana4417"], "me1234"),
+    "@charlie8295, Dana, @me1234",
+  );
+});

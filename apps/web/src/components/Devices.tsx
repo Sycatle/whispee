@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import type { ResolvedAccount } from "@/lib/account";
 import { describePresence } from "@/lib/presence";
-import type { Session } from "@/lib/session";
+import { useBump, useSession } from "@/state/SessionProvider";
+import { useReport } from "@/state/report";
+import { Avatar } from "@/ui/Avatar";
+import { Banner } from "@/ui/Banner";
+import { Button } from "@/ui/Button";
+import { Panel } from "@/ui/Panel";
+import { Spinner } from "@/ui/Spinner";
 
 /**
  * Account devices: revocation, and rotation when a device has been stolen.
@@ -18,16 +24,22 @@ import type { Session } from "@/lib/session";
  *
  * Showing both buttons side by side without that explanation would lead straight to the wrong
  * choice, and the user would believe they had protected themselves.
+ *
+ * # Why an identicon sits beside each identifier
+ *
+ * A device identifier is a run of hex, and a list of them is a wall a reader skims rather than
+ * reads. The identicon is derived from the identifier itself, so two devices are told apart by a
+ * shape before anyone compares characters, and "this one" is found at a glance.
+ *
+ * What this does not solve: the identicon is a five-by-five grid over a short hash — two
+ * identifiers can draw the same picture. It is a way of *noticing* which row is which, never a
+ * way of proving what a row is. The identifier underneath is the evidence, and it is set in
+ * `--font-evidence` because that is the string a human actually compares.
  */
-export function DeviceSettings({
-  session,
-  onError,
-  onClose,
-}: {
-  session: Session;
-  onError: (message: string) => void;
-  onClose: () => void;
-}) {
+export function DeviceSettings({ onClose }: { onClose: () => void }) {
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
   const [account, setAccount] = useState<ResolvedAccount | null>(null);
   const [busy, setBusy] = useState(false);
   const [rotation, setRotation] = useState(false);
@@ -37,18 +49,22 @@ export function DeviceSettings({
     session
       .resolve(session.handle)
       .then(setAccount)
-      .catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
+      .catch((e: unknown) => report.error(e instanceof Error ? e.message : String(e)));
   };
 
-  useEffect(reload, [session, onError]);
+  useEffect(reload, [session, report]);
 
   const revoke = async (deviceId: string) => {
     setBusy(true);
     try {
       await session.revokeOwnDevice(deviceId);
       reload();
+      // The device list is part of the session everybody else reads. This is what the caller
+      // used to do for us on close, except it now fires when something actually changed.
+      bump();
+      report.done("Device revoked");
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      report.error(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -59,8 +75,9 @@ export function DeviceSettings({
     try {
       setPhrase(await session.rotateAccount());
       reload();
+      bump();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      report.error(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -69,57 +86,59 @@ export function DeviceSettings({
   // After rotation: the new phrase, once. The old one is worth nothing now.
   if (phrase) {
     return (
-      <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-        <h2 className="font-medium">New recovery phrase</h2>
-        <p className="mt-2 text-(--color-ink-muted)">
-          Write it down now. The old one no longer gives access to anything, and this one will
-          not be shown again.
-        </p>
-        <p className="mt-3 rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-3 py-2 font-mono text-xs leading-relaxed">
+      <Panel
+        tone="danger"
+        title="New recovery phrase"
+        description="Write it down now. The old one no longer gives access to anything, and this one will not be shown again."
+        actions={
+          <Button variant="primary" onClick={() => {
+            setPhrase(null);
+            onClose();
+          }}>
+            I&apos;ve written it down
+          </Button>
+        }
+      >
+        {/* `--font-evidence` and `select-all`: twelve words copied out by hand are twelve chances
+            to transcribe one wrong, and the whole phrase is worthless if one word is. */}
+        <p className="select-all rounded-control border border-(--color-border-subtle) bg-(--color-surface-sunken) p-gutter font-(--font-evidence) text-body leading-relaxed text-(--color-ink)">
           {phrase}
         </p>
-        <p className="mt-3 text-xs text-(--color-ink-muted)">
+        <p className="mt-gutter text-caption text-(--color-ink-muted)">
           Your other devices must be <strong>paired again</strong>: they hold the old key. The
           people you talk to will see a fingerprint change warning — it is correct, your account
           key has changed.
         </p>
-        <button
-          type="button"
-          onClick={() => {
-            setPhrase(null);
-            onClose();
-          }}
-          className="mt-4 rounded-md bg-(--color-accent) px-3 py-1.5 text-sm font-medium text-white"
-        >
-          I&apos;ve written it down
-        </button>
-      </div>
+      </Panel>
     );
   }
 
   return (
-    <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-      <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Your devices</h2>
-        <button type="button" onClick={onClose} className="text-(--color-ink-muted) underline">
+    <Panel
+      title="Your devices"
+      description="All your devices have exactly the same access, everywhere. There is no primary device."
+      actions={
+        <Button variant="quiet" size="sm" onClick={onClose}>
           Close
-        </button>
-      </div>
-
-      <p className="mt-2 text-xs text-(--color-ink-muted)">
-        All your devices have exactly the same access, everywhere. There is no primary device.
-      </p>
-
+        </Button>
+      }
+    >
       {account === null ? (
-        <p className="mt-3 text-(--color-ink-muted)">Loading…</p>
+        <p className="flex items-center gap-snug text-body text-(--color-ink-muted)">
+          <Spinner label="Loading your devices" />
+          Loading…
+        </p>
       ) : (
-        <ul className="mt-3 space-y-2">
+        <ul className="flex flex-col gap-snug">
           {account.devices.map((device) => (
-            <li key={device.id} className="flex items-center justify-between gap-3">
-              <span className="font-mono text-xs">
-                {device.id}
+            <li key={device.id} className="flex items-center gap-gutter">
+              <Avatar seed={device.id} label={`Device ${device.id}`} size="sm" />
+              <span className="min-w-0 flex-1">
+                <span className="block break-all font-(--font-evidence) text-caption text-(--color-ink)">
+                  {device.id}
+                </span>
                 {device.id === session.deviceId && (
-                  <span className="ml-2 font-sans text-(--color-ink-muted)">(this one)</span>
+                  <span className="text-caption text-(--color-ink-muted)">(this one)</span>
                 )}
                 {/*
                   Served to the account owner alone. This is what makes visible a device thought
@@ -127,7 +146,7 @@ export function DeviceSettings({
                   device, or worse.
                 */}
                 {device.lastSeen !== undefined && (
-                  <span className="ml-2 block font-sans text-(--color-ink-muted)">
+                  <span className="block text-caption text-(--color-ink-muted)">
                     {/*
                       The server clock if we have already read it, the local one otherwise:
                       comparing two timestamps produced by different machines is exactly what
@@ -141,47 +160,57 @@ export function DeviceSettings({
                 )}
               </span>
               {device.id !== session.deviceId && (
-                <button
-                  type="button"
+                <Button
+                  variant="quiet"
+                  size="sm"
                   disabled={busy}
                   onClick={() => revoke(device.id)}
-                  className="shrink-0 text-xs underline text-(--color-ink-muted)"
+                  className="shrink-0"
                 >
-                  revoke
-                </button>
+                  Revoke
+                </Button>
               )}
             </li>
           ))}
 
           {account.revoked.map((device) => (
-            <li key={device.id} className="flex items-center justify-between gap-3">
-              <span className="font-mono text-xs text-(--color-ink-muted) line-through">
+            <li key={device.id} className="flex items-center gap-gutter opacity-60">
+              <Avatar seed={device.id} label={`Revoked device ${device.id}`} size="sm" />
+              <span className="min-w-0 flex-1 break-all font-(--font-evidence) text-caption text-(--color-ink-muted) line-through">
                 {device.id}
               </span>
-              <span className="shrink-0 text-xs text-(--color-ink-muted)">revoked</span>
+              <span className="shrink-0 text-caption text-(--color-ink-muted)">revoked</span>
             </li>
           ))}
         </ul>
       )}
 
-      <div className="mt-4 border-t border-(--color-border-subtle) pt-3">
-        <p className="text-xs text-(--color-ink-muted)">
+      <div className="mt-pane border-t border-(--color-border-subtle) pt-gutter">
+        <p className="text-caption text-(--color-ink-muted)">
           <strong>Revoking</strong> is the right answer for a device that is lost or out of
           service: it stops receiving, and no longer decrypts the rest of your conversations.
         </p>
 
+        {/*
+          The confirmation is a state of this panel rather than a dialog laid over it, and that
+          is deliberate rather than a limitation: the reader has to weigh five consequences
+          before pressing, and a dialog would either be too small to hold them or would hide the
+          device list the decision is about. The cost is stated in full, then the destructive
+          button, then a way out.
+
+          What this does not solve: it does not slow anybody down. Someone who has already
+          decided presses twice in a second, and rotation is irreversible from the first press.
+          The copy therefore has to carry the whole warning — there is no second guard behind it.
+        */}
         {rotation ? (
-          <div className="mt-3 space-y-2 rounded-md border border-(--color-danger) bg-(--color-danger)/10 p-3">
-            <p className="font-medium text-(--color-danger)">
-              If a device was stolen from you, revoking it is not enough
-            </p>
-            <p className="text-xs text-(--color-ink-muted)">
+          <Banner tone="danger" title="If a device was stolen from you, revoking it is not enough">
+            <p>
               It holds your account key, like all your devices. Whoever has it can therefore
               declare a new device straight away. Changing the account key is the only measure
               that stops them.
             </p>
-            <p className="text-xs text-(--color-ink-muted)">What this means:</p>
-            <ul className="list-disc space-y-1 pl-5 text-xs text-(--color-ink-muted)">
+            <p className="mt-snug">What this means:</p>
+            <ul className="mt-tight list-disc space-y-1 pl-5">
               <li>A new recovery phrase. The old one will be worth nothing.</li>
               <li>Your other devices will have to be paired again.</li>
               <li>
@@ -198,34 +227,26 @@ export function DeviceSettings({
                 The thief holds the same key you do and can act first. Do this now.
               </li>
             </ul>
-            <div className="flex gap-3 pt-1">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={rotate}
-                className="rounded-md bg-(--color-danger) px-3 py-1.5 text-xs font-medium text-white"
-              >
+            <div className="mt-gutter flex flex-wrap items-center gap-snug">
+              <Button variant="destructive" size="sm" busy={busy} onClick={rotate}>
                 Change the account key
-              </button>
-              <button
-                type="button"
-                onClick={() => setRotation(false)}
-                className="text-xs underline text-(--color-ink-muted)"
-              >
+              </Button>
+              <Button variant="quiet" size="sm" onClick={() => setRotation(false)}>
                 Cancel
-              </button>
+              </Button>
             </div>
-          </div>
+          </Banner>
         ) : (
-          <button
-            type="button"
+          <Button
+            variant="quiet"
+            size="sm"
             onClick={() => setRotation(true)}
-            className="mt-2 text-xs underline text-(--color-danger)"
+            className="mt-snug text-(--color-danger) hover:text-(--color-danger)"
           >
             A device was stolen from me
-          </button>
+          </Button>
         )}
       </div>
-    </div>
+    </Panel>
   );
 }

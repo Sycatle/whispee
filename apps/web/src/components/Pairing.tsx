@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import type { Session } from "@/lib/session";
 import { QrCode } from "@/components/QrCode";
 import { scanAvailable, scan } from "@/lib/scanner";
+import { useSession } from "@/state/SessionProvider";
+import { useReport } from "@/state/report";
+import { Banner } from "@/ui/Banner";
+import { Button } from "@/ui/Button";
+import { Field } from "@/ui/Field";
+import { Icon } from "@/ui/Icon";
+import { Panel } from "@/ui/Panel";
+import { Textarea } from "@/ui/Textarea";
 
 /**
  * Adding a device, from the side of the **already authenticated** device.
@@ -10,7 +17,8 @@ import { scanAvailable, scan } from "@/lib/scanner";
  * device, there is no reason to type the recovery phrase again — so no reason to expose it a
  * second time.
  */
-export function PairDevice({ session, onDone }: { session: Session; onDone: () => void }) {
+export function PairDevice({ onDone }: { onDone: () => void }) {
+  const session = useSession();
   const [code, setCode] = useState("");
   const [confirmation, setConfirmation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -75,106 +83,115 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
 
   if (confirmation) {
     return (
-      <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-        <h2 className="font-medium">Confirmation code</h2>
-        <p className="mt-2 text-(--color-ink-muted)">
-          This code must be identical on both screens. If it differs, stop: the device you are
-          pairing is not the one you think it is.
-        </p>
-        <p className="mt-3 font-mono text-2xl tracking-widest">{confirmation}</p>
-        <p className="mt-3 text-xs text-(--color-ink-muted)">
+      <Panel
+        title="Confirmation code"
+        description="This code must be identical on both screens. If it differs, stop: the device you are pairing is not the one you think it is."
+        actions={
+          <Button variant="primary" onClick={onDone}>
+            Done
+          </Button>
+        }
+      >
+        {/* The one string on this screen a human is asked to compare character by character, so
+            it is set in `--font-evidence` and spaced out. Wide tracking is not decoration here:
+            it stops two adjacent characters from being read as one. */}
+        <output className="block font-(--font-evidence) text-title tracking-widest text-(--color-ink)">
+          {confirmation}
+        </output>
+        <p className="mt-gutter text-caption text-(--color-ink-muted)">
           The new device joins your ongoing conversations within seconds.
         </p>
-        <button
-          type="button"
-          onClick={onDone}
-          className="mt-4 rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white"
-        >
-          Done
-        </button>
-      </div>
+      </Panel>
     );
   }
 
   return (
-    <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-      <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Add a device</h2>
-        <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
+    <Panel
+      title="Add a device"
+      description="On the new device, choose “Add this device to an account”, then scan its square or copy its code here. This code holds no secret: it is only an ephemeral public key, useless to anyone who intercepts it."
+      actions={
+        <Button variant="quiet" size="sm" onClick={onDone}>
           Close
-        </button>
-      </div>
-
-      <p className="mt-2 text-(--color-ink-muted)">
-        On the new device, choose &ldquo;Add this device to an account&rdquo;, then scan its square
-        or copy its code here. This code holds no secret: it is only an ephemeral public key,
-        useless to anyone who intercepts it.
-      </p>
-
-      <p className="mt-2 text-xs text-(--color-ink-muted)">
+        </Button>
+      }
+    >
+      <p className="text-caption text-(--color-ink-muted)">
         Only scan the screen you are holding: that is the one thing telling your device apart from
         a stranger&apos;s. Both screens will then show the same confirmation code — if they differ,
         stop.
       </p>
 
       {camera && (
-        <div className="mt-3">
+        <div className="mt-gutter flex flex-col gap-snug">
           {/* `playsInline`, without which iOS opens the video full screen, covering the panel and
               making it look like the app changed screens. */}
           <video
             ref={video}
             playsInline
             muted
-            className="w-full rounded-md border border-(--color-border-subtle)"
+            className="w-full rounded-control border border-(--color-border-subtle)"
           />
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => {
               stopCamera.current?.();
               setCamera(false);
             }}
-            className="mt-2 text-(--color-ink-muted) underline touch:min-h-11"
+            className="self-start"
           >
             Stop the camera
-          </button>
+          </Button>
         </div>
       )}
 
       {!camera && scanAvailable() && (
-        <button
-          type="button"
+        <Button
+          variant="primary"
+          icon={<Icon name="pair" />}
+          busy={busy}
           onClick={() => void readTheSquare()}
-          disabled={busy}
-          className="mt-3 w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50 touch:min-h-11"
+          className="mt-gutter w-full"
         >
           Scan the square
-        </button>
+        </Button>
       )}
 
-      <form onSubmit={submit} className="mt-3 space-y-2">
-        <textarea
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          placeholder="code shown by the new device"
-          rows={2}
-          required
-          className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5 font-mono text-xs"
-        />
-        <button
-          type="submit"
-          disabled={busy || !code.trim()}
-          className="rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
+      <form onSubmit={submit} className="mt-gutter flex flex-col gap-gutter">
+        <Field
+          label="Code shown by the new device"
+          hint="Paste it as it appears, in full."
         >
-          {busy ? "Sending…" : "Pair"}
-        </button>
+          {({ id, describedBy, invalid }) => (
+            <Textarea
+              id={id}
+              describedBy={describedBy}
+              invalid={invalid}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              rows={2}
+              required
+              className="font-(--font-evidence) text-body"
+            />
+          )}
+        </Field>
+        <Button
+          type="submit"
+          variant="primary"
+          busy={busy}
+          disabled={!code.trim()}
+          className="self-start"
+        >
+          Pair
+        </Button>
       </form>
 
       {error && (
-        <p role="alert" className="mt-3 text-(--color-danger)">
-          {error}
-        </p>
+        <div className="mt-gutter">
+          <Banner tone="danger">{error}</Banner>
+        </div>
       )}
-    </div>
+    </Panel>
   );
 }
 
@@ -183,6 +200,12 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
  *
  * This direction is mandatory. A displayed code can be photographed, so it must hold no secret.
  * The original device is the one that seals and sends, and only that way round.
+ *
+ * # Why this one keeps its props
+ *
+ * `code` and `confirmation` are not session state, they are the output of `usePairingOffer`
+ * running in the caller — on a device that has no session yet, which is the entire point of the
+ * screen. There is nothing here for `useSession()` to read.
  */
 export function ShowPairingCode({
   code,
@@ -193,13 +216,13 @@ export function ShowPairingCode({
   confirmation: string | null;
   onCancel: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
+  const report = useReport();
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 p-6">
-      <div>
-        <h1 className="text-xl font-medium">Add this device</h1>
-        <p className="mt-2 text-sm text-(--color-ink-muted)">
+    <main className="safe-top safe-bottom safe-sides mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center gap-section p-pane">
+      <div className="flex flex-col gap-snug">
+        <h1 className="text-title font-medium text-(--color-ink)">Add this device</h1>
+        <p className="text-body text-(--color-ink-muted)">
           On a device where you are already signed in, open &ldquo;Add a device&rdquo; and scan
           this square — or copy the code below. It holds no secret: your recovery phrase stays
           where it is, and does not have to be typed again.
@@ -210,38 +233,53 @@ export function ShowPairingCode({
         <QrCode value={code} />
       </div>
 
-      <div className="space-y-2">
+      <div className="flex flex-col gap-snug">
         {/* The text stays, under the square: not every platform can scan, and a desktop computer
             often has no camera pointed at the other screen. */}
-        <p className="break-all rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) p-4 font-mono text-xs">
+        <p className="break-all rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-gutter font-(--font-evidence) text-caption text-(--color-ink)">
           {code}
         </p>
-        <button
-          type="button"
+        {/*
+          The success used to be a `copied` flag that turned this label into "Copied" and never
+          turned back, which said nothing on a second copy and nothing at all to a screen reader.
+          The toast is announced, it expires, and it is the same acknowledgement every other
+          action in the application gives.
+
+          What this does not solve: a clipboard write that is refused still says nothing. The
+          promise rejects and no report is made — the code is on screen to be typed either way.
+        */}
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={<Icon name="copy" />}
           onClick={() => {
-            void navigator.clipboard.writeText(code).then(() => setCopied(true));
+            void navigator.clipboard
+              .writeText(code)
+              .then(() => report.done("Pairing code copied"));
           }}
-          className="text-sm text-(--color-ink-muted) underline"
+          className="self-start"
         >
-          {copied ? "Copied" : "Copy the code"}
-        </button>
+          Copy the code
+        </Button>
       </div>
 
       {confirmation ? (
         <div>
-          <p className="text-sm">Confirmation code:</p>
-          <p className="mt-1 font-mono text-2xl tracking-widest">{confirmation}</p>
-          <p className="mt-2 text-xs text-(--color-ink-muted)">
+          <p className="text-body text-(--color-ink)">Confirmation code:</p>
+          <output className="mt-tight block font-(--font-evidence) text-title tracking-widest text-(--color-ink)">
+            {confirmation}
+          </output>
+          <p className="mt-snug text-caption text-(--color-ink-muted)">
             It must be identical on both screens.
           </p>
         </div>
       ) : (
-        <p className="text-sm text-(--color-ink-muted)">Waiting for the other device…</p>
+        <p className="text-body text-(--color-ink-muted)">Waiting for the other device…</p>
       )}
 
-      <button type="button" onClick={onCancel} className="text-sm text-(--color-ink-muted) underline">
+      <Button variant="quiet" size="sm" onClick={onCancel} className="self-start">
         Cancel
-      </button>
+      </Button>
     </main>
   );
 }

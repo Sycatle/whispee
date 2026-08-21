@@ -201,6 +201,17 @@ the loss surface for no gain against a server that never sees it.
   "malicious server" row already covers the capability.
 - **Supply chain below the source.** Reproducible builds cover the binary against the published
   source; they say nothing about `rustc`, the crates, or the operating system.
+- **Supply chain in the interface.** The client went from seven production dependencies and none
+  for the interface to roughly fifty, when Radix, CVA and Lucide were adopted for the shell. On a
+  page that runs the user's cryptography, any one of them could read a key out of memory, and the
+  same reproducible-build argument that covers the Rust side covers none of it: `pnpm-lock.yaml`
+  pins what was installed, not what it does.
+
+  The trade was made deliberately and it is worth stating both halves. What was bought is the
+  accessibility work nobody here would have written correctly — focus traps, focus restoration,
+  `inert`, collision-aware positioning, `role="switch"` — every one of which the hand-written
+  version had got wrong. What was sold is a smaller surface to audit. A project that took this
+  seriously at scale would vendor these packages and review them; this one has not.
 
 ---
 

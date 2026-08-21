@@ -49,7 +49,15 @@ crates/
 apps/
   web/             Vite 7 + React 19 + Tailwind 4. Also the source of the desktop and mobile
                    interfaces — it is built once and packaged three times.
-    src/lib/       All non-UI logic. session.ts is the convergence point named above.
+    src/lib/       All non-UI logic. session.ts is the convergence point named above,
+                   and session-types.ts holds the shapes it hands around — split out so that
+                   several features can grow without colliding in the same two hundred lines.
+    src/ui/        Primitives. A Button that cannot fail contrast, a Field whose label is
+                   required by its type. Nothing here knows what a conversation is.
+    src/state/     The bridge between a mutable class and React: a revision counter, the
+                   provider that subscribes to it, and the error/confirmation channel.
+    src/routes/    A hash router in fifty lines. The open conversation lives in the URL.
+    src/app/       The shell: three columns, the rail, the detail column, the settings screen.
     src/components/  React components. Screens, not logic.
     src/lib/generated/  wasm-bindgen glue, committed, patched by scripts/patch-wasm-glue.mjs.
     public/        crypto_wasm_bg.wasm — the compiled module, committed as a build artefact.

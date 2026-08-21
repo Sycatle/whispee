@@ -56,7 +56,20 @@ function csp(api: string): string {
     // near that of a script.
     "style-src 'self' 'unsafe-inline'",
     `connect-src 'self' ${api} ${websocket}`,
-    "img-src 'self' data:",
+    // `blob:` is for image previews, and it is not a hole reopening.
+    //
+    // What a received image gets displayed as is a canvas re-encoding of what an image decoder
+    // produced from it (`lib/preview.ts`), never the bytes that arrived. `blob:` is what a URL
+    // minted by this document's own JavaScript looks like: it is not a network origin, nothing
+    // outside this document can produce one, and the server cannot inject one. It permits this
+    // page to show a picture it drew itself.
+    //
+    // What it still does not fix, and what `object-src 'none'` and `script-src 'self'` are
+    // carrying instead: a `blob:` URL is same-origin, so a `blob:` document would inherit this
+    // origin. `img-src` cannot navigate to one — it can only decode it as an image — and no
+    // other directive here allows `blob:`, which is why it is added to this one and not to
+    // `default-src`.
+    "img-src 'self' data: blob:",
     "object-src 'none'",
     "base-uri 'none'",
     "frame-ancestors 'none'",

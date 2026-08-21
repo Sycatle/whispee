@@ -1,8 +1,10 @@
 import { useState } from "react";
+import { formatHandle, nameOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { Button } from "@/ui/Button";
 import { Dialog } from "@/ui/Dialog";
 import { useBump, useSession } from "@/state/SessionProvider";
+import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 
 /**
@@ -61,6 +63,7 @@ export function GroupPanel({
   const session = useSession();
   const bump = useBump();
   const report = useReport();
+  const names = useNames();
 
   const [busy, setBusy] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -105,6 +108,24 @@ export function GroupPanel({
     return null;
   };
 
+  /**
+   * A member's two lines, for the roster and nowhere else in this file.
+   *
+   * The roster is a reference list read at leisure, so it has room for both strings and shows
+   * both. The confirmations further down deliberately do not — see the comment above the first
+   * of them.
+   */
+  const Member = ({ name }: { name: { primary: string; secondary: string | null } }) => (
+    <>
+      <span>{name.primary}</span>
+      {name.secondary !== null && (
+        <span className="font-evidence text-caption text-(--color-ink-muted)">
+          {name.secondary}
+        </span>
+      )}
+    </>
+  );
+
   const Role = ({ handle }: { handle: string }) => {
     const named = role(handle);
     if (named === null) return null;
@@ -121,7 +142,15 @@ export function GroupPanel({
 
       <ul className="space-y-tight">
         <li className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
-          <span>@{session.handle}</span>
+          {/* Our own name comes from `session.displayName`, not from `profiles`: that record is
+              what other people asserted about themselves, and this account never announces
+              itself to itself. */}
+          <Member
+            name={{
+              primary: session.displayName ?? formatHandle(session.handle),
+              secondary: session.displayName === undefined ? null : formatHandle(session.handle),
+            }}
+          />
           <span className="text-caption text-(--color-ink-muted)">(you)</span>
           <Role handle={session.handle} />
         </li>
@@ -132,7 +161,7 @@ export function GroupPanel({
 
           return (
             <li key={account.handle} className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
-              <span>@{account.handle}</span>
+              <Member name={nameOf(account.handle, names)} />
               <Role handle={account.handle} />
               <span className="text-caption text-(--color-ink-muted)">
                 {account.devices.length} device{account.devices.length > 1 ? "s" : ""}
@@ -201,11 +230,26 @@ export function GroupPanel({
         </div>
       )}
 
+      {/*
+        Every confirmation below names people by handle, and none of them by display name. This
+        is the deliberate exception to the rule the roster above follows.
+
+        A confirmation asks somebody to commit to an irreversible act against a specific account,
+        so the string it names has to be the one that account cannot choose. "Remove Charlie?"
+        asks for a signature on a label its own subject types in and can change tomorrow; "Remove
+        @charlie8295?" asks for one on the anchor. It is the same argument that keeps the bare
+        handle in `Verification.tsx`, and it applies to the reports these actions leave behind
+        too — a report of what happened has to be checkable against what was confirmed.
+
+        What it does not solve: somebody who only ever sees a display name in the roster may not
+        recognise the handle here. That is the cost, and it is the right way round — hesitating
+        over an unfamiliar handle is a better failure than confidently removing the wrong person.
+      */}
       <Dialog
         open={pending?.kind === "remove"}
         onOpenChange={(open) => !open && setPending(null)}
         tone="danger"
-        title={pending === null ? "Remove member" : `Remove @${pending.handle}?`}
+        title={pending === null ? "Remove member" : `Remove ${formatHandle(pending.handle)}?`}
         description="Removing someone removes all of their devices: the unit is the account, never the device. From the commit onward they decrypt nothing that follows, and re-adding them later does not give the window back."
         actions={
           <>
@@ -221,7 +265,7 @@ export function GroupPanel({
                 void action(async () => {
                   await session.removeAccount(view, handle);
                   setPending(null);
-                  report.done(`Removed @${handle} from the group.`);
+                  report.done(`Removed ${formatHandle(handle)} from the group.`);
                 });
               }}
             >
@@ -235,7 +279,11 @@ export function GroupPanel({
         open={pending?.kind === "handover"}
         onOpenChange={(open) => !open && setPending(null)}
         tone="danger"
-        title={pending === null ? "Hand the group over" : `Hand the group over to @${pending.handle}?`}
+        title={
+          pending === null
+            ? "Hand the group over"
+            : `Hand the group over to ${formatHandle(pending.handle)}?`
+        }
         description="They become the administrator and you do not. There is no way to take it back from this side: only the new administrator can hand it to anybody, including back to you."
         actions={
           <>
@@ -251,7 +299,7 @@ export function GroupPanel({
                 void action(async () => {
                   await session.setRoles(view, handle, roles.moderators);
                   setPending(null);
-                  report.done(`@${handle} now administers this group.`);
+                  report.done(`${formatHandle(handle)} now administers this group.`);
                 });
               }}
             >
@@ -283,7 +331,9 @@ export function GroupPanel({
                 })
               }
             >
-              {heir !== null ? `Hand over to @${heir} and leave` : "Request to leave"}
+              {heir !== null
+                ? `Hand over to ${formatHandle(heir)} and leave`
+                : "Request to leave"}
             </Button>
           </>
         }
@@ -296,7 +346,7 @@ export function GroupPanel({
           </p>
           {heir !== null && (
             <p>
-              You administer this group: <strong>@{heir}</strong> will succeed you
+              You administer this group: <strong>{formatHandle(heir)}</strong> will succeed you
               {roles !== null && roles.moderators.includes(heir)
                 ? " (moderator, the rank below)"
                 : " (longest-standing member)"}

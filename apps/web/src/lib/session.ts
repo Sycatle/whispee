@@ -19,6 +19,7 @@ import * as derive from "./conversation-view.ts";
 import { PresenceTracker } from "./session-presence.ts";
 import { PreferencesStore } from "./session-preferences.ts";
 import { Names, type Profile } from "./session-naming.ts";
+import { TrustStore } from "./session-trust.ts";
 import { composeStored } from "./session-persist.ts";
 import { fromBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
@@ -130,8 +131,7 @@ export class Session {
      */
     private vaultCipher: CryptoKey | null,
     readonly conversations: Map<string, ConversationView>,
-    private verified: Record<string, string>,
-    private knownDevices: Record<string, string[]>,
+    private trust: TrustStore,
     /**
      * Signalling settings.
      *
@@ -253,11 +253,11 @@ export class Session {
    * state is always on screen rather than tucked into a menu.
    */
   verificationOf(account: ResolvedAccount): VerificationState {
-    return derive.verificationOf(this.verified, account);
+    return this.trust.verificationOf(account);
   }
 
   async markVerified(account: ResolvedAccount): Promise<void> {
-    this.verified[account.handle] = account.fingerprint;
+    this.trust.markVerified(account);
     await this.persist();
   }
 
@@ -384,8 +384,7 @@ export class Session {
       // reversible in settings.
       await vault.importVaultKey(account.vaultKey()),
       new Map(),
-      {},
-      {},
+      new TrustStore(),
     );
 
     await session.replenishKeyPackages(KEY_PACKAGE_TARGET);
@@ -572,8 +571,7 @@ export class Session {
       // Conflating the two would re-enable the vault behind the back of someone who refused it.
       stored.vaultEnabled === false ? null : await vaultCipherOf(crypto, account),
       conversations,
-      stored.verified ?? {},
-      stored.knownDevices ?? {},
+      TrustStore.hydrate(stored),
       // A missing `presence` means enabled: that is the default, the flag only records a refusal.
       { readReceipts: true, typingIndicator: true, ...stored.signals },
     );
@@ -875,8 +873,7 @@ export class Session {
         conversations: this.conversations,
         lock: this.lock,
         vaultEnabled: this.vaultCipher !== null,
-        verified: this.verified,
-        knownDevices: this.knownDevices,
+        trust: this.trust.snapshot(),
         signals: this.signals,
         preferences: this.settings.snapshot(),
         names: this.names.snapshot(),
@@ -1201,7 +1198,10 @@ export class Session {
     }
 
     for (const peer of peers) {
-      this.knownDevices[peer.handle] = peer.devices.map((device) => device.id);
+      this.trust.noteDevices(
+        peer.handle,
+        peer.devices.map((device) => device.id),
+      );
     }
 
     const view: ConversationView = {
@@ -1410,7 +1410,10 @@ export class Session {
     // session lasts, and nothing anywhere says so.
     view.postingKeyShared = false;
 
-    this.knownDevices[peer.handle] = peer.devices.map((device) => device.id);
+    this.trust.noteDevices(
+        peer.handle,
+        peer.devices.map((device) => device.id),
+      );
     view.accounts = [...view.accounts, peer];
     this.refreshView(view);
     await this.persist();
@@ -1841,13 +1844,12 @@ export class Session {
    */
   async newDevicesOf(handle: string): Promise<string[]> {
     const peer = await this.resolve(handle);
-    const known = new Set(this.knownDevices[handle] ?? []);
-    const fresh = peer.devices.map((device) => device.id).filter((id) => !known.has(id));
+    const fresh = this.trust.newDevicesIn(
+      handle,
+      peer.devices.map((device) => device.id),
+    );
 
-    if (fresh.length > 0) {
-      this.knownDevices[handle] = peer.devices.map((device) => device.id);
-      await this.persist();
-    }
+    if (fresh.length > 0) await this.persist();
     return fresh;
   }
 

@@ -70,8 +70,14 @@ export interface PersistInput {
   conversations: ReadonlyMap<string, ConversationView>;
   lock: LockEnvelope | undefined;
   vaultEnabled: boolean;
-  verified: Record<string, string>;
-  knownDevices: Record<string, string[]>;
+  /**
+   * What `TrustStore` contributes, already mapped.
+   *
+   * The slice that costs the most to get wrong: `verified` is keyed by account, and read under a
+   * key it was not written under it does not fail — it reports every checked correspondent as
+   * unverified, or worse as changed. See `session-trust.ts`.
+   */
+  trust: Pick<StoredSession, "verified" | "knownDevices">;
   signals: SignalSettings;
   /**
    * What `PreferencesStore` contributes, already mapped.
@@ -123,8 +129,7 @@ export async function composeStored(input: PersistInput): Promise<StoredSession>
     vaultEnabled: input.vaultEnabled,
     state: await input.seal(input.mlsState),
     groupIds: input.groupIds,
-    verified: input.verified,
-    knownDevices: input.knownDevices,
+    ...input.trust,
     signals: input.signals,
     postingKeys: Object.fromEntries(
       views

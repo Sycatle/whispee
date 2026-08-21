@@ -15,7 +15,6 @@ import {
   matchingConversation,
   successorOf,
   unreadIn,
-  verificationOf,
 } from "./conversation-view.ts";
 import { record } from "./receipts.ts";
 import { freshSignalState, type ConversationView, type Message } from "./session-types.ts";
@@ -46,25 +45,6 @@ function peers(...names: string[]) {
 function account(handle: string, fingerprint: string) {
   return { handle, fingerprint } as ResolvedAccount;
 }
-
-test("a peer nobody compared out of band is unverified", () => {
-  assert.deepEqual(verificationOf({}, account("bob", "AAAA")), { status: "unverified" });
-});
-
-test("a fingerprint that still matches is verified", () => {
-  assert.deepEqual(verificationOf({ bob: "AAAA" }, account("bob", "AAAA")), {
-    status: "verified",
-  });
-});
-
-test("a fingerprint that moved reports what it used to be", () => {
-  // Keeping the old value — rather than a bare boolean — is the whole point: the user is the only
-  // one who can tell a recovery from a substitution, and they cannot without being shown both.
-  assert.deepEqual(verificationOf({ bob: "AAAA" }, account("bob", "BBBB")), {
-    status: "changed",
-    previous: "AAAA",
-  });
-});
 
 test("a conversation is found whatever order its members were typed in", () => {
   const group = view({ key: "g", peers: peers("alice", "bob", "carol") });

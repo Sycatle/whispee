@@ -19,9 +19,8 @@
  * untested. Extracting the easy half does not make the other half easier; it stops the two being
  * mistaken for each other.
  */
-import type { ResolvedAccount } from "./account";
 import { statusOf } from "./receipts.ts";
-import type { ConversationView, Roles, VerificationState } from "./session-types";
+import type { ConversationView, Roles } from "./session-types";
 
 /**
  * Separates handles when a membership set is flattened for comparison.
@@ -31,28 +30,6 @@ import type { ConversationView, Roles, VerificationState } from "./session-types
  * the comparison sound, and an inlined escape is easy to "tidy" into a comma.
  */
 const MEMBER_SEPARATOR = "\u0000";
-
-/**
- * Verification state of a peer.
- *
- * Without an out-of-band comparison, a malicious server can serve each side a KeyPackage it
- * controls and relay in the clear between two perfectly encrypted sessions. No cryptographic check
- * catches it — this is the real weak link of every E2EE deployment, and the reason this state is
- * always on screen rather than tucked into a menu.
- *
- * Takes the whole record of what has been verified rather than a single fingerprint, so that
- * "never verified" and "verified, and it has changed" are told apart here rather than by every
- * caller.
- */
-export function verificationOf(
-  verified: Record<string, string>,
-  account: ResolvedAccount,
-): VerificationState {
-  const known = verified[account.handle];
-  if (!known) return { status: "unverified" };
-  if (known === account.fingerprint) return { status: "verified" };
-  return { status: "changed", previous: known };
-}
 
 /**
  * Looks for a conversation whose participants are exactly the ones asked for.

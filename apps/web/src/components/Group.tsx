@@ -142,15 +142,9 @@ export function GroupPanel({
 
       <ul className="space-y-tight">
         <li className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
-          {/* Our own name comes from `session.displayName`, not from `profiles`: that record is
-              what other people asserted about themselves, and this account never announces
-              itself to itself. */}
-          <Member
-            name={{
-              primary: session.displayName ?? formatHandle(session.handle),
-              secondary: session.displayName === undefined ? null : formatHandle(session.handle),
-            }}
-          />
+          {/* Through `nameOf` like every other row: `useNames` folds this account's display name
+              into `profiles` under its own handle, so the self case does not exist here. */}
+          <Member name={nameOf(session.handle, names)} />
           <span className="text-caption text-(--color-ink-muted)">(you)</span>
           <Role handle={session.handle} />
         </li>

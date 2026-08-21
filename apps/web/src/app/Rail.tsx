@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 
 import { PresenceDot } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
-import { compactNameOf, formatHandle, nameMatches, nameOf } from "@/lib/naming";
+import { compactNameOf, nameMatches, nameOf } from "@/lib/naming";
 import { roster } from "@/lib/roster";
 import type { ConversationView } from "@/lib/session";
 import { Avatar } from "@/ui/Avatar";
@@ -223,14 +223,9 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
     ...contacts,
   ]);
 
-  /**
-   * What this account calls itself, or nothing.
-   *
-   * Read from `session.displayName` and not through `nameOf`: `profiles` holds what *other*
-   * people asserted about themselves, and this account never announces itself to itself. There
-   * is no petname on oneself either, so the whole naming order collapses to these two cases.
-   */
-  const self = session.displayName;
+  // Our own row goes through the same function as everybody else's: `useNames` folds this
+  // account's display name into `profiles` under its own handle, so there is no self case here.
+  const self = nameOf(session.handle, names);
 
   const open = async (handle: string) => {
     try {
@@ -458,23 +453,21 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             >
               <Avatar
                 seed={session.accountFingerprint()}
-                label={self ?? formatHandle(session.handle)}
+                label={self.primary}
                 size="md"
                 className="shrink-0"
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-body font-medium">
-                  {self ?? formatHandle(session.handle)}
-                </span>
+                <span className="block truncate text-body font-medium">{self.primary}</span>
                 {/*
                   A named account gets three lines here rather than two, and the device
                   identifier keeps the last of them. It is not a decoration: it is what somebody
                   compares character by character while pairing, and dropping it to make room for
                   a name would trade evidence for a label the user typed themselves.
                 */}
-                {self !== undefined && (
+                {self.secondary !== null && (
                   <span className="block truncate text-caption text-(--color-ink-muted)">
-                    {formatHandle(session.handle)}
+                    {self.secondary}
                   </span>
                 )}
                 <span className="block truncate font-evidence text-caption text-(--color-ink-muted)">
@@ -488,10 +481,8 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
           {/* One line, but a wide one, so both strings fit side by side and the anchor is not
               lost the moment the menu is the only thing on screen. */}
           <Menu.Label>
-            {self ?? formatHandle(session.handle)}
-            {self !== undefined && (
-              <span className="ml-tight">{formatHandle(session.handle)}</span>
-            )}
+            {self.primary}
+            {self.secondary !== null && <span className="ml-tight">{self.secondary}</span>}
           </Menu.Label>
 
           <Menu.Sub label="Theme" icon="theme">

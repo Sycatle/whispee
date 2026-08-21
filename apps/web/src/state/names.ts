@@ -14,5 +14,19 @@ import { useSession } from "./SessionProvider.tsx";
 
 export function useNames(): NameSources {
   const session = useSession();
-  return { petnames: session.petnames, profiles: session.profiles };
+
+  // Our own name is folded into `profiles` under our own handle rather than handled as a special
+  // case at each call site. `profiles` holds what people assert about themselves, and that is
+  // precisely what a display name is — ours is not a different kind of claim because we happen to
+  // be the one making it, and treating it as one meant three copies of the same fallback rule in
+  // three components.
+  //
+  // The `at` is zero and never compared: nothing arrives over the wire for our own handle, since
+  // `absorbProfile` is only reached by a message from a peer.
+  const profiles =
+    session.displayName === undefined
+      ? session.profiles
+      : { ...session.profiles, [session.handle]: { name: session.displayName, at: 0 } };
+
+  return { petnames: session.petnames, profiles };
 }

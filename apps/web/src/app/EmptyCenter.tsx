@@ -1,4 +1,5 @@
-import { formatHandle } from "@/lib/naming";
+import { nameOf } from "@/lib/naming";
+import { useNames } from "@/state/names";
 import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
@@ -32,19 +33,15 @@ export function EmptyCenter() {
   const session = useSession();
   const navigate = useNavigate();
   const fingerprint = session.accountFingerprint();
-  /**
-   * What this account calls itself, or nothing.
-   *
-   * Straight from `session.displayName` rather than through `nameOf`: `profiles` holds what other
-   * people asserted about themselves, and nobody asserts anything to themselves. A petname on
-   * oneself does not exist either, so the naming order has only these two branches here.
-   */
-  const self = session.displayName;
+  // The same function every other person on screen goes through: `useNames` folds this account's
+  // display name into `profiles` under its own handle, so there is no self case to keep in step.
+  const names = useNames();
+  const self = nameOf(session.handle, names);
 
   return (
     <div className="safe-bottom flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-pane">
       <div className="flex w-full max-w-md flex-col items-center gap-pane py-section text-center">
-        <Avatar seed={fingerprint} label={self ?? formatHandle(session.handle)} size="lg" />
+        <Avatar seed={fingerprint} label={self.primary} size="lg" />
 
         <div>
           {/*
@@ -53,11 +50,9 @@ export function EmptyCenter() {
             you chose for other people's screens. The handle is what identifies the account, so it
             keeps its place here rather than being replaced by the friendlier string above it.
           */}
-          <h1 className="text-display font-medium">{self ?? formatHandle(session.handle)}</h1>
-          {self !== undefined && (
-            <p className="mt-tight text-body text-(--color-ink-muted)">
-              {formatHandle(session.handle)}
-            </p>
+          <h1 className="text-display font-medium">{self.primary}</h1>
+          {self.secondary !== null && (
+            <p className="mt-tight text-body text-(--color-ink-muted)">{self.secondary}</p>
           )}
           {/* The device identifier is evidence, not prose: it is compared character by character
               against what another device shows during pairing. Hence the monospace token, whose

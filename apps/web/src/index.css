@@ -217,8 +217,9 @@
  * Everything is a multiple of `--spacing`, which stays at Tailwind's 0.25rem — restated rather
  * than assumed, because the six names below are only meaningful as multiples of something.
  *
- * These six are not a scale someone designed; they are the distances the interface already
- * uses, counted. A messenger of three panes, bubbles and dense settings panels has a genuinely
+ * The first six are not a scale someone designed; they are the distances the interface already
+ * uses, counted. The seventh, `--spacing-gap`, is the one exception: it was designed, because
+ * the interface it describes did not exist when the others were counted. A messenger of three panes, bubbles and dense settings panels has a genuinely
  * narrow set: `p-3`/`px-3` and `p-4`/`px-4` account for most of the padding in the tree, `mt-2`
  * and `gap-2` for most of the separation, and `py-1.5` exists on its own because a compact
  * control next to 0.875rem text is too tall at 0.5rem and too cramped at 0.25rem.
@@ -241,18 +242,32 @@
   --spacing-pane: 1rem;
   /* Between two unrelated blocks in a settings panel. The largest gap that means anything. */
   --spacing-section: 1.5rem;
+
+  /* Between two floating surfaces, and between a surface and the window edge.
+   *
+   * One value, used everywhere a surface meets another surface. That is the whole point: the
+   * regularity is what reads as deliberate, and a second gutter value would destroy it faster
+   * than any amount of misalignment elsewhere. It is deliberately *smaller* than `--spacing-snug`
+   * would suggest for a gap of this importance — a wide gutter between panes makes an application
+   * look like a dashboard of widgets rather than one instrument.
+   *
+   * What it does not solve: it is a distance, not a layout. Nothing stops a pane from being
+   * flush against the window; the shell has to apply it, and below `duo` it deliberately does
+   * not — see the note on `--radius-surface`. */
+  --spacing-gap: 0.5rem;
 }
 
 /* Radius.
  *
- * Three steps and a pill, because that is how many distinct corner sizes the interface can tell
+ * Four steps and a pill, because that is how many distinct corner sizes the interface can tell
  * apart at these sizes. Below 0.25rem a corner reads as square; the jump from a control to a
  * bubble has to be visible or it is noise.
  *
- * The values match what is already in the tree (`rounded` on a tag, `rounded-md` on 39 controls,
- * `rounded-lg` on the message bubble), so a component switching from the numeric name to the
- * semantic one changes nothing on screen. That is deliberate: the rename should be reviewable as
- * a rename. */
+ * The first three match what was already in the tree (`rounded` on a tag, `rounded-md` on 39
+ * controls, `rounded-lg` on the message bubble), so a component switching from the numeric name
+ * to the semantic one changes nothing on screen. That was deliberate: the rename should be
+ * reviewable as a rename. `--radius-surface` is the one that is not a rename — it turns corners
+ * that used to be square, and it is meant to be seen. */
 @theme static {
   /* A tag, a badge, a swatch — small enough that anything rounder looks like a mistake. */
   --radius-tag: 0.25rem;
@@ -264,6 +279,19 @@
   /* Avatars and status dots. `9999px` rather than `50%` so it stays circular-ended on a shape
      that is wider than it is tall. */
   --radius-pill: 9999px;
+
+  /* A whole pane: the rail, the thread, the detail column, the composer.
+   *
+   * Twice `--radius-control`, because a corner has to scale with the box it turns. The rail at
+   * 288 pixels wearing a 0.375rem corner does not read as rounded, it reads as a rectangle that
+   * failed to be square — and that impression is precisely what a floating surface cannot
+   * afford. Two radii for two scales of object is the whole system; a third would be a size
+   * nobody could name.
+   *
+   * What it does not solve: a rounded corner only means "detached" if something is visible
+   * behind it. Below `duo` a single pane fills the window, there is no ground to show, and the
+   * shell squares the corners off rather than rounding a shape against nothing. */
+  --radius-surface: 0.75rem;
 }
 
 /* Type.

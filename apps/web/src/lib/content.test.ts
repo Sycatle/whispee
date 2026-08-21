@@ -105,3 +105,65 @@ test("a wrapper nested inside a wrapper is refused", () => {
 
   assert.throws(() => decode(twice));
 });
+
+test("a display name round-trips with the moment it was set", () => {
+  const at = Date.now() - 1000;
+  const decoded = decode(encode({ kind: "profile", name: "Charlie", at }));
+
+  assert.deepEqual(decoded, { body: { kind: "profile", name: "Charlie", at } });
+});
+
+/**
+ * The name is control traffic, which is what buys it the three things it needs at once: no bubble
+ * in the thread, nothing archived to the vault, and no movement of the receipt cursor. The stamp
+ * it gives up in exchange is the reason it carries its own eight bytes.
+ */
+test("a display name is protocol traffic and is never wrapped in a stamp", () => {
+  assert.equal(isControl({ kind: "profile", name: "Charlie", at: 1 }), true);
+  assert.deepEqual(
+    encode({ kind: "profile", name: "Charlie", at: 1 }, 999),
+    encode({ kind: "profile", name: "Charlie", at: 1 }),
+  );
+});
+
+/**
+ * The self-declared clock is worth exactly what the stamp of a text message is worth: nothing. A
+ * member who dates their rename far ahead would win last-writer-wins against every update they
+ * ever make afterwards, and their name would be frozen with nothing on screen to say why.
+ */
+test("a profile timestamp in the future is clamped to the receiving clock", () => {
+  const before = Date.now();
+  const decoded = decode(encode({ kind: "profile", name: "Charlie", at: 4_102_444_800_000 }));
+  const after = Date.now();
+
+  assert.equal(decoded.body.kind, "profile");
+  if (decoded.body.kind !== "profile") return;
+  assert.ok(decoded.body.at >= before);
+  assert.ok(decoded.body.at <= after);
+});
+
+/** Ordinary skew between two consumer devices is not an attack, and must not cost a rename. */
+test("a profile timestamp a little ahead of us is believed", () => {
+  const at = Date.now() + 60_000;
+  const decoded = decode(encode({ kind: "profile", name: "Charlie", at }));
+
+  assert.deepEqual(decoded.body, { kind: "profile", name: "Charlie", at });
+});
+
+test("a display name over sixty-four bytes is refused rather than sent", () => {
+  assert.throws(() => encode({ kind: "profile", name: "\u{1F642}".repeat(17), at: 1 }));
+});
+
+test("a truncated profile timestamp is rejected rather than interpreted", () => {
+  const complete = encode({ kind: "profile", name: "Charlie", at: 1 });
+  assert.throws(() => decode(complete.subarray(0, 5)));
+});
+
+/** A name arriving over the wire is bounded on the way in too: the sender is not to be trusted. */
+test("a profile carrying an oversized name is rejected on decode", () => {
+  const oversized = new Uint8Array(1 + 8 + 65);
+  oversized[0] = 8;
+  oversized.fill(0x61, 9);
+
+  assert.throws(() => decode(oversized));
+});

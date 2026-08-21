@@ -139,6 +139,21 @@ the code and asking whether it is still true — which is the reason the next se
 comments that argue rather than describe. A description ages quietly; an argument fails loudly,
 because you can check whether its premise still holds.
 
+### And the opposite failure, which is cheaper to avoid
+
+The same week produced a fifth defect of a different kind: three clippy findings that would have
+turned CI red on the first push. Nobody had to be clever to catch those. **The tool saw them; the
+command was simply never run.**
+
+`cargo clippy` is the one check in the list above that nothing else stands in for — `cargo test`
+compiles the same code and says nothing about a byte-offset slice on a `str`, a four-column tuple
+written inline, or a collapsible `if`. So a loop that runs the tests and skips clippy feels
+complete and is not, and the gap only shows up where it costs the most: in CI, on a branch
+somebody has already pushed.
+
+Run every command in this section, not the ones that feel load-bearing. The list is short on
+purpose.
+
 ## Commits
 
 [Conventional Commits](https://www.conventionalcommits.org). The history already follows it,

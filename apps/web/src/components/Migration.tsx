@@ -1,5 +1,8 @@
 import { useState } from "react";
 import type { ProposedMigration, Session } from "@/lib/session";
+import { Banner } from "@/ui/Banner";
+import { Button } from "@/ui/Button";
+import { Spinner } from "@/ui/Spinner";
 
 /**
  * Offers the move to native storage, without performing it.
@@ -17,6 +20,18 @@ import type { ProposedMigration, Session } from "@/lib/session";
  * shows up immediately. A banner promising "more security" without saying what changes would get
  * blind acceptance, or refusal out of caution, which amounts to the same thing: the decision
  * would not be an informed one.
+ *
+ * # Why `tone="info"` for something the app would rather you did
+ *
+ * `warn` and `danger` mean "something is wrong"; nothing is wrong here, and both of those tones
+ * carry `role="alert"`, which would interrupt a screen reader mid-sentence to deliver a
+ * suggestion. An offer that shouts is an offer that gets dismissed unread — and dismissing it
+ * unread is exactly the outcome the long text above exists to avoid. `info` is `role="status"`:
+ * announced when the reader gets to it.
+ *
+ * What this does not solve: the banner is anchored at the bottom by whoever renders it, not by
+ * anything here. It is a block in the shell's column, so it inherits its position from that
+ * column — which is why it carries a margin rather than a border-to-border strip.
  */
 export function MigrationBanner({
   migration,
@@ -50,12 +65,12 @@ export function MigrationBanner({
   };
 
   return (
-    <section className="border-t border-(--color-ink-muted)/30 bg-(--color-ink-muted)/10 px-4 py-3 text-sm">
-      <h2 className="font-medium">
-        {migration.resume ? "Unfinished migration" : "This device's storage"}
-      </h2>
-
-      <p className="mt-1 text-(--color-ink-muted)">
+    <Banner
+      tone="info"
+      title={migration.resume ? "Unfinished migration" : "This device's storage"}
+      className="m-pane shrink-0"
+    >
+      <p>
         {migration.resume
           ? "A second device was registered but the old one has not been removed yet. " +
             "Both work; resuming finishes the move and removes the old one."
@@ -66,26 +81,29 @@ export function MigrationBanner({
       </p>
 
       {step ? (
-        <p className="mt-2 text-(--color-ink-muted)" role="status">
+        // The step name alone left the banner looking identical between two phases that can each
+        // take several seconds. The spinner is the part that says the wait is still ours rather
+        // than a screen that has stopped.
+        //
+        // No `role="status"` here: the banner itself already is one for this tone, and a live
+        // region nested inside a live region gets the change announced twice.
+        <p className="mt-snug flex items-center gap-snug">
+          <Spinner size="sm" />
           {step}
         </p>
       ) : (
-        <div className="mt-2 flex gap-4">
-          <button type="button" onClick={() => void run()} className="underline">
+        <div className="mt-snug flex flex-wrap items-center gap-snug">
+          <Button variant="primary" size="sm" onClick={() => void run()}>
             {migration.resume ? "Resume" : "Switch to app storage"}
-          </button>
+          </Button>
           {/* Dismissed for this session only: the offer comes back on the next start, because a
               refusal today is not a permanent refusal — and because nothing tells the two
               apart. */}
-          <button
-            type="button"
-            onClick={() => setDismissed(true)}
-            className="text-(--color-ink-muted) underline"
-          >
+          <Button variant="quiet" size="sm" onClick={() => setDismissed(true)}>
             Later
-          </button>
+          </Button>
         </div>
       )}
-    </section>
+    </Banner>
   );
 }

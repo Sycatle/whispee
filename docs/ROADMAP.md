@@ -144,7 +144,15 @@ omission:
 
 - **`envelopes` is never purged, and cannot be** — every envelope consumes a generation of the
   MLS application ratchet, and the server has no notion of "delivered". The table grows without
-  bound. That is an operational problem, not a simplification.
+  bound. That is an operational problem, not a simplification. Per-device write quotas now bound
+  the *rate* at which one device can add to it; they bound no total, and the anonymous post path
+  is not rate-limited at all, because attributing a post to a device is the power sealed sender
+  removes.
+- **On the desktop build, notifications neither collapse nor open the conversation.** Tauri's
+  notification plugin replaces `window.Notification` with a shim that drops the `tag` and returns
+  no handle, so forty arriving messages would be forty notices and clicking one does nothing. The
+  plugin is therefore not installed: notifications are web-grade on the web, and whatever the
+  platform webview offers on the desktop. The unread count in the title works everywhere.
 - **The transparency log is signed by the party it watches.** Gossip catches a forked log
   partially; it does not remove the defect.
 - **The MLS keys still live in WASM linear memory**, reachable by the page's JavaScript, on

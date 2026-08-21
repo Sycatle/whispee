@@ -234,6 +234,24 @@ Three further limits follow from push, and hold whenever it is configured:
 
 ---
 
+## 4bis. Local notifications are not push
+
+Push is the feature §4 argues against, and the reason is the server: one that chooses *whom* to
+wake gains a targeted activity trigger. A local notification has no server in it at all. The page
+raises it about an envelope it has already decrypted, nobody is asked, and nobody learns one was
+raised. It costs the threat model nothing.
+
+What it buys is smaller in exact proportion: it fires only while the page is running. A closed
+tab, a killed process or a sleeping phone produces nothing, and no client-side work changes that.
+The honest statement is "you find out sooner while the application is open", not "you find out".
+
+What it does disclose is on the screen, not on the wire: that this application is installed, and
+that something arrived. The notice carries no sender, no group and no text. Naming the
+conversation is available and off by default, behind copy that says what lands on a lock screen
+before offering the switch — the lock screen being the one surface encryption cannot reach.
+
+---
+
 ## 5. Known limitations
 
 The full table, in order of real importance. Nothing here is softened.
@@ -247,6 +265,10 @@ The full table, in order of real importance. Nothing here is softened.
 | **Post noise** | The server holds each group's posting key: it can deposit envelopes. They will not decrypt — it cannot produce valid MLS — but it can pollute. That is the price of a symmetric MAC. |
 | **Typing-post rhythm** | The signal's content is opaque and never reaches the disk, but the server sees that a post is happening towards a given group. In a one-to-one it infers that one of the two is writing. Sealed sender hides *who*, not *that* — disabling the indicator is the only real protection. |
 | **Image preview decoding** | A previewed attachment goes through the browser's image pipeline before anything is shown, and only the canvas re-encoding reaches the document — so a file lying about its type cannot become script. What it opens: the decoder is now reachable by any peer with a codec bug to spend, where before an attachment was only ever written to disk. The pixel ceiling that bounds a decode bomb is checked **after** the decode, because no browser API reports an image's dimensions without performing one. Previewing is opt-in, per file. |
+| **Local notifications** | Any notice at all discloses, to whoever glances at the device, that Whispee is installed and that a message just arrived. It names no sender, no group and no content; the conversation name is shown only if the user turns that on, and the wording says what that puts on a lock screen before offering the switch. Irreducible — it is the cost of the feature existing. Unlike push, no server is involved and none learns a notice was raised, which is also why it only fires while the page is running. |
+| **Replay window on a sealed-sender post** | An anonymous post carries no timestamp, so nothing bounds when the server should stop accepting a replay of it; remembering the nonce forever is the only complete answer, and it makes `posting_nonces` grow for the life of the deployment. It is now kept seven days. Past that a replay is accepted again — costing one duplicate row and one spurious wake-up, the MLS client discarding the message because that ratchet generation is already consumed. A storage nuisance, not a way into a conversation. |
+| **Write quotas bound a rate, not a total** | KeyPackage top-ups, vault writes, attachment uploads and signed envelope posts are capped per device per minute. The counters live in memory, so they are per instance and reset on restart, and an account multiplies its allowance by registering more devices — two rate-limited open requests each. Nothing here bounds stored bytes: at thirty attachments a minute a device still writes three quarters of a gibibyte a minute. A per-account stored-bytes quota would close that, and does not exist. |
+| **The anonymous post path is not rate-limited** | Bounding it would mean attributing a post to a device, which is the power sealed sender exists to remove; counting per group instead would throttle a conversation's honest members. Anyone holding a group's posting key can therefore grow `envelopes` in that group at will. They have to be a member — it is the ceiling the anonymous path removes, not the membership requirement. |
 | **Declared timestamps** | The time shown on a message is the one its sender put there, inside the encrypted content. The server never sees it and cannot alter it — and any member of the group can date their own message to anything. It is an annotation: the thread's order is `seq`, which the server assigns and no member controls. In a one-to-one there is exactly one other person who could lie, and they could equally lie in the text. |
 | **Unauthenticated signals** | The ephemeral channel is encrypted under a symmetric group key. In a group, a member can therefore make it look as though another is typing. Harmless with two, where there is only one other. |
 | **Forward secrecy of signals** | None inside an epoch: compromising the export secret exposes that epoch's signals. They have no retrospective value and are stored nowhere — the trade is deliberate, it avoids making the history pay for a disposable datum. |

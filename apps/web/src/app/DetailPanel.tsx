@@ -203,8 +203,6 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
 
 export function DetailPanel({ view }: { view: ConversationView }) {
   const session = useSession();
-  const bump = useBump();
-  const report = useReport();
   const route = useRoute();
   const navigate = useNavigate();
   const duo = useDuo();
@@ -346,18 +344,17 @@ export function DetailPanel({ view }: { view: ConversationView }) {
         Membership, roles and leaving, for groups only. `GroupPanel` already says the two things
         the user cannot guess — that leaving takes another member's commit, and that removing
         somebody removes all of their devices — and repeating either of them here would be a
-        second copy to keep in step.
+        second copy to keep in step. It says them in the confirmation dialogs, at the moment the
+        commit is about to go out, which is the only moment either sentence changes a decision.
+
+        It takes no `session`, no `onError` and no `onChanged`: it reads the session through
+        `useSession` and reports through `useReport`, so the roster and the roles stay fresh under
+        it whatever this column's own render schedule does.
       */}
       {view.accounts.length > 1 && (
         <section className="space-y-snug p-pane">
           <SectionTitle>Conversation</SectionTitle>
-          <GroupPanel
-            session={session}
-            view={view}
-            onError={(message) => report.error(message)}
-            onChanged={bump}
-            onClose={close}
-          />
+          <GroupPanel view={view} onClose={close} />
         </section>
       )}
     </aside>

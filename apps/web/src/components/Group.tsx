@@ -1,5 +1,9 @@
 import { useState } from "react";
-import type { ConversationView, Session } from "@/lib/session";
+import type { ConversationView } from "@/lib/session";
+import { Button } from "@/ui/Button";
+import { Dialog } from "@/ui/Dialog";
+import { useBump, useSession } from "@/state/SessionProvider";
+import { useReport } from "@/state/report";
 
 /**
  * Group administration: members, roles, leaving.
@@ -22,22 +26,48 @@ import type { ConversationView, Session } from "@/lib/session";
  * adding and removing ordinary members — but do not touch roles: if they could, one of them
  * would promote themselves to admin and there would be no authority left, only a race. One
  * button hands out power, and it belongs to the admin alone.
+ *
+ * # Why the irreversible actions are behind a dialog now
+ *
+ * Removing a member, handing the group over and leaving are all commits: they reach the other
+ * members, and nothing in the protocol undoes them. They used to be underlined words in a row of
+ * underlined words, one pointer-width from "make moderator". A `Dialog tone="danger"` costs a
+ * deliberate second click and — the part that matters more — gives the consequence somewhere to
+ * be written at the moment it is about to happen, instead of in a `title` attribute a touch user
+ * never sees.
+ *
+ * What it does not solve: a confirmed mistake is still a mistake. There is no undo here, because
+ * there is no undo in MLS; re-adding somebody is a new join, and they decrypt nothing from the
+ * window they were out of.
+ *
+ * # Why it takes no `session`
+ *
+ * It reads the session through `useSession`, so it re-renders when the roster or the roles move
+ * under it. See the rule at the top of `state/SessionProvider.tsx`: a session arriving by prop is
+ * fresh exactly once.
  */
 export function GroupPanel({
-  session,
   view,
-  onError,
-  onChanged,
   onClose,
 }: {
-  session: Session;
   view: ConversationView;
-  onError: (message: string) => void;
-  onChanged: () => void;
+  /**
+   * Closes the detail column. Called once the leave request is in: there is nothing further to
+   * administer in a group one is on the way out of. It does **not** mean the conversation is
+   * gone — see the note on leaving above.
+   */
   onClose: () => void;
 }) {
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
+
   const [busy, setBusy] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  /** The member a confirmation is currently open about, and what it would do to them. */
+  const [pending, setPending] = useState<{ kind: "remove" | "handover"; handle: string } | null>(
+    null,
+  );
 
   const roles = session.roles(view);
   const iAmAdmin = roles === null || roles.admin === session.handle;
@@ -60,9 +90,9 @@ export function GroupPanel({
     setBusy(true);
     try {
       await run();
-      onChanged();
+      bump();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      report.error(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -75,29 +105,25 @@ export function GroupPanel({
     return null;
   };
 
-  return (
-    <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-      <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Members</h2>
-        <button type="button" onClick={onClose} className="text-(--color-ink-muted) underline">
-          Close
-        </button>
-      </div>
+  const Role = ({ handle }: { handle: string }) => {
+    const named = role(handle);
+    if (named === null) return null;
+    return <span className="text-caption text-(--color-accent)">{named}</span>;
+  };
 
+  return (
+    <div className="space-y-snug">
       {roles === null && (
-        <p className="mt-2 text-xs text-(--color-ink-muted)">
+        <p className="text-caption text-(--color-ink-muted)">
           One-to-one conversation: no roles. A hierarchy would make no sense here.
         </p>
       )}
 
-      <ul className="mt-3 space-y-2">
-        <li className="flex items-center justify-between gap-3">
-          <span>
-            @{session.handle} <span className="text-(--color-ink-muted)">(you)</span>
-            {role(session.handle) && (
-              <span className="ml-2 text-xs text-(--color-accent)">{role(session.handle)}</span>
-            )}
-          </span>
+      <ul className="space-y-tight">
+        <li className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
+          <span>@{session.handle}</span>
+          <span className="text-caption text-(--color-ink-muted)">(you)</span>
+          <Role handle={session.handle} />
         </li>
 
         {view.accounts.map((account) => {
@@ -105,62 +131,53 @@ export function GroupPanel({
           const isAdmin = roles?.admin === account.handle;
 
           return (
-            <li key={account.handle} className="flex items-center justify-between gap-3">
-              <span>
-                @{account.handle}
-                {role(account.handle) && (
-                  <span className="ml-2 text-xs text-(--color-accent)">
-                    {role(account.handle)}
-                  </span>
-                )}
-                <span className="ml-2 text-xs text-(--color-ink-muted)">
-                  {account.devices.length} device{account.devices.length > 1 ? "s" : ""}
-                </span>
+            <li key={account.handle} className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
+              <span>@{account.handle}</span>
+              <Role handle={account.handle} />
+              <span className="text-caption text-(--color-ink-muted)">
+                {account.devices.length} device{account.devices.length > 1 ? "s" : ""}
               </span>
 
               {roles !== null && !isAdmin && (
-                <span className="flex shrink-0 gap-3 text-xs">
+                <span className="flex flex-wrap gap-tight">
                   {/* Only the admin hands out roles: a moderator who could would promote
                       themselves to admin, and there would be no authority left. */}
                   {iAmAdmin && (
                     <>
-                      <button
-                        type="button"
+                      {/* Reversible in one click, so it is not behind a confirmation. */}
+                      <Button
+                        variant="quiet"
+                        size="sm"
                         disabled={busy}
                         onClick={() =>
-                          action(() =>
+                          void action(() =>
                             session.setModerator(view, account.handle, !isModerator),
                           )
                         }
-                        className="underline text-(--color-ink-muted)"
                       >
-                        {isModerator ? "remove moderator" : "make moderator"}
-                      </button>
-                      <button
-                        type="button"
+                        {isModerator ? "Remove moderator" : "Make moderator"}
+                      </Button>
+                      <Button
+                        variant="quiet"
+                        size="sm"
                         disabled={busy}
-                        onClick={() =>
-                          action(async () => {
-                            await session.setRoles(view, account.handle, roles.moderators);
-                          })
-                        }
-                        className="underline text-(--color-ink-muted)"
-                        title="Hands the group over for good: you will not be able to take it back."
+                        onClick={() => setPending({ kind: "handover", handle: account.handle })}
                       >
-                        hand over
-                      </button>
+                        Hand over
+                      </Button>
                     </>
                   )}
                   {/* A moderator removes ordinary members, not their peers. */}
                   {iModerate && (!isModerator || iAmAdmin) && (
-                    <button
-                      type="button"
+                    <Button
+                      variant="quiet"
+                      size="sm"
                       disabled={busy}
-                      onClick={() => action(() => session.removeAccount(view, account.handle))}
-                      className="underline text-(--color-danger)"
+                      onClick={() => setPending({ kind: "remove", handle: account.handle })}
+                      className="text-(--color-danger)"
                     >
-                      remove
-                    </button>
+                      Remove
+                    </Button>
                   )}
                 </span>
               )}
@@ -170,83 +187,129 @@ export function GroupPanel({
       </ul>
 
       {roles !== null && iModerate && (
-        <p className="mt-3 text-xs text-(--color-ink-muted)">
+        <p className="text-caption text-(--color-ink-muted)">
           Removing someone removes <strong>all of their devices</strong>: the unit is the
           account. From the commit onward, they decrypt nothing that follows.
         </p>
       )}
 
       {roles !== null && (
-        <div className="mt-4 border-t border-(--color-border-subtle) pt-3">
-          {leaving ? (
-            <div className="space-y-2">
-              <p className="text-xs text-(--color-ink-muted)">
-                Leaving is a <strong>request</strong>: the protocol forbids removing yourself,
-                so another member has to pick it up. Until then you stay in the group and keep
-                receiving its messages.
-              </p>
-              {heir !== null && (
-                <p className="text-xs text-(--color-ink-muted)">
-                  You administer this group: <strong>@{heir}</strong> will succeed you
-                  {roles.moderators.includes(heir)
-                    ? " (moderator, the rank below)"
-                    : " (longest-standing member)"}
-                  . A group with no administrator would be frozen for good.
-                </p>
-              )}
-              {roles.admin === session.handle && heir === null && (
-                <p className="text-xs text-(--color-danger)">
-                  You are the last member: leaving amounts to deleting the conversation.
-                </p>
-              )}
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() =>
-                    action(async () => {
-                      await session.requestLeave(view);
-                      setLeaving(false);
-                    })
-                  }
-                  className="rounded-control bg-(--color-danger) px-gutter py-control text-caption font-medium text-(--color-state-ink)"
-                >
-                  {heir !== null ? `Hand over to @${heir} and leave` : "Request to leave"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLeaving(false)}
-                  className="text-xs underline text-(--color-ink-muted)"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setLeaving(true)}
-              className="text-xs underline text-(--color-ink-muted)"
-            >
-              Leave the group
-            </button>
-          )}
+        <div className="border-t border-(--color-border-subtle) pt-snug">
+          <Button variant="quiet" size="sm" onClick={() => setLeaving(true)}>
+            Leave the group
+          </Button>
         </div>
       )}
-    </div>
-  );
-}
 
-/** Discreet entry point to the panel, in the conversation header. */
-export function GroupToggle({ count, onClick }: { count: number; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title="Group members"
-      className="text-xs text-(--color-ink-muted) hover:underline"
-    >
-      {count + 1} members
-    </button>
+      <Dialog
+        open={pending?.kind === "remove"}
+        onOpenChange={(open) => !open && setPending(null)}
+        tone="danger"
+        title={pending === null ? "Remove member" : `Remove @${pending.handle}?`}
+        description="Removing someone removes all of their devices: the unit is the account, never the device. From the commit onward they decrypt nothing that follows, and re-adding them later does not give the window back."
+        actions={
+          <>
+            <Button variant="secondary" onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              busy={busy}
+              onClick={() => {
+                const handle = pending?.handle;
+                if (handle === undefined) return;
+                void action(async () => {
+                  await session.removeAccount(view, handle);
+                  setPending(null);
+                  report.done(`Removed @${handle} from the group.`);
+                });
+              }}
+            >
+              Remove
+            </Button>
+          </>
+        }
+      />
+
+      <Dialog
+        open={pending?.kind === "handover"}
+        onOpenChange={(open) => !open && setPending(null)}
+        tone="danger"
+        title={pending === null ? "Hand the group over" : `Hand the group over to @${pending.handle}?`}
+        description="They become the administrator and you do not. There is no way to take it back from this side: only the new administrator can hand it to anybody, including back to you."
+        actions={
+          <>
+            <Button variant="secondary" onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              busy={busy}
+              onClick={() => {
+                const handle = pending?.handle;
+                if (handle === undefined || roles === null) return;
+                void action(async () => {
+                  await session.setRoles(view, handle, roles.moderators);
+                  setPending(null);
+                  report.done(`@${handle} now administers this group.`);
+                });
+              }}
+            >
+              Hand over
+            </Button>
+          </>
+        }
+      />
+
+      <Dialog
+        open={leaving}
+        onOpenChange={setLeaving}
+        tone="danger"
+        title="Leave the group?"
+        actions={
+          <>
+            <Button variant="secondary" onClick={() => setLeaving(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              busy={busy}
+              onClick={() =>
+                void action(async () => {
+                  await session.requestLeave(view);
+                  setLeaving(false);
+                  report.done("Leave request sent. You are out once another member commits it.");
+                  onClose();
+                })
+              }
+            >
+              {heir !== null ? `Hand over to @${heir} and leave` : "Request to leave"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-snug text-(--color-ink-muted)">
+          <p>
+            Leaving is a <strong>request</strong>: the protocol forbids removing yourself, so
+            another member has to pick it up. Until then you stay in the group and keep receiving
+            its messages.
+          </p>
+          {heir !== null && (
+            <p>
+              You administer this group: <strong>@{heir}</strong> will succeed you
+              {roles !== null && roles.moderators.includes(heir)
+                ? " (moderator, the rank below)"
+                : " (longest-standing member)"}
+              . A group with no administrator would be frozen for good.
+            </p>
+          )}
+          {roles?.admin === session.handle && heir === null && (
+            <p className="text-(--color-danger)">
+              You are the last member: leaving amounts to deleting the conversation.
+            </p>
+          )}
+        </div>
+      </Dialog>
+    </div>
   );
 }

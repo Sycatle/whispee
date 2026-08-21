@@ -586,13 +586,13 @@ impl AccountKey {
 #[wasm_bindgen(js_name = verifyAttestation)]
 pub fn verify_attestation(
     identity_key: &[u8],
-    handle: &str,
+    account: &str,
     device_id: &str,
     auth_key: &[u8],
     mls_key: &[u8],
     attestation: &[u8],
 ) -> bool {
-    let claim = attest::DeviceClaim { account: handle, device_id, auth_key, mls_key };
+    let claim = attest::DeviceClaim { account, device_id, auth_key, mls_key };
     attest::verify(identity_key, &claim, attestation).is_ok()
 }
 
@@ -604,13 +604,49 @@ pub fn verify_attestation(
 #[wasm_bindgen(js_name = verifyRevocation)]
 pub fn verify_revocation(
     identity_key: &[u8],
-    handle: &str,
+    account: &str,
     device_id: &str,
     revoked_at: u64,
     revocation: &[u8],
 ) -> bool {
-    let claim = attest::RevocationClaim { account: handle, device_id, revoked_at };
+    let claim = attest::RevocationClaim { account, device_id, revoked_at };
     attest::verify_revocation(identity_key, &claim, revocation).is_ok()
+}
+
+/// Verifies one link of an account's rotation chain.
+///
+/// # Why this crosses the wasm boundary rather than being written in TypeScript
+///
+/// The same reason `postMac` gives: the signed message has a canonical format — a domain label
+/// and length-prefixed fields — and rewriting it on the client would duplicate the definition
+/// that the `attest` crate exists to hold exactly once. One byte of divergence and every chain
+/// looks broken, which reads as "the server is lying" rather than "we disagree about a length
+/// prefix".
+///
+/// `previous_identity_key` and not the new one: the signature attests that the holder of the
+/// outgoing key designates the incoming one. Verifying against the incoming key would only prove
+/// possession of it, which proves nothing about continuity.
+#[wasm_bindgen(js_name = verifyRotation)]
+pub fn verify_rotation(
+    previous_identity_key: &[u8],
+    account: &str,
+    new_identity_key: &[u8],
+    rotated_at: u64,
+    rotation: &[u8],
+) -> bool {
+    let claim = attest::RotationClaim { account, new_identity_key, rotated_at };
+    attest::verify_rotation(previous_identity_key, &claim, rotation).is_ok()
+}
+
+/// The account id an identity key would produce.
+///
+/// Exposed so the client can check the **anchor** of a chain — that its first key really does
+/// fingerprint to the id the account is being served under — without reimplementing the
+/// derivation. It is a truncated SHA-256 and would be four lines of TypeScript; the point is not
+/// difficulty, it is that a second definition of an identifier is a second thing that can drift.
+#[wasm_bindgen(js_name = accountId)]
+pub fn account_id(identity_key: &[u8]) -> String {
+    attest::account_id(identity_key)
 }
 
 // ---------------------------------------------------------------- anonymous post

@@ -277,6 +277,16 @@ export class Pairing {
 export function accountFingerprint(identity_key: Uint8Array): string;
 
 /**
+ * The account id an identity key would produce.
+ *
+ * Exposed so the client can check the **anchor** of a chain — that its first key really does
+ * fingerprint to the id the account is being served under — without reimplementing the
+ * derivation. It is a truncated SHA-256 and would be four lines of TypeScript; the point is not
+ * difficulty, it is that a second definition of an identifier is a second thing that can drift.
+ */
+export function accountId(identity_key: Uint8Array): string;
+
+/**
  * Derives the local unlock key from a password.
  *
  * Argon2id, 64 MiB, 3 passes. **About one second**: that is the price paid once per unlock,
@@ -356,7 +366,7 @@ export function signalMac(posting_key: Uint8Array, group_id: Uint8Array, nonce: 
  * server is precisely who we suspect: its check is an early filter, never a guarantee. See
  * the test `a_ghost_device_injected_in_sql_does_not_pass_client_verification`.
  */
-export function verifyAttestation(identity_key: Uint8Array, handle: string, device_id: string, auth_key: Uint8Array, mls_key: Uint8Array, attestation: Uint8Array): boolean;
+export function verifyAttestation(identity_key: Uint8Array, account: string, device_id: string, auth_key: Uint8Array, mls_key: Uint8Array, attestation: Uint8Array): boolean;
 
 /**
  * Checks that the current log **extends** the one already seen, with no rewriting.
@@ -382,7 +392,24 @@ export function verifyInclusion(leaf: Uint8Array, index: number, size: number, p
  * power to evict any device it chose — targeted censorship, durable, and indistinguishable
  * from a legitimate revocation.
  */
-export function verifyRevocation(identity_key: Uint8Array, handle: string, device_id: string, revoked_at: bigint, revocation: Uint8Array): boolean;
+export function verifyRevocation(identity_key: Uint8Array, account: string, device_id: string, revoked_at: bigint, revocation: Uint8Array): boolean;
+
+/**
+ * Verifies one link of an account's rotation chain.
+ *
+ * # Why this crosses the wasm boundary rather than being written in TypeScript
+ *
+ * The same reason `postMac` gives: the signed message has a canonical format — a domain label
+ * and length-prefixed fields — and rewriting it on the client would duplicate the definition
+ * that the `attest` crate exists to hold exactly once. One byte of divergence and every chain
+ * looks broken, which reads as "the server is lying" rather than "we disagree about a length
+ * prefix".
+ *
+ * `previous_identity_key` and not the new one: the signature attests that the holder of the
+ * outgoing key designates the incoming one. Verifying against the incoming key would only prove
+ * possession of it, which proves nothing about continuity.
+ */
+export function verifyRotation(previous_identity_key: Uint8Array, account: string, new_identity_key: Uint8Array, rotated_at: bigint, rotation: Uint8Array): boolean;
 
 /**
  * Checks that a tree head really was signed by the log.
@@ -401,6 +428,7 @@ export interface InitOutput {
     readonly __wbg_client_free: (a: number, b: number) => void;
     readonly __wbg_pairing_free: (a: number, b: number) => void;
     readonly accountFingerprint: (a: number, b: number, c: number) => void;
+    readonly accountId: (a: number, b: number, c: number) => void;
     readonly accountkey_attest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
     readonly accountkey_exportSeed: (a: number, b: number) => void;
     readonly accountkey_fingerprint: (a: number, b: number) => void;
@@ -449,6 +477,7 @@ export interface InitOutput {
     readonly verifyConsistency: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => number;
     readonly verifyInclusion: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => number;
     readonly verifyRevocation: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint, h: number, i: number) => number;
+    readonly verifyRotation: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint, h: number, i: number) => number;
     readonly verifyTreeHead: (a: number, b: number, c: bigint, d: number, e: number, f: bigint, g: number, h: number) => number;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

@@ -1055,6 +1055,35 @@ export function accountFingerprint(identity_key) {
 }
 
 /**
+ * The account id an identity key would produce.
+ *
+ * Exposed so the client can check the **anchor** of a chain — that its first key really does
+ * fingerprint to the id the account is being served under — without reimplementing the
+ * derivation. It is a truncated SHA-256 and would be four lines of TypeScript; the point is not
+ * difficulty, it is that a second definition of an identifier is a second thing that can drift.
+ * @param {Uint8Array} identity_key
+ * @returns {string}
+ */
+export function accountId(identity_key) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(identity_key, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.accountId(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred2_0 = r0;
+        deferred2_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export4(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * Derives the local unlock key from a password.
  *
  * Argon2id, 64 MiB, 3 passes. **About one second**: that is the price paid once per unlock,
@@ -1285,17 +1314,17 @@ export function signalMac(posting_key, group_id, nonce, body) {
  * server is precisely who we suspect: its check is an early filter, never a guarantee. See
  * the test `a_ghost_device_injected_in_sql_does_not_pass_client_verification`.
  * @param {Uint8Array} identity_key
- * @param {string} handle
+ * @param {string} account
  * @param {string} device_id
  * @param {Uint8Array} auth_key
  * @param {Uint8Array} mls_key
  * @param {Uint8Array} attestation
  * @returns {boolean}
  */
-export function verifyAttestation(identity_key, handle, device_id, auth_key, mls_key, attestation) {
+export function verifyAttestation(identity_key, account, device_id, auth_key, mls_key, attestation) {
     const ptr0 = passArray8ToWasm0(identity_key, wasm.__wbindgen_export);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(handle, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+    const ptr1 = passStringToWasm0(account, wasm.__wbindgen_export, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(device_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
     const len2 = WASM_VECTOR_LEN;
@@ -1363,22 +1392,56 @@ export function verifyInclusion(leaf, index, size, proof, root) {
  * power to evict any device it chose — targeted censorship, durable, and indistinguishable
  * from a legitimate revocation.
  * @param {Uint8Array} identity_key
- * @param {string} handle
+ * @param {string} account
  * @param {string} device_id
  * @param {bigint} revoked_at
  * @param {Uint8Array} revocation
  * @returns {boolean}
  */
-export function verifyRevocation(identity_key, handle, device_id, revoked_at, revocation) {
+export function verifyRevocation(identity_key, account, device_id, revoked_at, revocation) {
     const ptr0 = passArray8ToWasm0(identity_key, wasm.__wbindgen_export);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(handle, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+    const ptr1 = passStringToWasm0(account, wasm.__wbindgen_export, wasm.__wbindgen_export2);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(device_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passArray8ToWasm0(revocation, wasm.__wbindgen_export);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.verifyRevocation(ptr0, len0, ptr1, len1, ptr2, len2, revoked_at, ptr3, len3);
+    return ret !== 0;
+}
+
+/**
+ * Verifies one link of an account's rotation chain.
+ *
+ * # Why this crosses the wasm boundary rather than being written in TypeScript
+ *
+ * The same reason `postMac` gives: the signed message has a canonical format — a domain label
+ * and length-prefixed fields — and rewriting it on the client would duplicate the definition
+ * that the `attest` crate exists to hold exactly once. One byte of divergence and every chain
+ * looks broken, which reads as "the server is lying" rather than "we disagree about a length
+ * prefix".
+ *
+ * `previous_identity_key` and not the new one: the signature attests that the holder of the
+ * outgoing key designates the incoming one. Verifying against the incoming key would only prove
+ * possession of it, which proves nothing about continuity.
+ * @param {Uint8Array} previous_identity_key
+ * @param {string} account
+ * @param {Uint8Array} new_identity_key
+ * @param {bigint} rotated_at
+ * @param {Uint8Array} rotation
+ * @returns {boolean}
+ */
+export function verifyRotation(previous_identity_key, account, new_identity_key, rotated_at, rotation) {
+    const ptr0 = passArray8ToWasm0(previous_identity_key, wasm.__wbindgen_export);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(account, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(new_identity_key, wasm.__wbindgen_export);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArray8ToWasm0(rotation, wasm.__wbindgen_export);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.verifyRotation(ptr0, len0, ptr1, len1, ptr2, len2, rotated_at, ptr3, len3);
     return ret !== 0;
 }
 

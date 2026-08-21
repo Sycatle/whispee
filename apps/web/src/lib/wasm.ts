@@ -11,8 +11,10 @@ import type {
   accountFingerprint,
   deriveUnlockKey,
   sealPairing,
+  accountId,
   verifyAttestation,
   verifyRevocation,
+  verifyRotation,
   logLeaf,
   verifyInclusion,
   verifyConsistency,
@@ -37,6 +39,8 @@ export interface Crypto {
   deriveUnlockKey: typeof deriveUnlockKey;
   verifyAttestation: typeof verifyAttestation;
   verifyRevocation: typeof verifyRevocation;
+  verifyRotation: typeof verifyRotation;
+  accountId: typeof accountId;
   logLeaf: typeof logLeaf;
   verifyInclusion: typeof verifyInclusion;
   verifyConsistency: typeof verifyConsistency;
@@ -65,6 +69,8 @@ export function loadCrypto(): Promise<Crypto> {
       deriveUnlockKey: module.deriveUnlockKey,
       verifyAttestation: module.verifyAttestation,
       verifyRevocation: module.verifyRevocation,
+      verifyRotation: module.verifyRotation,
+      accountId: module.accountId,
       logLeaf: module.logLeaf,
       verifyInclusion: module.verifyInclusion,
       verifyConsistency: module.verifyConsistency,

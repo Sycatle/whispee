@@ -21,8 +21,9 @@
  * # What this module does not do
  *
  * It knows nothing about sessions or the network. It reports transitions; what to do with them
- * belongs to the caller, the only one that knows what must be polled, reopened or relocked —
- * auto-lock, when it lands, plugs in exactly here.
+ * belongs to the caller, the only one that knows what must be polled, reopened or relocked.
+ * `observeIdle` below follows the same rule: it says "nobody has touched this in a while" and
+ * leaves the consequence to the caller.
  */
 
 export type Transition =
@@ -83,7 +84,11 @@ export function networkReported(): boolean {
 }
 
 /**
- * How long away before a locked device asks for its password again.
+ * How long without the user before a locked device asks for its password again.
+ *
+ * The same delay covers both ways of being left alone: sent to the background, and sitting in the
+ * foreground untouched. One number, because the two situations put the device in exactly the same
+ * place — on a table, unlocked, in front of whoever walks past.
  *
  * # Why a delay rather than an immediate lock
  *
@@ -98,3 +103,84 @@ export function networkReported(): boolean {
  * can be argued about and changed in one place.
  */
 export const RELOCK_MS = 5 * 60 * 1000;
+
+/**
+ * How often the idle check runs. Coarse on purpose: it decides the precision of the delay, not
+ * the delay itself, and a wake-up every thirty seconds costs nothing measurable.
+ */
+const IDLE_TICK_MS = 30_000;
+
+/**
+ * What counts as somebody being there.
+ *
+ * Listened to in the capture phase, because `scroll` and `wheel` do not bubble out of the element
+ * they happened in — a conversation scrolled with the wheel would otherwise look like an empty
+ * room.
+ *
+ * `pointermove` is deliberately not in the list. It would keep the session open on a cursor
+ * nudged by a passing lorry, and on a touch screen it fires only when a finger is already down,
+ * which `pointerdown` has already caught. The cost is real and worth stating: **reading without
+ * touching the device counts as inactivity**, so a long article read on screen re-locks. From the
+ * outside that is indistinguishable from a device left on a table, which is the case this exists
+ * for.
+ */
+const ACTIVITY = ["pointerdown", "keydown", "wheel", "scroll", "touchstart"] as const;
+
+/**
+ * Calls back once nobody has touched `target` for `delayMs`.
+ *
+ * # Why a clock comparison and not a `setTimeout`
+ *
+ * A timer does not run while the machine is asleep or the tab is frozen: a lid closed for an hour
+ * would fire five minutes after it reopens, which is five minutes of readable conversations in
+ * the exact situation this is meant to cover. Comparing wall-clock stamps on a tick gives the
+ * truth on the first check after waking, and it costs one subtraction.
+ *
+ * The tick's coarseness is the only imprecision: the lock lands somewhere in the thirty seconds
+ * after the delay expires, never before it.
+ *
+ * # What it does not do
+ *
+ * It does not erase anything. Re-locking drops the state the interface holds and demands the
+ * password again; the key stays in the process — the WebAssembly module keeps its own state and
+ * nothing in a browser lets us demand otherwise. This protects against whoever picks the device
+ * up, not against whoever reads its memory.
+ *
+ * # Why the delay is not a setting
+ *
+ * It was considered and left out. A delay long enough to stop being annoying is long enough to
+ * stop protecting, and the choice would be made by someone judging their own patience rather than
+ * how long a laptop sits unattended in an office. Worse, the value would have to be readable
+ * *before* unlocking, hence stored in the clear next to encrypted state — a small leak, but paid
+ * for a setting whose only likely use is turning the protection off. `RELOCK_MS` is one constant
+ * in one file; if the five minutes turn out to be wrong, they are wrong for everybody and get
+ * changed here.
+ */
+export function observeIdle(
+  relock: () => void,
+  target: EventTarget,
+  now: () => number = () => Date.now(),
+  delayMs: number = RELOCK_MS,
+): () => void {
+  let last = now();
+  const touched = () => {
+    last = now();
+  };
+
+  const options = { capture: true, passive: true };
+  for (const event of ACTIVITY) target.addEventListener(event, touched, options);
+
+  const id = setInterval(() => {
+    if (now() - last < delayMs) return;
+
+    // The clock is restarted before calling back, so that a caller which decides it has nothing to
+    // lock — no session, or no lock set — does not get asked again on every tick from then on.
+    last = now();
+    relock();
+  }, IDLE_TICK_MS);
+
+  return () => {
+    clearInterval(id);
+    for (const event of ACTIVITY) target.removeEventListener(event, touched, { capture: true });
+  };
+}

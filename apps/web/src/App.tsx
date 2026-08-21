@@ -6,7 +6,7 @@ import { Onboarding } from "@/components/Onboarding";
 import { MigrationBanner } from "@/components/Migration";
 import { type ConversationView, type ProposedMigration, Session, start } from "@/lib/session";
 import { useDuo } from "@/lib/duo";
-import { RELOCK_MS, observeLifecycle, networkReported } from "@/lib/lifecycle";
+import { RELOCK_MS, observeIdle, observeLifecycle, networkReported } from "@/lib/lifecycle";
 
 /**
  * Polling interval, now a safety net rather than an engine.
@@ -46,6 +46,24 @@ export function App() {
   const [, forceRender] = useState(0);
   const duo = useDuo();
   const refresh = useCallback(() => forceRender((n) => n + 1), []);
+
+  /**
+   * Closing a locked session again.
+   *
+   * Dropping the session is what re-locks: the state on disk is encrypted under a key that only
+   * ever existed in memory, so forgetting the object is enough to make the password necessary
+   * again. Two paths lead here — coming back after a long absence, and sitting untouched — and
+   * they must do exactly the same thing, hence one function.
+   *
+   * What it does not do: erase that key from the process memory. The WebAssembly module keeps its
+   * state, and nothing in a browser lets us demand otherwise. The protection targets whoever picks
+   * the device up, not whoever inspects its memory.
+   */
+  const relock = useCallback(() => {
+    setSession(null);
+    setActive(null);
+    setLocked(true);
+  }, []);
 
   useEffect(() => {
     // The lock is detected before any restore attempt: without a password the state is
@@ -92,19 +110,10 @@ export function App() {
 
       if (transition.kind === "network") setOffline(false);
 
-      // A long absence closes a locked device again.
-      //
-      // Without this the lock only acts on a cold start: it protects a powered-off device, not
-      // one left on a table. Putting the session out of sight is enough to demand the password —
-      // the state on disk is encrypted under a key that only ever existed in memory.
-      //
-      // What it does not do: erase that key from the process memory. The WebAssembly module keeps
-      // its state, and nothing in a browser lets us demand otherwise. The protection targets
-      // whoever picks the device up, not whoever inspects its memory.
+      // A long absence closes a locked device again. Without this the lock would only act on a
+      // cold start: it would protect a powered-off device, not one put down mid-conversation.
       if (transition.kind === "resume" && session.locked && transition.awayMs > RELOCK_MS) {
-        setSession(null);
-        setActive(null);
-        setLocked(true);
+        relock();
         return;
       }
 
@@ -126,7 +135,23 @@ export function App() {
       stop();
       removeEventListener("offline", lost);
     };
-  }, [session, refresh]);
+  }, [session, refresh, relock]);
+
+  /**
+   * The same lock, for a device nobody has taken away.
+   *
+   * The resume path above only fires on a device that left the foreground — a phone pocketed, a
+   * tab switched. A desktop session left open on screen never triggers it, and until now stayed
+   * readable until the tab closed: exactly the machine most likely to be shared, and the one
+   * `docs/THREAT-MODEL.md` admitted was uncovered.
+   *
+   * Nothing is watched while the session carries no lock: without a password to come back with,
+   * dropping the session would only mean a reload with no gain.
+   */
+  useEffect(() => {
+    if (!session?.locked) return;
+    return observeIdle(relock, document);
+  }, [session, relock]);
 
   /**
    * The system back gesture closes the conversation instead of quitting the app.

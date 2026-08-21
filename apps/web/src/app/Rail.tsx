@@ -434,7 +434,10 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     // look selected. Recessing instead keeps three legible steps in the column —
                     // sunken under the pointer, surface at rest, raised where you are.
                     className={cn(
-                      "flex w-full items-start gap-snug rounded-control px-snug py-snug text-left text-body touch:min-h-11",
+                      // `py-gutter` and not `py-snug`: the rows were half a step apart, so a conversation and the
+                      // one under it read as one block of text rather than as two things to choose
+                      // between. A dozen still fit on screen without scrolling.
+                      "flex w-full items-start gap-snug rounded-control px-snug py-gutter text-left text-body touch:min-h-11",
                       "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)",
                       selected
                         ? "bg-(--color-surface-raised) font-medium"

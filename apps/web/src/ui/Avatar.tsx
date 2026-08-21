@@ -74,8 +74,13 @@ function Identicon({ seed, box }: { seed: string; box: number }) {
    * Lightness and chroma are fixed, only the hue is derived. A derived lightness would sooner or
    * later land on a value that vanishes into one of the two themes, and an avatar that is
    * invisible in dark mode is an avatar that is absent. L 0.6 clears both surfaces.
+   *
+   * Chroma is 0.08 rather than 0.12. At full strength, a column of these in the rail read as a
+   * row of small bright signs competing with the names beside them — the drawing is meant to be
+   * recognised, not looked at. Lowering it costs nothing that matters: hue is what tells two
+   * accounts apart at a glance, and hue survives desaturation.
    */
-  const ink = `oklch(0.6 0.12 ${hue})`;
+  const ink = `oklch(0.6 0.08 ${hue})`;
   return (
     <svg
       aria-hidden="true"
@@ -83,7 +88,19 @@ function Identicon({ seed, box }: { seed: string; box: number }) {
       viewBox={`0 0 ${GRID_SIZE} ${GRID_SIZE}`}
       width={box}
       height={box}
-      className="rounded-(--radius-pill) bg-(--color-surface-sunken)"
+      /*
+       * A rounded square, not a disc, and this is what the identicon actually needed.
+       *
+       * The grid is five cells across. Clipped to a circle, the cells around the edge were cut
+       * into arcs of varying size — so a shape built to be read as one object arrived as a
+       * jagged rim, different on every account for reasons that had nothing to do with the
+       * fingerprint. That is the noise: not the colour, the cropping. In a rounded square every
+       * cell is a whole cell and the mirror symmetry is visible, which is the property the grid
+       * was designed around.
+       *
+       * It is also why GitHub's identicons are squares.
+       */
+      className="rounded-control bg-(--color-surface-sunken)"
     >
       {cells.map((filled, index) =>
         filled ? (
@@ -140,7 +157,10 @@ export function Avatar({
             // exists to avoid.
             aria-hidden="true"
             style={{ width: box, height: box }}
-            className={`flex items-center justify-center rounded-(--radius-pill) bg-(--color-surface-sunken) font-medium text-(--color-ink-muted) ${text}`}
+            // The same silhouette as the identicon it is standing in for: a placeholder that
+            // changed shape when the first poll landed would be a second thing moving on screen,
+            // and the whole point of this placeholder is that it never becomes another drawing.
+            className={`flex items-center justify-center rounded-control bg-(--color-surface-sunken) font-medium text-(--color-ink-muted) ${text}`}
           >
             {initialOf(label)}
           </span>

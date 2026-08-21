@@ -173,6 +173,53 @@ function freshSignalState(): Pick<
   return { receipts: new Map(), contentCursor: 0, readCursor: 0, typing: [] };
 }
 
+/**
+ * The server failed to prove what it claims about an account key.
+ *
+ * # Why this is an error and not a banner
+ *
+ * It used to be only a banner. `resolve` recorded the anomaly and returned the account anyway,
+ * so a conversation opened on a key the server had just failed to place in the log — which is
+ * precisely the case the log exists to catch. The apparatus produced its signal and nothing
+ * acted on it.
+ *
+ * The rule now matches the one already applied to unattested devices in `startConversation`,
+ * and for the same stated reason: refusing to open beats quietly carrying on, because keeping
+ * quiet cancels out the whole point of the machinery.
+ *
+ * # What it is deliberately not
+ *
+ * A **network** failure. A log that cannot be reached proves nothing either way, and treating
+ * unreachable as hostile would make every outage look like an attack. That path stays a warning
+ * and a retry, as before.
+ *
+ * # Why there is no way to override it
+ *
+ * An override would be clicked. This project already refuses to show a permanent warning on the
+ * grounds that one taught to be ignored is inaudible on the day it matters; a "continue anyway"
+ * button on the one alert that cannot be a false positive is the same mistake wearing a
+ * different shape. A conversation already open is not cut off — `refreshAccounts` falls back to
+ * the account it last verified — but a new one does not start.
+ *
+ * # The cost, stated rather than discovered
+ *
+ * Now that the anchor survives restarts, **wiping the server's database looks exactly like an
+ * amputated log**, because from the client's side it is one: the head shrank. A developer who
+ * resets Postgres while keeping a browser session will find every resolve refused, and the way
+ * out is to erase the local identity. That is not a defect to work around — a client that
+ * shrugged at a shrinking log would not be checking anything — but it is a real change in what
+ * a local reset costs, and it should not be found out the hard way.
+ */
+export class LogProofRefused extends Error {
+  constructor(
+    readonly handle: string,
+    reason: string,
+  ) {
+    super(`The server failed to prove its key for @${handle}: ${reason}`);
+    this.name = "LogProofRefused";
+  }
+}
+
 export class Session {
   private constructor(
     readonly deviceId: string,
@@ -934,8 +981,14 @@ export class Session {
         if (advanced) await this.persist();
       } else {
         this.raiseLogAlert(verdict.reason);
+        throw new LogProofRefused(handle, verdict.reason);
       }
     } catch (error) {
+      // A refusal is not a deferral. It has already been recorded and it must reach the caller:
+      // swallowing it here is what let a conversation open on a key the server had just failed
+      // to prove.
+      if (error instanceof LogProofRefused) throw error;
+
       // Log unreachable: we do not invent a security alert for a network failure. But we remember
       // nothing either, so the check will be redone.
       console.warn("log verification deferred", error);
@@ -1238,6 +1291,12 @@ export class Session {
 
     const resolved: ResolvedAccount[] = [];
     for (const handle of handles) {
+      // A failure here must not empty a conversation that is already running, and since this
+      // commit it can also be a `LogProofRefused` rather than a network error. The fallback is
+      // the same either way, and it is the safe one: the account as it was **last verified**. We
+      // do not carry forward whatever the server just failed to prove — we keep what it did
+      // prove, earlier. The alert is already raised, and `startConversation` is where the refusal
+      // bites.
       try {
         resolved.push(await this.resolve(handle));
       } catch (error) {

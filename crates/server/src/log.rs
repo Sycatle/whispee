@@ -60,13 +60,13 @@ pub async fn signing_key(pool: &PgPool) -> Result<SigningKey, sqlx::Error> {
 /// would be rejected by every client.
 pub async fn append(
     tx: &mut sqlx::PgConnection,
-    handle: &str,
+    account: &str,
     identity_key: &[u8],
 ) -> Result<(), sqlx::Error> {
-    let leaf = transparency::leaf_hash(&transparency::entry(handle, identity_key));
+    let leaf = transparency::leaf_hash(&transparency::entry(account, identity_key));
 
-    sqlx::query("INSERT INTO log_entries (handle, identity_key, leaf) VALUES ($1, $2, $3)")
-        .bind(handle)
+    sqlx::query("INSERT INTO log_entries (account, identity_key, leaf) VALUES ($1, $2, $3)")
+        .bind(account)
         .bind(identity_key)
         .bind(leaf.as_slice())
         .execute(tx)
@@ -80,20 +80,20 @@ pub async fn append(
 /// Without this catch-up their keys would have no inclusion proof and clients would reject them
 /// all — the log would make the system less usable rather than safer.
 ///
-/// The order is deterministic (`created_at, handle`): two runs must produce the same tree, or a
+/// The order is deterministic (`created_at, account`): two runs must produce the same tree, or a
 /// restart would look like a rewrite.
 pub async fn backfill(pool: &PgPool) -> Result<usize, sqlx::Error> {
     let missing: Vec<(String, Vec<u8>)> = sqlx::query_as(
-        "SELECT a.handle, a.identity_key FROM accounts a
-         WHERE NOT EXISTS (SELECT 1 FROM log_entries l WHERE l.handle = a.handle)
-         ORDER BY a.created_at, a.handle",
+        "SELECT a.id, a.identity_key FROM accounts a
+         WHERE NOT EXISTS (SELECT 1 FROM log_entries l WHERE l.account = a.id)
+         ORDER BY a.created_at, a.id",
     )
     .fetch_all(pool)
     .await?;
 
     let mut tx = pool.begin().await?;
-    for (handle, identity_key) in &missing {
-        append(&mut tx, handle, identity_key).await?;
+    for (account, identity_key) in &missing {
+        append(&mut tx, account, identity_key).await?;
     }
     tx.commit().await?;
 
@@ -246,12 +246,12 @@ pub async fn snapshot(pool: &PgPool) -> Result<std::sync::Arc<Snapshot>, sqlx::E
 /// changed, rather than watch it disappear.
 pub async fn latest(
     pool: &PgPool,
-    handle: &str,
+    account: &str,
 ) -> Result<Option<(i64, Vec<u8>)>, sqlx::Error> {
     let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT seq, identity_key FROM log_entries WHERE handle = $1 ORDER BY seq DESC LIMIT 1",
+        "SELECT seq, identity_key FROM log_entries WHERE account = $1 ORDER BY seq DESC LIMIT 1",
     )
-    .bind(handle)
+    .bind(account)
     .fetch_optional(pool)
     .await?;
 

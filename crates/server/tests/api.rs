@@ -31,7 +31,7 @@ async fn registration_is_idempotent_but_a_device_id_cannot_be_taken_over() {
 
     // Claiming the same id with different keys must be refused, even with a valid attestation:
     // otherwise a member of the account takes over another device's id and inherits its access.
-    let impostor = Device::new(&server, &format!("{}:{id}", account.handle));
+    let impostor = Device::new(&server, &format!("{}:{id}", account.id));
     assert_eq!(impostor.register_under(&account).await.status(), 409);
 }
 
@@ -69,7 +69,7 @@ async fn an_auth_key_of_the_wrong_size_is_refused() {
         .post(format!("{}/v1/devices", server.base_url))
         .json(&serde_json::json!({
             "id": unique("device"),
-            "handle": account.handle,
+            "account": account.id,
             "auth_key": BASE64_STANDARD.encode([0u8; 16]),
             "mls_key": BASE64_STANDARD.encode([0u8; 32]),
             "attestation": BASE64_STANDARD.encode([0u8; 64]),
@@ -165,11 +165,11 @@ async fn a_device_id_whose_first_segment_is_not_exactly_the_handle_is_refused() 
     let server = start().await;
     let account = TestAccount::create(&server, &unique("alice")).await;
 
-    let device = Device::new(&server, &format!("{}x:phone", account.handle));
+    let device = Device::new(&server, &format!("{}x:phone", account.id));
     assert_eq!(device.register_under(&account).await.status(), 400);
 
     // A trailing segment is fine: only the first one names the account.
-    let device = Device::new(&server, &format!("{}:phone:laptop", account.handle));
+    let device = Device::new(&server, &format!("{}:phone:laptop", account.id));
     assert!(device.register_under(&account).await.status().is_success());
 }
 
@@ -182,7 +182,7 @@ async fn a_device_without_a_valid_attestation_is_refused() {
     let account = TestAccount::create(&server, &unique("alice")).await;
     let intruder = Device::new(&server, &unique("ghost"));
 
-    let response = intruder.register_with(&account.handle, &[0u8; 64]).await;
+    let response = intruder.register_with(&account.id, &[0u8; 64]).await;
 
     assert_eq!(response.status(), 400, "a null attestation was accepted");
 }
@@ -199,10 +199,10 @@ async fn an_attestation_from_one_account_is_worthless_in_another() {
     // Genuine attestation, produced by Alice, but presented in Bob's account.
     let attestation = alice
         .account
-        .attest(&bob.handle, &intruder.id, &[0u8; 32], intruder.mls_key())
+        .attest(&bob.id, &intruder.id, &[0u8; 32], intruder.mls_key())
         .unwrap();
 
-    assert_eq!(intruder.register_with(&bob.handle, &attestation).await.status(), 400);
+    assert_eq!(intruder.register_with(&bob.id, &attestation).await.status(), 400);
 }
 
 #[tokio::test]
@@ -213,7 +213,7 @@ async fn the_devices_of_an_account_are_listed_with_their_attestations() {
     let tablet = alice.device(&server, &unique("tablet")).await;
 
     let body: serde_json::Value = laptop
-        .get(&format!("/v1/accounts/{}/devices", alice.handle))
+        .get(&format!("/v1/accounts/{}/devices", alice.id))
         .await
         .json()
         .await
@@ -229,7 +229,7 @@ async fn the_devices_of_an_account_are_listed_with_their_attestations() {
     // redoes on its side, and what it actually relies on.
     for device in body["devices"].as_array().unwrap() {
         let claim = attest::DeviceClaim {
-            handle: &alice.handle,
+            account: &alice.id,
             device_id: device["id"].as_str().unwrap(),
             auth_key: &BASE64_STANDARD.decode(device["auth_key"].as_str().unwrap()).unwrap(),
             mls_key: &BASE64_STANDARD.decode(device["mls_key"].as_str().unwrap()).unwrap(),
@@ -264,11 +264,11 @@ async fn a_ghost_device_injected_in_sql_does_not_pass_client_verification() {
     // attestation — it cannot produce a valid one.
     let ghost = unique("ghost");
     sqlx::query(
-        "INSERT INTO devices (id, handle, auth_key, mls_key, attestation)
+        "INSERT INTO devices (id, account, auth_key, mls_key, attestation)
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&ghost)
-    .bind(&bob.handle)
+    .bind(&bob.id)
     .bind(&[0xaa_u8; 32][..])
     .bind(&[0xbb_u8; 32][..])
     .bind(&[0xcc_u8; 64][..])
@@ -277,7 +277,7 @@ async fn a_ghost_device_injected_in_sql_does_not_pass_client_verification() {
     .unwrap();
 
     let body: serde_json::Value = alice
-        .get(&format!("/v1/accounts/{}/devices", bob.handle))
+        .get(&format!("/v1/accounts/{}/devices", bob.id))
         .await
         .json()
         .await
@@ -293,7 +293,7 @@ async fn a_ghost_device_injected_in_sql_does_not_pass_client_verification() {
 
     // But the client rejects it, because the attestation does not verify.
     let claim = attest::DeviceClaim {
-        handle: &bob.handle,
+        account: &bob.id,
         device_id: &ghost,
         auth_key: &BASE64_STANDARD.decode(served["auth_key"].as_str().unwrap()).unwrap(),
         mls_key: &BASE64_STANDARD.decode(served["mls_key"].as_str().unwrap()).unwrap(),
@@ -342,7 +342,7 @@ async fn a_certificate_signed_by_another_account_is_refused() {
     // Mallory owns a perfectly valid account, just not Alice's.
     let mallory = TestAccount::create(&server, &unique("mallory")).await;
     let revoked_at = common::now();
-    let certificate = mallory.account.revoke(&alice.handle, &tablet.id, revoked_at).unwrap();
+    let certificate = mallory.account.revoke(&alice.id, &tablet.id, revoked_at).unwrap();
 
     let response = laptop
         .post(
@@ -437,7 +437,10 @@ async fn the_open_routes_refuse_beyond_the_quota() {
             .post(format!("{}/v1/accounts", server.base_url))
             .json(&serde_json::json!({
                 "handle": unique("quota"),
-                "identity_key": BASE64_STANDARD.encode([7u8; 32]),
+                // A fresh key per round, so each POST creates a genuinely new account. A shared key
+                // is one account, and one account may hold one handle — which would refuse the
+                // second creation for a reason that has nothing to do with the quota under test.
+                "identity_key": BASE64_STANDARD.encode(crypto_core::Account::generate().unwrap().0.identity_key()),
             }))
             .send()
             .await
@@ -450,7 +453,7 @@ async fn the_open_routes_refuse_beyond_the_quota() {
         .post(format!("{}/v1/accounts", server.base_url))
         .json(&serde_json::json!({
             "handle": unique("quota"),
-            "identity_key": BASE64_STANDARD.encode([7u8; 32]),
+            "identity_key": BASE64_STANDARD.encode(crypto_core::Account::generate().unwrap().0.identity_key()),
         }))
         .send()
         .await
@@ -490,7 +493,7 @@ async fn a_signed_request_only_passes_once() {
     // identical byte for byte, which is exactly what a network observer can reproduce.
     let instant = common::now();
     let nonce = [3u8; 16];
-    let body = serde_json::to_vec(&serde_json::json!({ "handles": [] })).unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({ "accounts": [] })).unwrap();
 
     let send = async |body: Vec<u8>| {
         alice
@@ -522,7 +525,7 @@ async fn two_devices_can_draw_the_same_nonce() {
 
     let instant = common::now();
     let nonce = [7u8; 16];
-    let body = serde_json::to_vec(&serde_json::json!({ "handles": [] })).unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({ "accounts": [] })).unwrap();
 
     for device in [&alice, &bob] {
         let response = device
@@ -552,7 +555,7 @@ async fn a_timestamp_outside_the_window_is_refused() {
     let tablet = alice.device(&server, &unique("tablet")).await;
 
     let future = common::now() + 3600;
-    let certificate = alice.account.revoke(&alice.handle, &tablet.id, future).unwrap();
+    let certificate = alice.account.revoke(&alice.id, &tablet.id, future).unwrap();
 
     let response = laptop
         .post(
@@ -593,7 +596,7 @@ async fn a_revoked_device_can_no_longer_be_added_to_a_group() {
     // omission by the server — and it is that certificate which lets Bob commit the MLS removal
     // without taking our word for it.
     let body: serde_json::Value =
-        bob.get(&format!("/v1/accounts/{}/devices", alice.handle)).await.json().await.unwrap();
+        bob.get(&format!("/v1/accounts/{}/devices", alice.id)).await.json().await.unwrap();
     let devices = body["devices"].as_array().unwrap();
 
     let served = devices
@@ -607,7 +610,7 @@ async fn a_revoked_device_can_no_longer_be_added_to_a_group() {
     let identity_key = BASE64_STANDARD.decode(body["identity_key"].as_str().unwrap()).unwrap();
 
     let claim = attest::RevocationClaim {
-        handle: &alice.handle,
+        account: &alice.id,
         device_id: &tablet.id,
         revoked_at,
     };
@@ -1518,8 +1521,8 @@ async fn the_server_only_sees_ciphertext_in_the_vault() {
         .await;
 
     let (stored,): (Vec<u8>,) =
-        sqlx::query_as("SELECT payload FROM vault_entries WHERE handle = $1")
-            .bind(&alice.handle)
+        sqlx::query_as("SELECT payload FROM vault_entries WHERE account = $1")
+            .bind(&alice.id)
             .fetch_one(&server.pool)
             .await
             .unwrap();
@@ -1550,7 +1553,7 @@ async fn a_rotation_invalidates_every_existing_attestation() {
 
     // Before rotation: both devices pass the verification any client performs.
     let before: serde_json::Value =
-        bob.get(&format!("/v1/accounts/{}/devices", alice.handle)).await.json().await.unwrap();
+        bob.get(&format!("/v1/accounts/{}/devices", alice.id)).await.json().await.unwrap();
     assert_eq!(verifiable_devices(&before), 2);
 
     // Alice rotates from her laptop.
@@ -1558,12 +1561,12 @@ async fn a_rotation_invalidates_every_existing_attestation() {
     let rotated_at = common::now();
     let signature = alice
         .account
-        .rotate(&alice.handle, &new_one.identity_key(), rotated_at)
+        .rotate(&alice.id, &new_one.identity_key(), rotated_at)
         .unwrap();
 
     let response = laptop
         .post(
-            &format!("/v1/accounts/{}/rotate", alice.handle),
+            &format!("/v1/accounts/{}/rotate", alice.id),
             serde_json::json!({
                 "new_identity_key": BASE64_STANDARD.encode(new_one.identity_key()),
                 "rotation": BASE64_STANDARD.encode(signature),
@@ -1576,7 +1579,7 @@ async fn a_rotation_invalidates_every_existing_attestation() {
     // NO attestation verifies any more: neither the stolen device's, nor even the laptop's,
     // which has to re-attest itself.
     let after: serde_json::Value =
-        bob.get(&format!("/v1/accounts/{}/devices", alice.handle)).await.json().await.unwrap();
+        bob.get(&format!("/v1/accounts/{}/devices", alice.id)).await.json().await.unwrap();
     assert_eq!(
         verifiable_devices(&after),
         0,
@@ -1587,14 +1590,14 @@ async fn a_rotation_invalidates_every_existing_attestation() {
     // it held the new seed, which it does not.
     let auth_key = BASE64_STANDARD.decode(laptop.public_key_b64()).unwrap();
     let reattestation = new_one
-        .attest(&alice.handle, &laptop.id, &auth_key, laptop.mls_key())
+        .attest(&alice.id, &laptop.id, &auth_key, laptop.mls_key())
         .unwrap();
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/devices", server.base_url))
         .json(&serde_json::json!({
             "id": laptop.id,
-            "handle": alice.handle,
+            "account": alice.id,
             "auth_key": BASE64_STANDARD.encode(&auth_key),
             "mls_key": BASE64_STANDARD.encode(laptop.mls_key()),
             "attestation": BASE64_STANDARD.encode(reattestation),
@@ -1605,14 +1608,14 @@ async fn a_rotation_invalidates_every_existing_attestation() {
     assert!(response.status().is_success(), "re-attestation refused after rotation");
 
     let final_: serde_json::Value =
-        bob.get(&format!("/v1/accounts/{}/devices", alice.handle)).await.json().await.unwrap();
+        bob.get(&format!("/v1/accounts/{}/devices", alice.id)).await.json().await.unwrap();
     assert_eq!(verifiable_devices(&final_), 1, "only the re-attested device must be recognised");
 }
 
 /// Counts the devices whose attestation verifies against the account's current key — that is,
 /// exactly what a client does on every read.
 fn verifiable_devices(body: &serde_json::Value) -> usize {
-    let handle = body["handle"].as_str().unwrap();
+    let account = body["account"].as_str().unwrap();
     let identity_key = BASE64_STANDARD.decode(body["identity_key"].as_str().unwrap()).unwrap();
 
     body["devices"]
@@ -1621,7 +1624,7 @@ fn verifiable_devices(body: &serde_json::Value) -> usize {
         .iter()
         .filter(|d| {
             let claim = attest::DeviceClaim {
-                handle,
+                account,
                 device_id: d["id"].as_str().unwrap(),
                 auth_key: &BASE64_STANDARD.decode(d["auth_key"].as_str().unwrap()).unwrap(),
                 mls_key: &BASE64_STANDARD.decode(d["mls_key"].as_str().unwrap()).unwrap(),
@@ -1644,11 +1647,11 @@ async fn a_third_party_cannot_rotate_an_account() {
     let (target, _) = crypto_core::Account::generate().unwrap();
     let rotated_at = common::now();
     let signature =
-        mallory.account.rotate(&alice.handle, &target.identity_key(), rotated_at).unwrap();
+        mallory.account.rotate(&alice.id, &target.identity_key(), rotated_at).unwrap();
 
     let response = laptop
         .post(
-            &format!("/v1/accounts/{}/rotate", alice.handle),
+            &format!("/v1/accounts/{}/rotate", alice.id),
             serde_json::json!({
                 "new_identity_key": BASE64_STANDARD.encode(target.identity_key()),
                 "rotation": BASE64_STANDARD.encode(signature),
@@ -1671,11 +1674,11 @@ async fn a_foreign_device_cannot_trigger_the_rotation() {
     let (new_one, _) = crypto_core::Account::generate().unwrap();
     let rotated_at = common::now();
     let signature =
-        alice.account.rotate(&alice.handle, &new_one.identity_key(), rotated_at).unwrap();
+        alice.account.rotate(&alice.id, &new_one.identity_key(), rotated_at).unwrap();
 
     let response = bob
         .post(
-            &format!("/v1/accounts/{}/rotate", alice.handle),
+            &format!("/v1/accounts/{}/rotate", alice.id),
             serde_json::json!({
                 "new_identity_key": BASE64_STANDARD.encode(new_one.identity_key()),
                 "rotation": BASE64_STANDARD.encode(signature),
@@ -1698,7 +1701,7 @@ async fn an_account_key_is_provable_in_the_log() {
     let reader = Device::register(&server, &unique("reader")).await;
 
     let body: serde_json::Value = reader
-        .get(&format!("/v1/log/proof/{}", alice.handle))
+        .get(&format!("/v1/log/proof/{}", alice.id))
         .await
         .json()
         .await
@@ -1719,7 +1722,7 @@ async fn an_account_key_is_provable_in_the_log() {
     let identity_key = BASE64_STANDARD.decode(body["identity_key"].as_str().unwrap()).unwrap();
     assert_eq!(identity_key, alice.account.identity_key());
 
-    let leaf = transparency::leaf_hash(&transparency::entry(&alice.handle, &identity_key));
+    let leaf = transparency::leaf_hash(&transparency::entry(&alice.id, &identity_key));
     let proof: Vec<[u8; 32]> = body["proof"]
         .as_array()
         .unwrap()
@@ -1752,7 +1755,7 @@ async fn a_substituted_key_does_not_appear_in_the_log() {
     let alice = Device::register(&server, &unique("alice")).await;
 
     let body: serde_json::Value =
-        alice.get(&format!("/v1/log/proof/{}", bob.handle)).await.json().await.unwrap();
+        alice.get(&format!("/v1/log/proof/{}", bob.id)).await.json().await.unwrap();
 
     let head = &body["head"];
     let root: [u8; 32] =
@@ -1768,7 +1771,7 @@ async fn a_substituted_key_does_not_appear_in_the_log() {
     // only one it has.
     let (impostor, _) = crypto_core::Account::generate().unwrap();
     let forged_leaf =
-        transparency::leaf_hash(&transparency::entry(&bob.handle, &impostor.identity_key()));
+        transparency::leaf_hash(&transparency::entry(&bob.id, &impostor.identity_key()));
 
     assert!(
         transparency::verify_inclusion(
@@ -1798,11 +1801,11 @@ async fn a_rotation_appends_to_the_log_without_erasing_anything() {
     let (new_one, _) = crypto_core::Account::generate().unwrap();
     let rotated_at = common::now();
     let signature =
-        alice.account.rotate(&alice.handle, &new_one.identity_key(), rotated_at).unwrap();
+        alice.account.rotate(&alice.id, &new_one.identity_key(), rotated_at).unwrap();
 
     let response = laptop
         .post(
-            &format!("/v1/accounts/{}/rotate", alice.handle),
+            &format!("/v1/accounts/{}/rotate", alice.id),
             serde_json::json!({
                 "new_identity_key": BASE64_STANDARD.encode(new_one.identity_key()),
                 "rotation": BASE64_STANDARD.encode(signature),
@@ -1820,7 +1823,7 @@ async fn a_rotation_appends_to_the_log_without_erasing_anything() {
 
     // And it is indeed the NEW key that is now proven.
     let proof: serde_json::Value =
-        laptop.get(&format!("/v1/log/proof/{}", alice.handle)).await.json().await.unwrap();
+        laptop.get(&format!("/v1/log/proof/{}", alice.id)).await.json().await.unwrap();
     assert_eq!(
         BASE64_STANDARD.decode(proof["identity_key"].as_str().unwrap()).unwrap(),
         new_one.identity_key(),
@@ -2383,9 +2386,9 @@ async fn trio(server: &TestServer) -> (TestAccount, Device, TestAccount, Device,
     (a, alice, b, bob, c, carol)
 }
 
-async fn presence_of(caller: &Device, handles: &[&str]) -> serde_json::Value {
+async fn presence_of(caller: &Device, accounts: &[&str]) -> serde_json::Value {
     let response = caller
-        .post("/v1/presence", serde_json::json!({ "handles": handles }))
+        .post("/v1/presence", serde_json::json!({ "accounts": accounts }))
         .await;
     assert!(response.status().is_success(), "presence refused: {:?}", response.status());
     response.json().await.unwrap()
@@ -2402,10 +2405,10 @@ async fn presence_is_only_visible_within_a_shared_group() {
     bring_online(&server, &alice).await.unwrap();
     bring_online(&server, &bob).await.unwrap();
 
-    let seen = presence_of(&bob, &[&a.handle]).await;
+    let seen = presence_of(&bob, &[&a.id]).await;
     assert_eq!(seen["accounts"].as_array().unwrap().len(), 1, "bob shares a group with alice");
 
-    let nothing = presence_of(&carol, &[&a.handle, &b.handle]).await;
+    let nothing = presence_of(&carol, &[&a.id, &b.id]).await;
     assert!(
         nothing["accounts"].as_array().unwrap().is_empty(),
         "carol has no group in common and yet sees something",
@@ -2421,7 +2424,7 @@ async fn an_unknown_handle_and_a_handle_with_no_shared_group_are_indistinguishab
     alice.get("/v1/groups").await;
     bring_online(&server, &alice).await.unwrap();
 
-    let stranger = presence_of(&carol, &[&a.handle]).await;
+    let stranger = presence_of(&carol, &[&a.id]).await;
     let nonexistent = presence_of(&carol, &["nobody-by-that-name"]).await;
 
     assert_eq!(stranger["accounts"], nonexistent["accounts"]);
@@ -2453,11 +2456,11 @@ async fn an_account_is_online_as_soon_as_a_single_one_of_its_devices_is() {
     laptop.get("/v1/groups").await;
     let seen_laptop = bring_online(&server, &laptop).await.unwrap();
 
-    let response = presence_of(&bob, &[&a.handle]).await;
+    let response = presence_of(&bob, &[&a.id]).await;
     let accounts = response["accounts"].as_array().unwrap();
 
     assert_eq!(accounts.len(), 1, "one account, one entry — never one per device");
-    assert_eq!(accounts[0]["handle"], a.handle);
+    assert_eq!(accounts[0]["account"], a.id);
     assert_eq!(accounts[0]["last_seen"].as_i64(), Some(seen_laptop));
 }
 
@@ -2482,12 +2485,12 @@ async fn a_revoked_device_no_longer_keeps_its_account_online() {
     bring_online(&server, &stolen).await.unwrap();
     forget_presence(&server.pool, &phone.id).await;
 
-    assert_eq!(presence_of(&bob, &[&a.handle]).await["accounts"].as_array().unwrap().len(), 1);
+    assert_eq!(presence_of(&bob, &[&a.id]).await["accounts"].as_array().unwrap().len(), 1);
 
     let revocation = a.revoke(&phone, &stolen.id).await;
     assert!(revocation.status().is_success(), "revocation refused");
 
-    let after = presence_of(&bob, &[&a.handle]).await;
+    let after = presence_of(&bob, &[&a.id]).await;
     assert!(
         after["accounts"].as_array().unwrap().is_empty(),
         "a revoked device still keeps its account online",
@@ -2544,12 +2547,12 @@ async fn refusing_to_broadcast_your_presence_also_cuts_off_reading_it() {
     alice.get("/v1/groups").await;
     bring_online(&server, &alice).await.unwrap();
 
-    assert_eq!(presence_of(&bob, &[&a.handle]).await["accounts"].as_array().unwrap().len(), 1);
+    assert_eq!(presence_of(&bob, &[&a.id]).await["accounts"].as_array().unwrap().len(), 1);
 
     bob.post("/v1/presence/optout", serde_json::json!({ "optout": true })).await;
 
     assert!(
-        presence_of(&bob, &[&a.handle]).await["accounts"].as_array().unwrap().is_empty(),
+        presence_of(&bob, &[&a.id]).await["accounts"].as_array().unwrap().is_empty(),
         "bob cut off his presence and still sees other people's",
     );
 }
@@ -2560,7 +2563,7 @@ async fn asking_for_presence_without_a_signature_is_refused() {
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/presence", server.base_url))
-        .json(&serde_json::json!({ "handles": ["alice"] }))
+        .json(&serde_json::json!({ "accounts": ["alice"] }))
         .send()
         .await
         .unwrap();
@@ -2574,7 +2577,7 @@ async fn too_many_handles_in_one_request_is_refused() {
     let alice = Device::register(&server, &unique("alice")).await;
 
     let handles: Vec<String> = (0..65).map(|i| format!("account{i}")).collect();
-    let response = alice.post("/v1/presence", serde_json::json!({ "handles": handles })).await;
+    let response = alice.post("/v1/presence", serde_json::json!({ "accounts": handles })).await;
 
     assert_eq!(response.status(), 400);
 }
@@ -2595,7 +2598,7 @@ async fn the_per_device_detail_is_only_served_to_its_owner() {
     bring_online(&server, &alice).await.unwrap();
 
     let own: serde_json::Value = alice
-        .get(&format!("/v1/accounts/{}/devices", a.handle))
+        .get(&format!("/v1/accounts/{}/devices", a.id))
         .await
         .json()
         .await
@@ -2603,7 +2606,7 @@ async fn the_per_device_detail_is_only_served_to_its_owner() {
     assert!(own["devices"][0]["last_seen"].is_i64(), "the owner cannot see their own devices");
 
     let third_party: serde_json::Value = bob
-        .get(&format!("/v1/accounts/{}/devices", a.handle))
+        .get(&format!("/v1/accounts/{}/devices", a.id))
         .await
         .json()
         .await

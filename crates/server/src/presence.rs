@@ -97,7 +97,7 @@ pub async fn touch(pool: &PgPool, device_id: &str) -> sqlx::Result<()> {
             SET last_seen_at = date_trunc('minute', now())
           FROM accounts a
          WHERE d.id = $1
-           AND a.handle = d.handle
+           AND a.id = d.account
            AND a.presence_optout = false
            AND (d.last_seen_at IS NULL OR d.last_seen_at < now() - interval '60 seconds')",
     )
@@ -123,7 +123,7 @@ pub fn touch_detached(pool: PgPool, device_id: String) {
 
 /// Last activity of an account, in seconds since the epoch.
 pub struct Seen {
-    pub handle: String,
+    pub account: String,
     pub last_seen: i64,
 }
 
@@ -131,7 +131,7 @@ pub struct Seen {
 ///
 /// # Access control
 ///
-/// A handle is only served if the caller shares at least one group with it — or if it is their
+/// An account is only served if the caller shares at least one group with it — or if it is their
 /// own account. Without that clause, the route would be an activity oracle on any pseudonym on
 /// the server.
 ///
@@ -144,38 +144,38 @@ pub struct Seen {
 /// Per-device detail. Only the `MAX` per account is served: how many devices a person has and
 /// their respective habits are a leak distinct from "online".
 ///
-/// An unknown handle and a handle with no shared group produce the same result — their absence.
+/// An unknown account and an account with no shared group produce the same result — their absence.
 /// Distinguishing them would make the route an account-existence oracle.
-pub async fn read(pool: &PgPool, device_id: &str, handles: &[String]) -> sqlx::Result<Vec<Seen>> {
+pub async fn read(pool: &PgPool, device_id: &str, accounts: &[String]) -> sqlx::Result<Vec<Seen>> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT d.handle, EXTRACT(EPOCH FROM MAX(d.last_seen_at))::BIGINT
+        "SELECT d.account, EXTRACT(EPOCH FROM MAX(d.last_seen_at))::BIGINT
            FROM devices d
           WHERE d.revoked_at IS NULL
-            AND d.handle = ANY($2)
+            AND d.account = ANY($2)
             AND EXISTS (
                   SELECT 1 FROM devices me
-                   JOIN accounts a ON a.handle = me.handle
+                   JOIN accounts a ON a.id = me.account
                   WHERE me.id = $1 AND a.presence_optout = false
                 )
             AND (
-                 d.handle = (SELECT handle FROM devices WHERE id = $1)
+                 d.account = (SELECT account FROM devices WHERE id = $1)
               OR EXISTS (
                    SELECT 1
                      FROM group_members me
                      JOIN group_members them ON them.group_id = me.group_id
                      JOIN devices other ON other.id = them.device_id
-                    WHERE me.device_id = $1 AND other.handle = d.handle
+                    WHERE me.device_id = $1 AND other.account = d.account
                  )
             )
-          GROUP BY d.handle
+          GROUP BY d.account
          HAVING MAX(d.last_seen_at) IS NOT NULL",
     )
     .bind(device_id)
-    .bind(handles)
+    .bind(accounts)
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|(handle, last_seen)| Seen { handle, last_seen }).collect())
+    Ok(rows.into_iter().map(|(account, last_seen)| Seen { account, last_seen }).collect())
 }
 
 #[cfg(test)]

@@ -592,7 +592,7 @@ pub fn verify_attestation(
     mls_key: &[u8],
     attestation: &[u8],
 ) -> bool {
-    let claim = attest::DeviceClaim { handle, device_id, auth_key, mls_key };
+    let claim = attest::DeviceClaim { account: handle, device_id, auth_key, mls_key };
     attest::verify(identity_key, &claim, attestation).is_ok()
 }
 
@@ -609,7 +609,7 @@ pub fn verify_revocation(
     revoked_at: u64,
     revocation: &[u8],
 ) -> bool {
-    let claim = attest::RevocationClaim { handle, device_id, revoked_at };
+    let claim = attest::RevocationClaim { account: handle, device_id, revoked_at };
     attest::verify_revocation(identity_key, &claim, revocation).is_ok()
 }
 

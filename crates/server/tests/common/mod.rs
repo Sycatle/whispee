@@ -180,7 +180,10 @@ pub struct Device {
 /// Tests go through a real account rather than a direct insert: that is the only way to check
 /// that the attestations produced on the client side really are the ones the server accepts.
 pub struct TestAccount {
+    /// The name it answers to. A label now, not an identity — it can be given up.
     pub handle: String,
+    /// What actually names it, everywhere the protocol needs to be sure.
+    pub id: String,
     pub account: Account,
 }
 
@@ -199,15 +202,16 @@ impl TestAccount {
             .unwrap();
 
         assert!(response.status().is_success(), "account creation refused");
-        Self { handle: handle.to_owned(), account }
+        let id = account.id();
+        Self { handle: handle.to_owned(), id, account }
     }
 
     /// Creates a device attached to this account and registers it.
     ///
-    /// The identifier is qualified by the handle, as the server requires: the device
-    /// namespace is local to the account.
+    /// The identifier is qualified by the account id, as the server requires: the device
+    /// namespace is local to the account, and an id — unlike a handle — never moves.
     pub async fn device(&self, server: &TestServer, id: &str) -> Device {
-        let device = Device::new(server, &format!("{}:{id}", self.handle));
+        let device = Device::new(server, &format!("{}:{id}", self.id));
         let response = device.register_under(self).await;
         assert!(response.status().is_success(), "registration refused: {:?}", response.status());
         device
@@ -224,7 +228,7 @@ impl TestAccount {
         device_id: &str,
     ) -> reqwest::Response {
         let revoked_at = now();
-        let certificate = self.account.revoke(&self.handle, device_id, revoked_at).unwrap();
+        let certificate = self.account.revoke(&self.id, device_id, revoked_at).unwrap();
 
         caller
             .post(
@@ -248,14 +252,14 @@ impl Device {
         let auth_key = self.signing_key.verifying_key().to_bytes();
         let attestation = owner
             .account
-            .attest(&owner.handle, &self.id, &auth_key, &self.mls_key)
+            .attest(&owner.id, &self.id, &auth_key, &self.mls_key)
             .unwrap();
 
         self.http
             .post(format!("{}/v1/devices", self.base_url))
             .json(&serde_json::json!({
                 "id": self.id,
-                "handle": owner.handle,
+                "account": owner.id,
                 "auth_key": BASE64_STANDARD.encode(auth_key),
                 "mls_key": BASE64_STANDARD.encode(self.mls_key),
                 "attestation": BASE64_STANDARD.encode(attestation),
@@ -266,12 +270,12 @@ impl Device {
     }
 
     /// Attempts a registration with an arbitrary attestation. Used by the attack tests.
-    pub async fn register_with(&self, handle: &str, attestation: &[u8]) -> reqwest::Response {
+    pub async fn register_with(&self, account: &str, attestation: &[u8]) -> reqwest::Response {
         self.http
             .post(format!("{}/v1/devices", self.base_url))
             .json(&serde_json::json!({
                 "id": self.id,
-                "handle": handle,
+                "account": account,
                 "auth_key": self.public_key_b64(),
                 "mls_key": BASE64_STANDARD.encode(self.mls_key),
                 "attestation": BASE64_STANDARD.encode(attestation),

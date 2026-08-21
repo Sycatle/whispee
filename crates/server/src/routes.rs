@@ -92,10 +92,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/presence/optout", post(set_presence_optout))
         .route("/v1/push/token", post(set_push_token))
         .route("/v1/push/forget", post(forget_push_token))
-        .route("/v1/accounts/{handle}/devices", get(list_account_devices))
-        .route("/v1/accounts/{handle}/rotate", post(rotate_account))
+        .route("/v1/accounts/{account}/devices", get(list_account_devices))
+        .route("/v1/accounts/{account}/rotate", post(rotate_account))
+        .route("/v1/accounts/{account}/handle", post(rename_account))
+        .route("/v1/handles/{handle}", get(resolve_handle))
         .route("/v1/log/sth", get(log_head))
-        .route("/v1/log/proof/{handle}", get(log_proof))
+        .route("/v1/log/proof/{account}", get(log_proof))
         .route("/v1/log/consistency", get(log_consistency))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
         .route("/v1/vault/{group_id}", post(store_vault).get(fetch_vault))
@@ -314,11 +316,28 @@ struct CreateAccount {
     identity_key: String,
 }
 
-/// Creates a pseudonymous account. Unsigned — no known key exists yet.
+/// Creates a pseudonymous account, and claims a handle for it. Unsigned — no key exists yet.
 ///
-/// This is **trust on first use**: the server believes the first claimant of a handle. Claiming
-/// the same handle with the same key is idempotent (reinstall); with a different key it is
-/// refused, which prevents a pseudonym from being silently taken over.
+/// # The account is its key; the handle is a name it answers to
+///
+/// The id is derived here rather than accepted from the caller: it is a hash of the identity key
+/// in the very same request, so nobody can assert an id that does not belong to the key they are
+/// presenting. That property is what the whole identity design rests on, and it costs one line —
+/// see `crates/attest/src/lib.rs::account_id`.
+///
+/// The key is recorded twice, as `identity_key` and as `genesis_key`. They are equal today and
+/// diverge on the first rotation: the first moves, the second is what the id was computed from
+/// and never does.
+///
+/// # What is idempotent, and what is a conflict
+///
+/// Re-creating the **same account** — same key, hence same id — is idempotent, which is how a
+/// device that lost its storage gets its account back.
+///
+/// Claiming a handle another account holds is a conflict, as it always was. Claiming one that has
+/// been *released* is also a conflict, and that part is new: a tombstoned handle is never
+/// re-issued, because every stale reference to it — a bookmark, a mention in a message written
+/// last year — would otherwise name somebody else. See `migrations/0014_account_identity.sql`.
 ///
 /// What TOFU does not prove: that the first claimant was legitimate. There is no answer to that
 /// without an external authority or key transparency — out of scope, documented in the README.
@@ -326,9 +345,9 @@ async fn create_account(
     State(pool): State<PgPool>,
     Json(payload): Json<CreateAccount>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // The one place a handle enters the system. Every other route reads a handle that got in
-    // through here, so this is where the format is imposed rather than merely hoped for — see
-    // `crate::handle` for what `^[a-z0-9_]{3,32}$` buys and what it explicitly does not.
+    // One of the two places a handle enters the system — `rename_account` is the other — so this
+    // is where the format is imposed rather than merely hoped for. See `crate::handle` for what
+    // `^[a-z0-9_]{3,32}$` buys and what it explicitly does not.
     crate::handle::validate(&payload.handle).map_err(ApiError::BadRequest)?;
 
     let identity_key = decode_b64(&payload.identity_key)?;
@@ -336,12 +355,15 @@ async fn create_account(
         return Err(ApiError::BadRequest("Ed25519 key expected (32 bytes)"));
     }
 
+    let id = attest::account_id(&identity_key);
+
     let mut tx = pool.begin().await?;
 
     let inserted = sqlx::query(
-        "INSERT INTO accounts (handle, identity_key) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        "INSERT INTO accounts (id, identity_key, genesis_key) VALUES ($1, $2, $2)
+         ON CONFLICT DO NOTHING",
     )
-    .bind(&payload.handle)
+    .bind(&id)
     .bind(&identity_key)
     .execute(&mut *tx)
     .await?;
@@ -350,30 +372,209 @@ async fn create_account(
     // inclusion proof would be rejected by every client: the account would exist without being
     // reachable, and nothing would say why.
     if inserted.rows_affected() > 0 {
-        crate::log::append(&mut tx, &payload.handle, &identity_key).await?;
+        crate::log::append(&mut tx, &id, &identity_key).await?;
+    }
+
+    // The handle, in the same transaction as the account it names.
+    //
+    // `ON CONFLICT DO NOTHING` covers the reinstall — the same account re-claiming the name it
+    // already holds — and says nothing about the two failures below, which is why those are told
+    // apart by a read rather than by a row count. A name somebody else holds and a name nobody
+    // holds any more are different sentences to be given.
+    // What the account answers to today, if anything. Read before the claim, so that the
+    // "already named" case below can be told from the "name is taken" one.
+    let held: Option<(String,)> =
+        sqlx::query_as("SELECT handle FROM handles WHERE account = $1 AND released_at IS NULL")
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+    let claimed =
+        sqlx::query("INSERT INTO handles (handle, account) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            .bind(&payload.handle)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+
+    if claimed.rows_affected() == 0 {
+        let owner: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT account FROM handles WHERE handle = $1")
+                .bind(&payload.handle)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+        match owner {
+            Some((Some(existing),)) if existing == id => {}
+            // A tombstone: the name existed, was given up, and does not come back.
+            Some((None,)) => return Err(ApiError::Conflict("handle is retired")),
+            _ => return Err(ApiError::Conflict("handle already taken by another account")),
+        }
+    } else if held.is_some() {
+        // The account already answers to a name, and has just been handed a second one.
+        //
+        // The unique index would refuse this as a constraint violation, which reaches the caller
+        // as a 500 — an internal error for something they did on purpose. It is a rename, and a
+        // rename has a route of its own, with a cooldown this one does not apply. Saying so is
+        // the difference between a bug report and an instruction.
+        return Err(ApiError::Conflict("this account already has a handle; rename it instead"));
     }
 
     tx.commit().await?;
 
-    if inserted.rows_affected() == 0 {
-        let existing: (Vec<u8>,) =
-            sqlx::query_as("SELECT identity_key FROM accounts WHERE handle = $1")
-                .bind(&payload.handle)
-                .fetch_one(&pool)
-                .await?;
+    Ok(Json(serde_json::json!({ "account": id, "handle": payload.handle })))
+}
 
-        if existing.0 != identity_key {
-            return Err(ApiError::Conflict("handle already taken by another account"));
+/// Resolves a handle to the account that answers to it. **The directory, and nothing more.**
+///
+/// # What this route can do, and why that is survivable
+///
+/// It can lie. It can answer late, refuse to answer, or hand back somebody else's id. Nothing
+/// here stops it, and nothing needs to: the id it returns is a hash of a key, and the key is
+/// inside the credential the caller is about to verify. A wrong id does not become a verifying
+/// one, so the worst this route can do is send somebody to the wrong account — which is the
+/// failure this product already has at first contact and already answers, with an out-of-band
+/// fingerprint comparison.
+///
+/// That is the whole reason ids are derived rather than assigned. A server that mints them could
+/// serve Alice one answer and Carol another about the same name, and there would be nothing to
+/// compare. Here there is nothing to compare because there is nothing to disagree about.
+///
+/// # A tombstone answers `410`, not `404`
+///
+/// They are different facts and a client should be able to say which it met. A name nobody ever
+/// took may still be claimed; a name that was given up never will be, and telling somebody to try
+/// again later would be a lie.
+///
+/// Unsigned, like `create_account`: a name has to be resolvable before an account exists to
+/// resolve it with.
+async fn resolve_handle(
+    State(pool): State<PgPool>,
+    Path(handle): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT account FROM handles WHERE handle = $1")
+            .bind(&handle)
+            .fetch_optional(&pool)
+            .await?;
+
+    match row {
+        Some((Some(account),)) => Ok(Json(serde_json::json!({ "handle": handle, "account": account }))),
+        Some((None,)) => Err(ApiError::Gone),
+        None => Err(ApiError::NotFound),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenameAccount {
+    handle: String,
+}
+
+/// Gives an account a new handle, and retires the old one.
+///
+/// # This is a registration route wearing a hat
+///
+/// It creates a row in the same namespace `create_account` does, from a caller who already has an
+/// account — which makes it the cheaper of the two doors into that namespace, not the safer one.
+/// It is signed, so it is rate-limited per device by the middleware the way every signed route
+/// is; what that does **not** bound is how often one account may cycle through names, which is
+/// the abuse specific to this route. See the cooldown below.
+///
+/// # The old name is retired, not freed
+///
+/// Releasing it would be the obvious thing and it is the dangerous one. Every stale reference to
+/// `@bob` — a bookmark, a screenshot, a mention in a message written last year — would name
+/// whoever claimed it next, and that is an impersonation nobody had to mount: it arrives on its
+/// own, on a schedule the attacker picks by waiting. The row stays, with its account cleared.
+///
+/// # What this route does not do
+///
+/// It does not touch the account, its key, its devices, its device ids, its attestations or
+/// anything in any conversation. That is the entire point of the identity work: a handle is a
+/// name an account answers to, and moving it moves nothing else. Correspondents learn the new
+/// name from its owner over MLS, never from this server — see `docs/specs/2026-08-21-account-identity.md`.
+async fn rename_account(
+    State(pool): State<PgPool>,
+    Path(account): Path<String>,
+    signed: Signed,
+) -> ApiResult<Json<serde_json::Value>> {
+    let payload: RenameAccount = signed.json()?;
+
+    // The other of the two places a handle enters the system. Same authority, same rule.
+    crate::handle::validate(&payload.handle).map_err(ApiError::BadRequest)?;
+
+    // The caller must be a device of the account it is renaming. Unlike rotation, there is no
+    // signature over the claim to fall back on — a rename carries no certificate, because there
+    // is nothing for a third party to verify: the name means nothing to anybody who did not ask
+    // this server for it. So this check is the whole of the authorisation.
+    if caller_account(&pool, &signed.device_id).await? != account {
+        return Err(ApiError::Forbidden);
+    }
+
+    let mut tx = pool.begin().await?;
+
+    // Retire whatever the account answers to today.
+    //
+    // `released_at` and a cleared account together: the CHECK in the migration insists on both,
+    // so a half-retired row cannot exist. Nothing is deleted — a deleted row is a name back in
+    // circulation.
+    let retired: Option<(String, Option<i64>)> = sqlx::query_as(
+        "UPDATE handles SET account = NULL, released_at = now()
+         WHERE account = $1 AND released_at IS NULL
+         RETURNING handle, EXTRACT(EPOCH FROM (now() - claimed_at))::BIGINT",
+    )
+    .bind(&account)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // A cooldown, counted from when the current name was claimed.
+    //
+    // Not decoration: renaming freely is how somebody escapes being blocked, or grinds through
+    // names until they land on one that reads like somebody else's. A day is long enough to make
+    // that tedious and short enough that a person who mistyped their own name is not stuck with
+    // it for a week.
+    if let Some((_, Some(held_for))) = &retired {
+        if *held_for < RENAME_COOLDOWN_SECONDS {
+            return Err(ApiError::Conflict("this account was renamed too recently"));
         }
     }
 
-    Ok(Json(serde_json::json!({ "handle": payload.handle })))
+    let claimed =
+        sqlx::query("INSERT INTO handles (handle, account) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            .bind(&payload.handle)
+            .bind(&account)
+            .execute(&mut *tx)
+            .await?;
+
+    if claimed.rows_affected() == 0 {
+        let owner: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT account FROM handles WHERE handle = $1")
+                .bind(&payload.handle)
+                .fetch_optional(&mut *tx)
+                .await?;
+        return match owner {
+            Some((None,)) => Err(ApiError::Conflict("handle is retired")),
+            _ => Err(ApiError::Conflict("handle already taken by another account")),
+        };
+    }
+
+    tx.commit().await?;
+
+    Ok(Json(serde_json::json!({
+        "account": account,
+        "handle": payload.handle,
+        "retired": retired.map(|(handle, _)| handle),
+    })))
 }
+
+/// How long an account keeps a name before it may take another. One day.
+const RENAME_COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
 
 #[derive(Deserialize)]
 struct RegisterDevice {
     id: String,
-    handle: String,
+    /// The account id this device belongs to. Was the handle; a handle can move, an account
+    /// cannot — which is what makes every device id this route ever issued survive a rename.
+    account: String,
     /// Ed25519 public key used to authenticate HTTP requests, base64.
     auth_key: String,
     /// This device's MLS signature public key, base64.
@@ -399,33 +600,37 @@ async fn register_device(
         return Err(ApiError::BadRequest("invalid device id"));
     }
 
-    // The device id is qualified by the handle: `alice:phone`.
+    // The device id is qualified by the account: `a1b2…f0:phone`.
     //
     // Otherwise the id space is global and the first arrival hogs the common names — the second
     // user who wants to call their phone "phone" is refused registration, despite holding a
     // perfectly legitimate account. The prefix makes the namespace local to the account; the
     // attestation guarantees nobody can claim someone else's prefix.
     //
-    // This is a **split**, not a `starts_with`, and that only became correct with
-    // `crate::handle`. A handle can no longer contain `:`, so the first `:` in a device id is
-    // unambiguously the separator and the left-hand side is the whole handle and nothing else.
-    // Before the format existed, `alice:phone` was itself a legal handle, so the device id
-    // `alice:phone:laptop` started with the prefix of *two* different accounts and the check
-    // handed the second one a foothold in the first one's namespace. Validating the handle here
-    // as well as splitting is what closes the other half: a prefix comparison against an
-    // unvalidated handle would still let a colon-bearing string through if this route were ever
-    // reached before `create_account` — which it can be, since a device may be registered
-    // against an account that does not exist and the lookup below is what refuses it.
-    crate::handle::validate(&payload.handle).map_err(ApiError::BadRequest)?;
+    // The prefix is the **account id** now, and that repairs something the handle version could
+    // not. A device id used to name the account by a string that had to be able to move — except
+    // that it could not, which was the whole reason handles were unrenameable. An id never moves,
+    // so a rename leaves every device id ever issued intact.
+    //
+    // This is a **split**, not a `starts_with`, and it stays one for the reason it became one: an
+    // id cannot contain `:`, so the first `:` is unambiguously the separator and the left-hand
+    // side is the whole account and nothing else. Checking the shape here as well as splitting
+    // closes the other half — a prefix comparison against an unvalidated string would let a
+    // colon-bearing value through if this route were reached before `create_account`, which it
+    // can be, since a device may be registered against an account that does not exist and the
+    // lookup below is what refuses it.
+    if !attest::is_account_id(&payload.account) {
+        return Err(ApiError::BadRequest("invalid account id"));
+    }
 
     let Some((prefix, _name)) = payload.id.split_once(':') else {
         return Err(ApiError::BadRequest(
-            "device id must be prefixed with the account handle",
+            "device id must be prefixed with the account id",
         ));
     };
-    if prefix != payload.handle {
+    if prefix != payload.account {
         return Err(ApiError::BadRequest(
-            "device id must be prefixed with the account handle",
+            "device id must be prefixed with the account id",
         ));
     }
 
@@ -442,14 +647,14 @@ async fn register_device(
     let attestation = decode_b64(&payload.attestation)?;
 
     let account: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT identity_key FROM accounts WHERE handle = $1")
-            .bind(&payload.handle)
+        sqlx::query_as("SELECT identity_key FROM accounts WHERE id = $1")
+            .bind(&payload.account)
             .fetch_optional(&pool)
             .await?;
     let (identity_key,) = account.ok_or(ApiError::NotFound)?;
 
     let claim = attest::DeviceClaim {
-        handle: &payload.handle,
+        account: &payload.account,
         device_id: &payload.id,
         auth_key: &auth_key,
         mls_key: &mls_key,
@@ -468,13 +673,13 @@ async fn register_device(
     // account's current key, a few lines above. The `WHERE` clause does forbid changing an
     // existing device's keys — that would be another device under the same name.
     let inserted = sqlx::query(
-        "INSERT INTO devices (id, handle, auth_key, mls_key, attestation)
+        "INSERT INTO devices (id, account, auth_key, mls_key, attestation)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (id) DO UPDATE SET attestation = EXCLUDED.attestation
          WHERE devices.auth_key = EXCLUDED.auth_key AND devices.mls_key = EXCLUDED.mls_key",
     )
     .bind(&payload.id)
-    .bind(&payload.handle)
+    .bind(&payload.account)
     .bind(&auth_key)
     .bind(&mls_key)
     .bind(&attestation)
@@ -485,12 +690,12 @@ async fn register_device(
         // Idempotent re-registration after a reinstall, refused if any field differs: a device
         // changes neither its keys nor its account, it creates a new one.
         let existing: (String, Vec<u8>, Vec<u8>) =
-            sqlx::query_as("SELECT handle, auth_key, mls_key FROM devices WHERE id = $1")
+            sqlx::query_as("SELECT account, auth_key, mls_key FROM devices WHERE id = $1")
                 .bind(&payload.id)
                 .fetch_one(&pool)
                 .await?;
 
-        if existing != (payload.handle.clone(), auth_key, mls_key) {
+        if existing != (payload.account.clone(), auth_key, mls_key) {
             return Err(ApiError::Conflict("id already taken by another device"));
         }
     }
@@ -522,7 +727,7 @@ struct AccountDevice {
 
 #[derive(Serialize)]
 struct AccountDevices {
-    handle: String,
+    account: String,
     identity_key: String,
     devices: Vec<AccountDevice>,
 }
@@ -538,15 +743,15 @@ struct AccountDevices {
 /// their devices receives nothing — noisy, and of no use to a spy.
 async fn list_account_devices(
     State(pool): State<PgPool>,
-    Path(handle): Path<String>,
+    Path(account): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<AccountDevices>> {
-    let account: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT identity_key FROM accounts WHERE handle = $1")
-            .bind(&handle)
+    let found: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT identity_key FROM accounts WHERE id = $1")
+            .bind(&account)
             .fetch_optional(&pool)
             .await?;
-    let (identity_key,) = account.ok_or(ApiError::NotFound)?;
+    let (identity_key,) = found.ok_or(ApiError::NotFound)?;
 
     // Revoked devices are served TOO, with their certificate. Hiding them would leave the
     // client unable to tell a revocation from an omission — and omission is precisely what this
@@ -557,18 +762,18 @@ async fn list_account_devices(
                 EXTRACT(EPOCH FROM revoked_at)::BIGINT, revocation,
                 EXTRACT(EPOCH FROM last_seen_at)::BIGINT
          FROM devices
-         WHERE handle = $1
+         WHERE account = $1
          ORDER BY id",
     )
-    .bind(&handle)
+    .bind(&account)
     .fetch_all(&pool)
     .await?;
 
     // Per-device detail is served to the account owner only.
-    let owner = caller_handle(&pool, &signed.device_id).await? == handle;
+    let owner = caller_account(&pool, &signed.device_id).await? == account;
 
     Ok(Json(AccountDevices {
-        handle,
+        account,
         identity_key: BASE64_STANDARD.encode(identity_key),
         devices: rows
             .into_iter()
@@ -643,7 +848,7 @@ async fn log_head(State(pool): State<PgPool>, _signed: Signed) -> ApiResult<Json
 
 #[derive(Serialize)]
 struct InclusionProof {
-    handle: String,
+    account: String,
     identity_key: String,
     index: usize,
     proof: Vec<String>,
@@ -657,20 +862,20 @@ struct InclusionProof {
 /// trusting us. That is the entire point.
 async fn log_proof(
     State(pool): State<PgPool>,
-    Path(handle): Path<String>,
+    Path(account): Path<String>,
     _signed: Signed,
 ) -> ApiResult<Json<InclusionProof>> {
     let (head, snapshot) = signed_head(&pool).await?;
 
     let (seq, identity_key) =
-        crate::log::latest(&pool, &handle).await?.ok_or(ApiError::NotFound)?;
+        crate::log::latest(&pool, &account).await?.ok_or(ApiError::NotFound)?;
     let index = crate::log::index_of(&pool, seq).await?;
 
     let proof = transparency::inclusion_proof(&snapshot.leaves, index)
         .map_err(|_| ApiError::BadRequest("index outside the log"))?;
 
     Ok(Json(InclusionProof {
-        handle,
+        account,
         identity_key: BASE64_STANDARD.encode(identity_key),
         index,
         proof: proof.iter().map(|h| BASE64_STANDARD.encode(h)).collect(),
@@ -740,7 +945,7 @@ struct RotateAccount {
 /// change alert on the correspondents' side — hence the importance of not making it routine.
 async fn rotate_account(
     State(pool): State<PgPool>,
-    Path(handle): Path<String>,
+    Path(account): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<serde_json::Value>> {
     let payload: RotateAccount = signed.json()?;
@@ -761,23 +966,23 @@ async fn rotate_account(
 
     // The caller must be a device of the account: the rotation signature already proves it, but
     // requiring it here avoids processing a stranger's request all the way to the verification.
-    let caller: Option<(String,)> = sqlx::query_as("SELECT handle FROM devices WHERE id = $1")
+    let caller: Option<(String,)> = sqlx::query_as("SELECT account FROM devices WHERE id = $1")
         .bind(&signed.device_id)
         .fetch_optional(&pool)
         .await?;
-    if caller.map(|(h,)| h).as_deref() != Some(handle.as_str()) {
+    if caller.map(|(a,)| a).as_deref() != Some(account.as_str()) {
         return Err(ApiError::Forbidden);
     }
 
     let current: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT identity_key FROM accounts WHERE handle = $1")
-            .bind(&handle)
+        sqlx::query_as("SELECT identity_key FROM accounts WHERE id = $1")
+            .bind(&account)
             .fetch_optional(&pool)
             .await?;
     let (previous_identity_key,) = current.ok_or(ApiError::NotFound)?;
 
     let claim = attest::RotationClaim {
-        handle: &handle,
+        account: &account,
         new_identity_key: &new_identity_key,
         rotated_at: payload.rotated_at,
     };
@@ -786,8 +991,11 @@ async fn rotate_account(
 
     let mut tx = pool.begin().await?;
 
-    sqlx::query("UPDATE accounts SET identity_key = $2 WHERE handle = $1")
-        .bind(&handle)
+    // `identity_key` moves; `genesis_key` does not, and that is what keeps the id stable across
+    // a rotation. An account that has rotated is the same account under the same name, which is
+    // the entire reason the id is anchored on the first key rather than on the current one.
+    sqlx::query("UPDATE accounts SET identity_key = $2 WHERE id = $1")
+        .bind(&account)
         .bind(&new_identity_key)
         .execute(&mut *tx)
         .await?;
@@ -795,16 +1003,16 @@ async fn rotate_account(
     // A rotation **appends** to the log, it replaces nothing: this is what lets a client see
     // that a key changed rather than watch it vanish, and what stops the server from quietly
     // rewriting an identity.
-    crate::log::append(&mut tx, &handle, &new_identity_key).await?;
+    crate::log::append(&mut tx, &account, &new_identity_key).await?;
 
     // The other devices' KeyPackages go with the old key: they carry credentials nobody can
     // tie back to the account any more, and would be used to add those devices to new groups.
     // The caller's are kept — it is about to re-attest.
     sqlx::query(
         "DELETE FROM key_packages WHERE device_id IN
-         (SELECT id FROM devices WHERE handle = $1 AND id <> $2)",
+         (SELECT id FROM devices WHERE account = $1 AND id <> $2)",
     )
-    .bind(&handle)
+    .bind(&account)
     .bind(&signed.device_id)
     .execute(&mut *tx)
     .await?;
@@ -814,7 +1022,7 @@ async fn rotate_account(
     // Stored attestations are not erased: they simply become unverifiable, and that is exactly
     // what we want visible. A client that receives an attestation which fails to verify rejects
     // it — the same path as for a ghost device, covered by the same test.
-    Ok(Json(serde_json::json!({ "handle": handle, "rotated_at": payload.rotated_at })))
+    Ok(Json(serde_json::json!({ "account": account, "rotated_at": payload.rotated_at })))
 }
 
 #[derive(Deserialize)]
@@ -855,27 +1063,27 @@ async fn revoke_device(
     }
 
     let row: Option<DeviceRow> = sqlx::query_as(
-        "SELECT d.handle, d.auth_key, d.mls_key, a.identity_key
-         FROM devices d JOIN accounts a ON a.handle = d.handle
+        "SELECT d.account, d.auth_key, d.mls_key, a.identity_key
+         FROM devices d JOIN accounts a ON a.id = d.account
          WHERE d.id = $1",
     )
     .bind(&device_id)
     .fetch_optional(&pool)
     .await?;
-    let (handle, _auth_key, _mls_key, identity_key) = row.ok_or(ApiError::NotFound)?;
+    let (account, _auth_key, _mls_key, identity_key) = row.ok_or(ApiError::NotFound)?;
 
     // The caller must belong to the same account as its target: without this check, any
     // account could revoke another's devices.
-    let caller: Option<(String,)> = sqlx::query_as("SELECT handle FROM devices WHERE id = $1")
+    let caller: Option<(String,)> = sqlx::query_as("SELECT account FROM devices WHERE id = $1")
         .bind(&signed.device_id)
         .fetch_optional(&pool)
         .await?;
-    if caller.map(|(h,)| h) != Some(handle.clone()) {
+    if caller.map(|(a,)| a) != Some(account.clone()) {
         return Err(ApiError::Forbidden);
     }
 
     let claim = attest::RevocationClaim {
-        handle: &handle,
+        account: &account,
         device_id: &device_id,
         revoked_at: payload.revoked_at,
     };
@@ -1318,13 +1526,13 @@ struct StoreVault {
 ///
 /// The vault is indexed by account, never by device: that is what lets a brand new device
 /// recover the history deposited by another.
-async fn caller_handle(pool: &PgPool, device_id: &str) -> ApiResult<String> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT handle FROM devices WHERE id = $1")
+async fn caller_account(pool: &PgPool, device_id: &str) -> ApiResult<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT account FROM devices WHERE id = $1")
         .bind(device_id)
         .fetch_optional(pool)
         .await?;
 
-    row.map(|(handle,)| handle).ok_or(ApiError::Forbidden)
+    row.map(|(account,)| account).ok_or(ApiError::Forbidden)
 }
 
 /// Stores entries in the caller's vault.
@@ -1359,18 +1567,18 @@ async fn store_vault(
     // Group membership is required: otherwise an account could archive under any group id and
     // use it as free storage.
     require_membership(&pool, &group_id, &signed.device_id).await?;
-    let handle = caller_handle(&pool, &signed.device_id).await?;
+    let account = caller_account(&pool, &signed.device_id).await?;
 
     let seqs: Vec<i64> = payload.entries.iter().map(|e| e.seq).collect();
     let blobs: Vec<Vec<u8>> =
         payload.entries.iter().map(|e| decode_b64(&e.payload)).collect::<ApiResult<_>>()?;
 
     sqlx::query(
-        "INSERT INTO vault_entries (handle, group_id, seq, payload)
+        "INSERT INTO vault_entries (account, group_id, seq, payload)
          SELECT $1, $2, * FROM UNNEST($3::bigint[], $4::bytea[])
          ON CONFLICT DO NOTHING",
     )
-    .bind(&handle)
+    .bind(&account)
     .bind(&group_id)
     .bind(&seqs)
     .bind(&blobs)
@@ -1398,15 +1606,15 @@ async fn fetch_vault(
     signed: Signed,
 ) -> ApiResult<Json<Vec<VaultRow>>> {
     let group_id = decode_group_id(&group_id)?;
-    let handle = caller_handle(&pool, &signed.device_id).await?;
+    let account = caller_account(&pool, &signed.device_id).await?;
 
     let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
         "SELECT seq, payload FROM vault_entries
-         WHERE handle = $1 AND group_id = $2 AND seq > $3
+         WHERE account = $1 AND group_id = $2 AND seq > $3
          ORDER BY seq
          LIMIT $4",
     )
-    .bind(&handle)
+    .bind(&account)
     .bind(&group_id)
     .bind(query.after)
     .bind(MAX_VAULT_ENTRIES as i64)
@@ -1847,16 +2055,16 @@ pub(crate) async fn oldest_surviving(pool: &PgPool, group_id: &[u8]) -> ApiResul
 /// Same reason as for KeyPackages: bound what a single request can ask for. With one reason of
 /// its own on top — unbounded, this route would be a convenient way to sweep an entire address
 /// book in one go.
-const MAX_PRESENCE_HANDLES: usize = 64;
+const MAX_PRESENCE_ACCOUNTS: usize = 64;
 
 #[derive(Deserialize)]
 struct PresenceRequest {
-    handles: Vec<String>,
+    accounts: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct PresenceEntry {
-    handle: String,
+    account: String,
     last_seen: i64,
 }
 
@@ -1888,11 +2096,11 @@ struct PresenceResponse {
 async fn read_presence(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Json<PresenceResponse>> {
     let payload: PresenceRequest = signed.json()?;
 
-    if payload.handles.len() > MAX_PRESENCE_HANDLES {
-        return Err(ApiError::BadRequest("too many handles"));
+    if payload.accounts.len() > MAX_PRESENCE_ACCOUNTS {
+        return Err(ApiError::BadRequest("too many accounts"));
     }
 
-    let seen = presence::read(&pool, &signed.device_id, &payload.handles).await?;
+    let seen = presence::read(&pool, &signed.device_id, &payload.accounts).await?;
     // `SystemTime` rather than a date dependency: we only serve a number of seconds.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1903,7 +2111,7 @@ async fn read_presence(State(pool): State<PgPool>, signed: Signed) -> ApiResult<
         now,
         accounts: seen
             .into_iter()
-            .map(|s| PresenceEntry { handle: s.handle, last_seen: s.last_seen })
+            .map(|s| PresenceEntry { account: s.account, last_seen: s.last_seen })
             .collect(),
     }))
 }
@@ -1923,10 +2131,10 @@ struct OptoutRequest {
 /// filtered on read would leave the server keeping the register anyway.
 async fn set_presence_optout(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
     let payload: OptoutRequest = signed.json()?;
-    let handle = caller_handle(&pool, &signed.device_id).await?;
+    let account = caller_account(&pool, &signed.device_id).await?;
 
-    sqlx::query("UPDATE accounts SET presence_optout = $2 WHERE handle = $1")
-        .bind(&handle)
+    sqlx::query("UPDATE accounts SET presence_optout = $2 WHERE id = $1")
+        .bind(&account)
         .bind(payload.optout)
         .execute(&pool)
         .await?;
@@ -1935,8 +2143,8 @@ async fn set_presence_optout(State(pool): State<PgPool>, signed: Signed) -> ApiR
     // served, and stops existing too. Keeping it would make the setting a lie the moment it is
     // set.
     if payload.optout {
-        sqlx::query("UPDATE devices SET last_seen_at = NULL WHERE handle = $1")
-            .bind(&handle)
+        sqlx::query("UPDATE devices SET last_seen_at = NULL WHERE account = $1")
+            .bind(&account)
             .execute(&pool)
             .await?;
     }

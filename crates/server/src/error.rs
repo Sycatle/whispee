@@ -19,6 +19,14 @@ pub enum ApiError {
     #[error("conflict: {0}")]
     Conflict(&'static str),
 
+    /// The thing existed and deliberately does not any more.
+    ///
+    /// Distinct from `NotFound`, and the distinction is the point: a handle nobody ever took may
+    /// still be claimed, a handle that was given up never will be. Answering 404 to a tombstone
+    /// would tell a client to try again later, which is not true and never becomes true.
+    #[error("gone")]
+    Gone,
+
     /// The caller did nothing forbidden; it only did too much of it.
     ///
     /// Distinct from `Forbidden` on purpose: an honest client that gets a 429 retries later,
@@ -38,6 +46,7 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::Gone => StatusCode::GONE,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

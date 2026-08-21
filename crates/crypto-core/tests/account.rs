@@ -85,7 +85,7 @@ fn the_account_attests_its_own_devices() {
 
     let signature = account.attest("alice", "phone", &auth_key, &mls_key).unwrap();
     let claim = attest::DeviceClaim {
-        handle: "alice",
+        account: "alice",
         device_id: "phone",
         auth_key: &auth_key,
         mls_key: &mls_key,
@@ -102,7 +102,7 @@ fn an_account_cannot_attest_for_another_handle() {
     let signature = account.attest("alice", "phone", &[1u8; 32], &[2u8; 32]).unwrap();
 
     let impersonated = attest::DeviceClaim {
-        handle: "bob",
+        account: "bob",
         device_id: "phone",
         auth_key: &[1u8; 32],
         mls_key: &[2u8; 32],
@@ -123,7 +123,7 @@ fn the_transferred_seed_rebuilds_an_equivalent_account() {
 
     let signature = paired.attest("alice", "tablet", &[3u8; 32], &[4u8; 32]).unwrap();
     let claim = attest::DeviceClaim {
-        handle: "alice",
+        account: "alice",
         device_id: "tablet",
         auth_key: &[3u8; 32],
         mls_key: &[4u8; 32],
@@ -150,7 +150,7 @@ fn a_revocation_certificate_is_verifiable_by_a_third_party() {
     let certificate = account.revoke("alice", "alice:phone", 1_700_000_000).unwrap();
 
     let claim =
-        attest::RevocationClaim { handle: "alice", device_id: "alice:phone", revoked_at: 1_700_000_000 };
+        attest::RevocationClaim { account: "alice", device_id: "alice:phone", revoked_at: 1_700_000_000 };
 
     assert!(attest::verify_revocation(&account.identity_key(), &claim, &certificate).is_ok());
 }
@@ -164,7 +164,7 @@ fn an_account_cannot_revoke_for_another_handle() {
 
     let certificate = alice.revoke("bob", "bob:phone", 1_700_000_000).unwrap();
     let claim =
-        attest::RevocationClaim { handle: "bob", device_id: "bob:phone", revoked_at: 1_700_000_000 };
+        attest::RevocationClaim { account: "bob", device_id: "bob:phone", revoked_at: 1_700_000_000 };
 
     // Signed by Alice, hence invalid under Bob's key: the server and the other clients alike
     // verify against the key of the account *named* in the certificate.

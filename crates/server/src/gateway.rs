@@ -182,7 +182,9 @@ enum ServerFrame<'a> {
 fn reason(error: &ApiError) -> &'static str {
     match error {
         ApiError::BadRequest(_) => "invalid frame",
-        ApiError::Unauthorized | ApiError::Forbidden | ApiError::NotFound => "denied",
+        ApiError::Unauthorized | ApiError::Forbidden | ApiError::NotFound | ApiError::Gone => {
+            "denied"
+        }
         ApiError::Conflict(_) => "conflict",
         ApiError::TooManyRequests => "too many requests",
         ApiError::Database(err) => {

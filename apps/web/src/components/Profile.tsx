@@ -37,18 +37,7 @@ import { Button } from "@/ui/Button";
 import { Field } from "@/ui/Field";
 import { Input } from "@/ui/Input";
 import { Panel } from "@/ui/Panel";
-
-/** Turns the module's error codes into the sentences this screen shows. */
-function messageFor(error: ReturnType<typeof validate>): string | undefined {
-  switch (error) {
-    case "too-long":
-      return `A display name is at most ${MAX_CODE_POINTS} characters.`;
-    case "empty":
-      return "A display name needs at least one visible character.";
-    case null:
-      return undefined;
-  }
-}
+import { displayNameMessage } from "@/ui/displayNameMessage";
 
 export function ProfileSettings() {
   const session = useSession();
@@ -92,7 +81,7 @@ export function ProfileSettings() {
           <Field
             label="Display name"
             hint="Leave it empty to go back to showing only your handle."
-            error={messageFor(error)}
+            error={displayNameMessage(error)}
           >
             {(control) => (
               <Input

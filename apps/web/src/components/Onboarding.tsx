@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { ShowPairingCode, usePairingOffer } from "@/components/Pairing";
 import { ApiError } from "@/lib/api";
+import {
+  MAX_CODE_POINTS as MAX_NAME_LENGTH,
+  sanitize as sanitizeName,
+  validate as validateName,
+} from "@/lib/display-name";
 import { MAX_LENGTH as MAX_HANDLE_LENGTH, normalize, suggest, validate } from "@/lib/handle";
 import { Session } from "@/lib/session";
 import { supportsEd25519 } from "@/lib/keys";
@@ -11,6 +16,7 @@ import { Field } from "@/ui/Field";
 import { Input } from "@/ui/Input";
 import { Textarea } from "@/ui/Textarea";
 import { cn } from "@/ui/cn";
+import { displayNameMessage } from "@/ui/displayNameMessage";
 import { handleMessage } from "@/ui/handleMessage";
 
 type Mode = "create" | "restore" | "pair";
@@ -100,6 +106,38 @@ export function Onboarding({
   error: string | null;
 }) {
   const [handle, setHandle] = useState("");
+  /**
+   * The name somebody gives when they sign up, and the thing the account is actually *about*.
+   *
+   * # Why the first question is a name and not a handle
+   *
+   * A handle has to be unique, which makes it the worst possible first question: it asks a person
+   * to invent an identifier before they have any idea which ones are free, and it answers them
+   * with a collision. A name has no such constraint — every Bob may be Bob — so the field can be
+   * answered the way its label is read.
+   *
+   * The handle is then drawn from it, and drawn is the operative word: see `derived` below.
+   */
+  const [name, setName] = useState("");
+  /**
+   * The four digits, held as the seed that produced them rather than as the digits.
+   *
+   * `suggest` draws its own randomness, which is right for its usual caller and wrong here: the
+   * handle is recomputed on **every keystroke of the name**, and a function that redrew each time
+   * would spin four digits under the reader's eyes while they typed. Freezing the seed and
+   * passing it back in makes the same function pure for the duration of the form — the stem
+   * follows the name, the digits stay put — and redrawing is then an explicit act, which is
+   * exactly what a collision is.
+   */
+  const [seed, setSeed] = useState(draw);
+  /**
+   * Whether the reader has taken the handle over.
+   *
+   * It decides more than which value is submitted. A drawn handle that collides is redrawn and
+   * resubmitted without a word, because nobody asked for that one; a chosen handle that collides
+   * is reported, because somebody did. Same status code, two different events.
+   */
+  const [custom, setCustom] = useState(false);
   const [phrase, setPhrase] = useState("");
   const [mode, setMode] = useState<Mode>("create");
   const [busy, setBusy] = useState(false);
@@ -122,17 +160,59 @@ export function Onboarding({
   // field waiting its turn.
   const problem = handle === "" ? null : validate(canonical);
 
-  const enrol = async (chosen: string) => {
+  const cleanName = sanitizeName(name);
+  const nameProblem = name === "" ? null : validateName(cleanName);
+
+  /**
+   * The handle a name will claim: its stem, then the four digits.
+   *
+   * **Always the digits, never the bare stem.** Trying `bob` first would give the first Bob a
+   * clean handle and charge every Bob after them a round trip to find out — and that round trip
+   * comes back 409, which `lib/handle.ts` spends a section explaining is a population count
+   * published to anybody who asks. Digits from the start cost one query nobody makes and put
+   * every Bob on the same footing.
+   *
+   * A name with no ASCII stem — `李`, an emoji, a script this alphabet cannot hold — normalises
+   * to nothing and leaves the digits alone. `@4821` is a valid handle and an ugly one, and the
+   * answer to it is the field below rather than a word invented on that person's behalf.
+   */
+  const derived = suggest(cleanName, () => seed);
+
+  /** What will actually be claimed: theirs if they took it, the drawn one otherwise. */
+  const chosen = mode === "create" ? (custom ? canonical : derived) : canonical;
+  const chosenProblem = mode === "create" && !custom ? validate(derived) : problem;
+
+  /**
+   * Claims a handle, and retries on its own only when the handle was drawn.
+   *
+   * `attempt` is a parameter and not the `offered` state, and that is not a stylistic choice: a
+   * recursive call reads the state its closure captured, so `offered` would be zero on every
+   * retry and a handle that collided persistently would be retried until the tab died. The state
+   * still exists for what it is good at — telling the *render* how many alternatives have been
+   * shown — and the loop counts on the stack, where a loop's counter belongs.
+   */
+  const enrol = async (claiming: string, attempt = 0) => {
     setBusy(true);
     setAlternative(null);
     try {
       if (mode === "create") {
-        const [session, generated] = await Session.create(chosen);
+        const [session, generated] = await Session.create(claiming);
+        /*
+          The name is set before the session is handed over, and it is worth being explicit that
+          this can fail on its own. `setDisplayName` publishes to every conversation the account
+          is in — none, at this instant — so there is nothing to fail against; but it also writes
+          to storage, and a rejected write here would leave an account with no name.
+
+          It is deliberately **not** awaited inside the `try` that owns the 409 handling below:
+          a failure to record a name is not a collision, and reporting it as one would offer an
+          alternative handle to somebody whose handle was accepted.
+        */
+        await session.setDisplayName(cleanName);
         // The session is not handed over yet: the user has to see the phrase first. Going
         // straight to the conversation would lose it for good.
         setRecovery({ phrase: generated, session });
       } else {
-        onReady(await Session.restoreFromPhrase(chosen, phrase));
+        onReady(await Session.restoreFromPhrase(claiming, phrase));
       }
     } catch (e) {
       // A 409 here means the handle belongs to a different account key, and only in creation.
@@ -151,8 +231,29 @@ export function Onboarding({
       // or an authenticated creation path, which is a change to the account model rather than to
       // a form. What this code does is read a signal that already exists.
       const collision = mode === "create" && e instanceof ApiError && e.status === 409;
-      if (collision && offered < MAX_SUGGESTIONS) {
-        setAlternative(suggest(chosen, draw));
+
+      /*
+        A drawn handle that collides is redrawn and tried again, in silence.
+
+        Nobody chose `@bob4821`, so being told it is taken is news about a decision the reader was
+        never party to — and the repair is the one this code can make on its own. Four digits
+        collide about once in ten thousand names, so this is a branch that almost never runs and
+        the loop still has to terminate: `MAX_SUGGESTIONS` is the same ceiling the manual path
+        uses, and past it the failure is reported like any other rather than retried forever.
+
+        A handle they typed is a different event. It is reported, with an alternative offered, and
+        the field stays theirs — which is the behaviour this screen has always had.
+      */
+      if (collision && !custom && attempt < MAX_SUGGESTIONS) {
+        const next = draw();
+        setSeed(next);
+        setBusy(false);
+        await enrol(suggest(cleanName, () => next), attempt + 1);
+        return;
+      }
+
+      if (collision && custom && offered < MAX_SUGGESTIONS) {
+        setAlternative(suggest(claiming, draw));
         setOffered(offered + 1);
       }
       onError(e instanceof Error ? e.message : String(e));
@@ -163,7 +264,7 @@ export function Onboarding({
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    await enrol(canonical);
+    await enrol(chosen);
   };
 
   if (recovery) {
@@ -197,6 +298,63 @@ export function Onboarding({
       <ModeChoice mode={mode} onChoose={setMode} />
 
       <form onSubmit={submit} className="flex flex-col gap-pane">
+        {mode === "create" && (
+          <>
+            <Field
+              label="Your name"
+              hint="What people see next to your messages. It is not unique — several people may go by the same name — and it never reaches the server: it travels inside the encrypted conversation. You can change it whenever you like."
+              error={displayNameMessage(nameProblem)}
+            >
+              {(control) => (
+                <Input
+                  id={control.id}
+                  describedBy={control.describedBy}
+                  invalid={control.invalid}
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Bob"
+                  required
+                  autoComplete="nickname"
+                  // Twice the display cap, like the settings panel and for its reason: the field
+                  // must accept a paste that is too long so the reader sees *why* it is refused.
+                  maxLength={MAX_NAME_LENGTH * 2}
+                />
+              )}
+            </Field>
+
+            {/*
+              The handle the name will claim, shown before it is claimed and not after.
+
+              It is the one thing on this screen that cannot be changed later — it is the account
+              — so it is on screen while the decision is still open, rather than discovered on the
+              first message. Shown as a fact rather than as a field, because it is answered
+              already; the button is there for the minority who care which one they get.
+            */}
+            {!custom && (
+              <div className="flex items-center justify-between gap-gutter rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-gutter">
+                <p className="min-w-0 text-caption text-(--color-ink-muted)">
+                  You will be{" "}
+                  <span className="font-evidence wrap-anywhere text-(--color-ink)">
+                    @{derived}
+                  </span>
+                  . This is what identifies you, and it cannot be changed afterwards.
+                </p>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    setCustom(true);
+                    setHandle(derived);
+                  }}
+                >
+                  Change
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+
+        {(mode !== "create" || custom) && (
         <Field
           label="Handle"
           hint="Lowercase letters, digits and underscores, 3 to 32 characters. It travels in the clear and is visible to the server and to everyone you talk to. Don't put anything sensitive in it, and above all no phone number and no email address — this system asks for neither."
@@ -224,6 +382,7 @@ export function Onboarding({
             />
           )}
         </Field>
+        )}
 
         {/*
           The alternative offered after a collision, adopted in one press.
@@ -284,7 +443,12 @@ export function Onboarding({
           type="submit"
           variant="primary"
           busy={busy}
-          disabled={validate(canonical) !== null || ed25519 !== true}
+          disabled={
+            chosenProblem !== null ||
+            chosen === "" ||
+            (mode === "create" && validateName(cleanName) !== null) ||
+            ed25519 !== true
+          }
           className="w-full"
         >
           {mode === "create" ? "Create the account" : "Recover the account"}

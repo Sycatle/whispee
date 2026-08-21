@@ -1,87 +1,85 @@
 /**
- * Canal éphémère : les signaux qui n'ont de valeur que maintenant.
+ * Ephemeral channel: the signals that are only worth anything right now.
  *
- * # Pourquoi un second canal
+ * # Why a second channel
  *
- * Tout le reste passe par le ratchet applicatif MLS, qui est conçu pour ne rien perdre :
- * chaque message consomme une génération, et un trou trop large casse le déchiffrement de la
- * suite. C'est exactement ce qu'il faut pour des messages — et exactement ce qu'il ne faut pas
- * pour un indicateur de frappe.
+ * Everything else goes through the MLS application ratchet, which is designed to lose nothing:
+ * each message consumes a generation, and too wide a gap breaks decryption of what follows. That
+ * is exactly what messages need — and exactly what a typing indicator does not.
  *
- * La conséquence n'est pas théorique. La table `envelopes` n'est jamais purgée, et **ne peut
- * pas l'être** sans trouer le ratchet. Faire transiter la frappe par ce chemin conserverait
- * indéfiniment la trace de qui a commencé à répondre puis s'est ravisé.
+ * The consequence is not theoretical. The `envelopes` table is never purged, and **cannot be**
+ * without punching a hole in the ratchet. Routing typing through that path would keep, forever, a
+ * record of who started to answer and then thought better of it.
  *
- * Ici, rien n'est stocké : le serveur relaie et oublie.
+ * Here nothing is stored: the server relays and forgets.
  *
- * # Ce que ce canal ne garantit pas
+ * # What this channel does not guarantee
  *
- * **Pas de forward secrecy à l'intérieur d'une epoch.** La clé vient du secret d'export du
- * groupe : tous les signaux d'une même epoch tombent ensemble si elle fuit. Acceptable pour une
- * donnée qui expire en trois secondes ; inacceptable pour un message, d'où la séparation.
+ * **No forward secrecy within an epoch.** The key comes from the group's exporter secret: every
+ * signal of a given epoch falls together if it leaks. Acceptable for data that expires in three
+ * seconds; unacceptable for a message, hence the separation.
  *
- * **Pas d'authentification de l'émetteur.** La clé est celle du groupe, donc tout membre peut
- * produire un signal qui paraît venir d'un autre. Sans conséquence à deux — il n'y a qu'un
- * autre. Dans un groupe, cela signifie qu'un membre peut faire croire qu'un tiers écrit.
+ * **No sender authentication.** The key is the group's, so any member can produce a signal
+ * that appears to come from another. Harmless with two people — there is only one other. In a
+ * group, it means a member can make it look like a third party is typing.
  *
- * Ce qu'il garantit en revanche est réel : la clé change à chaque commit, donc un membre
- * retiré perd ce canal au même instant que le reste.
+ * What it does guarantee is real: the key changes on every commit, so a removed member loses this
+ * channel at the same instant as the rest.
  *
- * # Comment un indicateur s'éteint
+ * # How an indicator goes out
  *
- * Jamais par un signal de fin — il pourrait se perdre, et l'indicateur resterait allumé pour
- * toujours. Deux chemins, tous deux locaux :
+ * Never through a stop signal — it could get lost, and the indicator would stay lit forever. Two
+ * paths, both local:
  *
- *  * **l'arrivée d'un message de l'auteur** (`without`), qui est la preuve la plus sûre qu'il a
- *    fini d'écrire, et qui ne coûte rien puisqu'on ne l'attend pas ;
- *  * **l'expiration** (`fresh`), en dernier recours. Elle demande un minuteur côté affichage :
- *    calculer qu'une entrée est périmée ne sert à rien si personne ne redessine. Voir
- *    `nextExpiry`.
+ *  * **a message arriving from the author** (`without`), which is the surest proof they have
+ *    finished typing, and which costs nothing since we were not waiting for it;
+ *  * **expiry** (`fresh`), as a last resort. It needs a timer on the display side: computing that
+ *    an entry is stale is useless if nobody repaints. See `nextExpiry`.
  */
 
-/** Ce qu'un signal transporte. Un seul cas, et le format le dit explicitement. */
+/** What a signal carries. A single case, and the format says so explicitly. */
 const TYPE_TYPING = 0;
 
 /**
- * Durée pendant laquelle un indicateur reçu reste affiché.
+ * How long a received indicator stays displayed.
  *
- * Aucun signal « a cessé d'écrire » n'est émis : l'expiration s'en charge, et un signal de fin
- * pourrait se perdre — laissant l'indicateur allumé indéfiniment.
+ * No "stopped typing" signal is emitted: expiry takes care of it, and a stop signal could get lost
+ * — leaving the indicator lit indefinitely.
  *
- * Trois secondes, et non six : c'est le délai au bout duquel quelqu'un qui a réellement cessé
- * d'écrire cesse d'être annoncé. Le porter plus haut rend l'indicateur menteur plus longtemps,
- * ce qui est le seul défaut qu'il puisse avoir.
+ * Three seconds, not six: that is the delay after which someone who has genuinely stopped typing
+ * stops being announced. Raising it makes the indicator lie for longer, which is the only fault it
+ * can have.
  *
- * **L'expiration doit être rendue, pas seulement calculée.** `fresh()` ne s'évalue qu'au rendu ;
- * sans minuteur qui force ce rendu au moment voulu, la valeur ci-dessous ne décrit rien. Voir
+ * **Expiry has to be rendered, not just computed.** `fresh()` is only evaluated on render; without
+ * a timer forcing that render at the right moment, the value below describes nothing. See
  * `Messages.tsx`.
  */
 export const TYPING_TTL_MS = 3000;
 
 /**
- * Intervalle minimal entre deux émissions pendant qu'on tape.
+ * Minimum interval between two emissions while typing.
  *
- * Plus court, on paie un dépôt réseau par frappe de touche pour une information que le
- * destinataire a déjà. Plus long que la moitié du TTL, l'indicateur clignote — d'où la moitié
- * exacte de `TYPING_TTL_MS`.
+ * Any shorter and we pay one network deposit per keystroke for information the recipient already
+ * has. Any longer than half the TTL and the indicator flickers — hence exactly half of
+ * `TYPING_TTL_MS`.
  *
- * C'est aussi le pire cas d'inertie : la dernière frappe avant l'arrêt peut être avalée par ce
- * seuil, donc le dernier signal émis peut dater d'une seconde et demie avant l'arrêt réel.
+ * It is also the worst-case lag: the last keystroke before stopping can be swallowed by this
+ * threshold, so the last signal emitted may date from a second and a half before the real stop.
  */
 export const TYPING_DEBOUNCE_MS = 1500;
 
 export interface Typing {
   handle: string;
-  /** Horodatage local de réception, pour l'expiration. */
+  /** Local receipt timestamp, for expiry. */
   at: number;
 }
 
 /**
- * Scelle un indicateur de frappe sous la clé d'epoch.
+ * Seals a typing indicator under the epoch key.
  *
- * Le handle voyage **à l'intérieur** du chiffré. Il n'est pas authentifié — voir l'en-tête du
- * module — mais il n'est pas non plus visible du serveur, ce qui est le point qui compte : le
- * serveur constate un dépôt vers un groupe, pas qui l'a fait.
+ * The handle travels **inside** the ciphertext. It is not authenticated — see the module header
+ * — but it is not visible to the server either, which is the point that matters: the server sees
+ * a deposit towards a group, not who made it.
  */
 export async function sealTyping(key: Uint8Array, handle: string): Promise<Uint8Array> {
   const body = new TextEncoder().encode(handle);
@@ -90,7 +88,9 @@ export async function sealTyping(key: Uint8Array, handle: string): Promise<Uint8
   plaintext.set(body, 1);
 
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const material = await crypto.subtle.importKey("raw", bytes(key), "AES-GCM", false, ["encrypt"]);
+  const material = await crypto.subtle.importKey("raw", bytes(key), "AES-GCM", false, [
+    "encrypt",
+  ]);
   const sealed = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv }, material, bytes(plaintext)),
   );
@@ -102,12 +102,11 @@ export async function sealTyping(key: Uint8Array, handle: string): Promise<Uint8
 }
 
 /**
- * Ouvre un signal reçu. Retourne `undefined` plutôt que de lever.
+ * Opens a received signal. Returns `undefined` rather than throwing.
  *
- * Un signal illisible est le cas **normal**, pas une anomalie : le serveur relaie sans filtrer
- * par epoch, donc un signal émis juste avant un commit arrive après, sous une clé qui n'est
- * plus la bonne. Lever ici ferait remonter une erreur à chaque changement de composition du
- * groupe.
+ * An unreadable signal is the **normal** case, not an anomaly: the server relays without filtering
+ * by epoch, so a signal sent just before a commit arrives after it, under a key that is no longer
+ * the right one. Throwing here would surface an error on every change of group composition.
  */
 export async function openTyping(
   key: Uint8Array,
@@ -117,59 +116,60 @@ export async function openTyping(
 
   try {
     const iv = bytes(payload.subarray(0, 12));
-    const material = await crypto.subtle.importKey("raw", bytes(key), "AES-GCM", false, ["decrypt"]);
-    const clair = new Uint8Array(
+    const material = await crypto.subtle.importKey("raw", bytes(key), "AES-GCM", false, [
+      "decrypt",
+    ]);
+    const plaintext = new Uint8Array(
       await crypto.subtle.decrypt({ name: "AES-GCM", iv }, material, bytes(payload.subarray(12))),
     );
 
-    if (clair.length < 1 || clair[0] !== TYPE_TYPING) return undefined;
-    return new TextDecoder().decode(clair.subarray(1));
+    if (plaintext.length < 1 || plaintext[0] !== TYPE_TYPING) return undefined;
+    return new TextDecoder().decode(plaintext.subarray(1));
   } catch {
     return undefined;
   }
 }
 
-/** Ne garde que les indicateurs non expirés. */
+/** Keeps only the indicators that have not expired. */
 export function fresh(typing: Typing[], now: number): Typing[] {
   return typing.filter((entry) => now - entry.at < TYPING_TTL_MS);
 }
 
 /**
- * Délai avant que le prochain indicateur n'expire, ou `undefined` s'il n'y en a aucun.
+ * Delay until the next indicator expires, or `undefined` if there is none.
  *
- * L'expiration est paresseuse : `fresh()` ne s'évalue qu'au rendu, et un rendu n'a lieu que sur
- * un événement extérieur. Or quand quelqu'un cesse d'écrire, il ne se produit justement plus
- * rien — l'indicateur restait donc peint à l'écran jusqu'au prochain événement quelconque, soit
- * la relève périodique, soit trente secondes. C'est cette fonction qui donne à l'affichage de
- * quoi se réveiller tout seul.
+ * Expiry is lazy: `fresh()` is only evaluated on render, and a render only happens on an outside
+ * event. But when someone stops typing, that is precisely when nothing happens any more — so the
+ * indicator stayed painted on screen until the next event of any kind, that is, the periodic poll,
+ * or thirty seconds. This function is what gives the display something to wake itself up with.
  *
- * Jamais négatif : une entrée déjà expirée demande un rendu immédiat, pas un `setTimeout` au
- * passé.
+ * Never negative: an already expired entry calls for an immediate render, not a `setTimeout` into
+ * the past.
  */
 export function nextExpiry(typing: Typing[], now: number): number | undefined {
   if (typing.length === 0) return undefined;
 
-  const plusAncien = Math.min(...typing.map((entry) => entry.at));
-  return Math.max(0, plusAncien + TYPING_TTL_MS - now);
+  const oldest = Math.min(...typing.map((entry) => entry.at));
+  return Math.max(0, oldest + TYPING_TTL_MS - now);
 }
 
 /**
- * Retire les indicateurs d'un correspondant.
+ * Removes a correspondent's indicators.
  *
- * Appelé quand un message de sa part arrive : l'envoi est la preuve la plus sûre qu'il a fini
- * d'écrire, et elle ne coûte aucun signal supplémentaire. Sans cela, l'auteur d'un message
- * paraît continuer d'écrire pendant tout le TTL après l'avoir envoyé.
+ * Called when a message from them arrives: sending is the surest proof they have finished typing,
+ * and it costs no extra signal. Without it, the author of a message appears to keep typing for the
+ * whole TTL after sending it.
  *
- * Le risque du signal « a cessé d'écrire » ne s'applique pas ici : rien n'est émis, donc rien ne
- * peut se perdre. Au pire on n'éteint pas, et l'expiration reprend la main.
+ * The risk of a "stopped typing" signal does not apply here: nothing is emitted, so nothing can be
+ * lost. At worst we fail to switch it off, and expiry takes over.
  */
 export function without(typing: Typing[], handle: string): Typing[] {
   return typing.filter((entry) => entry.handle !== handle);
 }
 
 /**
- * `Uint8Array` peut être une vue sur un buffer plus grand ; `crypto.subtle` prend le buffer
- * entier. Sans cette copie, on chiffrerait des octets voisins.
+ * A `Uint8Array` can be a view onto a larger buffer; `crypto.subtle` takes the whole buffer.
+ * Without this copy, we would encrypt neighbouring bytes.
  */
 function bytes(view: Uint8Array): ArrayBuffer {
   return view.slice().buffer as ArrayBuffer;

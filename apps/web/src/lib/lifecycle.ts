@@ -1,103 +1,100 @@
 /**
- * Ce que devient l'application quand on la quitte des yeux.
+ * What becomes of the app when you look away from it.
  *
- * # Pourquoi une messagerie ne peut pas l'ignorer
+ * # Why a messenger cannot ignore this
  *
- * Sur mobile, passer en arrière-plan n'est pas une pause : le système gèle les minuteurs, coupe
- * les connexions ouvertes, et peut tuer le processus sans prévenir. Une application qui compte
- * sur son `setInterval` pour rester à jour se réveille avec un écran figé sur l'état d'il y a
- * une heure — et, plus perfidement, avec un WebSocket qui **paraît** ouvert alors que plus rien
- * ne passe.
+ * On mobile, going to the background is not a pause: the system freezes timers, cuts open
+ * connections, and may kill the process without warning. An app that relies on its `setInterval`
+ * to stay current wakes up frozen on an hour-old state — and, worse, with a WebSocket that
+ * **looks** open while nothing goes through it any more.
  *
- * Le navigateur de bureau fait déjà une version atténuée de la même chose : Chrome limite les
- * minuteurs des onglets d'arrière-plan à un déclenchement par minute.
+ * Desktop browsers do a milder version of the same thing: Chrome throttles background-tab timers
+ * to one firing per minute.
  *
- * # Reprendre, ce n'est pas continuer
+ * # Resuming is not continuing
  *
- * Au retour au premier plan, il ne suffit pas de laisser l'intervalle repartir : il faut relever
- * tout de suite et **rouvrir le flux**, sans chercher à savoir s'il est encore vivant. Cette
- * question n'a pas de réponse fiable — un socket coupé par le système reste `OPEN` jusqu'à la
- * première écriture — et la poser coûterait plus cher que de reconnecter à tort.
+ * On returning to the foreground, letting the interval restart is not enough: the app must poll
+ * immediately and **reopen the stream**, without trying to find out whether it is still alive.
+ * That question has no reliable answer — a socket cut by the system stays `OPEN` until the first
+ * write — and asking it would cost more than reconnecting needlessly.
  *
- * # Ce que ce module ne fait pas
+ * # What this module does not do
  *
- * Il ne connaît ni session ni réseau. Il rapporte des transitions ; ce qu'il faut en faire
- * appartient à l'appelant, seul à savoir ce qui doit être relevé, rouvert ou reverrouillé — le
- * verrouillage automatique, quand il arrivera, se branchera exactement ici.
+ * It knows nothing about sessions or the network. It reports transitions; what to do with them
+ * belongs to the caller, the only one that knows what must be polled, reopened or relocked —
+ * auto-lock, when it lands, plugs in exactly here.
  */
 
 export type Transition =
-  /** Retour au premier plan. Impose une relève et une réouverture du flux. */
-  | { quoi: "reprise"; absenceMs: number }
-  /** Passage en arrière-plan. */
-  | { quoi: "veille" }
+  /** Back in the foreground. Forces a poll and a stream reopen. */
+  | { kind: "resume"; awayMs: number }
+  /** Moved to the background. */
+  | { kind: "hidden" }
   /**
-   * Le réseau est revenu.
+   * The network is back.
    *
-   * Distinct de la reprise : un ordinateur portable qui retrouve le Wi-Fi n'a jamais quitté le
-   * premier plan, et une application qui n'écouterait que la visibilité y resterait muette
-   * jusqu'à la relève suivante.
+   * Distinct from a resume: a laptop that regains Wi-Fi never left the foreground, and an app
+   * listening only to visibility would stay silent there until the next poll.
    */
-  | { quoi: "reseau" };
+  | { kind: "network" };
 
 /**
- * S'abonne aux transitions, et rend de quoi se désabonner.
+ * Subscribes to transitions, and returns a way to unsubscribe.
  *
- * `maintenant` est injecté pour que la durée d'absence soit vérifiable sans horloge réelle.
+ * `now` is injected so that the away duration is verifiable without a real clock.
  */
-export function observerCycle(
-  reagir: (transition: Transition) => void,
-  maintenant: () => number = () => Date.now(),
+export function observeLifecycle(
+  react: (transition: Transition) => void,
+  now: () => number = () => Date.now(),
 ): () => void {
-  // Instant du passage en arrière-plan. La durée d'absence sert à l'appelant : une seconde
-  // d'inattention et une nuit entière n'appellent pas le même rattrapage.
-  let depuis = maintenant();
+  // When the app went to the background. The away duration is for the caller: a second of
+  // inattention and a whole night do not call for the same catch-up.
+  let since = now();
 
-  const visibilite = () => {
+  const visibility = () => {
     if (document.visibilityState === "hidden") {
-      depuis = maintenant();
-      reagir({ quoi: "veille" });
+      since = now();
+      react({ kind: "hidden" });
       return;
     }
-    reagir({ quoi: "reprise", absenceMs: maintenant() - depuis });
+    react({ kind: "resume", awayMs: now() - since });
   };
 
-  const enLigne = () => reagir({ quoi: "reseau" });
+  const online = () => react({ kind: "network" });
 
-  document.addEventListener("visibilitychange", visibilite);
-  addEventListener("online", enLigne);
+  document.addEventListener("visibilitychange", visibility);
+  addEventListener("online", online);
 
   return () => {
-    document.removeEventListener("visibilitychange", visibilite);
-    removeEventListener("online", enLigne);
+    document.removeEventListener("visibilitychange", visibility);
+    removeEventListener("online", online);
   };
 }
 
 /**
- * Le réseau est-il déclaré disponible ?
+ * Is the network reported as available?
  *
- * `false` est une information sûre — il n'y a aucune interface active — et mérite d'être
- * affichée. `true` ne garantit rien : un portail captif, un serveur éteint ou un DNS muet
- * répondent tous « en ligne ». C'est pourquoi cette valeur ne sert qu'à **expliquer** un échec,
- * jamais à décider d'en tenter un.
+ * `false` is trustworthy — no interface is up — and worth displaying. `true` guarantees nothing:
+ * a captive portal, a dead server and a silent DNS all report "online". Which is why this value
+ * only ever **explains** a failure, never decides whether to attempt one.
  */
-export function reseauDeclare(): boolean {
+export function networkReported(): boolean {
   return navigator.onLine !== false;
 }
 
 /**
- * Absence au-delà de laquelle un appareil verrouillé redemande son mot de passe.
+ * How long away before a locked device asks for its password again.
  *
- * # Pourquoi un délai, et pas un verrouillage immédiat
+ * # Why a delay rather than an immediate lock
  *
- * Quitter l'application une seconde pour copier un code reçu par ailleurs est un geste courant,
- * et redemander le mot de passe à chaque aller-retour ferait retirer le verrou — un verrou trop
- * strict ne protège plus rien, il apprend seulement à s'en passer.
+ * Leaving the app for a second to copy a code received elsewhere is a common move, and asking
+ * for the password on every round trip would get the lock removed — a lock that is too strict
+ * protects nothing, it only teaches people to do without it.
  *
- * # Pourquoi pas davantage
+ * # Why not longer
  *
- * La fenêtre est exactement celle où un appareil posé sur une table est lisible par qui le
- * ramasse. Cinq minutes est un compromis, non un seuil dérivé de quoi que ce soit ; il est ici
- * pour pouvoir être discuté et changé à un seul endroit.
+ * The window is exactly the one where a device left on a table is readable by whoever picks it
+ * up. Five minutes is a compromise, not a threshold derived from anything; it lives here so it
+ * can be argued about and changed in one place.
  */
-export const REVERROUILLAGE_MS = 5 * 60 * 1000;
+export const RELOCK_MS = 5 * 60 * 1000;

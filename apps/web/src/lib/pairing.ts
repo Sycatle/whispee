@@ -1,36 +1,36 @@
 /**
- * Appairage d'un nouvel appareil.
+ * Pairing a new device.
  *
- * # Le sens du QR, et pourquoi il n'est pas arbitraire
+ * # Which way the QR points, and why it is not arbitrary
  *
- * Le **nouvel** appareil affiche, l'**ancien** scanne. Un QR est photographiable par
- * construction : y mettre un secret reviendrait à le publier. Celui-ci ne porte qu'une clé
- * publique éphémère et une adresse de dépôt, tous deux sans valeur pour qui les intercepte.
+ * The **new** device displays, the **old** one scans. A QR code can be photographed by
+ * construction: putting a secret in it would amount to publishing it. This one carries only an
+ * ephemeral public key and a deposit address, both worthless to whoever intercepts them.
  *
- * L'ancien appareil scelle ensuite le paquet sous le secret X25519 partagé et le dépose sur le
- * serveur, qui n'en voit qu'un blob : il ne détient aucune des deux moitiés privées.
+ * The old device then seals the packet under the shared X25519 secret and deposits it on the
+ * server, which only ever sees a blob: it holds neither of the two private halves.
  *
- * # Ce qui n'est pas protégé
+ * # What is not protected
  *
- * La sécurité du canal est **physique** : elle tient à ce que l'utilisateur ne scanne que
- * l'écran qu'il a en main. Un attaquant qui lui présente son propre QR est appairé, et aucune
- * cryptographie ne peut l'en empêcher. C'est le modèle de WhatsApp et de Signal.
+ * The channel's security is **physical**: it rests on the user only scanning the screen they are
+ * holding. An attacker who shows them their own QR code gets paired, and no cryptography can
+ * prevent it. That is WhatsApp's model, and Signal's.
  */
 import { Api } from "./api";
 import { fromBase64, toBase64 } from "./keys";
 
-/** Ce que le QR encode. Aucun de ces champs n'est secret. */
+/** What the QR code encodes. None of these fields is secret. */
 export interface PairingCode {
   id: Uint8Array;
   publicKey: Uint8Array;
 }
 
 /**
- * Encode l'offre en une chaîne compacte.
+ * Encodes the offer into a compact string.
  *
- * Le QR n'est pas toujours praticable — écran non partagé, absence de caméra sur un
- * ordinateur de bureau. La même chaîne se copie alors à la main, avec exactement les mêmes
- * propriétés : elle ne contient rien de secret.
+ * The QR code is not always practical — a screen that cannot be shown, no camera on a desktop
+ * computer. The same string can then be copied by hand, with exactly the same properties: it
+ * contains nothing secret.
  */
 export function encodePairingCode(code: PairingCode): string {
   const joined = new Uint8Array(code.id.length + code.publicKey.length);
@@ -43,10 +43,10 @@ export function decodePairingCode(text: string): PairingCode {
   const normalized = text.trim().replace(/-/g, "+").replace(/_/g, "/");
   const bytes = fromBase64(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="));
 
-  // 16 octets d'identifiant + 32 de clé X25519. Une longueur inattendue signale une saisie
-  // tronquée, pas une attaque — mais échouer ici vaut mieux que de sceller dans le vide.
+  // 16 bytes of id + 32 of X25519 key. An unexpected length signals a truncated entry, not an
+  // attack — but failing here beats sealing into the void.
   if (bytes.length !== 48) {
-    throw new Error("Code d'appairage invalide ou incomplet.");
+    throw new Error("Invalid or incomplete pairing code.");
   }
 
   return { id: bytes.slice(0, 16), publicKey: bytes.slice(16) };
@@ -57,10 +57,10 @@ export function depositPairing(api: Api, id: Uint8Array, payload: Uint8Array): P
 }
 
 /**
- * Attend que l'appareil d'origine dépose le paquet.
+ * Waits for the original device to deposit the packet.
  *
- * Le serveur ne notifie pas : on interroge. La fenêtre est courte — le paquet contient de quoi
- * prendre le contrôle du compte, et le serveur le fait expirer au bout de cinq minutes.
+ * The server does not notify: we poll. The window is short — the packet contains enough to take
+ * control of the account, and the server expires it after five minutes.
  */
 export async function awaitPairing(
   id: Uint8Array,

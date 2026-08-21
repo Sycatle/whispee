@@ -1,8 +1,8 @@
 /**
- * Chargement du module WebAssembly.
+ * Loading the WebAssembly module.
  *
- * Le binaire fait ~1,4 Mo (≈515 Ko gzip) : il doit être servi compressé et mis en cache
- * longuement. Il est chargé une seule fois par onglet, à la demande.
+ * The binary weighs ~1.4 MB (≈515 KB gzipped): it must be served compressed and cached for a
+ * long time. It is loaded once per tab, on demand.
  */
 import type {
   AccountKey,
@@ -23,11 +23,11 @@ import type {
 } from "./generated/crypto_wasm";
 
 /**
- * Ce que le module WASM expose et dont l'application a besoin.
+ * What the WASM module exposes and the application needs.
  *
- * `Client` et `AccountKey` sont volontairement distincts : un compte survit à ses appareils,
- * et un appareil existe le temps d'un appairage sans détenir la clé du compte. Les fusionner
- * laisserait croire que l'un implique l'autre.
+ * `Client` and `AccountKey` are deliberately distinct: an account outlives its devices, and a
+ * device exists for the length of a pairing without holding the account key. Merging them would
+ * suggest that one implies the other.
  */
 export interface Crypto {
   Client: typeof Client;
@@ -50,9 +50,9 @@ export interface Crypto {
 let loading: Promise<Crypto> | null = null;
 
 /**
- * Import dynamique volontaire : le glue wasm-bindgen ne doit pas entrer dans le bundle
- * initial. Il touche `WebAssembly` et `fetch` à l'évaluation, ce qui n'a rien à faire
- * dans un rendu côté serveur, et il n'est utile qu'une fois l'application interactive.
+ * Deliberate dynamic import: the wasm-bindgen glue must not enter the initial bundle. It touches
+ * `WebAssembly` and `fetch` on evaluation, which has no business in a server-side render, and it
+ * is only useful once the application is interactive.
  */
 export function loadCrypto(): Promise<Crypto> {
   loading ??= import("./generated/crypto_wasm").then(async (module) => {
@@ -80,67 +80,67 @@ export function loadCrypto(): Promise<Crypto> {
 
 export type { AccountKey, Client, Pairing };
 
-/** Retour de `sealPairing`. */
+/** Return value of `sealPairing`. */
 export interface Sealed {
   payload: Uint8Array;
-  /** Code court à comparer de visu sur les deux écrans. */
+  /** Short code to compare by eye on both screens. */
   confirmation: string;
 }
 
-/** Retour de `Pairing.open`. */
+/** Return value of `Pairing.open`. */
 export interface Opened {
   plaintext: Uint8Array;
   confirmation: string;
 }
 
-/** Retour de `AccountKey.generate`. */
+/** Return value of `AccountKey.generate`. */
 export interface CreatedAccount {
   /**
-   * À afficher **une seule fois**, puis à oublier. L'application ne la conserve pas et ne
-   * peut pas la réafficher : une phrase remontrable à la demande est une phrase que quiconque
-   * tient l'appareil déverrouillé peut remontrer aussi.
+   * To be shown **once**, then forgotten. The application does not keep it and cannot show it
+   * again: a phrase that can be shown on demand is a phrase anyone holding the unlocked device
+   * can show too.
    */
   phrase: string;
   identityKey: Uint8Array;
 }
 
-/** Un appareil tel que le serveur le déclare. Rien n'est acquis avant vérification. */
+/** A device as the server declares it. Nothing is settled before verification. */
 export interface AttestedDevice {
   id: string;
   authKey: Uint8Array;
   mlsKey: Uint8Array;
   attestation: Uint8Array;
   /**
-   * Instant de révocation en secondes Unix, absent si l'appareil est actif.
+   * Revocation instant in Unix seconds, absent if the device is active.
    *
-   * Les appareils révoqués **sont servis** avec leur certificat, et c'est délibéré : les taire
-   * rendrait la révocation indiscernable d'une omission par le serveur.
+   * Revoked devices **are served**, with their certificate, and that is deliberate: hiding them
+   * would make revocation indistinguishable from an omission by the server.
    */
   revokedAt?: number;
-  /** Certificat signé par le compte. Présent exactement quand `revokedAt` l'est. */
+  /** Certificate signed by the account. Present exactly when `revokedAt` is. */
   revocation?: Uint8Array;
   /**
-   * Dernière activité, en secondes Unix. **Servi au seul propriétaire du compte.**
+   * Last activity, in Unix seconds. **Served to the account owner only.**
    *
-   * Absent pour les appareils d'autrui : le détail par appareil dirait combien d'appareils une
-   * personne possède et lequel elle utilise à quelle heure. Pour soi, c'est ce qui rend visible
-   * un appareil fantôme réellement actif.
+   * Absent for other people's devices: per-device detail would say how many devices someone owns
+   * and which one they use at what hour. For yourself, it is what makes a genuinely active ghost
+   * device visible.
    */
   lastSeen?: number;
 }
 
-/** Retour de `Client.invite`. */
+/** Return value of `Client.invite`. */
 export interface Invitation {
-  /** Aux membres déjà présents, pour qu'ils avancent d'epoch. */
+  /** For the members already present, so they advance an epoch. */
   commit: Uint8Array;
-  /** Au seul invité. */
+  /** For the invitee alone. */
   welcome: Uint8Array;
 }
 
-/** Retour de `Client.process`. */
+/** Return value of `Client.process`. */
 export type Incoming =
   | { kind: "application"; sender: string | null; plaintext: Uint8Array }
-  /** La composition du groupe ou ses clés ont changé : rafraîchir les empreintes. */
+  /** The group's composition or its keys changed: refresh the fingerprints. */
   | { kind: "groupChanged" }
   | { kind: "proposal" };
 

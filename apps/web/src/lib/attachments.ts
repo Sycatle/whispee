@@ -1,41 +1,41 @@
 /**
- * Pièces jointes chiffrées.
+ * Encrypted attachments.
  *
- * Le fichier est chiffré côté client avec une **clé aléatoire propre à ce fichier**, puis
- * déposé sur le serveur. La clé ne quitte jamais le client par ce chemin : elle voyage à
- * l'intérieur du message MLS, donc chiffrée de bout en bout comme le texte.
+ * The file is encrypted on the client with a **random key of its own**, then deposited on the
+ * server. The key never leaves the client by that path: it travels inside the MLS message, so
+ * end-to-end encrypted like the text.
  *
- * Conséquence : le serveur détient l'intégralité du fichier et ne peut rien en faire. Il
- * n'en connaît ni le contenu, ni le nom, ni le type.
+ * Consequence: the server holds the whole file and can do nothing with it. It knows neither its
+ * content, nor its name, nor its type.
  *
- * # Pourquoi une clé par fichier
+ * # Why one key per file
  *
- * Réutiliser une clé entre fichiers ferait qu'un seul descripteur divulgué ouvrirait tous
- * les autres. Une clé par fichier borne les dégâts d'une fuite à ce fichier, et permet en
- * outre de partager une pièce jointe précise sans donner accès au reste.
+ * Reusing a key across files would mean a single leaked descriptor opens all the others. One key
+ * per file bounds the damage of a leak to that file, and also allows sharing one specific
+ * attachment without giving access to the rest.
  *
- * # Ce qui fuit malgré tout
+ * # What leaks anyway
  *
- * La **taille** du fichier, à seize octets près. Elle suffit souvent à identifier un
- * document connu. Seul du padding la masquerait, au prix de la bande passante.
+ * The file's **size**, to within sixteen bytes. That is often enough to identify a known document.
+ * Only padding would mask it, at the cost of bandwidth.
  */
 import type { Api } from "./api";
 
-/** Descripteur transporté dans le message MLS. C'est lui qui porte le secret. */
+/** Descriptor carried inside the MLS message. This is what holds the secret. */
 export interface AttachmentRef {
   id: string;
-  /** Clé AES-256-GCM, en base64. Ne doit jamais atteindre le serveur autrement que chiffrée. */
+  /** AES-256-GCM key, in base64. Must never reach the server other than encrypted. */
   key: string;
   iv: string;
-  /** Nom d'origine. C'est du contenu : il ne doit pas être confié au serveur. */
+  /** Original name. This is content: it must not be handed to the server. */
   name: string;
-  /** Type déclaré par l'expéditeur. À traiter comme une suggestion, jamais comme une preuve. */
+  /** Type declared by the sender. Treat as a hint, never as proof. */
   mime: string;
-  /** Taille en clair, pour l'affichage avant téléchargement. */
+  /** Plaintext size, for display before download. */
   size: number;
 }
 
-/** Doit rester sous le plafond du serveur (`MAX_ATTACHMENT_BYTES`). */
+/** Must stay under the server's ceiling (`MAX_ATTACHMENT_BYTES`). */
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 function toBase64(bytes: Uint8Array): string {
@@ -51,17 +51,17 @@ function fromBase64(value: string): Uint8Array {
   return bytes;
 }
 
-/** Voir la note sur `buffer` dans `keys.ts`. */
+/** See the note on `buffer` in `keys.ts`. */
 function buffer(bytes: Uint8Array): BufferSource {
   return bytes as unknown as BufferSource;
 }
 
 /**
- * Chiffre puis dépose un fichier. Retourne le descripteur à joindre au message.
+ * Encrypts then uploads a file. Returns the descriptor to attach to the message.
  *
- * La clé est marquée extractable — il faut bien l'exporter pour la transmettre au
- * destinataire. C'est l'exception justifiée au principe suivi partout ailleurs : une clé de
- * fichier *doit* voyager, contrairement aux clés d'identité et d'enveloppe.
+ * The key is marked extractable — it has to be exported to be sent to the recipient. This is the
+ * justified exception to the principle followed everywhere else: a file key *must* travel, unlike
+ * the identity and wrapping keys.
  */
 export async function encryptAndUpload(
   api: Api,
@@ -70,9 +70,9 @@ export async function encryptAndUpload(
 ): Promise<AttachmentRef> {
   if (file.size > MAX_ATTACHMENT_BYTES) {
     throw new Error(
-      `Fichier trop volumineux (${Math.round(file.size / 1024 / 1024)} Mo, maximum ${
+      `File too large (${Math.round(file.size / 1024 / 1024)} MB, maximum ${
         MAX_ATTACHMENT_BYTES / 1024 / 1024
-      } Mo).`,
+      } MB).`,
     );
   }
 
@@ -101,15 +101,14 @@ export async function encryptAndUpload(
 }
 
 /**
- * Récupère et déchiffre une pièce jointe.
+ * Fetches and decrypts an attachment.
  *
- * L'AEAD porte l'intégrité : si le serveur substitue ou altère le blob, le déchiffrement
- * échoue au lieu de rendre des octets falsifiés. Aucune empreinte séparée n'est donc
- * nécessaire — le tag GCM fait ce travail.
+ * The AEAD carries integrity: if the server substitutes or alters the blob, decryption fails
+ * instead of returning forged bytes. No separate digest is needed — the GCM tag does that work.
  *
- * Le `Blob` est construit avec le type **déclaré par l'expéditeur**, qui n'est qu'une
- * indication. L'appelant ne doit jamais le rendre inline sur cette origine : un SVG ou un
- * HTML ainsi affiché exécuterait du script avec les clés de l'utilisateur à portée.
+ * The `Blob` is built with the type **declared by the sender**, which is only a hint. The caller
+ * must never render it inline on this origin: an SVG or an HTML file displayed that way would run
+ * script with the user's keys within reach.
  */
 export async function downloadAndDecrypt(
   api: Api,

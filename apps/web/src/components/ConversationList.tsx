@@ -32,8 +32,8 @@ export function ConversationList({
   const start = async (event: React.FormEvent) => {
     event.preventDefault();
     try {
-      // Plusieurs pseudonymes séparés par des virgules ouvrent un groupe. Au-delà d'un
-      // correspondant, le créateur en devient le premier administrateur.
+      // Several handles separated by commas open a group. Past one peer, the creator becomes
+      // its first administrator.
       const handles = peer
         .split(",")
         .map((handle) => handle.trim().replace(/^@/, ""))
@@ -49,21 +49,21 @@ export function ConversationList({
 
   return (
     <aside
-      // Toute la largeur quand elle est seule à l'écran, une colonne fixe quand elle accompagne
-      // une conversation. La bordure suit : elle sépare deux panneaux, et n'a rien à séparer
-      // quand il n'y en a qu'un.
+      // Full width when it is alone on screen, a fixed column when it sits next to a
+      // conversation. The border follows: it separates two panes, and has nothing to separate
+      // when there is only one.
       className="flex w-full shrink-0 flex-col duo:w-64 duo:border-r duo:border-(--color-border-subtle)"
     >
       <form onSubmit={start} className="space-y-2 border-b border-(--color-border-subtle) p-3">
         <input
           value={peer}
           onChange={(e) => setPeer(e.target.value)}
-          placeholder="bob, ou bob, carol"
+          placeholder="bob, or bob, carol"
           required
           className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-2 py-1.5 text-sm"
         />
         <button type="submit" className="w-full rounded-md bg-(--color-accent) px-2 py-1.5 text-sm text-white">
-          Ouvrir une conversation
+          Start a conversation
         </button>
       </form>
 
@@ -97,7 +97,7 @@ export function ConversationList({
             onClick={() => setSignalPanel(false)}
             className="mt-3 text-xs underline opacity-70"
           >
-            Fermer
+            Close
           </button>
         </div>
       )}
@@ -116,28 +116,27 @@ export function ConversationList({
       {!pairing && !lockPanel && !vaultPanel && !devicePanel && !signalPanel && (
         <div className="flex flex-col gap-1 border-b border-(--color-border-subtle) px-3 py-2 text-left text-xs text-(--color-ink-muted)">
           <button type="button" onClick={() => setPairing(true)} className="text-left underline">
-            Ajouter un appareil
+            Add a device
           </button>
           <button type="button" onClick={() => setDevicePanel(true)} className="text-left underline">
-            Vos appareils
+            Your devices
           </button>
           <button type="button" onClick={() => setLockPanel(true)} className="text-left underline">
-            {session.locked ? "Retirer le verrou" : "Verrouiller cet appareil"}
+            {session.locked ? "Remove the lock" : "Lock this device"}
           </button>
           <button type="button" onClick={() => setVaultPanel(true)} className="text-left underline">
-            {/* L'état coupé se lit comme une anomalie choisie, pas comme une invitation. */}
-            {session.archiving ? "Sauvegarde de l'historique" : "Sauvegarde désactivée"}
+            {/* The off state reads as a deliberate anomaly, not as an invitation. */}
+            {session.archiving ? "History backup" : "Backup disabled"}
           </button>
           <button type="button" onClick={() => setSignalPanel(true)} className="text-left underline">
-            Accusés et indicateurs
+            Receipts and indicators
           </button>
         </div>
       )}
 
       {/*
-        Ni epoch, ni stock de clés d'accueil. L'epoch est un détail de débogage, et le stock
-        se reconstitue tout seul à chaque relève — l'exposer transformerait de l'entretien
-        automatique en inquiétude pour l'utilisateur.
+        Neither epoch nor prekey stock. The epoch is a debugging detail, and the stock refills
+        itself on every poll — exposing it would turn automatic upkeep into user worry.
       */}
       <ul className="min-h-0 flex-1 overflow-y-auto">
         {conversations.map((view) => (
@@ -145,17 +144,17 @@ export function ConversationList({
             <button
               type="button"
               onClick={() => onSelect(view)}
-              // `tactile:` et non `duo:` : la question n'est pas la largeur de l'écran mais la
-              // précision du pointeur. Une tablette est large **et** manipulée au doigt ; un
-              // seuil de largeur y donnerait des cibles pensées pour une souris.
-              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm tactile:min-h-11 ${
+              // `touch:` and not `duo:`: the question is not screen width but pointer
+              // precision. A tablet is wide **and** finger-driven; a width breakpoint would
+              // give it targets designed for a mouse.
+              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm touch:min-h-11 ${
                 current?.key === view.key ? "bg-(--color-surface-raised) font-medium" : ""
               }`}
             >
               {/*
-                Une pastille par conversation, et seulement en tête-à-tête. Sur un groupe, elle
-                ne dirait pas de qui elle parle — et poser la question multiplie les inférences
-                au lieu d'informer.
+                One dot per conversation, and only one-to-one. In a group it would not say who
+                it is about — and asking the question multiplies inferences instead of
+                informing.
               */}
               {view.accounts.length === 1 && (
                 <PresenceDot session={session} handle={view.accounts[0].handle} />
@@ -163,7 +162,7 @@ export function ConversationList({
               <span className="min-w-0 truncate">
                 {view.accounts.map((a) => `@${a.handle}`).join(", ") ||
                   [...new Set(view.peers.map((p) => p.name))].map((n) => `@${n}`).join(", ") ||
-                  "conversation vide"}
+                  "empty conversation"}
               </span>
             </button>
           </li>

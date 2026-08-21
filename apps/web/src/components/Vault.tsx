@@ -2,15 +2,15 @@ import { useState } from "react";
 import type { ConversationView, Session } from "@/lib/session";
 
 /**
- * Réglage du coffre d'historique, **actif par défaut**.
+ * History vault settings, **on by default**.
  *
- * Cet écran n'existe plus pour faire accepter un renoncement : il est déjà pris, dans
- * `Session.attach`. Il existe pour le **rappeler** et pour permettre d'en sortir — ce qui n'est
- * pas la même chose que de le taire.
+ * This screen does not exist to get a trade-off accepted: it has already been made, in
+ * `Session.attach`. It exists to **restate** it and to let the user back out — which is not
+ * the same thing as staying quiet about it.
  *
- * D'où la forme : l'avertissement reste affiché quand la sauvegarde est active, au présent, et
- * non seulement sur un écran d'activation que plus personne ne verra. Un compromis qui devient
- * le défaut est précisément celui qu'on cesse d'énoncer si l'on n'y prend pas garde.
+ * Hence the shape: the warning stays on screen, in the present tense, while archiving is on,
+ * rather than only on an activation screen nobody will ever see again. A trade-off that
+ * becomes the default is exactly the one you stop saying out loud unless you take care to.
  */
 export function VaultSettings({
   session,
@@ -22,10 +22,10 @@ export function VaultSettings({
   onDone: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [compris, setCompris] = useState(false);
-  const [restaures, setRestaures] = useState<number | null>(null);
+  const [understood, setUnderstood] = useState(false);
+  const [restored, setRestored] = useState<number | null>(null);
 
-  const basculer = async () => {
+  const toggle = async () => {
     setBusy(true);
     try {
       if (session.archiving) {
@@ -39,11 +39,11 @@ export function VaultSettings({
     }
   };
 
-  const restaurer = async () => {
+  const restore = async () => {
     if (!active) return;
     setBusy(true);
     try {
-      setRestaures(await session.restoreHistory(active));
+      setRestored(await session.restoreHistory(active));
     } finally {
       setBusy(false);
     }
@@ -53,62 +53,62 @@ export function VaultSettings({
     return (
       <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
         <div className="flex items-baseline justify-between gap-4">
-          <h2 className="font-medium">Sauvegarde de l&apos;historique</h2>
+          <h2 className="font-medium">History backup</h2>
           <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
-            Fermer
+            Close
           </button>
         </div>
 
         <p className="mt-2 text-(--color-ink-muted)">
-          Vos messages sont archivés, chiffrés par une clé dérivée de votre phrase de
-          récupération. Le serveur ne peut pas les lire, et votre historique revient tout seul
-          à l&apos;ouverture d&apos;une conversation.
+          Your messages are archived, encrypted under a key derived from your recovery phrase.
+          The server cannot read them, and your history comes back on its own when you open a
+          conversation.
         </p>
 
         <div className="mt-3 rounded-md border border-(--color-danger) bg-(--color-danger)/10 p-3">
-          <p className="font-medium text-(--color-danger)">Ce que vous avez abandonné</p>
+          <p className="font-medium text-(--color-danger)">What you gave up</p>
           <p className="mt-1 text-(--color-ink-muted)">
-            L&apos;archive est chiffrée par une clé dérivée de votre phrase de récupération, donc
-            <strong> la même pour toujours</strong>. Si cette phrase vous échappe un jour,
-            l&apos;intégralité du passé sauvegardé devient lisible — rétroactivement. Sans
-            sauvegarde, ce passé-là serait resté hors d&apos;atteinte : c&apos;est la forward
-            secrecy, et c&apos;est une protection réelle.
+            The archive is encrypted under a key derived from your recovery phrase, so
+            <strong> the same key forever</strong>. If that phrase ever gets away from you, the
+            whole of your backed-up past becomes readable — retroactively. Without the backup,
+            that past would have stayed out of reach: that is forward secrecy, and it is real
+            protection.
           </p>
         </div>
 
         <div className="mt-3 flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={restaurer}
+            onClick={restore}
             disabled={busy || !active}
             className="rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
           >
-            {busy ? "…" : "Recharger depuis le coffre"}
+            {busy ? "…" : "Reload from the vault"}
           </button>
           <button
             type="button"
-            onClick={basculer}
+            onClick={toggle}
             disabled={busy}
             className="rounded-md border border-(--color-border-subtle) px-3 py-1.5 disabled:opacity-50"
           >
-            Arrêter la sauvegarde
+            Stop backing up
           </button>
         </div>
 
-        {restaures !== null && (
+        {restored !== null && (
           <p className="mt-2 text-(--color-ok)">
-            {restaures === 0
-              ? "Rien à restaurer pour cette conversation."
-              : `${restaures} message(s) restauré(s).`}
+            {restored === 0
+              ? "Nothing to restore for this conversation."
+              : `${restored} message${restored === 1 ? "" : "s"} restored.`}
           </p>
         )}
 
         <p className="mt-3 text-xs text-(--color-ink-muted)">
-          Arrêter la sauvegarde n&apos;efface pas ce qui a déjà été archivé : le serveur
-          conserve ces entrées, et la clé qui les ouvre reste dérivable de votre phrase.
-          Promettre une suppression que nous ne contrôlons pas serait malhonnête. Cela ne rend
-          pas non plus au passé déjà archivé la forward secrecy qu&apos;il a perdue — et les
-          messages suivants deviendront, eux, irrécupérables sur un nouvel appareil.
+          Stopping the backup does not erase what has already been archived: the server keeps
+          those entries, and the key that opens them stays derivable from your phrase. Promising
+          a deletion we do not control would be dishonest. Nor does it give back the forward
+          secrecy the already-archived past has lost — while the messages that follow will be
+          unrecoverable on a new device.
         </p>
       </div>
     );
@@ -117,54 +117,53 @@ export function VaultSettings({
   return (
     <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Sauvegarde désactivée</h2>
+        <h2 className="font-medium">Backup off</h2>
         <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
-          Fermer
+          Close
         </button>
       </div>
 
       <p className="mt-2 text-(--color-ink-muted)">
-        Vous avez coupé la sauvegarde. Vos messages disparaissent donc à la fermeture de
-        l&apos;application, et un nouvel appareil repart d&apos;une conversation vide. Ce
-        n&apos;est pas une panne : c&apos;est la forward secrecy, qui rend le passé illisible
-        même pour qui obtiendrait le serveur plus tard.
+        You turned the backup off. Your messages therefore disappear when the application
+        closes, and a new device starts from an empty conversation. This is not a failure: it is
+        forward secrecy, which keeps the past unreadable even to someone who gets hold of the
+        server later on.
       </p>
 
       <div className="mt-3 rounded-md border border-(--color-danger) bg-(--color-danger)/10 p-3">
-        <p className="font-medium text-(--color-danger)">Ce que vous abandonnez</p>
+        <p className="font-medium text-(--color-danger)">What you would give up</p>
         <p className="mt-1 text-(--color-ink-muted)">
-          L&apos;archive est chiffrée par une clé dérivée de votre phrase de récupération, donc
-          <strong> la même pour toujours</strong>. Si cette phrase vous échappe un jour,
-          l&apos;intégralité du passé sauvegardé devient lisible — rétroactivement. Sans
-          sauvegarde, ce passé-là serait resté hors d&apos;atteinte.
+          The archive is encrypted under a key derived from your recovery phrase, so
+          <strong> the same key forever</strong>. If that phrase ever gets away from you, the
+          whole of your backed-up past becomes readable — retroactively. Without the backup,
+          that past would have stayed out of reach.
         </p>
       </div>
 
       <p className="mt-3 text-xs text-(--color-ink-muted)">
-        L&apos;archivage reprendrait maintenant et ne remonte pas dans le temps : les messages
-        échangés pendant la coupure ont vu leurs clés détruites, rien ne permet de les
-        reconstituer.
+        Archiving would resume from now on and does not reach back in time: the messages
+        exchanged while it was off had their keys destroyed, and nothing can reconstruct them.
       </p>
 
       <label className="mt-3 flex items-start gap-2">
         <input
           type="checkbox"
-          checked={compris}
-          onChange={(e) => setCompris(e.target.checked)}
+          checked={understood}
+          onChange={(e) => setUnderstood(e.target.checked)}
           className="mt-1"
         />
         <span>
-          Je comprends que mon historique ne sera plus protégé par la forward secrecy.
+          I understand that my history will no longer be protected by forward secrecy.
         </span>
       </label>
 
       <button
         type="button"
-        onClick={basculer}
-        disabled={busy || !compris}
+        onClick={toggle}
+        disabled={busy || !understood}
         className="mt-3 rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
       >
-        {busy ? "…" : "Réactiver la sauvegarde"}
+        {busy ? "…" : "Turn the backup back on"}
       </button>
     </div>
   );

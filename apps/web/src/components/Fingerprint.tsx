@@ -1,10 +1,9 @@
 /**
- * Affichage d'une empreinte destinée à la comparaison humaine.
+ * Renders a fingerprint for human comparison.
  *
- * Découpée en blocs et en chasse fixe : comparer deux chaînes hexadécimales continues est
- * notoirement peu fiable, et l'attaque consiste précisément à produire une clé dont
- * l'empreinte *ressemble* à la bonne. On ne peut pas rendre la comparaison agréable, mais
- * on peut la rendre possible.
+ * Split into fixed-width blocks: comparing two continuous hex strings is notoriously
+ * unreliable, and the attack is precisely to produce a key whose fingerprint *looks* like
+ * the right one. We cannot make the comparison pleasant, but we can make it possible.
  */
 export function Fingerprint({ value }: { value: string }) {
   return (

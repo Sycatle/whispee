@@ -1,27 +1,27 @@
 /**
- * Déverrouillage par empreinte ou visage.
+ * Unlocking with a fingerprint or a face.
  *
- * # Ce que cela échange, et qui doit le savoir
+ * # What this trades, and who needs to know
  *
- * Un mot de passe n'est stocké nulle part : il n'existe que dans la tête de son propriétaire, et
- * c'est ce qui rend l'état illisible pour qui emporte le disque. Activer la biométrie **écrit la
- * clé maîtresse sur l'appareil**, scellée par les secrets du processus natif — lesquels sont, eux,
- * en clair dans le répertoire privé de l'application.
+ * A password is stored nowhere: it exists only in its owner's head, and that is what makes the
+ * state unreadable to whoever walks off with the disk. Turning biometrics on **writes the master
+ * key to the device**, sealed by the native process's secrets — which are themselves in the
+ * clear in the app's private directory.
  *
- * La protection devient donc celle du système : le répertoire privé, plus l'invite du système
- * devant la clé. C'est solide contre qui prend le téléphone en main ; sans valeur contre qui en
- * extrait le stockage — un `root`, une sauvegarde non chiffrée, une image disque.
+ * The protection therefore becomes the system's: the private directory, plus the system prompt
+ * in front of the key. That is solid against someone picking the phone up; worth nothing against
+ * someone extracting its storage — a `root`, an unencrypted backup, a disk image.
  *
- * C'est **strictement plus faible** que le mot de passe seul. Ce n'est pas une raison de s'en
- * priver : un verrou qu'on retire parce qu'il est pénible protège moins qu'un verrou tiède qu'on
- * garde. Mais c'est une raison de le dire avant, et non dans une note de bas de page.
+ * It is **strictly weaker** than the password alone. That is not a reason to do without it: a
+ * lock removed because it is annoying protects less than a lukewarm lock that is kept. But it is
+ * a reason to say so up front, and not in a footnote.
  *
- * # Où l'invite est déclenchée
+ * # Where the prompt is triggered
  *
- * Dans le processus natif, sur le chemin de la clé — pas ici. Une invite posée en JavaScript
- * avant l'appel serait une politesse qu'un script hostile saute ; celle-ci, il ne peut que la
- * subir. Ce module ne fait donc qu'appeler des commandes, et n'a aucune logique de sécurité :
- * c'est voulu, et c'est ce qu'il faut vérifier en le lisant.
+ * In the native process, on the path to the key — not here. A prompt raised in JavaScript before
+ * the call would be a courtesy a hostile script skips; this one it can only submit to. So this
+ * module does nothing but call commands, and holds no security logic: that is intentional, and
+ * it is what to check when reading it.
  */
 import { invoke } from "@tauri-apps/api/core";
 
@@ -29,50 +29,50 @@ import { fromBase64, toBase64 } from "./keys";
 import { isTauri } from "./platform";
 
 /**
- * L'appareil peut-il proposer ce déverrouillage ?
+ * Can the device offer this unlock?
  *
- * Deux conditions, tenues côté natif : la plateforme expose l'invite, et l'utilisateur a enrôlé
- * une empreinte ou un visage. Un téléphone dont personne n'a configuré la biométrie répond non —
- * proposer le réglage y donnerait un bouton qui échoue à l'usage.
+ * Two conditions, both checked natively: the platform exposes the prompt, and the user has
+ * enrolled a fingerprint or a face. A phone where nobody set biometrics up answers no — offering
+ * the setting there would give a button that fails in use.
  */
-export async function biometrieDisponible(): Promise<boolean> {
+export async function biometricAvailable(): Promise<boolean> {
   if (!isTauri()) return false;
 
-  return invoke<boolean>("biometrie_disponible");
+  return invoke<boolean>("biometric_available");
 }
 
-/** Le déverrouillage biométrique est-il activé ? Ne déclenche aucune invite. */
-export async function biometrieActive(): Promise<boolean> {
+/** Is biometric unlock enabled? Raises no prompt. */
+export async function biometricEnabled(): Promise<boolean> {
   if (!isTauri()) return false;
 
   return invoke<boolean>("master_present");
 }
 
-/** Range la clé maîtresse pour que l'invite puisse la rendre. */
-export async function activerBiometrie(master: Uint8Array): Promise<void> {
+/** Stores the master key so the prompt can hand it back. */
+export async function enableBiometric(master: Uint8Array): Promise<void> {
   await invoke("master_seal", { master: toBase64(master) });
 }
 
 /**
- * Demande la clé maîtresse, derrière l'invite du système.
+ * Asks for the master key, behind the system prompt.
  *
- * `null` si aucune clé n'est rangée. Une invite refusée **lève** : l'échec doit se distinguer de
- * l'absence, sans quoi un refus renverrait l'utilisateur vers la saisie du mot de passe comme si
- * la biométrie n'avait jamais été activée.
+ * `null` if no key is stored. A refused prompt **throws**: failure has to be distinguishable
+ * from absence, otherwise a refusal would send the user back to the password field as if
+ * biometrics had never been turned on.
  */
-export async function ouvrirParBiometrie(): Promise<Uint8Array | null> {
+export async function unlockWithBiometric(): Promise<Uint8Array | null> {
   const master = await invoke<string | null>("master_open");
   return master === null ? null : fromBase64(master);
 }
 
 /**
- * Retire le déverrouillage biométrique. Le verrou reste posé ; le mot de passe l'ouvre encore.
+ * Removes biometric unlock. The lock stays on; the password still opens it.
  *
- * Sans effet hors Tauri, plutôt qu'en erreur : le retrait est appelé par le retrait du verrou,
- * qui existe sur toutes les plateformes, et faire échouer là où il n'y a rien à retirer
- * transformerait une opération réussie en incident.
+ * A no-op outside Tauri rather than an error: removal is called by removing the lock, which
+ * exists on every platform, and failing where there is nothing to remove would turn a successful
+ * operation into an incident.
  */
-export async function retirerBiometrie(): Promise<void> {
+export async function disableBiometric(): Promise<void> {
   if (!isTauri()) return;
 
   await invoke("master_clear");

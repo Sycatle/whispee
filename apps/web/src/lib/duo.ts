@@ -1,43 +1,42 @@
 /**
- * Y a-t-il la place d'afficher deux panneaux à la fois ?
+ * Is there room to show two panes at once?
  *
- * # Pourquoi la question se pose aussi en JavaScript
+ * # Why the question comes up in JavaScript too
  *
- * Le CSS sait masquer un panneau ; il ne sait pas décider **lequel des deux** monter, ni offrir
- * un bouton retour, ni faire du bouton retour du système une fermeture de conversation. À un
- * seul panneau, la navigation change de nature : ce n'est plus une mise en page, c'est un état.
+ * CSS can hide a pane; it cannot decide **which of the two** to mount, nor offer a back button,
+ * nor turn the system back button into "close the conversation". At one pane, navigation changes
+ * nature: it is no longer a layout, it is state.
  *
- * # Le seuil est écrit deux fois, et c'est assumé
+ * # The breakpoint is written twice, deliberately
  *
- * `index.css` le porte aussi, dans la variante `duo:`. Aucun mécanisme ne permet à Tailwind de
- * lire une constante TypeScript, et l'inverse — dériver le JavaScript du CSS — supposerait de
- * lire une feuille de style compilée au démarrage. Deux déclarations dont le désaccord se voit
- * immédiatement à l'écran valent mieux qu'une indirection qui masquerait le lien.
+ * `index.css` carries it too, in the `duo:` variant. Nothing lets Tailwind read a TypeScript
+ * constant, and the reverse — deriving the JavaScript from the CSS — would mean parsing a
+ * compiled stylesheet at startup. Two declarations whose disagreement is immediately visible on
+ * screen beat an indirection that would hide the link.
  */
 import { useEffect, useState } from "react";
 
-/** Doit rester identique à la variante `duo:` de `index.css`. */
-export const SEUIL_DUO = "(min-width: 48rem)";
+/** Must stay identical to the `duo:` variant in `index.css`. */
+export const DUO_BREAKPOINT = "(min-width: 48rem)";
 
 /**
- * Vrai quand les deux panneaux tiennent côte à côte.
+ * True when both panes fit side by side.
  *
- * Réévalué au redimensionnement, ce qui couvre la rotation d'une tablette autant qu'une fenêtre
- * qu'on rétrécit — le même événement, et il n'y a pas de raison de traiter l'un des deux comme
- * un cas particulier.
+ * Re-evaluated on resize, which covers rotating a tablet as much as shrinking a window — the
+ * same event, and no reason to treat either as a special case.
  */
 export function useDuo(): boolean {
-  const [duo, setDuo] = useState(() => globalThis.matchMedia?.(SEUIL_DUO).matches ?? true);
+  const [duo, setDuo] = useState(() => globalThis.matchMedia?.(DUO_BREAKPOINT).matches ?? true);
 
   useEffect(() => {
-    const requete = globalThis.matchMedia?.(SEUIL_DUO);
-    if (!requete) return;
+    const query = globalThis.matchMedia?.(DUO_BREAKPOINT);
+    if (!query) return;
 
-    const reagir = () => setDuo(requete.matches);
-    requete.addEventListener("change", reagir);
-    // Relu à l'abonnement : entre le premier rendu et cet effet, la fenêtre a pu changer.
-    reagir();
-    return () => requete.removeEventListener("change", reagir);
+    const react = () => setDuo(query.matches);
+    query.addEventListener("change", react);
+    // Re-read on subscribe: the window may have changed between the first render and this effect.
+    react();
+    return () => query.removeEventListener("change", react);
   }, []);
 
   return duo;

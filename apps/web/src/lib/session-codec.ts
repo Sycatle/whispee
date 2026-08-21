@@ -1,50 +1,49 @@
 /**
- * Traduction de la session en octets, pour les stockages qui ne savent ranger que des octets.
+ * Turning the session into bytes, for the stores that can only hold bytes.
  *
- * # Pourquoi ce module existe séparément
+ * # Why this module exists on its own
  *
- * IndexedDB accepte une `StoredSession` telle quelle : le clonage structuré sait transporter un
- * `Uint8Array`, et même une `CryptoKey` non extractable. Un fichier ne sait rien de tout cela. Le
- * store natif a donc besoin d'une traduction, et cette traduction est le seul endroit où les
- * invariants de forme de la session sont écrits noir sur blanc — ce qui vaut d'être testable sans
- * base de données ni processus Rust.
+ * IndexedDB takes a `StoredSession` as it is: structured cloning carries a `Uint8Array`, and
+ * even a non-extractable `CryptoKey`. A file knows none of that. The native store therefore
+ * needs a translation, and that translation is the only place where the session's shape
+ * invariants are written down — which is worth being able to test without a database or a Rust
+ * process.
  *
- * # Ce que le codec ne transporte pas
+ * # What the codec does not carry
  *
- * Les clés. `StoredSession` n'en porte aucune : sur le web elles vivent dans la même base, mais
- * c'est le store qui les y range, pas la session. Un fichier ne pourrait pas les recevoir — des
- * `CryptoKey` non extractables ne se sérialisent pas, par construction — et il n'a pas à le
- * faire : sous Tauri elles vivent dans le processus natif, derrière `NativeCipher`.
+ * The keys. `StoredSession` holds none: on the web they live in the same database, but it is the
+ * store that puts them there, not the session. A file could not receive them — non-extractable
+ * `CryptoKey`s do not serialise, by construction — and it does not have to: under Tauri they
+ * live in the native process, behind `NativeCipher`.
  *
- * # Le champ qui justifie les tests
+ * # The field that justifies the tests
  *
- * `vaultEnabled` a **trois** états et non deux : absent vaut « actif » — le coffre est le défaut
- * — tandis que `false` est un refus explicite de l'utilisateur. Un codec qui normaliserait
- * l'absence en `false` couperait la sauvegarde d'un compte neuf ; un codec qui normaliserait
- * `false` en absent la rallumerait dans le dos de quelqu'un qui l'avait coupée. La seconde erreur
- * est la pire, et aucune des deux ne se voit à l'œil nu. Même raisonnement pour
- * `signals.presence`.
+ * `vaultEnabled` has **three** states, not two: absent means "on" — the vault is the default —
+ * while `false` is an explicit refusal by the user. A codec that normalised absence to `false`
+ * would cut backup off for a fresh account; a codec that normalised `false` to absent would turn
+ * it back on behind the back of someone who had turned it off. The second mistake is the worse
+ * one, and neither is visible to the naked eye. Same reasoning for `signals.presence`.
  */
 import { fromBase64, toBase64 } from "./keys.ts";
 import type { StoredSession } from "./storage";
 
 /**
- * Version du format sur disque.
+ * On-disk format version.
  *
- * Présente dès la première version : l'ajouter après coup obligerait à deviner l'âge d'un fichier
- * qui ne le dit pas.
+ * Present from the first version: adding it after the fact would mean guessing the age of a file
+ * that does not say.
  */
 const VERSION = 1;
 
 /**
- * Encode en JSON UTF-8.
+ * Encodes to UTF-8 JSON.
  *
- * Les octets deviennent du base64 plutôt qu'un tableau de nombres — un `Uint8Array` passé à
- * `JSON.stringify` devient un objet indexé par chaînes, qui se relit en objet et non en tableau
- * d'octets. La panne serait silencieuse : `state` redeviendrait un objet vide plutôt que d'échouer.
+ * Bytes become base64 rather than an array of numbers — a `Uint8Array` handed to `JSON.stringify`
+ * becomes an object keyed by strings, which reads back as an object and not as a byte array. The
+ * breakage would be silent: `state` would come back as an empty object rather than failing.
  */
-export function encoderSession(session: StoredSession): Uint8Array {
-  const brut = {
+export function encodeSession(session: StoredSession): Uint8Array {
+  const raw = {
     v: VERSION,
     deviceId: session.deviceId,
     handle: session.handle,
@@ -60,69 +59,68 @@ export function encoderSession(session: StoredSession): Uint8Array {
     postingKeys: session.postingKeys,
   };
 
-  return new TextEncoder().encode(JSON.stringify(brut));
+  return new TextEncoder().encode(JSON.stringify(raw));
 }
 
 /**
- * Relit ce qu'`encoderSession` a produit, ou lève.
+ * Reads back what `encodeSession` produced, or throws.
  *
- * Lever plutôt que rendre une session partielle : un état MLS amputé de son curseur rejouerait
- * des clés déjà consommées, et la conversation resterait vide après un simple rechargement. Une
- * erreur visible au démarrage vaut mieux qu'une session qui semble marcher.
+ * Throwing rather than returning a partial session: an MLS state stripped of its cursor would
+ * replay already-consumed keys, and the conversation would stay empty after a simple reload. An
+ * error visible at startup beats a session that seems to work.
  */
-export function decoderSession(octets: Uint8Array): StoredSession {
-  const brut: unknown = JSON.parse(new TextDecoder().decode(octets));
+export function decodeSession(bytes: Uint8Array): StoredSession {
+  const raw: unknown = JSON.parse(new TextDecoder().decode(bytes));
 
-  if (typeof brut !== "object" || brut === null) {
-    throw new Error("session illisible : la racine n'est pas un objet");
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("unreadable session: the root is not an object");
   }
 
-  const champ = brut as Record<string, unknown>;
+  const field = raw as Record<string, unknown>;
 
-  if (champ.v !== VERSION) {
-    throw new Error(`session en version ${String(champ.v)}, attendue ${VERSION}`);
+  if (field.v !== VERSION) {
+    throw new Error(`session is version ${String(field.v)}, expected ${VERSION}`);
   }
 
   return {
-    deviceId: exigerChaine(champ.deviceId, "deviceId"),
-    handle: exigerChaine(champ.handle, "handle"),
-    accountSeed: fromBase64(exigerChaine(champ.accountSeed, "accountSeed")),
-    // Les optionnels sont répandus conditionnellement plutôt qu'affectés à `undefined` : une
-    // propriété présente et valant `undefined` n'est pas la même chose qu'une propriété absente
-    // pour `Object.keys`, pour une comparaison structurelle, ou pour un futur `in`. Puisque toute
-    // la subtilité de `vaultEnabled` tient à la distinction absent / `false`, autant que la forme
-    // relue soit exactement celle qui a été écrite.
-    ...(champ.lock === undefined ? {} : { lock: champ.lock as StoredSession["lock"] }),
-    ...(champ.vaultEnabled === undefined ? {} : { vaultEnabled: champ.vaultEnabled as boolean }),
-    ...(champ.state === undefined
+    deviceId: requireString(field.deviceId, "deviceId"),
+    handle: requireString(field.handle, "handle"),
+    accountSeed: fromBase64(requireString(field.accountSeed, "accountSeed")),
+    // Optionals are spread conditionally rather than assigned `undefined`: a property that is
+    // present and holds `undefined` is not the same as an absent one for `Object.keys`, for a
+    // structural comparison, or for a future `in`. Since the whole subtlety of `vaultEnabled` is
+    // the absent / `false` distinction, the shape read back should be exactly the one written.
+    ...(field.lock === undefined ? {} : { lock: field.lock as StoredSession["lock"] }),
+    ...(field.vaultEnabled === undefined ? {} : { vaultEnabled: field.vaultEnabled as boolean }),
+    ...(field.state === undefined
       ? {}
-      : { state: fromBase64(exigerChaine(champ.state, "state")) }),
-    groupIds: exigerTableau(champ.groupIds, "groupIds").map((valeur, index) =>
-      fromBase64(exigerChaine(valeur, `groupIds[${index}]`)),
+      : { state: fromBase64(requireString(field.state, "state")) }),
+    groupIds: requireArray(field.groupIds, "groupIds").map((value, index) =>
+      fromBase64(requireString(value, `groupIds[${index}]`)),
     ),
-    verified: exigerObjet(champ.verified, "verified") as Record<string, string>,
-    cursors: exigerObjet(champ.cursors, "cursors") as Record<string, number>,
-    knownDevices: exigerObjet(champ.knownDevices, "knownDevices") as Record<string, string[]>,
-    ...(champ.signals === undefined ? {} : { signals: champ.signals as StoredSession["signals"] }),
-    ...(champ.postingKeys === undefined
+    verified: requireObject(field.verified, "verified") as Record<string, string>,
+    cursors: requireObject(field.cursors, "cursors") as Record<string, number>,
+    knownDevices: requireObject(field.knownDevices, "knownDevices") as Record<string, string[]>,
+    ...(field.signals === undefined ? {} : { signals: field.signals as StoredSession["signals"] }),
+    ...(field.postingKeys === undefined
       ? {}
-      : { postingKeys: champ.postingKeys as Record<string, string> }),
+      : { postingKeys: field.postingKeys as Record<string, string> }),
   };
 }
 
-function exigerChaine(valeur: unknown, nom: string): string {
-  if (typeof valeur !== "string") throw new Error(`session illisible : ${nom} n'est pas une chaîne`);
-  return valeur;
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string") throw new Error(`unreadable session: ${name} is not a string`);
+  return value;
 }
 
-function exigerTableau(valeur: unknown, nom: string): unknown[] {
-  if (!Array.isArray(valeur)) throw new Error(`session illisible : ${nom} n'est pas un tableau`);
-  return valeur;
+function requireArray(value: unknown, name: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`unreadable session: ${name} is not an array`);
+  return value;
 }
 
-function exigerObjet(valeur: unknown, nom: string): Record<string, unknown> {
-  if (typeof valeur !== "object" || valeur === null || Array.isArray(valeur)) {
-    throw new Error(`session illisible : ${nom} n'est pas un objet`);
+function requireObject(value: unknown, name: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`unreadable session: ${name} is not an object`);
   }
-  return valeur as Record<string, unknown>;
+  return value as Record<string, unknown>;
 }

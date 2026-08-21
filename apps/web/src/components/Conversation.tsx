@@ -18,10 +18,10 @@ export function Conversation({
   onChanged: () => void;
   onError: (message: string) => void;
   /**
-   * Retour à la liste, quand elle n'est pas affichée à côté.
+   * Back to the list, when the list is not shown alongside.
    *
-   * Absent à deux panneaux : un bouton retour y désignerait un écran déjà visible. Sa présence
-   * est donc ce qui dit à ce composant qu'il occupe l'écran entier.
+   * Absent in the two-pane layout: a back button there would point at an already visible screen.
+   * Its presence is therefore what tells this component it owns the whole screen.
    */
   onBack?: () => void;
 }) {
@@ -33,16 +33,16 @@ export function Conversation({
   const fileInput = useRef<HTMLInputElement>(null);
   const occlusion = useOcclusion();
 
-  // Rapatriement de l'historique archivé, à l'ouverture de la conversation.
+  // Pulls the archived history back in when the conversation opens.
   //
-  // Paresseux et non bloquant : la conversation s'affiche tout de suite, le passé se remplit
-  // derrière. `hydrate` ne fait le travail qu'une fois par session — l'effet peut donc se
-  // rejouer sans conséquence quand la vue change d'identité.
+  // Lazy and non-blocking: the conversation shows immediately, the past fills in behind it.
+  // `hydrate` only does the work once per session, so re-running this effect when the view
+  // changes identity is harmless.
   useEffect(() => {
     session
       .hydrate(view)
-      .then((restaures) => {
-        if (restaures > 0) onChanged();
+      .then((restored) => {
+        if (restored > 0) onChanged();
       })
       .catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
   }, [session, view, onChanged, onError]);
@@ -64,20 +64,20 @@ export function Conversation({
   };
 
   /**
-   * Signale la frappe à chaque touche — le débounce est dans `Session`.
+   * Reports typing on every keystroke — the debounce lives in `Session`.
    *
-   * Le placer ici obligerait chaque appelant à le refaire, et c'est le genre de garde qu'on
-   * oublie : un dépôt réseau par touche enfoncée.
+   * Putting it here would force every caller to redo it, and it is the kind of guard that gets
+   * forgotten: one network post per key pressed.
    */
-  const typing = (valeur: string) => {
-    setText(valeur);
-    if (valeur) void session.notifyTyping(view).catch(() => {});
+  const typing = (value: string) => {
+    setText(value);
+    if (value) void session.notifyTyping(view).catch(() => {});
   };
 
   const attach = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    // Le champ est réinitialisé tout de suite : sans cela, renvoyer deux fois le même
-    // fichier ne déclencherait pas de second `change`.
+    // The input is reset right away: without it, picking the same file twice would not fire a
+    // second `change`.
     event.target.value = "";
     if (!file) return;
 
@@ -92,12 +92,12 @@ export function Conversation({
     }
   };
 
-  const enTrainDEcrire = session.typingIn(view);
+  const isTyping = session.typingIn(view);
 
   const title =
     view.accounts.map((a) => `@${a.handle}`).join(", ") ||
     [...new Set(view.peers.map((p) => p.name))].map((n) => `@${n}`).join(", ") ||
-    "conversation vide";
+    "empty conversation";
 
   return (
     <section className="flex min-w-0 flex-1 flex-col">
@@ -106,32 +106,31 @@ export function Conversation({
           <button
             type="button"
             onClick={onBack}
-            aria-label="Revenir aux conversations"
-            className="-ml-2 shrink-0 self-center px-2 py-1 text-xl leading-none text-(--color-ink-muted) tactile:min-h-11"
+            aria-label="Back to conversations"
+            className="-ml-2 shrink-0 self-center px-2 py-1 text-xl leading-none text-(--color-ink-muted) touch:min-h-11"
           >
             ‹
           </button>
         )}
         {/*
-          L'epoch n'est pas affichée — c'est un détail de protocole qui n'apprend rien à
-          l'utilisateur. Elle est exposée en attribut parce que deux membres à des epochs
-          différentes ne peuvent plus se lire du tout : c'est la première chose à regarder
-          quand un message n'arrive pas, et la chercher autrement demande d'instrumenter le
-          module WebAssembly.
+          The epoch is not displayed — it is a protocol detail that teaches the user nothing.
+          It is exposed as an attribute because two members on different epochs can no longer
+          read each other at all: it is the first thing to check when a message fails to
+          arrive, and finding it any other way means instrumenting the WebAssembly module.
         */}
         <div className="min-w-0">
           <h2 className="truncate text-sm font-medium" data-epoch={String(view.epoch)}>
             {title}
           </h2>
           {/*
-            « écrit… » prend le pas sur la présence : écrire implique être en ligne, et afficher
-            les deux ajoute du bruit sans ajouter d'information. En tête-à-tête seulement — sur
-            un groupe, « en ligne » ne dirait pas de qui il s'agit.
+            "is typing…" wins over presence: typing implies being online, and showing both adds
+            noise without adding information. One-to-one only — in a group, "online" would not
+            say who it is talking about.
           */}
-          {enTrainDEcrire.length > 0 ? (
+          {isTyping.length > 0 ? (
             <span className="text-xs text-(--color-ink-muted)">
-              {enTrainDEcrire.map((handle) => `@${handle}`).join(", ")}{" "}
-              {enTrainDEcrire.length > 1 ? "écrivent" : "écrit"}…
+              {isTyping.map((handle) => `@${handle}`).join(", ")}{" "}
+              {isTyping.length > 1 ? "are typing" : "is typing"}…
             </span>
           ) : (
             view.accounts.length === 1 && (
@@ -164,9 +163,9 @@ export function Conversation({
       )}
 
       {/*
-        Alerte uniquement sur changement d'empreinte. En nominal, ce composant ne rend rien :
-        un avertissement permanent s'apprend à ignorer, et rendrait celui-ci inaudible le
-        jour où il compte.
+        Warns only when a fingerprint changes. In the nominal case this component renders
+        nothing: a permanent warning teaches people to ignore it, and would make this one
+        inaudible on the day it matters.
       */}
       {view.accounts.map((account) => (
         <Verification
@@ -201,48 +200,48 @@ export function Conversation({
 
       {replyTo !== null && (
         <div className="flex items-center justify-between gap-2 border-t border-(--color-border-subtle) px-4 py-1 text-xs opacity-70">
-          <span className="truncate">Réponse au message {replyTo}</span>
+          <span className="truncate">Replying to message {replyTo}</span>
           <button type="button" onClick={() => setReplyTo(null)} className="shrink-0">
-            annuler
+            cancel
           </button>
         </div>
       )}
 
       <form
         onSubmit={send}
-        // Le clavier logiciel ne redimensionne pas la fenêtre sur iOS : il glisse la page
-        // dessous, sans qu'aucune requête média ne se déclenche. Sans ce retrait, le champ qui
-        // vient de recevoir le focus se retrouve caché par le clavier qui l'a ouvert.
+        // The software keyboard does not resize the window on iOS: it slides under the page
+        // without firing any media query. Without this inset, the field that just took focus
+        // ends up hidden by the keyboard that opened it.
         //
-        // `safe-bas` en plus : les deux ne se recouvrent pas — la barre de geste est là quand le
-        // clavier est fermé, et le clavier la remplace quand il s'ouvre.
+        // `safe-bottom` on top: the two never overlap — the gesture bar is there when the keyboard
+        // is closed, and the keyboard replaces it when it opens.
         style={{ paddingBottom: occlusion || undefined }}
-        className="safe-bas flex items-center gap-2 border-t border-(--color-border-subtle) p-3"
+        className="safe-bottom flex items-center gap-2 border-t border-(--color-border-subtle) p-3"
       >
         <input ref={fileInput} type="file" onChange={attach} className="hidden" />
         <button
           type="button"
           onClick={() => fileInput.current?.click()}
           disabled={sending}
-          title="Joindre un fichier"
-          className="rounded-md border border-(--color-border-subtle) px-3 py-2 text-sm tactile:min-h-11 tactile:min-w-11 disabled:opacity-50"
+          title="Attach a file"
+          className="rounded-md border border-(--color-border-subtle) px-3 py-2 text-sm touch:min-h-11 touch:min-w-11 disabled:opacity-50"
         >
           {sending ? "…" : "📎"}
         </button>
         <input
           value={text}
           onChange={(e) => typing(e.target.value)}
-          placeholder={replyTo === null ? "Message" : "Réponse"}
-          // `text-base` explicitement : en dessous de 16 pixels, iOS zoome sur le champ au
-          // focus et ne dézoome pas en sortant. Le corriger en interdisant le zoom priverait de
-          // recours ceux qui en ont besoin ; le corriger par la taille ne coûte rien.
-          className="min-w-0 flex-1 rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2 text-base tactile:min-h-11"
+          placeholder={replyTo === null ? "Message" : "Reply"}
+          // `text-base` on purpose: below 16 pixels, iOS zooms into the field on focus and does
+          // not zoom back out on blur. Fixing that by forbidding zoom would strip a fallback
+          // from the people who need it; fixing it by font size costs nothing.
+          className="min-w-0 flex-1 rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2 text-base touch:min-h-11"
         />
         <button
           type="submit"
-          className="rounded-md bg-(--color-accent) px-4 py-2 text-sm font-medium text-white tactile:min-h-11"
+          className="rounded-md bg-(--color-accent) px-4 py-2 text-sm font-medium text-white touch:min-h-11"
         >
-          Envoyer
+          Send
         </button>
       </form>
     </section>

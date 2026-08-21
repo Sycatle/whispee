@@ -3,44 +3,44 @@ import { test } from "node:test";
 
 import { ONLINE_WINDOW_MS, describePresence, isOnline } from "./presence.ts";
 
-const MAINTENANT = Date.now();
+const NOW = Date.now();
 
-test("un compte vu dans la fenêtre est en ligne", () => {
-  assert.equal(isOnline(MAINTENANT - 1000, MAINTENANT), true);
-  assert.equal(describePresence(MAINTENANT - 1000, MAINTENANT), "en ligne");
+test("an account seen within the window is online", () => {
+  assert.equal(isOnline(NOW - 1000, NOW), true);
+  assert.equal(describePresence(NOW - 1000, NOW), "online");
 });
 
-test("la borne est stricte : à la fenêtre exacte, le compte est hors ligne", () => {
-  assert.equal(isOnline(MAINTENANT - ONLINE_WINDOW_MS + 1, MAINTENANT), true);
-  assert.equal(isOnline(MAINTENANT - ONLINE_WINDOW_MS, MAINTENANT), false);
+test("the bound is strict: at exactly the window, the account is offline", () => {
+  assert.equal(isOnline(NOW - ONLINE_WINDOW_MS + 1, NOW), true);
+  assert.equal(isOnline(NOW - ONLINE_WINDOW_MS, NOW), false);
 });
 
-test("hors de la fenêtre, l'heure de la dernière activité s'affiche", () => {
-  const vu = MAINTENANT - ONLINE_WINDOW_MS - 60_000;
-  assert.match(describePresence(vu, MAINTENANT), /^vu (à \d\d:\d\d|le )/);
-});
-
-/**
- * Ne pas savoir n'est pas la même chose que savoir absent. Le compte peut n'avoir jamais été vu,
- * ou avoir refusé de diffuser sa présence — trancher à sa place serait le premier mensonge de
- * l'écran.
- */
-test("sans donnée, rien ne s'affiche — surtout pas « hors ligne »", () => {
-  assert.equal(describePresence(undefined, MAINTENANT), "");
-  assert.equal(isOnline(undefined, MAINTENANT), false);
+test("outside the window, the time of the last activity is shown", () => {
+  const seen = NOW - ONLINE_WINDOW_MS - 60_000;
+  assert.match(describePresence(seen, NOW), /^last seen (at \d\d:\d\d|on )/);
 });
 
 /**
- * Deux horloges se comparent, et elles divergent : c'est la raison d'être de `MAX_CLOCK_SKEW`
- * côté serveur. « Vu dans trois minutes » serait la seule autre réponse possible.
+ * Not knowing is not the same as knowing someone is away. The account may never have been seen,
+ * or may have refused to broadcast its presence — deciding on its behalf would be the screen's
+ * first lie.
  */
-test("un horodatage dans le futur vaut « en ligne », jamais « vu dans trois minutes »", () => {
-  assert.equal(describePresence(MAINTENANT + 180_000, MAINTENANT), "en ligne");
+test('with no data, nothing is shown — least of all "offline"', () => {
+  assert.equal(describePresence(undefined, NOW), "");
+  assert.equal(isOnline(undefined, NOW), false);
 });
 
-/** C'est l'horloge du serveur qui décide, pas celle du navigateur. */
-test("la référence est le maintenant du serveur", () => {
-  const serveur = MAINTENANT - 10 * ONLINE_WINDOW_MS;
-  assert.equal(isOnline(serveur - 1000, serveur), true);
-  assert.equal(isOnline(serveur - 1000, MAINTENANT), false);
+/**
+ * Two clocks are being compared, and they drift apart: that is what `MAX_CLOCK_SKEW` exists for
+ * on the server. "Seen in three minutes" would be the only other possible answer.
+ */
+test('a timestamp in the future reads as "online", never as "seen in three minutes"', () => {
+  assert.equal(describePresence(NOW + 180_000, NOW), "online");
+});
+
+/** The server's clock decides, not the browser's. */
+test("the reference is the server's now", () => {
+  const server = NOW - 10 * ONLINE_WINDOW_MS;
+  assert.equal(isOnline(server - 1000, server), true);
+  assert.equal(isOnline(server - 1000, NOW), false);
 });

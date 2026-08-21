@@ -1,19 +1,19 @@
 /**
- * Affichage de la présence.
+ * Presence display.
  *
- * Isolé plutôt qu'inséré directement dans `page.tsx` : ce fichier dépasse déjà les huit cents
- * lignes, et la règle d'affichage — un point quand c'est frais, une heure sinon, rien quand on
- * ne sait pas — mérite d'être lisible d'un seul tenant.
+ * Kept separate rather than inlined into `page.tsx`: that file already runs past eight hundred
+ * lines, and the display rule — a dot when it is fresh, a time otherwise, nothing when we do not
+ * know — deserves to be readable in one piece.
  */
 import type { Session } from "@/lib/session";
 import { describePresence, isOnline } from "@/lib/presence";
 
 /**
- * Pastille « en ligne », sans texte.
+ * "Online" dot, no text.
  *
- * Rien du tout quand le compte n'est pas frais : un point gris demanderait à l'œil de
- * distinguer deux nuances dans une liste, pour dire « hors ligne » alors qu'on ne le sait pas
- * toujours. L'absence de point est plus honnête et plus lisible.
+ * Nothing at all when the account is not fresh: a grey dot would ask the eye to tell two shades
+ * apart in a list, in order to say "offline" when we do not always know that. No dot is both
+ * more honest and more readable.
  */
 export function PresenceDot({ session, handle }: { session: Session; handle: string }) {
   if (!isOnline(session.presenceOf(handle), session.presenceClock)) return null;
@@ -21,21 +21,21 @@ export function PresenceDot({ session, handle }: { session: Session; handle: str
   return (
     <span
       className="inline-block size-2 shrink-0 rounded-full bg-(--color-ok)"
-      title="en ligne"
-      aria-label="en ligne"
+      title="online"
+      aria-label="online"
     />
   );
 }
 
 /**
- * Ligne « en ligne » / « vu à 14:02 ».
+ * The "online" / "last seen at 14:02" line.
  *
- * Ne rend rien quand le serveur n'a rien à dire — compte jamais vu, ou qui a refusé de diffuser
- * sa présence. « Hors ligne » serait une affirmation, et on n'en a pas les moyens.
+ * Renders nothing when the server has nothing to say — an account never seen, or one that
+ * declined to broadcast its presence. "Offline" would be a claim, and we cannot back it.
  */
 export function PresenceLine({ session, handle }: { session: Session; handle: string }) {
-  const texte = describePresence(session.presenceOf(handle), session.presenceClock);
-  if (!texte) return null;
+  const text = describePresence(session.presenceOf(handle), session.presenceClock);
+  if (!text) return null;
 
-  return <span className="text-xs text-(--color-ink-muted)">{texte}</span>;
+  return <span className="text-xs text-(--color-ink-muted)">{text}</span>;
 }

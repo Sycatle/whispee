@@ -17,7 +17,7 @@ export function Onboarding({
   const [mode, setMode] = useState<"create" | "restore" | "pair">("create");
   const [busy, setBusy] = useState(false);
   const [ed25519, setEd25519] = useState<boolean | null>(null);
-  /** La phrase produite à la création. Affichée une fois, jamais réaffichable ensuite. */
+  /** The phrase produced at creation. Shown once, never shown again afterwards. */
   const [recovery, setRecovery] = useState<{ phrase: string; session: Session } | null>(null);
 
   useEffect(() => {
@@ -30,8 +30,8 @@ export function Onboarding({
     try {
       if (mode === "create") {
         const [session, generated] = await Session.create(handle.trim());
-        // On ne remet pas la session tout de suite : l'utilisateur doit d'abord voir sa
-        // phrase. Passer directement à la conversation la lui ferait perdre définitivement.
+        // The session is not handed over yet: the user has to see the phrase first. Going
+        // straight to the conversation would lose it for good.
         setRecovery({ phrase: generated, session });
       } else {
         onReady(await Session.restoreFromPhrase(handle.trim(), phrase));
@@ -55,25 +55,24 @@ export function Onboarding({
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 p-6">
       <div>
         <h1 className="text-xl font-medium">
-          {mode === "create" ? "Nouveau compte" : "Récupérer mon compte"}
+          {mode === "create" ? "New account" : "Recover my account"}
         </h1>
         <p className="mt-2 text-sm text-(--color-ink-muted)">
-          Votre pseudonyme est transporté en clair et visible du serveur comme de tous vos
-          correspondants. N&apos;y mettez rien de sensible, et surtout pas de numéro de
-          téléphone ni d&apos;adresse e-mail — ce système n&apos;en demande aucun.
+          Your handle travels in the clear and is visible to the server and to everyone you talk
+          to. Don&apos;t put anything sensitive in it, and above all no phone number and no email
+          address — this system asks for neither.
         </p>
         <p className="mt-2 text-xs text-(--color-ink-muted)">
-          Cet appareil sera nommé automatiquement d&apos;après son type. Rien de plus précis :
-          un modèle exact distinguerait son porteur bien au-delà de ce qu&apos;exige
-          l&apos;acheminement des messages.
+          This device will be named automatically after its type. Nothing more precise: an exact
+          model would single out its owner far beyond what delivering messages requires.
         </p>
       </div>
 
       {ed25519 === false && (
         <p role="alert" className="rounded-md border border-(--color-danger) bg-(--color-danger)/10 p-3 text-sm text-(--color-danger)">
-          Ce navigateur ne prend pas en charge Ed25519 dans WebCrypto. Plutôt que de replier
-          sur une implémentation JavaScript — où la clé privée resterait exposée en mémoire du
-          script — l&apos;application refuse de créer une identité. Utilisez un navigateur à jour.
+          This browser does not support Ed25519 in WebCrypto. Rather than fall back to a
+          JavaScript implementation — where the private key would sit exposed in the script&apos;s
+          memory — the app refuses to create an identity. Please use an up-to-date browser.
         </p>
       )}
 
@@ -81,7 +80,7 @@ export function Onboarding({
         <input
           value={handle}
           onChange={(e) => setHandle(e.target.value)}
-          placeholder="pseudonyme (alice)"
+          placeholder="handle (alice)"
           required
           maxLength={64}
           className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2"
@@ -90,7 +89,7 @@ export function Onboarding({
           <textarea
             value={phrase}
             onChange={(e) => setPhrase(e.target.value)}
-            placeholder="vos douze mots de récupération"
+            placeholder="your twelve recovery words"
             required
             rows={3}
             className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2 text-sm"
@@ -102,7 +101,7 @@ export function Onboarding({
           disabled={busy || !handle.trim() || ed25519 !== true}
           className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50"
         >
-          {busy ? "En cours…" : mode === "create" ? "Créer le compte" : "Récupérer le compte"}
+          {busy ? "Working…" : mode === "create" ? "Create the account" : "Recover the account"}
         </button>
       </form>
 
@@ -110,31 +109,29 @@ export function Onboarding({
         {mode === "create" ? (
           <>
             <button type="button" onClick={() => setMode("pair")} className="underline">
-              Ajouter cet appareil à un compte existant
+              Add this device to an existing account
             </button>
             <button type="button" onClick={() => setMode("restore")} className="underline">
-              J&apos;ai perdu tous mes appareils — récupérer avec ma phrase
+              I lost all my devices — recover with my phrase
             </button>
           </>
         ) : (
           <button type="button" onClick={() => setMode("create")} className="underline">
-            Créer un nouveau compte
+            Create a new account
           </button>
         )}
       </div>
 
       {mode === "restore" && (
         <p className="text-xs text-(--color-ink-muted)">
-          À n&apos;utiliser que si vous avez perdu tous vos appareils. Pour en ajouter un
-          nouveau alors que vous en avez encore un sous la main, faites-le depuis celui-ci :
-          votre phrase n&apos;a alors aucune raison d&apos;être ressaisie, donc aucune raison
-          d&apos;être exposée.
+          Only use this if you have lost every one of your devices. To add a new device while you
+          still have one at hand, do it from that one: your phrase then has no reason to be typed
+          in again, so no reason to be exposed.
           <br />
-          Vous retrouverez votre compte, mais pas vos conversations en cours : elles vivent
-          dans des groupes chiffrés dont ce nouvel appareil n&apos;est pas membre. Votre
-          historique sauvegardé, lui, existe toujours et votre phrase l&apos;ouvre — mais tant
-          que quelqu&apos;un ne vous a pas réintégré à la conversation, cet appareil ignore
-          jusqu&apos;à son existence et ne peut pas aller le chercher.
+          You will get your account back, but not your ongoing conversations: they live in
+          encrypted groups that this new device is not a member of. Your saved history does still
+          exist, and your phrase opens it — but until someone adds you back to the conversation,
+          this device doesn&apos;t even know that history exists and cannot go and fetch it.
         </p>
       )}
 
@@ -148,10 +145,10 @@ export function Onboarding({
 }
 
 /**
- * Nouvel appareil en attente d'appairage.
+ * A new device waiting to be paired.
  *
- * Il affiche son code et attend. Il n'a aucun secret à saisir : c'est tout l'intérêt du sens
- * choisi — le code étant photographiable, il ne doit rien contenir de sensible.
+ * It shows its code and waits. It has no secret to type in: that is the whole point of this
+ * direction — the code can be photographed, so it must hold nothing sensitive.
  */
 function PairThisDevice({
   onReady,
@@ -184,17 +181,17 @@ function PairThisDevice({
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 p-6">
       <div>
-        <h1 className="text-xl font-medium">Ajouter cet appareil</h1>
+        <h1 className="text-xl font-medium">Add this device</h1>
         <p className="mt-2 text-sm text-(--color-ink-muted)">
-          Indiquez le pseudonyme du compte, puis recopiez le code affiché ici sur un appareil
-          où vous êtes déjà connecté.
+          Enter the account&apos;s handle, then copy the code shown here onto a device where you
+          are already signed in.
         </p>
       </div>
 
       <input
         value={handle}
         onChange={(e) => setHandle(e.target.value)}
-        placeholder="pseudonyme du compte"
+        placeholder="account handle"
         maxLength={64}
         className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2"
       />
@@ -205,22 +202,22 @@ function PairThisDevice({
         onClick={() => setStarted(true)}
         className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50"
       >
-        Afficher le code d&apos;appairage
+        Show the pairing code
       </button>
 
       <button type="button" onClick={onCancel} className="text-sm text-(--color-ink-muted) underline">
-        Retour
+        Back
       </button>
     </main>
   );
 }
 
 /**
- * Affichage unique de la phrase de récupération.
+ * The one and only time the recovery phrase is shown.
  *
- * Elle n'est pas conservée et ne pourra pas être réaffichée. C'est délibéré : une phrase que
- * l'application sait remontrer est une phrase que quiconque tient l'appareil déverrouillé
- * peut remontrer aussi. L'écran force donc une confirmation explicite.
+ * It is not kept and cannot be shown again. That is deliberate: a phrase the app can show again
+ * is a phrase anyone holding the unlocked device can show again too. So the screen forces an
+ * explicit acknowledgement.
  */
 function RecoveryPhrase({
   phrase,
@@ -234,11 +231,11 @@ function RecoveryPhrase({
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 p-6">
       <div>
-        <h1 className="text-xl font-medium">Votre phrase de récupération</h1>
+        <h1 className="text-xl font-medium">Your recovery phrase</h1>
         <p className="mt-2 text-sm text-(--color-ink-muted)">
-          Ces douze mots sont le <strong>seul</strong> moyen de retrouver votre compte si vous
-          perdez tous vos appareils. Ils ne quittent jamais cet appareil : le serveur ne les
-          connaît pas et ne peut pas vous les redonner.
+          These twelve words are the <strong>only</strong> way to get your account back if you
+          lose all your devices. They never leave this device: the server does not know them and
+          cannot give them back to you.
         </p>
       </div>
 
@@ -251,19 +248,19 @@ function RecoveryPhrase({
       </ol>
 
       <p className="text-sm text-(--color-danger)">
-        Notez-les hors ligne. Cet écran ne pourra pas être réaffiché — pas par précaution
-        excessive, mais parce que l&apos;application ne conserve pas la phrase.
+        Write them down offline. This screen cannot be shown again — not out of excessive caution,
+        but because the app does not keep the phrase.
       </p>
 
       {/*
-        Dit ici, et pas dans un écran de réglage que personne n'ouvrira : c'est le moment où
-        ces douze mots deviennent aussi la clé de l'historique. La sauvegarde est active par
-        défaut, donc le compromis se prend maintenant, à l'endroit où la phrase est à l'écran.
+        Said here, not in a settings screen nobody will open: this is the moment those twelve
+        words also become the key to the history. Backup is on by default, so the trade-off is
+        made now, where the phrase is on screen.
       */}
       <p className="text-sm text-(--color-ink-muted)">
-        Ces douze mots chiffrent aussi votre historique sauvegardé. Qui les obtient peut donc
-        relire tout votre passé archivé, y compris rétroactivement. Vous pouvez couper cette
-        sauvegarde dans les réglages.
+        These twelve words also encrypt your saved history. Anyone who gets them can therefore
+        read your whole archived past, retroactively included. You can turn that backup off in
+        settings.
       </p>
 
       <label className="flex items-start gap-2 text-sm">
@@ -273,7 +270,7 @@ function RecoveryPhrase({
           onChange={(e) => setConfirmed(e.target.checked)}
           className="mt-1"
         />
-        <span>J&apos;ai noté ces douze mots et je comprends qu&apos;ils sont irrécupérables.</span>
+        <span>I have written down these twelve words and I understand they cannot be recovered.</span>
       </label>
 
       <button
@@ -282,7 +279,7 @@ function RecoveryPhrase({
         onClick={onAcknowledged}
         className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50"
       >
-        Continuer
+        Continue
       </button>
     </main>
   );

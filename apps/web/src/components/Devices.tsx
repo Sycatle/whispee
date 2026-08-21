@@ -4,21 +4,20 @@ import { describePresence } from "@/lib/presence";
 import type { Session } from "@/lib/session";
 
 /**
- * Appareils du compte : révocation, et rotation quand un appareil a été volé.
+ * Account devices: revocation, and rotation when a device has been stolen.
  *
- * # La distinction que ce panneau existe pour rendre lisible
+ * # The distinction this panel exists to make legible
  *
- * Perdre un appareil et se le faire voler n'appellent pas la même réponse, et l'interface est
- * le seul endroit où l'utilisateur peut apprendre pourquoi.
+ * Losing a device and having one stolen do not call for the same response, and the interface
+ * is the only place the user can learn why.
  *
- * Tous les appareils d'un compte détiennent la même graine — c'est ce qui leur donne à tous
- * les mêmes droits, sans appareil « principal ». La contrepartie est qu'un appareil **volé**
- * détient le compte entier : le révoquer ne l'empêche pas d'en attester un nouveau dans la
- * seconde. Seule la rotation de la clé du compte y met fin, en rendant invérifiables toutes
- * les attestations d'un coup.
+ * Every device on an account holds the same seed — that is what gives them all the same
+ * rights, with no "primary" device. The cost is that a **stolen** device holds the whole
+ * account: revoking it does not stop it from attesting a new one a second later. Only rotating
+ * the account key ends that, by making every attestation unverifiable at once.
  *
- * Présenter les deux boutons côte à côte sans cette explication conduirait tout droit au
- * mauvais choix, et l'utilisateur croirait s'être protégé.
+ * Showing both buttons side by side without that explanation would lead straight to the wrong
+ * choice, and the user would believe they had protected themselves.
  */
 export function DeviceSettings({
   session,
@@ -34,20 +33,20 @@ export function DeviceSettings({
   const [rotation, setRotation] = useState(false);
   const [phrase, setPhrase] = useState<string | null>(null);
 
-  const recharger = () => {
+  const reload = () => {
     session
       .resolve(session.handle)
       .then(setAccount)
       .catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
   };
 
-  useEffect(recharger, [session, onError]);
+  useEffect(reload, [session, onError]);
 
-  const revoquer = async (deviceId: string) => {
+  const revoke = async (deviceId: string) => {
     setBusy(true);
     try {
       await session.revokeOwnDevice(deviceId);
-      recharger();
+      reload();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -55,11 +54,11 @@ export function DeviceSettings({
     }
   };
 
-  const tourner = async () => {
+  const rotate = async () => {
     setBusy(true);
     try {
       setPhrase(await session.rotateAccount());
-      recharger();
+      reload();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -67,22 +66,22 @@ export function DeviceSettings({
     }
   };
 
-  // Après rotation : la nouvelle phrase, une seule fois. L'ancienne ne vaut plus rien.
+  // After rotation: the new phrase, once. The old one is worth nothing now.
   if (phrase) {
     return (
       <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-        <h2 className="font-medium">Nouvelle phrase de récupération</h2>
+        <h2 className="font-medium">New recovery phrase</h2>
         <p className="mt-2 text-(--color-ink-muted)">
-          Notez-la maintenant. L&apos;ancienne ne donne plus accès à rien, et celle-ci ne sera
-          pas réaffichée.
+          Write it down now. The old one no longer gives access to anything, and this one will
+          not be shown again.
         </p>
         <p className="mt-3 rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-3 py-2 font-mono text-xs leading-relaxed">
           {phrase}
         </p>
         <p className="mt-3 text-xs text-(--color-ink-muted)">
-          Vos autres appareils doivent être <strong>ré-appairés</strong> : ils détiennent
-          l&apos;ancienne clé. Vos correspondants verront un avertissement de changement
-          d&apos;empreinte — il est exact, la clé de votre compte a changé.
+          Your other devices must be <strong>paired again</strong>: they hold the old key. The
+          people you talk to will see a fingerprint change warning — it is correct, your account
+          key has changed.
         </p>
         <button
           type="button"
@@ -92,7 +91,7 @@ export function DeviceSettings({
           }}
           className="mt-4 rounded-md bg-(--color-accent) px-3 py-1.5 text-sm font-medium text-white"
         >
-          Je l&apos;ai notée
+          I&apos;ve written it down
         </button>
       </div>
     );
@@ -101,19 +100,18 @@ export function DeviceSettings({
   return (
     <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Vos appareils</h2>
+        <h2 className="font-medium">Your devices</h2>
         <button type="button" onClick={onClose} className="text-(--color-ink-muted) underline">
-          Fermer
+          Close
         </button>
       </div>
 
       <p className="mt-2 text-xs text-(--color-ink-muted)">
-        Tous vos appareils ont exactement le même accès, partout. Il n&apos;y a pas
-        d&apos;appareil principal.
+        All your devices have exactly the same access, everywhere. There is no primary device.
       </p>
 
       {account === null ? (
-        <p className="mt-3 text-(--color-ink-muted)">Chargement…</p>
+        <p className="mt-3 text-(--color-ink-muted)">Loading…</p>
       ) : (
         <ul className="mt-3 space-y-2">
           {account.devices.map((device) => (
@@ -121,19 +119,19 @@ export function DeviceSettings({
               <span className="font-mono text-xs">
                 {device.id}
                 {device.id === session.deviceId && (
-                  <span className="ml-2 font-sans text-(--color-ink-muted)">(celui-ci)</span>
+                  <span className="ml-2 font-sans text-(--color-ink-muted)">(this one)</span>
                 )}
                 {/*
-                  Servi au seul propriétaire du compte. C'est ce qui rend visible un appareil
-                  qu'on croyait éteint et qui relève toujours ses messages — le symptôme d'un
-                  appareil perdu, ou pire.
+                  Served to the account owner alone. This is what makes visible a device thought
+                  to be switched off that is still collecting messages — the symptom of a lost
+                  device, or worse.
                 */}
                 {device.lastSeen !== undefined && (
                   <span className="ml-2 block font-sans text-(--color-ink-muted)">
                     {/*
-                      L'horloge du serveur si on l'a déjà relevée, la locale sinon : comparer
-                      deux horodatages produits par des machines différentes est justement ce
-                      qui fait clignoter un statut chez qui a l'heure mal réglée.
+                      The server clock if we have already read it, the local one otherwise:
+                      comparing two timestamps produced by different machines is exactly what
+                      makes a status flicker for anyone whose clock is off.
                     */}
                     {describePresence(
                       device.lastSeen * 1000,
@@ -146,10 +144,10 @@ export function DeviceSettings({
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => revoquer(device.id)}
+                  onClick={() => revoke(device.id)}
                   className="shrink-0 text-xs underline text-(--color-ink-muted)"
                 >
-                  révoquer
+                  revoke
                 </button>
               )}
             </li>
@@ -160,7 +158,7 @@ export function DeviceSettings({
               <span className="font-mono text-xs text-(--color-ink-muted) line-through">
                 {device.id}
               </span>
-              <span className="shrink-0 text-xs text-(--color-ink-muted)">révoqué</span>
+              <span className="shrink-0 text-xs text-(--color-ink-muted)">revoked</span>
             </li>
           ))}
         </ul>
@@ -168,54 +166,53 @@ export function DeviceSettings({
 
       <div className="mt-4 border-t border-(--color-border-subtle) pt-3">
         <p className="text-xs text-(--color-ink-muted)">
-          <strong>Révoquer</strong> convient à un appareil perdu ou hors service : il cesse de
-          recevoir, et ne déchiffre plus la suite des conversations.
+          <strong>Revoking</strong> is the right answer for a device that is lost or out of
+          service: it stops receiving, and no longer decrypts the rest of your conversations.
         </p>
 
         {rotation ? (
           <div className="mt-3 space-y-2 rounded-md border border-(--color-danger) bg-(--color-danger)/10 p-3">
             <p className="font-medium text-(--color-danger)">
-              Si un appareil vous a été volé, le révoquer ne suffit pas
+              If a device was stolen from you, revoking it is not enough
             </p>
             <p className="text-xs text-(--color-ink-muted)">
-              Il détient la clé de votre compte, comme tous vos appareils. Son porteur peut donc
-              en déclarer un nouveau aussitôt. Changer la clé du compte est la seule mesure qui
-              l&apos;en empêche.
+              It holds your account key, like all your devices. Whoever has it can therefore
+              declare a new device straight away. Changing the account key is the only measure
+              that stops them.
             </p>
-            <p className="text-xs text-(--color-ink-muted)">Ce que cela implique :</p>
+            <p className="text-xs text-(--color-ink-muted)">What this means:</p>
             <ul className="list-disc space-y-1 pl-5 text-xs text-(--color-ink-muted)">
-              <li>Une nouvelle phrase de récupération. L&apos;ancienne ne vaudra plus rien.</li>
-              <li>Vos autres appareils devront être ré-appairés.</li>
+              <li>A new recovery phrase. The old one will be worth nothing.</li>
+              <li>Your other devices will have to be paired again.</li>
               <li>
-                Vos correspondants verront un avertissement de changement d&apos;identité, qui
-                sera exact.
+                The people you talk to will see an identity change warning, and it will be
+                correct.
               </li>
               <li>
-                <strong>Tout votre historique sauvegardé deviendra définitivement illisible</strong>
-                : il est chiffré sous une clé dérivée de l&apos;ancienne phrase, et rien ne permet
-                de le rechiffrer. La sauvegarde étant active par défaut, cela vous concerne même
-                si vous ne l&apos;avez jamais réglée.
+                <strong>All of your backed-up history will become permanently unreadable</strong>
+                : it is encrypted under a key derived from the old phrase, and nothing can
+                re-encrypt it. Since the backup is on by default, this applies to you even if you
+                never touched the setting.
               </li>
               <li>
-                Le voleur détient la même clé que vous et peut agir le premier. Faites-le
-                maintenant.
+                The thief holds the same key you do and can act first. Do this now.
               </li>
             </ul>
             <div className="flex gap-3 pt-1">
               <button
                 type="button"
                 disabled={busy}
-                onClick={tourner}
+                onClick={rotate}
                 className="rounded-md bg-(--color-danger) px-3 py-1.5 text-xs font-medium text-white"
               >
-                Changer la clé du compte
+                Change the account key
               </button>
               <button
                 type="button"
                 onClick={() => setRotation(false)}
                 className="text-xs underline text-(--color-ink-muted)"
               >
-                Annuler
+                Cancel
               </button>
             </div>
           </div>
@@ -225,7 +222,7 @@ export function DeviceSettings({
             onClick={() => setRotation(true)}
             className="mt-2 text-xs underline text-(--color-danger)"
           >
-            Un appareil m&apos;a été volé
+            A device was stolen from me
           </button>
         )}
       </div>

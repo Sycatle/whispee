@@ -1,172 +1,172 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { decider, migrer, PropagationIncomplete, type Etapes } from "./migration.ts";
+import { decide, migrate, PropagationIncomplete, type Steps } from "./migration.ts";
 
 const web = { handle: "alice" };
-const natif = { handle: "alice" };
+const native = { handle: "alice" };
 
-test("rien de rangé : l'installation est neuve", () => {
-  assert.deepEqual(decider(undefined, undefined), { quoi: "neuve" });
+test("nothing stored: the install is fresh", () => {
+  assert.deepEqual(decide(undefined, undefined), { kind: "fresh" });
 });
 
-test("session native seule : la migration est finie", () => {
-  assert.deepEqual(decider(undefined, natif), { quoi: "native" });
+test("a native session alone: the migration is over", () => {
+  assert.deepEqual(decide(undefined, native), { kind: "native" });
 });
 
-test("session web seule : la migration est à faire", () => {
-  assert.deepEqual(decider(web, undefined), { quoi: "demarrer", handle: "alice" });
+test("a web session alone: the migration is still to do", () => {
+  assert.deepEqual(decide(web, undefined), { kind: "start", handle: "alice" });
 });
 
-test("les deux sessions : la migration est à reprendre", () => {
-  assert.deepEqual(decider(web, natif), { quoi: "reprendre", handle: "alice" });
-});
-
-/**
- * **Le test qui porte la décision de conception.**
- *
- * Sans coffre, l'historique n'existe que dans l'état MLS de l'appareil courant, et le ratchet en
- * a détruit les clés au fur et à mesure : le nouvel appareil ne pourrait le relire nulle part.
- * Migrer échangerait alors une éviction possible contre une perte certaine.
- */
-test("un coffre refusé interdit la migration", () => {
-  const decision = decider({ handle: "alice", vaultEnabled: false }, undefined);
-
-  assert.equal(decision.quoi, "repli");
-  assert.match(decision.quoi === "repli" ? decision.raison : "", /sauvegarde d'historique/);
+test("both sessions: the migration is to be resumed", () => {
+  assert.deepEqual(decide(web, native), { kind: "resume", handle: "alice" });
 });
 
 /**
- * Absent n'est pas `false`.
+ * **The test that carries the design decision.**
  *
- * Les comptes antérieurs au drapeau n'ont jamais eu à décider ; les traiter comme un refus
- * refuserait de migrer précisément les installations les plus anciennes.
+ * Without a vault, history exists only in the current device's MLS state, and the ratchet has
+ * destroyed its keys along the way: the new device could read it back nowhere. Migrating would
+ * trade a possible eviction for a certain loss.
  */
-test("un coffre jamais refusé se migre", () => {
-  assert.equal(decider({ handle: "alice" }, undefined).quoi, "demarrer");
-  assert.equal(decider({ handle: "alice", vaultEnabled: true }, undefined).quoi, "demarrer");
+test("a refused vault forbids the migration", () => {
+  const decision = decide({ handle: "alice", vaultEnabled: false }, undefined);
+
+  assert.equal(decision.kind, "fallback");
+  assert.match(decision.kind === "fallback" ? decision.reason : "", /History backup/);
 });
 
-/** Deux comptes distincts ne sont pas une migration à moitié faite. */
-test("deux comptes différents font reculer", () => {
-  const decision = decider(web, { handle: "bob" });
-
-  assert.equal(decision.quoi, "repli");
-  assert.match(decision.quoi === "repli" ? decision.raison : "", /autre compte/);
+/**
+ * Absent is not `false`.
+ *
+ * Accounts older than the flag never had to decide; treating them as a refusal would refuse to
+ * migrate exactly the oldest installs.
+ */
+test("a vault that was never refused migrates", () => {
+  assert.equal(decide({ handle: "alice" }, undefined).kind, "start");
+  assert.equal(decide({ handle: "alice", vaultEnabled: true }, undefined).kind, "start");
 });
 
-function etapes(ajouts: Partial<Etapes> = {}): Etapes & { journal: string[] } {
-  const journal: string[] = [];
-  const noter = (nom: string) => () => {
-    journal.push(nom);
+/** Two distinct accounts are not a half-finished migration. */
+test("two different accounts make it back off", () => {
+  const decision = decide(web, { handle: "bob" });
+
+  assert.equal(decision.kind, "fallback");
+  assert.match(decision.kind === "fallback" ? decision.reason : "", /another account/);
+});
+
+function steps(extra: Partial<Steps> = {}): Steps & { log: string[] } {
+  const log: string[] = [];
+  const note = (name: string) => () => {
+    log.push(name);
     return Promise.resolve();
   };
 
   return {
-    journal,
-    enregistrerAppareilNatif: () => {
-      journal.push("enregistrer");
+    log,
+    registerNativeDevice: () => {
+      log.push("register");
       return Promise.resolve("alice:desktop-2");
     },
-    propagerDepuisAncien: noter("propager"),
-    avancement: () => Promise.resolve({ rejointes: 2, attendues: 2 }),
-    restaurerHistorique: noter("restaurer"),
-    revoquerAncien: (ancien: string) => {
-      journal.push(`revoquer:${ancien}`);
+    propagateFromOld: note("propagate"),
+    progress: () => Promise.resolve({ joined: 2, expected: 2 }),
+    restoreHistory: note("restore"),
+    revokeOld: (old: string) => {
+      log.push(`revoke:${old}`);
       return Promise.resolve();
     },
-    oublierWeb: noter("oublier"),
-    ...ajouts,
+    forgetWeb: note("forget"),
+    ...extra,
   };
 }
 
-const sansAttente = () => Promise.resolve();
+const noWait = () => Promise.resolve();
 
 /**
- * **Le test qui porte l'ordre des étapes.**
+ * **The test that carries the order of the steps.**
  *
- * La révocation avant l'effacement, et les deux après la propagation : révoquer l'ancien
- * appareil trop tôt le couperait des groupes avant qu'il n'y ait introduit le nouveau, et
- * effacer la session web avant tout le reste retirerait la seule chose qui permet de rejouer.
+ * Revocation before erasure, and both after propagation: revoking the old device too early would
+ * cut it off from the groups before it had introduced the new one, and erasing the web session
+ * first would remove the one thing that makes a replay possible.
  */
-test("une migration complète suit l'ordre imposé", async () => {
-  const plan = etapes();
-  await migrer({ quoi: "demarrer", handle: "alice" }, plan, "alice:desktop", sansAttente);
+test("a complete migration follows the imposed order", async () => {
+  const plan = steps();
+  await migrate({ kind: "start", handle: "alice" }, plan, "alice:desktop", noWait);
 
-  assert.deepEqual(plan.journal, [
-    "enregistrer",
-    "propager",
-    "restaurer",
-    "revoquer:alice:desktop",
-    "oublier",
+  assert.deepEqual(plan.log, [
+    "register",
+    "propagate",
+    "restore",
+    "revoke:alice:desktop",
+    "forget",
   ]);
 });
 
-/** Reprendre ne réenregistre pas : l'appareil natif existe déjà, et le serveur en créerait un second. */
-test("une reprise n'enregistre pas un appareil de plus", async () => {
-  const plan = etapes();
-  await migrer({ quoi: "reprendre", handle: "alice" }, plan, "alice:desktop", sansAttente);
+/** Resuming does not re-register: the native device already exists, and the server would create a second one. */
+test("a resume does not register one more device", async () => {
+  const plan = steps();
+  await migrate({ kind: "resume", handle: "alice" }, plan, "alice:desktop", noWait);
 
-  assert.ok(!plan.journal.includes("enregistrer"));
-  assert.deepEqual(plan.journal[0], "propager");
+  assert.ok(!plan.log.includes("register"));
+  assert.deepEqual(plan.log[0], "propagate");
 });
 
 /**
- * On attend le **résultat** de la propagation, pas le geste.
+ * We wait for the **result** of the propagation, not for the gesture.
  *
- * L'ancien appareil dépose des commits, le nouveau doit les relever : révoquer entre les deux
- * rendrait les conversations inaccessibles de ce côté-ci, sans recours.
+ * The old device posts commits, the new one has to pick them up: revoking in between would make
+ * the conversations unreachable on this side, with no recourse.
  */
-test("la révocation attend que les groupes soient rejoints", async () => {
-  let tours = 0;
-  const plan = etapes({
-    avancement: () => {
-      tours += 1;
-      return Promise.resolve({ rejointes: tours >= 3 ? 2 : 0, attendues: 2 });
+test("revocation waits until the groups have been joined", async () => {
+  let rounds = 0;
+  const plan = steps({
+    progress: () => {
+      rounds += 1;
+      return Promise.resolve({ joined: rounds >= 3 ? 2 : 0, expected: 2 });
     },
   });
 
-  await migrer({ quoi: "reprendre", handle: "alice" }, plan, "alice:desktop", sansAttente);
+  await migrate({ kind: "resume", handle: "alice" }, plan, "alice:desktop", noWait);
 
-  assert.equal(plan.journal.filter((e) => e === "propager").length, 3);
-  assert.ok(plan.journal.indexOf("revoquer:alice:desktop") > plan.journal.lastIndexOf("propager"));
+  assert.equal(plan.log.filter((e) => e === "propagate").length, 3);
+  assert.ok(plan.log.indexOf("revoke:alice:desktop") > plan.log.lastIndexOf("propagate"));
 });
 
 /**
- * Un serveur muet fait abandonner, sans rien détruire.
+ * A silent server makes it give up, without destroying anything.
  *
- * L'abandon laisse deux appareils actifs : un état sain, seulement redondant, dont le démarrage
- * suivant repart. Ce qu'il ne faut surtout pas, c'est révoquer ou effacer par dépit.
+ * Giving up leaves two active devices: a healthy state, merely redundant, which the next start
+ * picks up again. What must never happen is revoking or erasing out of spite.
  */
-test("une propagation qui n'aboutit pas ne révoque rien", async () => {
-  const plan = etapes({ avancement: () => Promise.resolve({ rejointes: 0, attendues: 2 }) });
+test("a propagation that does not complete revokes nothing", async () => {
+  const plan = steps({ progress: () => Promise.resolve({ joined: 0, expected: 2 }) });
 
   await assert.rejects(
-    () => migrer({ quoi: "reprendre", handle: "alice" }, plan, "alice:desktop", sansAttente),
+    () => migrate({ kind: "resume", handle: "alice" }, plan, "alice:desktop", noWait),
     PropagationIncomplete,
   );
 
-  assert.ok(!plan.journal.some((e) => e.startsWith("revoquer")));
-  assert.ok(!plan.journal.includes("oublier"));
+  assert.ok(!plan.log.some((e) => e.startsWith("revoke")));
+  assert.ok(!plan.log.includes("forget"));
 });
 
-/** Aucune décision de repli ne doit toucher à quoi que ce soit. */
-test("un repli n'exécute aucune étape", async () => {
+/** No fallback decision may touch anything at all. */
+test("a fallback runs no step", async () => {
   for (const decision of [
-    { quoi: "repli", raison: "peu importe" },
-    { quoi: "native" },
-    { quoi: "neuve" },
+    { kind: "fallback", reason: "no matter" },
+    { kind: "native" },
+    { kind: "fresh" },
   ] as const) {
-    const plan = etapes();
-    await migrer(decision, plan, "alice:desktop", sansAttente);
-    assert.deepEqual(plan.journal, [], `${decision.quoi} a agi`);
+    const plan = steps();
+    await migrate(decision, plan, "alice:desktop", noWait);
+    assert.deepEqual(plan.log, [], `${decision.kind} acted`);
   }
 });
 
-/** Une conversation de plus côté nouveau (rare, mais possible) ne bloque pas. */
-test("un avancement supérieur à l'attendu ne boucle pas", async () => {
-  const plan = etapes({ avancement: () => Promise.resolve({ rejointes: 3, attendues: 2 }) });
-  await migrer({ quoi: "reprendre", handle: "alice" }, plan, "alice:desktop", sansAttente);
+/** One conversation more on the new side (rare, but possible) does not block. */
+test("progress beyond what was expected does not loop", async () => {
+  const plan = steps({ progress: () => Promise.resolve({ joined: 3, expected: 2 }) });
+  await migrate({ kind: "resume", handle: "alice" }, plan, "alice:desktop", noWait);
 
-  assert.ok(plan.journal.includes("oublier"));
+  assert.ok(plan.log.includes("forget"));
 });

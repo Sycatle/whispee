@@ -1,224 +1,224 @@
 /**
- * Passage d'une installation de bureau au stockage natif.
+ * Moving a desktop install over to native storage.
  *
- * # Le problème, qui n'a pas de solution simple
+ * # The problem, which has no simple solution
  *
- * Une installation existante range ses clés dans IndexedDB. Elles y sont non extractables —
- * c'est leur seule raison d'être — donc **elle ne peut pas les déplacer**. Et le serveur refuse
- * de changer la clé d'authentification d'un appareil déjà enregistré (clause sur `auth_key` dans
- * `register_device`), ce qui ferme la dernière porte : cet appareil ne sera jamais natif.
+ * An existing install keeps its keys in IndexedDB. They are non-extractable there — that is
+ * their whole purpose — so **it cannot move them**. And the server refuses to change the
+ * authentication key of an already-registered device (the `auth_key` clause in
+ * `register_device`), which closes the last door: this device will never be native.
  *
- * Déplacer le seul état MLS ne servirait à rien. Un état sauvé dont la clé d'authentification a
- * disparu est inutilisable : l'appareil ne peut plus émettre une requête. La demi-mesure
- * ressemblerait à une protection sans en être une, ce qui est pire que de ne rien faire.
+ * Moving only the MLS state would be pointless. A saved state whose authentication key is gone
+ * is unusable: the device can no longer issue a request. The half-measure would look like
+ * protection without being one, which is worse than doing nothing.
  *
- * # Ce qu'on fait à la place
+ * # What we do instead
  *
- * On n'essaie pas de sauver l'appareil : on en enregistre un neuf, natif, attesté par la graine
- * du compte — qui, elle, est dans la session et donc disponible. L'ancien est révoqué. C'est le
- * mécanisme d'appairage existant, appliqué à soi-même, et il ne demande aucune fonction serveur
- * nouvelle.
+ * We do not try to save the device: we register a new, native one, attested by the account seed
+ * — which is in the session and therefore available. The old one is revoked. This is the
+ * existing pairing mechanism applied to oneself, and it needs no new server feature.
  *
- * Le prix est réel et se paie une fois : l'identité MLS change, donc les groupes sont à
- * rejoindre et l'historique à relire depuis le coffre.
+ * The price is real and paid once: the MLS identity changes, so groups have to be rejoined and
+ * history re-read from the vault.
  *
- * # D'où le pré-requis
+ * # Hence the prerequisite
  *
- * **Sans coffre, pas de migration.** L'historique n'existe alors nulle part ailleurs que dans
- * l'état MLS de l'appareil courant, et le nouvel appareil ne peut pas en hériter : le ratchet a
- * détruit les clés au fur et à mesure. Migrer sans coffre échangerait une éviction *possible*
- * contre une perte *certaine*. L'installation reste sur IndexedDB, ce qu'elle faisait déjà.
+ * **No vault, no migration.** History then exists nowhere but in the current device's MLS state,
+ * and the new device cannot inherit it: the ratchet destroyed the keys as it went. Migrating
+ * without a vault would trade a *possible* eviction for a *certain* loss. The install stays on
+ * IndexedDB, which is what it was doing already.
  *
- * # Pourquoi l'état de la migration n'est pas mémorisé
+ * # Why the migration state is not remembered
  *
- * Il se déduit de ce qui existe : une session web seule est une migration à faire, les deux
- * ensemble une migration commencée, une session native seule une migration finie. Un marqueur
- * ajouterait une troisième source de vérité, qu'une interruption pourrait mettre en désaccord
- * avec les deux autres — précisément dans le cas où l'on compte dessus.
+ * It follows from what exists: a web session alone is a migration to do, both together a
+ * migration begun, a native session alone a migration finished. A marker would add a third
+ * source of truth, which an interruption could put at odds with the other two — precisely in the
+ * case where it is being relied on.
  */
 
-/** Ce qu'on sait d'une session déjà rangée quelque part, sans l'avoir ouverte. */
+/** What is known about a session already kept somewhere, without having opened it. */
 export interface Presence {
   handle: string;
   /**
-   * Le coffre est-il actif ?
+   * Is the vault on?
    *
-   * Trois valeurs, et la distinction est ici décisive : `false` est un refus explicite qui
-   * interdit la migration, `undefined` est l'absence de décision, donc le défaut, donc actif.
-   * Les confondre refuserait de migrer tous les comptes antérieurs au drapeau.
+   * Three values, and the distinction is decisive here: `false` is an explicit refusal that
+   * forbids migration, `undefined` is the absence of a decision, hence the default, hence on.
+   * Confusing them would refuse to migrate every account predating the flag.
    */
   vaultEnabled?: boolean;
 }
 
 export type Decision =
-  /** Rien de rangé : l'installation est neuve, elle démarre nativement sans rien migrer. */
-  | { quoi: "neuve" }
-  /** Migration finie, ou installation déjà native. */
-  | { quoi: "native" }
-  /** À faire, depuis le début. */
-  | { quoi: "demarrer"; handle: string }
+  /** Nothing kept: the install is new, it starts natively with nothing to migrate. */
+  | { kind: "fresh" }
+  /** Migration finished, or install already native. */
+  | { kind: "native" }
+  /** To do, from the start. */
+  | { kind: "start"; handle: string }
   /**
-   * Commencée puis interrompue.
+   * Begun, then interrupted.
    *
-   * Ce n'est pas un état dégradé : le compte a simplement deux appareils, ce qu'il a le droit
-   * d'avoir. Reprendre revient à finir la propagation puis à révoquer l'ancien.
+   * This is not a degraded state: the account simply has two devices, which it is entitled to.
+   * Resuming means finishing the propagation and then revoking the old one.
    */
-  | { quoi: "reprendre"; handle: string }
+  | { kind: "resume"; handle: string }
   /**
-   * On reste sur IndexedDB, et on dit pourquoi.
+   * We stay on IndexedDB, and we say why.
    *
-   * `raison` est destinée à l'utilisateur : une migration silencieusement abandonnée laisserait
-   * croire à une protection qui n'existe pas.
+   * `reason` is meant for the user: a migration silently abandoned would suggest a protection
+   * that does not exist.
    */
-  | { quoi: "repli"; raison: string };
+  | { kind: "fallback"; reason: string };
 
-const SANS_COFFRE =
-  "La sauvegarde d'historique est désactivée : migrer vers le stockage natif ferait perdre " +
-  "définitivement les conversations, que le nouvel appareil ne pourrait relire nulle part. " +
-  "L'application continue de fonctionner comme avant.";
+const NO_VAULT =
+  "History backup is turned off: migrating to app storage would permanently lose your " +
+  "conversations, which the new device could not re-read anywhere. The app keeps working as " +
+  "before.";
 
-const CONFLIT =
-  "Le stockage natif contient déjà la session d'un autre compte. Aucune migration n'est tentée : " +
-  "l'écraser détruirait une identité que le serveur connaît encore et que plus rien ne prouverait.";
+const CONFLICT =
+  "App storage already holds another account's session. No migration is attempted: overwriting " +
+  "it would destroy an identity the server still knows about and that nothing could prove any more.";
 
 /**
- * Que faire au démarrage, sous Tauri.
+ * What to do at startup, under Tauri.
  *
- * Fonction pure : elle ne regarde que ce qui existe, et c'est ce qui la rend vérifiable. Toute
- * la difficulté de la migration tient dans ce tableau de cas, pas dans les appels réseau.
+ * A pure function: it looks only at what exists, and that is what makes it verifiable. All the
+ * difficulty of the migration is in this table of cases, not in the network calls.
  */
-export function decider(web: Presence | undefined, natif: Presence | undefined): Decision {
+export function decide(web: Presence | undefined, native: Presence | undefined): Decision {
   if (web === undefined) {
-    return natif === undefined ? { quoi: "neuve" } : { quoi: "native" };
+    return native === undefined ? { kind: "fresh" } : { kind: "native" };
   }
 
-  if (natif === undefined) {
-    // Le refus est vérifié avant toute chose : c'est le seul cas où migrer serait destructeur.
-    if (web.vaultEnabled === false) return { quoi: "repli", raison: SANS_COFFRE };
-    return { quoi: "demarrer", handle: web.handle };
+  if (native === undefined) {
+    // The refusal is checked before anything else: it is the only case where migrating would be
+    // destructive.
+    if (web.vaultEnabled === false) return { kind: "fallback", reason: NO_VAULT };
+    return { kind: "start", handle: web.handle };
   }
 
-  // Deux sessions de comptes différents ne sont pas une migration à moitié faite. Se tromper
-  // ici écraserait une identité que le serveur connaît encore et que plus rien ne prouverait.
-  if (natif.handle !== web.handle) return { quoi: "repli", raison: CONFLIT };
+  // Two sessions from different accounts are not a half-finished migration. Getting this wrong
+  // would overwrite an identity the server still knows about and that nothing could prove.
+  if (native.handle !== web.handle) return { kind: "fallback", reason: CONFLICT };
 
-  return { quoi: "reprendre", handle: web.handle };
+  return { kind: "resume", handle: web.handle };
 }
 
 /**
- * Les étapes, telles que `session.ts` sait les exécuter.
+ * The steps, as `session.ts` knows how to run them.
  *
- * Isolées derrière une interface pour que l'enchaînement — le seul endroit où une interruption
- * peut faire des dégâts — soit testable sans serveur, sans MLS et sans webview.
+ * Isolated behind an interface so that the sequence — the only place an interruption can do
+ * damage — is testable without a server, without MLS and without a webview.
  */
-export interface Etapes {
+export interface Steps {
   /**
-   * Enregistre un appareil natif neuf, attesté par la graine du compte, et range sa session.
+   * Registers a new native device, attested by the account seed, and stores its session.
    *
-   * Appelée seulement si aucune session native n'existe. Le serveur décline le nom en cas de
-   * collision, donc un second appel créerait un appareil de plus au lieu d'échouer — c'est
-   * pourquoi la décision, et non cette fonction, porte l'idempotence.
+   * Called only if no native session exists. The server declines a name on collision, so a
+   * second call would create one more device instead of failing — which is why idempotence is
+   * carried by the decision, not by this function.
    */
-  enregistrerAppareilNatif(): Promise<string>;
-
-  /**
-   * Fait ajouter le nouvel appareil à toutes les conversations, par l'ancien.
-   *
-   * C'est `propagateOwnDevices`, déjà idempotent et déjà appelé à chaque relève : MLS ne
-   * rattrape pas un membre absent de l'arbre, donc l'opération est conçue pour être répétée.
-   */
-  propagerDepuisAncien(): Promise<void>;
-
-  /** Combien de conversations le nouvel appareil a rejointes, sur combien l'ancien en a. */
-  avancement(): Promise<{ rejointes: number; attendues: number }>;
-
-  /** Relit l'historique archivé, conversation par conversation. */
-  restaurerHistorique(): Promise<void>;
+  registerNativeDevice(): Promise<string>;
 
   /**
-   * Révoque l'ancien appareil, depuis le nouveau.
+   * Has the old device add the new one to every conversation.
    *
-   * Dans ce sens et pas l'autre : un appareil ne se révoque pas lui-même, et surtout la
-   * révocation doit être le **dernier** geste avant l'effacement. La faire plus tôt couperait
-   * l'ancien appareil des groupes avant qu'il n'ait fini d'y introduire le nouveau.
+   * This is `propagateOwnDevices`, already idempotent and already called on every poll: MLS does
+   * not catch up a member missing from the tree, so the operation is designed to be repeated.
    */
-  revoquerAncien(ancien: string): Promise<void>;
+  propagateFromOld(): Promise<void>;
 
-  /** Efface la session web. Le seul geste irréversible, et donc le dernier. */
-  oublierWeb(): Promise<void>;
+  /** How many conversations the new device has joined, out of how many the old one has. */
+  progress(): Promise<{ joined: number; expected: number }>;
 
-  /** Signale l'avancement à l'interface : la migration prend plusieurs allers-retours. */
-  progres?(etape: string): void;
+  /** Re-reads the archived history, conversation by conversation. */
+  restoreHistory(): Promise<void>;
+
+  /**
+   * Revokes the old device, from the new one.
+   *
+   * In that direction and not the other: a device does not revoke itself, and above all the
+   * revocation must be the **last** act before erasure. Doing it earlier would cut the old
+   * device off from the groups before it had finished introducing the new one there.
+   */
+  revokeOld(old: string): Promise<void>;
+
+  /** Erases the web session. The only irreversible act, and therefore the last one. */
+  forgetWeb(): Promise<void>;
+
+  /** Reports progress to the interface: the migration takes several round trips. */
+  onProgress?(step: string): void;
 }
 
 /**
- * Nombre de tours d'attente avant d'abandonner la propagation.
+ * How many waiting rounds before giving up on propagation.
  *
- * Abandonner laisse deux appareils actifs — un état sain, seulement redondant — et le démarrage
- * suivant repart de là. Attendre indéfiniment, en revanche, bloquerait l'application sur un
- * serveur muet.
+ * Giving up leaves two active devices — a healthy state, merely redundant — and the next startup
+ * picks up from there. Waiting forever, on the other hand, would block the app on a silent
+ * server.
  */
-const TOURS_MAX = 20;
+const MAX_ROUNDS = 20;
 
-/** Signale que la propagation n'a pas abouti dans le temps imparti. */
+/** Signals that propagation did not complete in the time allowed. */
 export class PropagationIncomplete extends Error {
-  constructor(rejointes: number, attendues: number) {
+  constructor(joined: number, expected: number) {
     super(
-      `Migration inachevée : ${rejointes} conversation(s) sur ${attendues} rejointes. ` +
-        "Elle reprendra au prochain démarrage ; les deux appareils restent actifs d'ici là.",
+      `Migration unfinished: ${joined} of ${expected} conversation(s) joined. ` +
+        "It will resume on the next start; both devices stay active until then.",
     );
     this.name = "PropagationIncomplete";
   }
 }
 
 /**
- * Exécute la migration, ou la reprend.
+ * Runs the migration, or resumes it.
  *
- * L'ordre n'est pas négociable, et chaque étape supporte d'être rejouée : une interruption
- * laisse le compte avec deux appareils actifs, ce qui fonctionne, et le démarrage suivant
- * reprend là où celui-ci s'est arrêté.
+ * The order is not negotiable, and every step tolerates being replayed: an interruption leaves
+ * the account with two active devices, which works, and the next startup picks up where this one
+ * stopped.
  *
- * `attendre` est injecté pour que les tests n'attendent pas réellement.
+ * `wait` is injected so tests do not actually wait.
  */
-export async function migrer(
+export async function migrate(
   decision: Decision,
-  etapes: Etapes,
-  ancien: string,
-  attendre: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  steps: Steps,
+  old: string,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
 ): Promise<void> {
-  if (decision.quoi !== "demarrer" && decision.quoi !== "reprendre") return;
+  if (decision.kind !== "start" && decision.kind !== "resume") return;
 
-  const dire = (etape: string) => etapes.progres?.(etape);
+  const say = (step: string) => steps.onProgress?.(step);
 
-  if (decision.quoi === "demarrer") {
-    dire("Enregistrement de l'appareil…");
-    await etapes.enregistrerAppareilNatif();
+  if (decision.kind === "start") {
+    say("Registering the device…");
+    await steps.registerNativeDevice();
   }
 
-  dire("Transfert des conversations…");
-  await etapes.propagerDepuisAncien();
+  say("Transferring conversations…");
+  await steps.propagateFromOld();
 
-  // La propagation est asynchrone de bout en bout : l'ancien appareil dépose des commits, le
-  // nouveau doit les relever. On attend le résultat plutôt que le geste — sans quoi on
-  // révoquerait l'ancien avant que le nouveau ne soit réellement dans les groupes, et les
-  // conversations deviendraient inaccessibles de ce côté-ci.
-  for (let tour = 0; ; tour += 1) {
-    const { rejointes, attendues } = await etapes.avancement();
-    if (rejointes >= attendues) break;
+  // Propagation is asynchronous end to end: the old device posts commits, the new one has to
+  // pick them up. We wait for the result rather than the act — otherwise we would revoke the old
+  // device before the new one was really in the groups, and the conversations would become
+  // unreachable from this side.
+  for (let round = 0; ; round += 1) {
+    const { joined, expected } = await steps.progress();
+    if (joined >= expected) break;
 
-    if (tour >= TOURS_MAX) throw new PropagationIncomplete(rejointes, attendues);
+    if (round >= MAX_ROUNDS) throw new PropagationIncomplete(joined, expected);
 
-    await attendre(1500);
-    await etapes.propagerDepuisAncien();
+    await wait(1500);
+    await steps.propagateFromOld();
   }
 
-  dire("Restauration de l'historique…");
-  await etapes.restaurerHistorique();
+  say("Restoring history…");
+  await steps.restoreHistory();
 
-  dire("Retrait de l'ancien appareil…");
-  await etapes.revoquerAncien(ancien);
+  say("Removing the old device…");
+  await steps.revokeOld(old);
 
-  // En dernier, et seulement en dernier : tant que la session web existe, tout ce qui précède
-  // peut être rejoué. Une fois effacée, plus rien ne peut l'être.
-  await etapes.oublierWeb();
+  // Last, and only last: as long as the web session exists, everything above can be replayed.
+  // Once erased, nothing can be.
+  await steps.forgetWeb();
 }

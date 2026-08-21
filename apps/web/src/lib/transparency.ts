@@ -1,36 +1,36 @@
 /**
- * Vérification du journal auditable des clés, côté client.
+ * Client-side verification of the auditable key log.
  *
- * # Le trou que ce module ferme
+ * # The hole this module closes
  *
- * Les attestations empêchent le serveur d'**ajouter** un appareil à un compte. Elles ne
- * l'empêchent pas de mentir sur la clé du compte **au premier contact** : quand on demande le
- * compte de quelqu'un pour la première fois, on n'a rien à quoi comparer. Le serveur peut
- * servir sa propre clé et relayer en clair entre deux sessions parfaitement chiffrées.
+ * Attestations stop the server from **adding** a device to an account. They do not stop it from
+ * lying about the account key **on first contact**: when you ask for someone's account for the
+ * first time, you have nothing to compare against. The server can serve its own key and relay in
+ * the clear between two perfectly encrypted sessions.
  *
- * Une preuve d'inclusion dans un arbre de Merkle append-only ne se fabrique pas. Le serveur
- * doit publier la clé qu'il sert, et il ne peut plus la retirer ensuite.
+ * An inclusion proof in an append-only Merkle tree cannot be forged. The server has to publish the
+ * key it serves, and it can no longer take it back afterwards.
  *
- * # Les trois contrôles, et pourquoi il en faut trois
+ * # The three checks, and why three are needed
  *
- * 1. **Signature de la tête** — elle vient bien du journal.
- * 2. **Inclusion** — la clé qu'on me sert est celle du journal, pas une autre.
- * 3. **Cohérence** — le journal d'aujourd'hui prolonge celui que j'ai vu hier.
+ * 1. **Head signature** — it really does come from the log.
+ * 2. **Inclusion** — the key I am served is the log's, not another one.
+ * 3. **Consistency** — today's log extends the one I saw yesterday.
  *
- * Sans le troisième, le serveur remplace une clé déjà publiée et sert un journal tout aussi
- * cohérent : les deux premiers passent, et le journal ne prouve plus rien sur le passé.
+ * Without the third, the server replaces an already published key and serves a log that is just as
+ * consistent: the first two pass, and the log no longer proves anything about the past.
  *
- * # Ce qu'aucun des trois n'attrape
+ * # What none of the three catches
  *
- * Un serveur qui tient **deux journaux** et en sert un à chacun. Chaque victime voit un journal
- * signé, cohérent, où sa propre vue est parfaite. Seule la comparaison des têtes entre clients
- * — le gossip, dans les messages chiffrés que le serveur ne peut ni lire ni falsifier — révèle
- * la bifurcation. Voir `Session.gossip`.
+ * A server that keeps **two logs** and serves one to each side. Each victim sees a signed,
+ * consistent log in which their own view is perfect. Only comparing heads between clients — the
+ * gossip, inside encrypted messages the server can neither read nor forge — reveals the fork. See
+ * `Session.gossip`.
  */
 import type { Api, SignedHead } from "./api";
 import type { Crypto } from "./wasm";
 
-/** Dernière tête acceptée, conservée d'une session à l'autre. */
+/** The last accepted head, kept from one session to the next. */
 export interface SeenHead {
   size: number;
   root: Uint8Array;
@@ -40,17 +40,17 @@ export interface SeenHead {
 export type Verdict =
   | { ok: true }
   /**
-   * Le serveur a échoué à prouver ce qu'il affirme. Ce n'est pas une erreur réseau à
-   * réessayer : c'est le signal que le dispositif existe pour produire.
+   * The server failed to prove what it claims. This is not a network error to retry: it is the
+   * signal the whole mechanism exists to produce.
    */
   | { ok: false; reason: string };
 
 /**
- * Vérifie la signature d'une tête servie par le serveur.
+ * Verifies the signature of a head served by the server.
  *
- * La clé publique du journal est elle-même servie par le serveur — pis-aller assumé, voir le
- * commentaire de `SignedHead` côté serveur. On refuse au moins qu'elle **change** en cours de
- * route : un journal qui se met à signer avec une autre clé est un autre journal.
+ * The log's public key is itself served by the server — an accepted stopgap, see the `SignedHead`
+ * comment on the server side. What we do refuse is for it to **change** along the way: a log that
+ * starts signing with another key is another log.
  */
 export function acceptHead(
   crypto: Crypto,
@@ -58,10 +58,10 @@ export function acceptHead(
   seen: SeenHead | undefined,
 ): Verdict {
   if (seen && !equal(seen.logKey, head.logKey)) {
-    return { ok: false, reason: "la clé du journal a changé : ce n'est plus le même journal." };
+    return { ok: false, reason: "the log key changed: this is no longer the same log." };
   }
 
-  const valide = crypto.verifyTreeHead(
+  const valid = crypto.verifyTreeHead(
     head.logKey,
     BigInt(head.size),
     head.root,
@@ -69,23 +69,22 @@ export function acceptHead(
     head.signature,
   );
 
-  if (!valide) return { ok: false, reason: "tête de journal mal signée." };
+  if (!valid) return { ok: false, reason: "badly signed log head." };
 
-  // Un journal ne rétrécit pas. Une tête plus petite que la dernière vue est soit un rejeu,
-  // soit une amputation — les deux méritent le même refus.
+  // A log does not shrink. A head smaller than the last one seen is either a replay or an
+  // amputation — both deserve the same refusal.
   if (seen && head.size < seen.size) {
-    return { ok: false, reason: "le journal a rétréci : des entrées ont disparu." };
+    return { ok: false, reason: "the log shrank: entries have disappeared." };
   }
 
   return { ok: true };
 }
 
 /**
- * Vérifie qu'une clé de compte figure dans le journal, et que celui-ci prolonge ce qu'on
- * connaissait.
+ * Verifies that an account key appears in the log, and that the log extends what we already knew.
  *
- * Retourne la nouvelle tête à mémoriser en cas de succès. En cas d'échec, **rien n'est
- * mémorisé** : accepter une tête qu'on vient de refuser reviendrait à l'entériner.
+ * Returns the new head to remember on success. On failure **nothing is remembered**: accepting a
+ * head we have just refused would amount to endorsing it.
  */
 export async function verifyAccount(
   api: Api,
@@ -96,11 +95,11 @@ export async function verifyAccount(
 ): Promise<{ verdict: Verdict; head?: SeenHead }> {
   const proof = await api.logProof(handle);
 
-  const tete = acceptHead(crypto, proof.head, seen);
-  if (!tete.ok) return { verdict: tete };
+  const head = acceptHead(crypto, proof.head, seen);
+  if (!head.ok) return { verdict: head };
 
-  // La feuille est **recalculée** à partir du handle et de la clé qu'on nous sert. Utiliser
-  // celle du serveur reviendrait à lui faire prouver ses dires avec ses dires.
+  // The leaf is **recomputed** from the handle and the key we are served. Using the server's would
+  // amount to letting it prove its claims with its claims.
   const leaf = crypto.logLeaf(handle, identityKey);
 
   if (
@@ -109,7 +108,7 @@ export async function verifyAccount(
     return {
       verdict: {
         ok: false,
-        reason: `la clé servie pour @${handle} ne figure pas dans le journal.`,
+        reason: `the key served for @${handle} does not appear in the log.`,
       },
     };
   }
@@ -118,14 +117,14 @@ export async function verifyAccount(
     return {
       verdict: {
         ok: false,
-        reason: `le journal publie une autre clé pour @${handle} que celle qui nous est servie.`,
+        reason: `the log publishes a different key for @${handle} than the one we are served.`,
       },
     };
   }
 
   if (seen) {
-    const coherence = await verifyExtends(api, crypto, seen, proof.head);
-    if (!coherence.ok) return { verdict: coherence };
+    const consistency = await verifyExtends(api, crypto, seen, proof.head);
+    if (!consistency.ok) return { verdict: consistency };
   }
 
   return {
@@ -135,31 +134,30 @@ export async function verifyAccount(
 }
 
 /**
- * Vérifie que le journal courant prolonge une tête donnée.
+ * Verifies that the current log extends a given head.
  *
- * Sert deux usages qui n'en font qu'un : notre propre tête précédente, et **celle qu'un
- * correspondant nous a transmise**. Dans le second cas, c'est ce qui détecte un serveur qui
- * tiendrait deux journaux — il ne peut pas prouver que le nôtre prolonge une vue qu'il n'a
- * jamais servie.
+ * Serves two uses that are really one: our own previous head, and **the one a correspondent handed
+ * us**. In the second case, this is what detects a server keeping two logs — it cannot prove that
+ * ours extends a view it never served.
  */
 export async function verifyExtends(
   api: Api,
   crypto: Crypto,
-  ancre: SeenHead,
-  courante: SignedHead,
+  anchor: SeenHead,
+  current: SignedHead,
 ): Promise<Verdict> {
-  if (ancre.size > courante.size) {
-    return { ok: false, reason: "le journal est plus court que la vue de référence." };
+  if (anchor.size > current.size) {
+    return { ok: false, reason: "the log is shorter than the reference view." };
   }
 
-  const { proof } = await api.logConsistency(ancre.size);
+  const { proof } = await api.logConsistency(anchor.size);
 
   if (
-    !crypto.verifyConsistency(ancre.size, ancre.root, courante.size, courante.root, proof)
+    !crypto.verifyConsistency(anchor.size, anchor.root, current.size, current.root, proof)
   ) {
     return {
       ok: false,
-      reason: "le journal ne prolonge pas la vue de référence : des clés ont été réécrites.",
+      reason: "the log does not extend the reference view: keys have been rewritten.",
     };
   }
 

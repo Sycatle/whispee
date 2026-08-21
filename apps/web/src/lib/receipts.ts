@@ -1,34 +1,33 @@
 /**
- * Accusés de livraison et de lecture.
+ * Delivery and read receipts.
  *
- * # Cumulatifs, jamais unitaires
+ * # Cumulative, never per-message
  *
- * Un accusé dit « jusqu'à ce numéro », pas « ce message-ci ». Ouvrir une conversation en
- * retard de deux cents messages coûte donc une enveloppe et non deux cents — dans une table
- * qui n'est jamais purgée, la différence n'est pas une optimisation, c'est la viabilité.
+ * A receipt says "up to this number", not "this message". Opening a conversation two hundred
+ * messages behind therefore costs one envelope and not two hundred — in a table that is never
+ * purged, the difference is not an optimisation, it is viability.
  *
- * # La boucle qu'il faut couper
+ * # The loop that has to be cut
  *
- * Un accusé est lui-même une enveloppe. Sans garde, chacun accuse réception de l'accusé de
- * l'autre et la conversation ne s'arrête plus. La coupure est dans `content.isControl()`, en
- * un seul endroit, appliqué à l'émission comme à la réception.
+ * A receipt is itself an envelope. Without a guard, each side acknowledges the other's
+ * acknowledgement and the conversation never stops. The cut is in `content.isControl()`, in one
+ * place, applied on send as on receive.
  *
- * # Deux appareils, un seul compte
+ * # Two devices, one account
  *
- * Chaque appareil d'un compte reçoit chaque message et voudrait accuser réception. Comme tous
- * les membres reçoivent aussi tous les accusés, l'état de son propre compte est connu
- * localement : il suffit de n'émettre que si l'on dépasse ce que le compte a déjà accusé. La
- * déduplication ne demande aucune coordination.
+ * Every device on an account receives every message and would like to acknowledge it. Since all
+ * members also receive all the receipts, an account's own state is known locally: it is enough to
+ * emit only when going beyond what the account has already acknowledged. Deduplication needs no
+ * coordination.
  *
- * # Réciprocité
+ * # Reciprocity
  *
- * Désactiver ses accusés de lecture désactive aussi leur affichage. Sans cette symétrie, on
- * pourrait voir sans être vu, ce qui est précisément ce que le réglage prétend empêcher.
- * Le `delivered` n'est pas concerné : il constate qu'un appareil a relevé sa boîte, pas
- * qu'une personne a lu.
+ * Turning off your read receipts also turns off their display. Without that symmetry, you could
+ * see without being seen, which is precisely what the setting claims to prevent. `delivered` is
+ * not affected: it attests that a device collected its mail, not that a person read.
  */
 
-/** Ce qu'un compte a accusé, dans une conversation. */
+/** What an account has acknowledged, in one conversation. */
 export interface AccountReceipts {
   delivered: number;
   read: number;
@@ -37,11 +36,11 @@ export interface AccountReceipts {
 export type ReceiptBook = Map<string, AccountReceipts>;
 
 /**
- * Enregistre un accusé reçu. Un curseur ne recule jamais.
+ * Records a received receipt. A cursor never moves backwards.
  *
- * Le serveur ordonne les enveloppes mais ne garantit pas l'ordre dans lequel un client les
- * traite après une reconnexion. Prendre le maximum plutôt que la dernière valeur évite qu'un
- * accusé ancien, rejoué ou relu, fasse régresser l'affichage.
+ * The server orders envelopes but does not guarantee the order in which a client processes them
+ * after a reconnection. Taking the maximum rather than the last value keeps an old receipt,
+ * replayed or re-read, from making the display regress.
  */
 export function record(
   book: ReceiptBook,
@@ -49,25 +48,26 @@ export function record(
   state: "delivered" | "read",
   seq: number,
 ): void {
-  const courant = book.get(handle) ?? { delivered: 0, read: 0 };
+  const current = book.get(handle) ?? { delivered: 0, read: 0 };
 
   if (state === "read") {
-    // Lire implique avoir reçu. Sans cette ligne, un client qui n'émet que `read` (accusés de
-    // livraison arrivés hors d'ordre) afficherait « lu » sans jamais afficher « reçu ».
-    courant.read = Math.max(courant.read, seq);
-    courant.delivered = Math.max(courant.delivered, seq);
+    // Reading implies having received. Without this line, a client that only emits `read`
+    // (delivery receipts arriving out of order) would show "read" without ever showing
+    // "delivered".
+    current.read = Math.max(current.read, seq);
+    current.delivered = Math.max(current.delivered, seq);
   } else {
-    courant.delivered = Math.max(courant.delivered, seq);
+    current.delivered = Math.max(current.delivered, seq);
   }
 
-  book.set(handle, courant);
+  book.set(handle, current);
 }
 
 /**
- * Faut-il émettre un accusé, et pour quel numéro ?
+ * Should a receipt be emitted, and for which number?
  *
- * Retourne `undefined` quand il n'y a rien à annoncer — c'est le cas courant, et c'est ce qui
- * empêche chaque tour de relève de produire une enveloppe.
+ * Returns `undefined` when there is nothing to announce — the common case, and what keeps every
+ * poll round from producing an envelope.
  */
 export function pending(
   book: ReceiptBook,
@@ -75,17 +75,17 @@ export function pending(
   state: "delivered" | "read",
   cursor: number,
 ): number | undefined {
-  const connu = book.get(handle) ?? { delivered: 0, read: 0 };
-  const acquis = state === "read" ? connu.read : connu.delivered;
-  return cursor > acquis ? cursor : undefined;
+  const known = book.get(handle) ?? { delivered: 0, read: 0 };
+  const reached = state === "read" ? known.read : known.delivered;
+  return cursor > reached ? cursor : undefined;
 }
 
 /**
- * État à afficher sur un message qu'on a envoyé soi-même.
+ * State to display on a message you sent yourself.
  *
- * `readReceipts` est le réglage local : quand il est désactivé, on n'émet pas et on n'affiche
- * pas. Le paramètre est passé plutôt que lu d'un module de réglages pour que la réciprocité
- * soit visible dans la signature — un défaut de couplage rendrait l'asymétrie possible.
+ * `readReceipts` is the local setting: when it is off, we neither emit nor display. The parameter
+ * is passed in rather than read from a settings module so that the reciprocity is visible in the
+ * signature — a coupling failure would make the asymmetry possible.
  */
 export function statusOf(
   book: ReceiptBook,
@@ -95,9 +95,9 @@ export function statusOf(
 ): "sent" | "delivered" | "read" {
   if (peers.length === 0) return "sent";
 
-  const etats = peers.map((handle) => book.get(handle) ?? { delivered: 0, read: 0 });
+  const states = peers.map((handle) => book.get(handle) ?? { delivered: 0, read: 0 });
 
-  if (readReceipts && etats.every((etat) => etat.read >= seq)) return "read";
-  if (etats.every((etat) => etat.delivered >= seq)) return "delivered";
+  if (readReceipts && states.every((state) => state.read >= seq)) return "read";
+  if (states.every((state) => state.delivered >= seq)) return "delivered";
   return "sent";
 }

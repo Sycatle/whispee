@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { Session } from "@/lib/session";
 import { QrCode } from "@/components/QrCode";
-import { scanDisponible, scanner } from "@/lib/scanner";
+import { scanAvailable, scan } from "@/lib/scanner";
 
 /**
- * Ajout d'un appareil, côté appareil **déjà authentifié**.
+ * Adding a device, from the side of the **already authenticated** device.
  *
- * C'est ici que doit se passer l'ajout, et non sur l'écran d'accueil : tant qu'on tient un
- * appareil en main, il n'y a aucune raison de ressaisir la phrase de récupération — donc
- * aucune raison de l'exposer une seconde fois.
+ * This is where the addition belongs, not on the welcome screen: as long as you are holding a
+ * device, there is no reason to type the recovery phrase again — so no reason to expose it a
+ * second time.
  */
 export function PairDevice({ session, onDone }: { session: Session; onDone: () => void }) {
   const [code, setCode] = useState("");
@@ -17,45 +17,45 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
   const [busy, setBusy] = useState(false);
   const [camera, setCamera] = useState(false);
   const video = useRef<HTMLVideoElement>(null);
-  const arret = useRef<(() => void) | null>(null);
+  const stopCamera = useRef<(() => void) | null>(null);
 
-  // La caméra doit s'éteindre au démontage, y compris si le panneau se ferme pendant un scan.
-  // Un voyant vert qui reste allumé après coup est au mieux inquiétant, au pire une fuite.
-  useEffect(() => () => arret.current?.(), []);
+  // The camera must go off on unmount, including if the panel closes mid-scan. A green light
+  // still on afterwards is unsettling at best and a leak at worst.
+  useEffect(() => () => stopCamera.current?.(), []);
 
   /**
-   * Scanne, puis appaire directement.
+   * Scan, then pair straight away.
    *
-   * Sans étape de confirmation intermédiaire : le code lu n'est pas une intention à valider,
-   * c'est la même donnée que celle qu'on aurait recopiée. La vérification, elle, arrive juste
-   * après — le code de confirmation affiché des deux côtés, qui est le seul contrôle qui compte.
+   * No intermediate confirmation step: the code read is not an intention to approve, it is the
+   * same data you would have typed by hand. Verification comes right after — the confirmation
+   * code shown on both sides, which is the only check that counts.
    */
-  const lireLeCarre = async () => {
+  const readTheSquare = async () => {
     setError(null);
     setCamera(true);
     try {
       if (!video.current) return;
 
-      const { lecture, arreter } = await scanner(video.current);
-      arret.current = arreter;
+      const { read, stop } = await scan(video.current);
+      stopCamera.current = stop;
 
-      const lu = await lecture;
-      setCode(lu);
+      const scanned = await read;
+      setCode(scanned);
       setCamera(false);
       setBusy(true);
-      setConfirmation(await session.pairDevice(lu.trim()));
+      setConfirmation(await session.pairDevice(scanned.trim()));
     } catch (e) {
-      // Une caméra refusée n'est pas une panne : le champ de saisie reste, et il suffit.
+      // A refused camera is not a failure: the text field is still there, and it is enough.
       setError(
         e instanceof Error && e.name === "NotAllowedError"
-          ? "Caméra refusée. Recopiez le code affiché sur l'autre appareil."
+          ? "Camera denied. Copy the code shown on the other device instead."
           : e instanceof Error
             ? e.message
             : String(e),
       );
       setCamera(false);
     } finally {
-      arret.current = null;
+      stopCamera.current = null;
       setBusy(false);
     }
   };
@@ -76,21 +76,21 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
   if (confirmation) {
     return (
       <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-        <h2 className="font-medium">Code de confirmation</h2>
+        <h2 className="font-medium">Confirmation code</h2>
         <p className="mt-2 text-(--color-ink-muted)">
-          Ce code doit être identique sur les deux écrans. S&apos;il diffère, interrompez :
-          vous n&apos;êtes pas en train d&apos;appairer l&apos;appareil que vous croyez.
+          This code must be identical on both screens. If it differs, stop: the device you are
+          pairing is not the one you think it is.
         </p>
         <p className="mt-3 font-mono text-2xl tracking-widest">{confirmation}</p>
         <p className="mt-3 text-xs text-(--color-ink-muted)">
-          Le nouvel appareil rejoint vos conversations en cours dans les secondes qui suivent.
+          The new device joins your ongoing conversations within seconds.
         </p>
         <button
           type="button"
           onClick={onDone}
           className="mt-4 rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white"
         >
-          Terminé
+          Done
         </button>
       </div>
     );
@@ -99,28 +99,28 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
   return (
     <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Ajouter un appareil</h2>
+        <h2 className="font-medium">Add a device</h2>
         <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
-          Fermer
+          Close
         </button>
       </div>
 
       <p className="mt-2 text-(--color-ink-muted)">
-        Sur le nouvel appareil, choisissez « Ajouter cet appareil à un compte », puis scannez son
-        carré ou recopiez son code ici. Ce code ne contient aucun secret : il n&apos;est
-        qu&apos;une clé publique éphémère, inutilisable par qui l&apos;intercepte.
+        On the new device, choose &ldquo;Add this device to an account&rdquo;, then scan its square
+        or copy its code here. This code holds no secret: it is only an ephemeral public key,
+        useless to anyone who intercepts it.
       </p>
 
       <p className="mt-2 text-xs text-(--color-ink-muted)">
-        Ne scannez que l&apos;écran que vous avez en main : c&apos;est la seule chose qui
-        distingue votre appareil de celui d&apos;un inconnu. Les deux écrans afficheront ensuite
-        le même code de confirmation — s&apos;ils diffèrent, interrompez.
+        Only scan the screen you are holding: that is the one thing telling your device apart from
+        a stranger&apos;s. Both screens will then show the same confirmation code — if they differ,
+        stop.
       </p>
 
       {camera && (
         <div className="mt-3">
-          {/* `playsInline` sans quoi iOS ouvre la vidéo en plein écran, ce qui recouvre le
-              panneau et donne l'impression que l'application a changé d'écran. */}
+          {/* `playsInline`, without which iOS opens the video full screen, covering the panel and
+              making it look like the app changed screens. */}
           <video
             ref={video}
             playsInline
@@ -130,24 +130,24 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
           <button
             type="button"
             onClick={() => {
-              arret.current?.();
+              stopCamera.current?.();
               setCamera(false);
             }}
-            className="mt-2 text-(--color-ink-muted) underline tactile:min-h-11"
+            className="mt-2 text-(--color-ink-muted) underline touch:min-h-11"
           >
-            Arrêter la caméra
+            Stop the camera
           </button>
         </div>
       )}
 
-      {!camera && scanDisponible() && (
+      {!camera && scanAvailable() && (
         <button
           type="button"
-          onClick={() => void lireLeCarre()}
+          onClick={() => void readTheSquare()}
           disabled={busy}
-          className="mt-3 w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50 tactile:min-h-11"
+          className="mt-3 w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50 touch:min-h-11"
         >
-          Scanner le carré
+          Scan the square
         </button>
       )}
 
@@ -155,7 +155,7 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
         <textarea
           value={code}
           onChange={(e) => setCode(e.target.value)}
-          placeholder="code affiché par le nouvel appareil"
+          placeholder="code shown by the new device"
           rows={2}
           required
           className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5 font-mono text-xs"
@@ -165,7 +165,7 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
           disabled={busy || !code.trim()}
           className="rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
         >
-          {busy ? "Envoi…" : "Appairer"}
+          {busy ? "Sending…" : "Pair"}
         </button>
       </form>
 
@@ -179,10 +179,10 @@ export function PairDevice({ session, onDone }: { session: Session; onDone: () =
 }
 
 /**
- * Écran du **nouvel** appareil : il affiche, il n'entre rien.
+ * The **new** device's screen: it displays, it never types anything in.
  *
- * Ce sens est obligatoire. Un code affiché est photographiable ; il ne doit donc contenir
- * aucun secret. C'est l'appareil d'origine qui scelle et envoie, dans ce sens-là uniquement.
+ * This direction is mandatory. A displayed code can be photographed, so it must hold no secret.
+ * The original device is the one that seals and sends, and only that way round.
  */
 export function ShowPairingCode({
   code,
@@ -198,11 +198,11 @@ export function ShowPairingCode({
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 p-6">
       <div>
-        <h1 className="text-xl font-medium">Ajouter cet appareil</h1>
+        <h1 className="text-xl font-medium">Add this device</h1>
         <p className="mt-2 text-sm text-(--color-ink-muted)">
-          Sur un appareil où vous êtes déjà connecté, ouvrez « Ajouter un appareil » et scannez
-          ce carré — ou recopiez le code en dessous. Il ne contient aucun secret : votre phrase
-          de récupération reste là où elle est, et n&apos;a pas à être ressaisie.
+          On a device where you are already signed in, open &ldquo;Add a device&rdquo; and scan
+          this square — or copy the code below. It holds no secret: your recovery phrase stays
+          where it is, and does not have to be typed again.
         </p>
       </div>
 
@@ -211,8 +211,8 @@ export function ShowPairingCode({
       </div>
 
       <div className="space-y-2">
-        {/* Le texte reste, sous le carré : toutes les plateformes ne savent pas scanner, et un
-            ordinateur de bureau n'a souvent pas de caméra tournée vers l'autre écran. */}
+        {/* The text stays, under the square: not every platform can scan, and a desktop computer
+            often has no camera pointed at the other screen. */}
         <p className="break-all rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) p-4 font-mono text-xs">
           {code}
         </p>
@@ -223,30 +223,30 @@ export function ShowPairingCode({
           }}
           className="text-sm text-(--color-ink-muted) underline"
         >
-          {copied ? "Copié" : "Copier le code"}
+          {copied ? "Copied" : "Copy the code"}
         </button>
       </div>
 
       {confirmation ? (
         <div>
-          <p className="text-sm">Code de confirmation :</p>
+          <p className="text-sm">Confirmation code:</p>
           <p className="mt-1 font-mono text-2xl tracking-widest">{confirmation}</p>
           <p className="mt-2 text-xs text-(--color-ink-muted)">
-            Il doit être identique sur les deux écrans.
+            It must be identical on both screens.
           </p>
         </div>
       ) : (
-        <p className="text-sm text-(--color-ink-muted)">En attente de l&apos;autre appareil…</p>
+        <p className="text-sm text-(--color-ink-muted)">Waiting for the other device…</p>
       )}
 
       <button type="button" onClick={onCancel} className="text-sm text-(--color-ink-muted) underline">
-        Annuler
+        Cancel
       </button>
     </main>
   );
 }
 
-/** Génère l'offre et attend le paquet. Isolé en hook : la boucle doit s'arrêter au démontage. */
+/** Generates the offer and waits for the packet. In a hook: the loop must stop on unmount. */
 export function usePairingOffer(enabled: boolean) {
   const [code, setCode] = useState<string | null>(null);
   const [seed, setSeed] = useState<Uint8Array | null>(null);

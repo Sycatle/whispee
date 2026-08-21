@@ -1,59 +1,57 @@
 import qrcode from "qrcode-generator";
 
 /**
- * Le code d'appairage, en carré à scanner.
+ * The pairing code, as a square to scan.
  *
- * # Pourquoi une dépendance ici, dans un projet qui s'en méfie
+ * # Why a dependency here, in a project that distrusts them
  *
- * Écrire un encodeur QR demande Reed-Solomon, les huit masques et leurs pénalités : quelques
- * centaines de lignes qu'aucun test disponible ici ne pourrait valider, faute de lecteur — Chrome
- * sous Linux n'expose pas `BarcodeDetector`. Un carré subtilement faux ne se verrait qu'entre les
- * mains d'un utilisateur.
+ * Writing a QR encoder means Reed-Solomon, the eight masks and their penalties: a few hundred
+ * lines that no test available here could validate, for lack of a reader — Chrome on Linux does
+ * not expose `BarcodeDetector`. A subtly wrong square would only show up in a user's hands.
  *
- * Le contenu, lui, ne coûte rien à confier : identifiant et clé publique éphémère, tous deux
- * publics par construction. Une bibliothèque compromise ne pourrait pas voler de secret — au pire
- * afficher un code menant ailleurs, ce que le code de confirmation affiché des deux côtés est
- * précisément là pour attraper.
+ * The content costs nothing to entrust: an id and an ephemeral public key, both public by
+ * construction. A compromised library could not steal a secret — at worst display a code leading
+ * elsewhere, which is exactly what the confirmation code shown on both sides is there to catch.
  *
- * # Rendu en SVG, pas en canvas
+ * # Rendered as SVG, not canvas
  *
- * Net à toute taille, donc lisible par une caméra quel que soit l'écran, et sans lecture de
- * pixels — un canvas devrait être dimensionné à la main pour ne pas rendre un carré flou sur
- * écran dense, exactement là où le scan doit fonctionner.
+ * Sharp at any size, so readable by a camera whatever the screen, and with no pixel readback — a
+ * canvas would have to be sized by hand to avoid a blurry square on a dense display, precisely
+ * where scanning has to work.
  */
-export function QrCode({ value, taille = 240 }: { value: string; taille?: number }) {
-  // Version 0 : la bibliothèque choisit la plus petite qui contienne la donnée. Correction « M »,
-  // le compromis habituel — un QR affiché sur un écran propre n'a pas besoin de « H », qui
-  // densifierait les modules et rendrait le scan plus difficile à distance.
+export function QrCode({ value, size = 240 }: { value: string; size?: number }) {
+  // Version 0: the library picks the smallest one that fits the data. Correction level "M", the
+  // usual trade-off — a QR shown on a clean screen does not need "H", which would densify the
+  // modules and make scanning harder from a distance.
   const qr = qrcode(0, "M");
   qr.addData(value);
   qr.make();
 
   const modules = qr.getModuleCount();
-  // Une marge de quatre modules est exigée par la norme : sans elle, un lecteur ne distingue pas
-  // le motif du fond et bien des scans échouent sans rien dire.
-  const cote = modules + 8;
+  // A four-module quiet zone is required by the standard: without it, a reader cannot tell the
+  // pattern from the background and many scans fail silently.
+  const side = modules + 8;
 
-  const cases: string[] = [];
-  for (let ligne = 0; ligne < modules; ligne += 1) {
-    for (let colonne = 0; colonne < modules; colonne += 1) {
-      if (qr.isDark(ligne, colonne)) cases.push(`M${colonne + 4},${ligne + 4}h1v1h-1z`);
+  const cells: string[] = [];
+  for (let row = 0; row < modules; row += 1) {
+    for (let column = 0; column < modules; column += 1) {
+      if (qr.isDark(row, column)) cells.push(`M${column + 4},${row + 4}h1v1h-1z`);
     }
   }
 
   return (
     <svg
-      viewBox={`0 0 ${cote} ${cote}`}
-      width={taille}
-      height={taille}
+      viewBox={`0 0 ${side} ${side}`}
+      width={size}
+      height={size}
       role="img"
-      aria-label="Code d'appairage à scanner"
-      // Fond blanc et modules noirs en dur, hors du thème : un lecteur attend du contraste et
-      // du noir sur blanc. Un QR en couleurs de thème sombre est illisible pour beaucoup de
-      // caméras, ce qui ferait passer un défaut d'affichage pour une panne d'appairage.
+      aria-label="Pairing code to scan"
+      // White background and black modules hardcoded, outside the theme: a reader expects
+      // contrast, and black on white. A QR in dark-theme colors is unreadable to many cameras,
+      // which would make a display flaw look like a pairing failure.
       className="rounded-md bg-white"
     >
-      <path d={cases.join("")} fill="#000" shapeRendering="crispEdges" />
+      <path d={cells.join("")} fill="#000" shapeRendering="crispEdges" />
     </svg>
   );
 }

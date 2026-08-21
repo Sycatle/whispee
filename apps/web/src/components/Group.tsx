@@ -2,26 +2,26 @@ import { useState } from "react";
 import type { ConversationView, Session } from "@/lib/session";
 
 /**
- * Administration d'un groupe : membres, rôles, sortie.
+ * Group administration: members, roles, leaving.
  *
- * # Ce que ce panneau doit dire, et que l'utilisateur ne peut pas deviner
+ * # What this panel has to say, and the user cannot guess
  *
- * Deux comportements paraîtraient des bugs si on ne les expliquait pas :
+ * Two behaviours would look like bugs if left unexplained:
  *
- * 1. **Quitter un groupe ne prend pas effet tout de suite.** La RFC 9420 interdit de se
- *    retirer soi-même dans un commit qu'on génère ; il faut qu'un autre membre le reprenne.
- *    Faire disparaître la conversation de l'écran laisserait croire à quelqu'un qu'il est
- *    sorti alors qu'il continue d'être lu.
+ * 1. **Leaving a group does not take effect right away.** RFC 9420 forbids removing yourself
+ *    in a commit you generate; another member has to pick it up. Making the conversation
+ *    vanish from the screen would let someone believe they were out while they are still
+ *    being read.
  *
- * 2. **Retirer quelqu'un le retire avec tous ses appareils.** L'unité est le compte, jamais
- *    l'appareil : tous les appareils d'un compte ont exactement le même accès, partout.
+ * 2. **Removing someone removes all of their devices.** The unit is the account, never the
+ *    device: every device on an account has exactly the same access, everywhere.
  *
- * # La hiérarchie
+ * # The hierarchy
  *
- * Un **admin** unique, des **modérateurs** sous lui. Les modérateurs entretiennent le groupe —
- * ajouter, retirer des membres ordinaires — mais ne touchent pas aux rôles : s'ils le
- * pouvaient, l'un d'eux se promouvrait admin et il n'y aurait plus d'autorité, seulement une
- * course. Un seul bouton distribue le pouvoir, et il n'appartient qu'à l'admin.
+ * A single **admin**, with **moderators** under them. Moderators keep the group in order —
+ * adding and removing ordinary members — but do not touch roles: if they could, one of them
+ * would promote themselves to admin and there would be no authority left, only a race. One
+ * button hands out power, and it belongs to the admin alone.
  */
 export function GroupPanel({
   session,
@@ -40,20 +40,20 @@ export function GroupPanel({
   const [leaving, setLeaving] = useState(false);
 
   const roles = session.roles(view);
-  const jeSuisAdmin = roles === null || roles.admin === session.handle;
-  const jeModere = roles === null || roles.admin === session.handle
+  const iAmAdmin = roles === null || roles.admin === session.handle;
+  const iModerate = roles === null || roles.admin === session.handle
     || roles.moderators.includes(session.handle);
 
-  // Qui héritera si nous partons. Calculé comme le fait `Session.requestLeave` : le rang
-  // immédiatement en dessous — un modérateur — sinon le membre le plus ancien au sens de
-  // l'arbre MLS. Annoncé avant le départ plutôt que constaté après : léguer un groupe sans
-  // savoir à qui serait la pire façon de le quitter.
-  const heritier = (() => {
+  // Who inherits if we leave. Computed the way `Session.requestLeave` does it: the rank just
+  // below — a moderator — otherwise the longest-standing member in MLS tree order. Announced
+  // before leaving rather than discovered after: bequeathing a group without knowing to whom
+  // would be the worst way to leave it.
+  const heir = (() => {
     if (roles === null || roles.admin !== session.handle) return null;
-    const membres = view.peers
+    const members = view.peers
       .map((peer) => peer.name)
       .filter((name) => name !== session.handle);
-    return membres.find((name) => roles.moderators.includes(name)) ?? membres[0] ?? null;
+    return members.find((name) => roles.moderators.includes(name)) ?? members[0] ?? null;
   })();
 
   const action = async (run: () => Promise<void>) => {
@@ -71,29 +71,29 @@ export function GroupPanel({
   const role = (handle: string) => {
     if (roles === null) return null;
     if (roles.admin === handle) return "admin";
-    if (roles.moderators.includes(handle)) return "modérateur";
+    if (roles.moderators.includes(handle)) return "moderator";
     return null;
   };
 
   return (
     <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Membres</h2>
+        <h2 className="font-medium">Members</h2>
         <button type="button" onClick={onClose} className="text-(--color-ink-muted) underline">
-          Fermer
+          Close
         </button>
       </div>
 
       {roles === null && (
         <p className="mt-2 text-xs text-(--color-ink-muted)">
-          Conversation à deux : pas de rôles. Une hiérarchie n&apos;y aurait aucun sens.
+          One-to-one conversation: no roles. A hierarchy would make no sense here.
         </p>
       )}
 
       <ul className="mt-3 space-y-2">
         <li className="flex items-center justify-between gap-3">
           <span>
-            @{session.handle} <span className="text-(--color-ink-muted)">(vous)</span>
+            @{session.handle} <span className="text-(--color-ink-muted)">(you)</span>
             {role(session.handle) && (
               <span className="ml-2 text-xs text-(--color-accent)">{role(session.handle)}</span>
             )}
@@ -101,8 +101,8 @@ export function GroupPanel({
         </li>
 
         {view.accounts.map((account) => {
-          const estModerateur = roles?.moderators.includes(account.handle) ?? false;
-          const estAdmin = roles?.admin === account.handle;
+          const isModerator = roles?.moderators.includes(account.handle) ?? false;
+          const isAdmin = roles?.admin === account.handle;
 
           return (
             <li key={account.handle} className="flex items-center justify-between gap-3">
@@ -114,27 +114,27 @@ export function GroupPanel({
                   </span>
                 )}
                 <span className="ml-2 text-xs text-(--color-ink-muted)">
-                  {account.devices.length} appareil{account.devices.length > 1 ? "s" : ""}
+                  {account.devices.length} device{account.devices.length > 1 ? "s" : ""}
                 </span>
               </span>
 
-              {roles !== null && !estAdmin && (
+              {roles !== null && !isAdmin && (
                 <span className="flex shrink-0 gap-3 text-xs">
-                  {/* Seul l'admin distribue les rôles : un modérateur qui le pourrait se
-                      promouvrait admin, et il n'y aurait plus d'autorité. */}
-                  {jeSuisAdmin && (
+                  {/* Only the admin hands out roles: a moderator who could would promote
+                      themselves to admin, and there would be no authority left. */}
+                  {iAmAdmin && (
                     <>
                       <button
                         type="button"
                         disabled={busy}
                         onClick={() =>
                           action(() =>
-                            session.setModerator(view, account.handle, !estModerateur),
+                            session.setModerator(view, account.handle, !isModerator),
                           )
                         }
                         className="underline text-(--color-ink-muted)"
                       >
-                        {estModerateur ? "retirer modérateur" : "passer modérateur"}
+                        {isModerator ? "remove moderator" : "make moderator"}
                       </button>
                       <button
                         type="button"
@@ -145,21 +145,21 @@ export function GroupPanel({
                           })
                         }
                         className="underline text-(--color-ink-muted)"
-                        title="Transmet définitivement le groupe : vous ne pourrez pas le reprendre."
+                        title="Hands the group over for good: you will not be able to take it back."
                       >
-                        transmettre
+                        hand over
                       </button>
                     </>
                   )}
-                  {/* Un modérateur retire les membres ordinaires, pas ses pairs. */}
-                  {jeModere && (!estModerateur || jeSuisAdmin) && (
+                  {/* A moderator removes ordinary members, not their peers. */}
+                  {iModerate && (!isModerator || iAmAdmin) && (
                     <button
                       type="button"
                       disabled={busy}
                       onClick={() => action(() => session.removeAccount(view, account.handle))}
                       className="underline text-(--color-danger)"
                     >
-                      retirer
+                      remove
                     </button>
                   )}
                 </span>
@@ -169,10 +169,10 @@ export function GroupPanel({
         })}
       </ul>
 
-      {roles !== null && jeModere && (
+      {roles !== null && iModerate && (
         <p className="mt-3 text-xs text-(--color-ink-muted)">
-          Retirer quelqu&apos;un le retire avec <strong>tous ses appareils</strong> : l&apos;unité
-          est le compte. À partir du commit, il ne déchiffre plus rien de ce qui suit.
+          Removing someone removes <strong>all of their devices</strong>: the unit is the
+          account. From the commit onward, they decrypt nothing that follows.
         </p>
       )}
 
@@ -181,22 +181,22 @@ export function GroupPanel({
           {leaving ? (
             <div className="space-y-2">
               <p className="text-xs text-(--color-ink-muted)">
-                Votre départ est une <strong>demande</strong> : le protocole interdit de se
-                retirer soi-même, un autre membre doit la reprendre. Jusque-là vous restez dans
-                le groupe et continuez d&apos;en recevoir les messages.
+                Leaving is a <strong>request</strong>: the protocol forbids removing yourself,
+                so another member has to pick it up. Until then you stay in the group and keep
+                receiving its messages.
               </p>
-              {heritier !== null && (
+              {heir !== null && (
                 <p className="text-xs text-(--color-ink-muted)">
-                  Vous administrez ce groupe : <strong>@{heritier}</strong> vous succédera
-                  {roles.moderators.includes(heritier)
-                    ? " (modérateur, le rang en dessous)"
-                    : " (membre le plus ancien)"}
-                  . Un groupe sans administrateur serait définitivement figé.
+                  You administer this group: <strong>@{heir}</strong> will succeed you
+                  {roles.moderators.includes(heir)
+                    ? " (moderator, the rank below)"
+                    : " (longest-standing member)"}
+                  . A group with no administrator would be frozen for good.
                 </p>
               )}
-              {roles.admin === session.handle && heritier === null && (
+              {roles.admin === session.handle && heir === null && (
                 <p className="text-xs text-(--color-danger)">
-                  Vous êtes le dernier membre : quitter revient à supprimer la conversation.
+                  You are the last member: leaving amounts to deleting the conversation.
                 </p>
               )}
               <div className="flex gap-3">
@@ -211,14 +211,14 @@ export function GroupPanel({
                   }
                   className="rounded-md bg-(--color-danger) px-3 py-1.5 text-xs font-medium text-white"
                 >
-                  {heritier !== null ? `Transmettre à @${heritier} et quitter` : "Demander à quitter"}
+                  {heir !== null ? `Hand over to @${heir} and leave` : "Request to leave"}
                 </button>
                 <button
                   type="button"
                   onClick={() => setLeaving(false)}
                   className="text-xs underline text-(--color-ink-muted)"
                 >
-                  Annuler
+                  Cancel
                 </button>
               </div>
             </div>
@@ -228,7 +228,7 @@ export function GroupPanel({
               onClick={() => setLeaving(true)}
               className="text-xs underline text-(--color-ink-muted)"
             >
-              Quitter le groupe
+              Leave the group
             </button>
           )}
         </div>
@@ -237,16 +237,16 @@ export function GroupPanel({
   );
 }
 
-/** Bouton discret d'accès au panneau, dans l'en-tête de conversation. */
+/** Discreet entry point to the panel, in the conversation header. */
 export function GroupToggle({ count, onClick }: { count: number; onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      title="Membres du groupe"
+      title="Group members"
       className="text-xs text-(--color-ink-muted) hover:underline"
     >
-      {count + 1} membres
+      {count + 1} members
     </button>
   );
 }

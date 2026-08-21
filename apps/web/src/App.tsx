@@ -4,20 +4,19 @@ import { Conversation } from "@/components/Conversation";
 import { ConversationList } from "@/components/ConversationList";
 import { Onboarding } from "@/components/Onboarding";
 import { MigrationBanner } from "@/components/Migration";
-import { type ConversationView, type MigrationProposee, Session, demarrer } from "@/lib/session";
+import { type ConversationView, type ProposedMigration, Session, start } from "@/lib/session";
 import { useDuo } from "@/lib/duo";
-import { REVERROUILLAGE_MS, observerCycle, reseauDeclare } from "@/lib/lifecycle";
+import { RELOCK_MS, observeLifecycle, networkReported } from "@/lib/lifecycle";
 
 /**
- * Intervalle de relève, désormais un filet plutôt qu'un moteur.
+ * Polling interval, now a safety net rather than an engine.
  *
- * Le flux temps réel apporte les nouveautés en moins d'une seconde ; ce qui reste ici est
- * l'entretien qui n'a pas d'événement déclencheur — réapprovisionnement des clés d'accueil,
- * découverte de nouvelles conversations, propagation vers nos autres appareils, éviction des
- * appareils révoqués.
+ * The realtime stream brings news in under a second; what is left here is the upkeep that has no
+ * triggering event — replenishing welcome keys, discovering new conversations, propagating to our
+ * other devices, evicting revoked devices.
  *
- * Le raccourcir ne rendrait rien plus rapide : cela ne ferait que redonner au serveur le
- * journal d'activité à la seconde près que le flux vient de lui retirer.
+ * Shortening it would make nothing faster: it would only hand the server back the second-by-second
+ * activity log the stream just took away from it.
  */
 const POLL_MS = 30_000;
 
@@ -26,86 +25,83 @@ export function App() {
   const [active, setActive] = useState<ConversationView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
-  /** Pourquoi la migration est impossible, s'il y a lieu. Informatif : rien n'est cassé. */
-  const [repli, setRepli] = useState<string | null>(null);
+  /** Why migration is impossible, if it is. Informational: nothing is broken. */
+  const [fallback, setFallback] = useState<string | null>(null);
   /**
-   * Migration proposée, tant que l'utilisateur ne l'a ni lancée ni écartée.
+   * Proposed migration, until the user either runs it or dismisses it.
    *
-   * Proposée et non exécutée : elle enregistre un appareil et en révoque un autre, ce que rien
-   * dans « ouvrir l'application » ne demande.
+   * Proposed and not executed: it registers one device and revokes another, and nothing about
+   * "open the app" asks for that.
    */
-  const [migration, setMigration] = useState<MigrationProposee | null>(null);
+  const [migration, setMigration] = useState<ProposedMigration | null>(null);
   /**
-   * Le système déclare-t-il une connexion ?
+   * Does the system report a connection?
    *
-   * Affiché parce que `false` est une information sûre et qu'elle explique tous les échecs à
-   * venir. L'inverse ne prouve rien — un portail captif se déclare en ligne — donc rien n'est
-   * empêché sur la foi de cette valeur.
+   * Shown because `false` is trustworthy information and explains every failure that follows. The
+   * opposite proves nothing — a captive portal reports itself online — so nothing is prevented on
+   * the strength of this value.
    */
-  const [horsLigne, setHorsLigne] = useState(false);
+  const [offline, setOffline] = useState(false);
   const [locked, setLocked] = useState(false);
   const [, forceRender] = useState(0);
   const duo = useDuo();
   const refresh = useCallback(() => forceRender((n) => n + 1), []);
 
   useEffect(() => {
-    // Le verrou se détecte avant toute tentative de restauration : sans mot de passe, l'état
-    // est illisible, et traiter cela comme une erreur de déchiffrement effacerait la
-    // distinction entre « verrouillé » et « corrompu ».
+    // The lock is detected before any restore attempt: without a password the state is
+    // unreadable, and treating that as a decryption error would erase the distinction between
+    // "locked" and "corrupted".
     Session.isLocked()
-      .then(async (verrouillee) => {
-        if (verrouillee) {
+      .then(async (isLocked) => {
+        if (isLocked) {
           setLocked(true);
           return null;
         }
 
-        // `demarrer` et non `restore` : sous Tauri, une installation existante peut avoir une
-        // migration à faire, ce qui suppose de tenir l'ancienne session ouverte.
-        const { session, migration: proposee, repli: refuse } = await demarrer();
-        if (refuse) setRepli(refuse);
-        if (proposee) setMigration(proposee);
+        // `start` and not `restore`: under Tauri, an existing install may have a migration to
+        // perform, which requires keeping the old session open.
+        const { session, migration: proposed, fallback: refused } = await start();
+        if (refused) setFallback(refused);
+        if (proposed) setMigration(proposed);
         return session;
       })
       .then(setSession)
       .catch((e) => {
-        // Un état illisible ne doit pas bloquer l'écran de démarrage : mieux vaut proposer
-        // de repartir d'une identité neuve que de laisser un « Chargement… » éternel.
-        console.error("restauration de session impossible", e);
-        setError(
-          "Impossible de restaurer la session précédente. Effacez l'identité pour repartir de zéro.",
-        );
+        // Unreadable state must not block the startup screen: better to offer a fresh identity
+        // than to leave an eternal "Loading…".
+        console.error("could not restore session", e);
+        setError("Could not restore the previous session. Erase the identity to start over.");
       })
       .finally(() => setBusy(false));
   }, []);
 
   /**
-   * Reprise après un passage en arrière-plan.
+   * Resuming after a spell in the background.
    *
-   * Le système gèle les minuteurs et coupe les connexions sans prévenir. Au retour, l'intervalle
-   * qui repart ne suffit pas : il faut relever tout de suite et **rouvrir le flux** sans
-   * chercher à savoir s'il a survécu. La question n'a pas de réponse fiable — un socket coupé
-   * par le système reste `OPEN` jusqu'à la première écriture — et reconnecter à tort coûte moins
-   * cher que de rester silencieusement muet.
+   * The system freezes timers and cuts connections without warning. On return, restarting the
+   * interval is not enough: we must poll immediately and **reopen the stream** without trying to
+   * find out whether it survived. That question has no reliable answer — a socket cut by the
+   * system stays `OPEN` until the first write — and reconnecting needlessly costs less than
+   * staying silently mute.
    */
   useEffect(() => {
     if (!session) return;
 
-    const arret = observerCycle((transition) => {
-      if (transition.quoi === "veille") return;
+    const stop = observeLifecycle((transition) => {
+      if (transition.kind === "hidden") return;
 
-      if (transition.quoi === "reseau") setHorsLigne(false);
+      if (transition.kind === "network") setOffline(false);
 
-      // Une absence prolongée referme un appareil verrouillé.
+      // A long absence closes a locked device again.
       //
-      // Sans cela le verrou n'agit qu'au démarrage à froid : il protège un appareil éteint, et
-      // pas celui qu'on pose sur une table. Écarter la session de l'écran suffit à exiger le
-      // mot de passe — l'état sur le disque est chiffré sous une clé qui n'existait qu'en
-      // mémoire.
+      // Without this the lock only acts on a cold start: it protects a powered-off device, not
+      // one left on a table. Putting the session out of sight is enough to demand the password —
+      // the state on disk is encrypted under a key that only ever existed in memory.
       //
-      // Ce que cela ne fait pas : effacer cette clé de la mémoire du processus. Le module
-      // WebAssembly garde son état, et rien dans un navigateur ne permet de l'exiger. La
-      // protection vise qui prend l'appareil en main, pas qui inspecte sa mémoire.
-      if (transition.quoi === "reprise" && session.locked && transition.absenceMs > REVERROUILLAGE_MS) {
+      // What it does not do: erase that key from the process memory. The WebAssembly module keeps
+      // its state, and nothing in a browser lets us demand otherwise. The protection targets
+      // whoever picks the device up, not whoever inspects its memory.
+      if (transition.kind === "resume" && session.locked && transition.awayMs > RELOCK_MS) {
         setSession(null);
         setActive(null);
         setLocked(true);
@@ -122,55 +118,54 @@ export function App() {
         .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
     });
 
-    const perdu = () => setHorsLigne(true);
-    addEventListener("offline", perdu);
-    setHorsLigne(!reseauDeclare());
+    const lost = () => setOffline(true);
+    addEventListener("offline", lost);
+    setOffline(!networkReported());
 
     return () => {
-      arret();
-      removeEventListener("offline", perdu);
+      stop();
+      removeEventListener("offline", lost);
     };
   }, [session, refresh]);
 
   /**
-   * Le retour du système ferme la conversation, au lieu de quitter l'application.
+   * The system back gesture closes the conversation instead of quitting the app.
    *
-   * # Pourquoi passer par l'historique
+   * # Why go through history
    *
-   * Sur Android comme dans un navigateur mobile, le geste de retour agit sur l'historique. Une
-   * application à un seul panneau qui n'y touche pas se fait quitter au premier retour, alors
-   * que l'utilisateur voulait revenir à sa liste — le réflexe le plus courant sur mobile, et
-   * celui dont l'échec ressemble le plus à un plantage.
+   * On Android as in a mobile browser, the back gesture acts on history. A single-panel app that
+   * leaves history alone gets quit on the first back, when the user only wanted to return to their
+   * list — the most common reflex on mobile, and the one whose failure looks most like a crash.
    *
-   * # Le garde-fou
+   * # The guard
    *
-   * L'entrée poussée doit être retirée si la conversation se ferme autrement — par le bouton
-   * retour de l'en-tête, ou parce que l'écran s'est élargi. Le drapeau distingue les deux : sans
-   * lui, un `history.back()` de trop consommerait une entrée qui ne nous appartient pas, et sur
-   * Android cela ferme l'application.
+   * The pushed entry must be removed if the conversation closes some other way — via the header's
+   * back button, or because the screen got wider. The flag tells the two apart: without it, one
+   * `history.back()` too many would consume an entry that is not ours, and on Android that closes
+   * the app.
    */
-  const entreePoussee = useRef(false);
+  const pushedEntry = useRef(false);
 
   useEffect(() => {
-    // `active` et non la conversation retenue : celle-ci n'est calculée qu'après les écrans de
-    // démarrage, donc après les hooks. Les deux coïncident à un panneau, où la sélection ne se
-    // replie sur rien.
+    // `active` and not the retained conversation: that one is only computed after the startup
+    // screens, hence after the hooks. The two coincide at one panel, where the selection falls
+    // back to nothing.
     if (duo || !active) return;
 
     history.pushState({ wac: "conversation" }, "");
-    entreePoussee.current = true;
+    pushedEntry.current = true;
 
-    const revenir = () => {
-      // Consommée par le système : il n'y a plus rien à retirer.
-      entreePoussee.current = false;
+    const goBack = () => {
+      // Consumed by the system: there is nothing left to remove.
+      pushedEntry.current = false;
       setActive(null);
     };
 
-    addEventListener("popstate", revenir);
+    addEventListener("popstate", goBack);
     return () => {
-      removeEventListener("popstate", revenir);
-      if (entreePoussee.current) {
-        entreePoussee.current = false;
+      removeEventListener("popstate", goBack);
+      if (pushedEntry.current) {
+        pushedEntry.current = false;
         history.back();
       }
     };
@@ -185,27 +180,24 @@ export function App() {
         await session.poll();
         if (cancelled) return;
 
-        // Ouvre la première conversation tant qu'aucune n'est sélectionnée, **et seulement à
-        // deux panneaux**.
+        // Open the first conversation while none is selected, **and only at two panels**.
         //
-        // Là, elle comble un vide : un appareil fraîchement appairé découvre ses conversations
-        // pendant la relève, et sans cela il affiche une liste à gauche et rien à droite, comme
-        // si les messages n'arrivaient pas alors qu'ils sont déjà déchiffrés.
+        // There it fills a void: a freshly paired device discovers its conversations during the
+        // poll, and without this it shows a list on the left and nothing on the right, as if the
+        // messages were not arriving when they are already decrypted.
         //
-        // À un panneau, la même ligne fait le contraire de ce qu'elle vise : elle ouvre une
-        // conversation que personne n'a demandée et recouvre la liste, qui est l'écran
-        // d'accueil. Le seul moyen d'en sortir est le bouton retour, sur un écran où l'on
-        // n'était jamais entré.
+        // At one panel the same line does the opposite of what it intends: it opens a conversation
+        // nobody asked for and covers the list, which is the home screen. The only way out is the
+        // back button, on a screen the user never entered.
         if (duo) {
           setActive((current) => current ?? session.conversations.values().next().value ?? null);
         }
 
-        // Une relève réussie efface l'erreur précédente.
+        // A successful poll clears the previous error.
         //
-        // Sans cela, un incident passager — réseau coupé, serveur redémarré — laisse un
-        // bandeau rouge indéfiniment à l'écran, alors que tout refonctionne. Une alerte qui
-        // survit à sa cause s'apprend à ignorer, et le jour où elle compte, elle est déjà
-        // devenue invisible.
+        // Without this a passing incident — network cut, server restarted — leaves a red banner on
+        // screen indefinitely while everything works again. An alert that outlives its cause
+        // teaches people to ignore it, and the day it matters it has already become invisible.
         setError(null);
         refresh();
       } catch (e) {
@@ -216,8 +208,8 @@ export function App() {
     void tick();
     const id = setInterval(tick, POLL_MS);
 
-    // Le flux n'est pas une dépendance de la relève : il la déclenche plus tôt, rien de plus.
-    // S'il ne se connecte jamais, l'intervalle ci-dessus suffit à tout faire fonctionner.
+    // The stream is not a dependency of the poll: it triggers it earlier, nothing more. If it
+    // never connects, the interval above is enough to keep everything working.
     session.startStream(() => {
       if (!cancelled) refresh();
     });
@@ -229,14 +221,14 @@ export function App() {
     };
   }, [session, refresh, duo]);
 
-  if (busy) return <Centered>Chargement…</Centered>;
+  if (busy) return <Centered>Loading…</Centered>;
 
   if (locked && !session) {
     return (
       <Unlock
-        onUnlocked={(s, proposee) => {
+        onUnlocked={(s, proposed) => {
           setSession(s);
-          if (proposee) setMigration(proposee);
+          if (proposed) setMigration(proposed);
           setLocked(false);
         }}
         onError={setError}
@@ -250,51 +242,49 @@ export function App() {
 
   const conversations = [...session.conversations.values()];
 
-  // À deux panneaux, une conversation est toujours ouverte : un panneau droit vide serait du
-  // vide permanent. À un seul, l'absence de sélection **est** l'écran de liste — retomber sur la
-  // première conversation rendrait la liste inatteignable.
-  const retenue = active && session.conversations.get(active.key) ? active : null;
-  const current = duo ? retenue ?? conversations[0] ?? null : retenue;
+  // At two panels a conversation is always open: an empty right panel would be permanent
+  // emptiness. At one panel, having no selection **is** the list screen — falling back to the
+  // first conversation would make the list unreachable.
+  const retained = active && session.conversations.get(active.key) ? active : null;
+  const current = duo ? retained ?? conversations[0] ?? null : retained;
 
   return (
     <div
-      // `h-dvh` et non `h-screen` : sur mobile, `100vh` compte la hauteur barres déployées, si
-      // bien qu'une centaine de pixels passent sous l'écran — précisément le champ de saisie et
-      // le dernier message.
-      className="safe-cotes safe-haut mx-auto flex h-dvh max-w-5xl flex-col"
+      // `h-dvh` and not `h-screen`: on mobile, `100vh` counts the height with the bars expanded, so
+      // a hundred pixels or so end up below the screen — precisely the input field and the last
+      // message.
+      className="safe-sides safe-top mx-auto flex h-dvh max-w-5xl flex-col"
     >
-      {/* À un panneau, l'en-tête ne s'affiche que sur la liste. Dans la conversation il coûtait
-          un sixième de la hauteur pour répéter une identité que l'utilisateur connaît, alors
-          que l'écran porte déjà son propre en-tête — celui du correspondant, qui lui est
-          utile. L'avertissement reste lisible : la liste est l'écran d'accueil. */}
+      {/* At one panel, the header only shows on the list. In the conversation it cost a sixth of
+          the height to repeat an identity the user knows, while the screen already carries its own
+          header — the correspondent's, which is useful to them. The warning stays readable: the
+          list is the home screen. */}
       {(duo || !current) && (
         <Header session={session} onForget={() => session.forget().then(() => location.reload())} />
       )}
 
       {/*
-        Les anomalies du journal de clés sont affichées au niveau de l'application, pas d'une
-        conversation : elles portent sur l'identité des comptes, donc sur toutes les
-        conversations à la fois.
+        Key log anomalies are shown at the app level, not inside a conversation: they concern
+        account identities, hence every conversation at once.
       */}
       {session.logAlerts.length > 0 && (
         <div role="alert" className="border-b border-(--color-danger) bg-(--color-danger)/20 px-4 py-3 text-sm">
-          <p className="font-medium text-(--color-danger)">Journal de clés incohérent</p>
-          {session.logAlerts.map((alerte) => (
-            <p key={alerte} className="mt-1 text-(--color-ink-muted)">
-              {alerte}
+          <p className="font-medium text-(--color-danger)">Inconsistent key log</p>
+          {session.logAlerts.map((alert) => (
+            <p key={alert} className="mt-1 text-(--color-ink-muted)">
+              {alert}
             </p>
           ))}
           <p className="mt-2 text-xs text-(--color-ink-muted)">
-            Le serveur a échoué à prouver ce qu&apos;il affirme sur les clés des comptes. Ce
-            n&apos;est pas une panne réseau : c&apos;est exactement ce que ce contrôle existe
-            pour détecter.
+            The server failed to prove what it claims about account keys. This is not a network
+            outage: it is exactly what this check exists to catch.
           </p>
         </div>
       )}
 
       <div className="flex min-h-0 flex-1">
-        {/* À un panneau, un seul des deux est monté — et non masqué : une conversation cachée
-            continuerait de relever, de défiler et de réclamer le focus au clavier. */}
+        {/* At one panel only one of the two is mounted — not hidden: a hidden conversation would
+            keep polling, scrolling and claiming keyboard focus. */}
         {(duo || !current) && (
           <ConversationList
             session={session}
@@ -314,41 +304,36 @@ export function App() {
             onBack={duo ? undefined : () => setActive(null)}
           />
         ) : (
-          duo && (
-            <Centered>
-              Aucune conversation. Ouvrez-en une avec le pseudonyme d&apos;un correspondant.
-            </Centered>
-          )
+          duo && <Centered>No conversations. Start one with someone&apos;s handle.</Centered>
         )}
       </div>
 
       {migration && (
         <MigrationBanner
           migration={migration}
-          onDone={(nouvelle) => {
+          onDone={(fresh) => {
             setMigration(null);
             setActive(null);
-            setSession(nouvelle);
+            setSession(fresh);
           }}
           onError={setError}
         />
       )}
 
-      {horsLigne && (
+      {offline && (
         <p
           role="status"
           className="border-t border-(--color-warn) bg-(--color-warn)/10 px-4 py-2 text-sm text-(--color-warn)"
         >
-          Hors ligne. Les messages écrits maintenant ne partiront pas ; ce qui a été reçu reste
-          lisible.
+          Offline. Messages written now will not go out; anything already received stays readable.
         </p>
       )}
 
-      {repli && (
+      {fallback && (
         <p className="flex items-baseline justify-between gap-4 border-t border-(--color-ink-muted)/30 bg-(--color-ink-muted)/10 px-4 py-2 text-sm text-(--color-ink-muted)">
-          <span>{repli}</span>
-          <button type="button" onClick={() => setRepli(null)} className="shrink-0 underline">
-            Fermer
+          <span>{fallback}</span>
+          <button type="button" onClick={() => setFallback(null)} className="shrink-0 underline">
+            Dismiss
           </button>
         </p>
       )}
@@ -359,10 +344,9 @@ export function App() {
           className="flex items-baseline justify-between gap-4 border-t border-(--color-danger) bg-(--color-danger)/10 px-4 py-2 text-sm text-(--color-danger)"
         >
           <span>{error}</span>
-          {/* Toujours refermable : une erreur qu'on ne peut pas écarter finit par faire
-              partie du décor. */}
+          {/* Always dismissible: an error you cannot wave away ends up part of the scenery. */}
           <button type="button" onClick={() => setError(null)} className="shrink-0 underline">
-            Fermer
+            Dismiss
           </button>
         </p>
       )}
@@ -383,9 +367,9 @@ function Header({ session, onForget }: { session: Session; onForget: () => void 
     <header className="border-b border-(--color-border-subtle) px-4 py-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         {/*
-          L'empreinte de l'utilisateur n'est plus affichée en permanence : elle ne lui sert
-          à rien au quotidien. Elle vit désormais dans le panneau de vérification, avec
-          celle du correspondant — c'est-à-dire au seul endroit où on en a besoin.
+          The user's own fingerprint is no longer shown permanently: it is of no daily use to them.
+          It now lives in the verification panel, next to the correspondent's — the one place where
+          it is actually needed.
         */}
         <h1 className="font-medium">
           @{session.handle}{" "}
@@ -394,18 +378,17 @@ function Header({ session, onForget }: { session: Session; onForget: () => void 
           </span>
         </h1>
         <button type="button" onClick={onForget} className="text-sm text-(--color-ink-muted) underline">
-          Effacer cette identité
+          Erase this identity
         </button>
       </div>
       {/*
-        Cet avertissement reste, lui, parce qu'il ne concerne pas une conversation mais
-        l'outil entier : c'est une limite que l'utilisateur doit connaître pour décider quoi
-        lui confier.
+        This warning does stay, because it is not about one conversation but about the whole tool:
+        it is a limit the user has to know in order to decide what to trust it with.
       */}
       <p className="mt-2 text-xs text-(--color-ink-muted)">
-        Client web : le serveur livre ce code à chaque chargement et pourrait en livrer une
-        version qui exfiltre vos clés. Aucune API navigateur ne corrige cela. Projet
-        d&apos;apprentissage, non audité — pour des échanges réellement sensibles, utilisez Signal.
+        Web client: the server delivers this code on every load, and could deliver a version that
+        exfiltrates your keys. No browser API fixes that. This is a learning project, unaudited —
+        for genuinely sensitive conversations, use Signal.
       </p>
     </header>
   );

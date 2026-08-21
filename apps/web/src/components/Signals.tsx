@@ -1,20 +1,20 @@
 /**
- * Réglages de signalisation.
+ * Signalling settings.
  *
- * # Pourquoi la réciprocité est écrite à l'écran
+ * # Why the reciprocity is spelled out on screen
  *
- * Désactiver ses accusés de lecture cesse aussi de montrer ceux des autres. C'est le
- * comportement de WhatsApp et de Signal, et il surprend systématiquement quand il n'est pas
- * annoncé. L'enfouir dans une documentation reviendrait à faire découvrir la contrepartie
- * après coup, ce qui est exactement ce qu'un réglage de vie privée ne doit pas faire.
+ * Turning off your read receipts also stops showing you other people's. This is how WhatsApp and
+ * Signal behave, and it surprises everyone when it is not announced. Burying it in documentation
+ * would mean discovering the trade-off after the fact, which is exactly what a privacy setting
+ * must not do.
  *
- * # La présence suit la même règle, et va plus loin
+ * # Presence follows the same rule, and goes further
  *
- * Elle est la seule des fonctions affichées ici qui oblige le serveur à tenir un registre
- * transverse aux conversations — donc à connaître les horaires d'éveil de chacun. Aucune
- * formulation chiffrée ne contourne cela : c'est pourquoi la couper ne se contente pas de
- * masquer l'affichage, mais dit au serveur de **cesser d'enregistrer** et d'effacer ce qu'il
- * a déjà noté. Un réglage qui filtrerait seulement à la lecture ne réglerait rien.
+ * It is the only feature shown here that forces the server to keep a record spanning all
+ * conversations — and therefore to know when each person is awake. No amount of encryption gets
+ * around that: which is why turning it off does not merely hide the display, it tells the server
+ * to **stop recording** and to erase what it already noted. A setting that only filtered on read
+ * would fix nothing.
  */
 import { useState } from "react";
 
@@ -29,10 +29,10 @@ export function SignalSettings({
 }) {
   const [settings, setSettings] = useState(session.signalSettings());
 
-  const basculer = (cle: "readReceipts" | "typingIndicator" | "presence") => {
-    const valeur = !settings[cle];
-    setSettings({ ...settings, [cle]: valeur });
-    session.setSignalSetting(cle, valeur).catch((e: unknown) => {
+  const toggle = (key: "readReceipts" | "typingIndicator" | "presence") => {
+    const value = !settings[key];
+    setSettings({ ...settings, [key]: value });
+    session.setSignalSetting(key, value).catch((e: unknown) => {
       onError(e instanceof Error ? e.message : String(e));
     });
   };
@@ -43,15 +43,14 @@ export function SignalSettings({
         <input
           type="checkbox"
           checked={settings.readReceipts}
-          onChange={() => basculer("readReceipts")}
+          onChange={() => toggle("readReceipts")}
           className="mt-1"
         />
         <span>
-          Accusés de lecture
+          Read receipts
           <span className="block text-xs opacity-70">
-            Les désactiver vous empêche aussi de voir ceux des autres. Les accusés de réception
-            restent actifs : ils constatent qu’un appareil a relevé le message, pas qu’une
-            personne l’a lu.
+            Turning them off also stops you from seeing other people’s. Delivery receipts stay
+            on: they record that a device picked the message up, not that a person read it.
           </span>
         </span>
       </label>
@@ -60,14 +59,14 @@ export function SignalSettings({
         <input
           type="checkbox"
           checked={settings.typingIndicator}
-          onChange={() => basculer("typingIndicator")}
+          onChange={() => toggle("typingIndicator")}
           className="mt-1"
         />
         <span>
-          Indicateur de frappe
+          Typing indicator
           <span className="block text-xs opacity-70">
-            Le contenu est chiffré et n’est jamais stocké, mais le serveur voit qu’un dépôt a
-            lieu dans cette conversation. Le désactiver est la seule protection réelle.
+            The content is encrypted and never stored, but the server can see that something is
+            being posted to this conversation. Turning it off is the only real protection.
           </span>
         </span>
       </label>
@@ -76,23 +75,23 @@ export function SignalSettings({
         <input
           type="checkbox"
           checked={settings.presence !== false}
-          onChange={() => basculer("presence")}
+          onChange={() => toggle("presence")}
           className="mt-1"
         />
         <span>
-          Statut « en ligne »
+          “Online” status
           <span className="block text-xs opacity-70">
-            La désactiver vous empêche aussi de voir qui est en ligne, et demande au serveur
-            d’effacer ce qu’il a déjà noté de votre activité. Tant qu’elle est active, il
-            conserve l’heure de votre dernière connexion, à la minute près — c’est la seule de
-            ces trois fonctions qui exige de lui un registre.
+            Turning it off also stops you from seeing who is online, and asks the server to erase
+            what it already noted about your activity. While it is on, the server keeps the time
+            of your last connection, to the minute — the only one of these three features that
+            requires it to keep a record.
           </span>
         </span>
       </label>
 
       <p className="text-xs opacity-60">
-        Votre historique est sauvegardé par défaut, chiffré par votre phrase de récupération.
-        Cela se règle dans « Sauvegarde de l’historique ».
+        Your history is backed up by default, encrypted with your recovery phrase. You can
+        change that under “History backup”.
       </p>
     </section>
   );

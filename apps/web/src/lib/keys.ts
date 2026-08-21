@@ -1,36 +1,35 @@
 /**
- * Clés détenues par le navigateur.
+ * Keys held by the browser.
  *
- * Deux clés distinctes, avec deux rôles distincts :
+ * Two distinct keys, with two distinct roles:
  *
- * * **auth** (Ed25519) — signe les requêtes HTTP vers le delivery service ;
- * * **wrap** (AES-GCM) — chiffre l'état MLS avant qu'il touche IndexedDB.
+ * * **auth** (Ed25519) — signs HTTP requests to the delivery service;
+ * * **wrap** (AES-GCM) — encrypts MLS state before it touches IndexedDB.
  *
- * Les deux sont créées **non extractables** : `crypto.subtle` refusera de jamais en
- * exporter le matériel, y compris à notre propre code.
+ * Both are created **non-extractable**: `crypto.subtle` will refuse to ever export their
+ * material, including to our own code.
  *
- * # Ce que « non extractable » protège, et ce que ça ne protège pas
+ * # What "non-extractable" protects, and what it does not
  *
- * Cela empêche l'exfiltration du matériel de clé. Cela n'empêche **pas** un script hostile
- * s'exécutant sur cette origine d'utiliser la clé — signer, déchiffrer — tant que la page
- * est ouverte. La distinction compte : un vol de clé est permanent, un usage abusif cesse
- * avec la session.
+ * It prevents key material from being exfiltrated. It does **not** prevent a hostile script
+ * running on this origin from using the key — signing, decrypting — while the page is open.
+ * The distinction matters: a stolen key is permanent, abuse ends with the session.
  *
- * Et surtout : le serveur livre ce JavaScript. Un serveur compromis peut livrer une version
- * qui utilise ces clés contre l'utilisateur. C'est la limite structurelle du web, qu'aucune
- * API navigateur ne corrige.
+ * And above all: the server delivers this JavaScript. A compromised server can deliver a
+ * version that uses these keys against the user. That is the structural limit of the web, and
+ * no browser API fixes it.
  */
 
 const AUTH_ALGORITHM = "Ed25519";
 
 /**
- * TypeScript 5.7+ distingue `Uint8Array<ArrayBuffer>` de `Uint8Array<SharedArrayBuffer>`,
- * et WebCrypto n'accepte que le premier. Aucun de nos tableaux ne provient d'un
- * `SharedArrayBuffer` — ni le WASM, ni `getRandomValues`, ni le décodage réseau — mais
- * `subarray` et `slice` perdent cette information de type.
+ * TypeScript 5.7+ distinguishes `Uint8Array<ArrayBuffer>` from `Uint8Array<SharedArrayBuffer>`,
+ * and WebCrypto only accepts the former. None of our arrays come from a `SharedArrayBuffer` —
+ * not the WASM ones, not `getRandomValues`, not network decoding — but `subarray` and `slice`
+ * lose that type information.
  *
- * Un cast unique et nommé vaut mieux que de propager le générique dans toutes les
- * signatures : si l'hypothèse devient fausse un jour, il n'y a qu'un endroit à revoir.
+ * A single named cast beats propagating the generic through every signature: if the assumption
+ * ever becomes false, there is only one place to revisit.
  */
 function buffer(bytes: Uint8Array): BufferSource {
   return bytes as unknown as BufferSource;
@@ -42,9 +41,9 @@ export interface DeviceKeys {
 }
 
 /**
- * Ed25519 dans WebCrypto est disponible sur Chrome 137+, Firefox 129+ et Safari 17+.
- * En cas d'absence, on préfère échouer visiblement plutôt que retomber sur une
- * implémentation JavaScript où la clé privée resterait exposée en mémoire du script.
+ * Ed25519 in WebCrypto is available on Chrome 137+, Firefox 129+ and Safari 17+. If it is
+ * missing we prefer to fail visibly rather than fall back to a JavaScript implementation where
+ * the private key would sit exposed in the script's memory.
  */
 export async function supportsEd25519(): Promise<boolean> {
   try {
@@ -70,17 +69,17 @@ export async function generateDeviceKeys(): Promise<DeviceKeys> {
 }
 
 /**
- * La clé publique d'authentification — la seule moitié qui quitte l'appareil.
+ * The public authentication key — the only half that leaves the device.
  *
- * En octets, parce que l'attestation la couvre telle quelle : la signer sous sa forme base64
- * ferait dépendre la vérification de l'encodage, et deux encodages valides du même octet
- * (padding, variante URL-safe) produiraient alors deux messages signés différents.
+ * As bytes, because the attestation covers it as-is: signing it in base64 form would make
+ * verification depend on the encoding, and two valid encodings of the same bytes (padding,
+ * URL-safe variant) would then produce two different signed messages.
  */
 export async function exportAuthPublicKeyBytes(keys: DeviceKeys): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.exportKey("raw", keys.auth.publicKey));
 }
 
-/** Même clé, en base64, pour les corps JSON. */
+/** The same key, in base64, for JSON bodies. */
 export async function exportAuthPublicKey(keys: DeviceKeys): Promise<string> {
   return toBase64(await exportAuthPublicKeyBytes(keys));
 }
@@ -95,15 +94,15 @@ export async function sign(keys: DeviceKeys, payload: Uint8Array): Promise<strin
 }
 
 /**
- * Chiffre l'état MLS avant persistance, sous la clé fournie.
+ * Encrypts MLS state before persistence, under the given key.
  *
- * La clé est un paramètre et non un champ de `DeviceKeys` : selon que le verrou local est
- * actif ou non, ce sera la clé maîtresse dérivée du mot de passe (qui n'existe qu'en mémoire)
- * ou la clé non-extractable rangée dans IndexedDB.
+ * The key is a parameter rather than a field of `DeviceKeys`: depending on whether the local
+ * lock is active, it will be the master key derived from the password (which only exists in
+ * memory) or the non-extractable key stored in IndexedDB.
  *
- * Un nonce aléatoire de 96 bits par chiffrement. AES-GCM casse catastrophiquement si un
- * nonce est réutilisé sous la même clé ; 96 bits aléatoires rendent la collision
- * négligeable au rythme où un client sauvegarde son état.
+ * A random 96-bit nonce per encryption. AES-GCM breaks catastrophically if a nonce is reused
+ * under the same key; 96 random bits make a collision negligible at the rate a client saves its
+ * state.
  */
 export async function wrapState(key: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -116,7 +115,7 @@ export async function wrapState(key: CryptoKey, plaintext: Uint8Array): Promise<
 }
 
 export async function unwrapState(key: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
-  if (blob.length <= 12) throw new Error("état chiffré tronqué");
+  if (blob.length <= 12) throw new Error("truncated encrypted state");
 
   const plaintext = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: buffer(blob.subarray(0, 12)) },
@@ -144,19 +143,19 @@ export function toHex(bytes: Uint8Array): string {
 }
 
 /**
- * Réciproque de `toHex`, pour les identifiants de groupe qui reviennent du flux temps réel.
+ * Inverse of `toHex`, for the group ids that come back from the real-time stream.
  *
- * Une entrée de longueur impaire ou non hexadécimale produirait des octets silencieusement
- * faux — d'où le rejet explicite plutôt qu'un `NaN` qui se propagerait jusqu'à une requête.
+ * An odd-length or non-hexadecimal input would produce silently wrong bytes — hence the explicit
+ * rejection rather than a `NaN` propagating all the way into a request.
  */
 export function fromHex(value: string): Uint8Array {
-  if (value.length % 2 !== 0) throw new Error("chaîne hexadécimale de longueur impaire");
+  if (value.length % 2 !== 0) throw new Error("odd-length hex string");
 
   const bytes = new Uint8Array(value.length / 2);
   for (let i = 0; i < bytes.length; i += 1) {
-    const octet = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
-    if (Number.isNaN(octet)) throw new Error("chaîne hexadécimale invalide");
-    bytes[i] = octet;
+    const byte = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
+    if (Number.isNaN(byte)) throw new Error("invalid hex string");
+    bytes[i] = byte;
   }
   return bytes;
 }

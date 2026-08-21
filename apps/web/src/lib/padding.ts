@@ -1,47 +1,45 @@
 /**
- * Rembourrage des messages, pour que leur taille cesse de renseigner le serveur.
+ * Message padding, so that size stops informing the server.
  *
- * # Ce que la taille révèle
+ * # What size reveals
  *
- * Le contenu est chiffré, mais sa **longueur** ne l'est pas : elle traverse MLS presque
- * inchangée, et le serveur la lit sur chaque enveloppe. Cela suffit à distinguer « oui » de
- * « je te rappelle dans dix minutes », à repérer un mot de passe collé, à reconnaître un
- * message type. Sur une conversation suivie dans la durée, la suite des longueurs est une
- * signature.
+ * The content is encrypted, but its **length** is not: it crosses MLS almost unchanged, and the
+ * server reads it on every envelope. That is enough to tell "yes" from "I'll call you back in ten
+ * minutes", to spot a pasted password, to recognise a boilerplate message. Over a conversation
+ * followed for a while, the sequence of lengths is a signature.
  *
- * # Le compromis, qui est réel
+ * # The trade-off, which is real
  *
- * Rembourrer coûte de la bande passante : c'est un octet transmis pour rien à chaque octet
- * ajouté. Des paliers trop fins ne cachent rien, trop larges gaspillent. Les paliers retenus
- * commencent à 256 octets — au-dessus de l'écrasante majorité des messages écrits, qui
- * deviennent donc **tous de la même taille** — puis doublent.
+ * Padding costs bandwidth: one byte transmitted for nothing per byte added. Buckets that are too
+ * fine hide nothing, too wide waste. The chosen buckets start at 256 bytes — above the
+ * overwhelming majority of written messages, which therefore all become **the same size** — then
+ * double.
  *
- * Le doublement borne le gaspillage à moins de 100 % et donne une échelle logarithmique : le
- * serveur n'apprend plus que l'ordre de grandeur, jamais la taille.
+ * Doubling bounds the waste to under 100 % and gives a logarithmic scale: the server only learns
+ * the order of magnitude, never the size.
  *
- * # Ce que cela ne cache pas
+ * # What this does not hide
  *
- * Qui écrit, à qui, et quand. Le rythme d'une conversation reste entièrement lisible, et il
- * en dit souvent plus que les longueurs. Le masquer demanderait du trafic factice — un coût
- * permanent, y compris quand personne ne parle.
+ * Who writes, to whom, and when. The rhythm of a conversation stays entirely legible, and it often
+ * says more than the lengths. Masking it would take decoy traffic — a permanent cost, including
+ * when nobody is talking.
  *
- * Les pièces jointes ne passent pas par ici : elles transitent par un autre chemin et leur
- * taille est de toute façon dominée par le fichier.
+ * Attachments do not go through here: they travel by another path and their size is dominated by
+ * the file anyway.
  */
 
-/** Premier palier. Choisi au-dessus de la quasi-totalité des messages écrits. */
+/** First bucket. Chosen above nearly all written messages. */
 const FIRST_BUCKET = 256;
 
 /**
- * Marqueur de fin de contenu, puis des zéros — ISO/IEC 7816-4.
+ * End-of-content marker, then zeroes — ISO/IEC 7816-4.
  *
- * Un simple remplissage par des zéros serait ambigu : un contenu se terminant légitimement par
- * un zéro deviendrait indistinguable de son rembourrage. Le marqueur lève l'ambiguïté sans
- * coûter plus d'un octet.
+ * Plain zero filling would be ambiguous: content legitimately ending in a zero would become
+ * indistinguishable from its padding. The marker removes the ambiguity for no more than one byte.
  */
 const MARKER = 0x80;
 
-/** Palier atteignant au moins `length`. */
+/** The bucket reaching at least `length`. */
 function bucket(length: number): number {
   let size = FIRST_BUCKET;
   while (size < length) size *= 2;
@@ -49,10 +47,10 @@ function bucket(length: number): number {
 }
 
 /**
- * Rembourre jusqu'au palier supérieur.
+ * Pads up to the next bucket.
  *
- * Le marqueur est **toujours** ajouté, même quand la longueur tombe pile sur un palier : sans
- * cela, le retrait ne saurait pas si le dernier octet appartient au contenu.
+ * The marker is **always** added, even when the length falls exactly on a bucket: without it,
+ * removal would not know whether the last byte belongs to the content.
  */
 export function pad(body: Uint8Array): Uint8Array {
   const size = bucket(body.length + 1);
@@ -63,19 +61,18 @@ export function pad(body: Uint8Array): Uint8Array {
 }
 
 /**
- * Retire le rembourrage.
+ * Removes the padding.
  *
- * Lève sur un rembourrage mal formé plutôt que de deviner : ces octets ont été authentifiés
- * par MLS, donc ils viennent bien d'un membre — mais un membre peut envoyer n'importe quoi,
- * par erreur comme volontairement, et une lecture approximative ici deviendrait une différence
- * d'interprétation entre clients.
+ * Throws on malformed padding rather than guessing: these bytes were authenticated by MLS, so they
+ * do come from a member — but a member can send anything at all, by mistake or on purpose, and a
+ * loose reading here would become a difference of interpretation between clients.
  */
 export function unpad(padded: Uint8Array): Uint8Array {
   let end = padded.length - 1;
   while (end >= 0 && padded[end] === 0x00) end -= 1;
 
   if (end < 0 || padded[end] !== MARKER) {
-    throw new Error("rembourrage mal formé");
+    throw new Error("malformed padding");
   }
 
   return padded.subarray(0, end);

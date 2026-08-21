@@ -1,19 +1,19 @@
 /**
- * Nom de l'appareil courant.
+ * Name of the current device.
  *
- * Le demander à l'utilisateur ne sert à rien : il n'a pas d'information que le navigateur
- * n'ait déjà, et la question arrive au pire moment — juste avant qu'il découvre sa phrase de
- * récupération, qui elle mérite toute son attention.
+ * Asking the user is pointless: they have no information the browser does not already have, and
+ * the question comes at the worst moment — right before they discover their recovery phrase,
+ * which deserves all their attention.
  *
- * Ce nom est **transporté en clair** dans l'identifiant d'appareil, visible du serveur comme
- * des correspondants. D'où deux mots génériques plutôt qu'un modèle précis : « iPhone 15 Pro
- * bleu » distinguerait son porteur bien au-delà de ce qu'exige le routage.
+ * This name is **carried in the clear** inside the device id, visible to the server and to
+ * correspondents. Hence two generic words rather than a precise model: "blue iPhone 15 Pro"
+ * would single out its owner far beyond what routing requires.
  */
 export type DeviceKind = "desktop" | "mobile";
 
 export function detectDeviceKind(): DeviceKind {
-  // `userAgentData` est l'API non dépréciée et non falsifiable par simple chaîne ; elle
-  // manque encore à Safari et Firefox, d'où le repli sur l'user agent.
+  // `userAgentData` is the non-deprecated API, and cannot be faked with a plain string; Safari
+  // and Firefox still lack it, hence the fallback on the user agent.
   const hints = (navigator as Navigator & { userAgentData?: { mobile?: boolean } }).userAgentData;
   if (typeof hints?.mobile === "boolean") return hints.mobile ? "mobile" : "desktop";
 
@@ -21,10 +21,10 @@ export function detectDeviceKind(): DeviceKind {
 }
 
 /**
- * Décline un nom déjà pris : `desktop`, `desktop-2`, `desktop-3`…
+ * Varies a name that is already taken: `desktop`, `desktop-2`, `desktop-3`…
  *
- * Un compte peut légitimement avoir deux ordinateurs. Le serveur refuse alors le second avec
- * un 409, et cette suite permet de réessayer sans rien demander à l'utilisateur.
+ * An account can legitimately have two computers. The server then refuses the second with a 409,
+ * and this sequence allows a retry without asking the user anything.
  */
 export function* deviceNameCandidates(kind: DeviceKind): Generator<string> {
   yield kind;

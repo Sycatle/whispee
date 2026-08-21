@@ -2,21 +2,20 @@ import { useState } from "react";
 import type { AttachmentRef } from "@/lib/attachments";
 
 function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} o`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} Ko`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} Mo`;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} kB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /**
- * Pièce jointe reçue.
+ * A received attachment.
  *
- * Le fichier est **téléchargé, jamais rendu inline**. Le type MIME vient de l'expéditeur :
- * c'est une indication, pas une preuve. Afficher un fichier déclaré `image/png` qui se
- * révèle être un SVG ou un HTML exécuterait du script sur cette origine — c'est-à-dire à
- * portée des clés dans IndexedDB. Un correspondant hostile, ou un compte compromis, suffit.
+ * The file is **downloaded, never rendered inline**. The MIME type comes from the sender: it is
+ * a hint, not a proof. Displaying a file declared `image/png` that turns out to be SVG or HTML
+ * would run script on this origin — that is, within reach of the keys in IndexedDB. A hostile
+ * peer, or one compromised account, is enough.
  *
- * Le nom aussi vient de l'expéditeur. Il est affiché comme texte, jamais interprété comme
- * un chemin.
+ * The name comes from the sender too. It is shown as text, never interpreted as a path.
  */
 export function Attachment({
   attachment,
@@ -34,8 +33,8 @@ export function Attachment({
     try {
       const blob = await onOpen();
 
-      // Le déchiffrement a réussi, donc l'AEAD a validé l'intégrité : ces octets sont bien
-      // ceux qu'un membre du groupe a chiffrés, et n'ont pas été altérés en transit.
+      // Decryption succeeded, so the AEAD validated integrity: these bytes are the ones a group
+      // member encrypted, unaltered in transit.
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -43,11 +42,11 @@ export function Attachment({
       link.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      // Un échec ici n'est pas anodin : l'AEAD refuse un blob substitué ou altéré.
+      // A failure here is not benign: the AEAD rejects a substituted or altered blob.
       setError(
         e instanceof Error && e.name === "OperationError"
-          ? "Fichier illisible : il a été modifié ou remplacé depuis son envoi."
-          : "Téléchargement impossible.",
+          ? "Unreadable file: it was modified or replaced after it was sent."
+          : "Download failed.",
       );
     } finally {
       setBusy(false);
@@ -67,7 +66,7 @@ export function Attachment({
       </button>
       <p className="text-xs opacity-70">
         {formatSize(attachment.size)}
-        {busy && " — déchiffrement…"}
+        {busy && " — decrypting…"}
       </p>
       {error && (
         <p role="alert" className="text-xs text-(--color-danger)">

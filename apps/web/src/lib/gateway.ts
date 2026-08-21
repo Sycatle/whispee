@@ -1,34 +1,33 @@
 /**
- * Session gateway : une connexion, toutes les conversations.
+ * Gateway session: one connection, every conversation.
  *
- * # Ce que ce module n'est pas
+ * # What this module is not
  *
- * Il n'est **pas** une source de vérité. Une trame `envelope` se contente de dire « va voir » ;
- * c'est la relève normale qui lit, vérifie l'appartenance et fait avancer le curseur. Une
- * session qui ne s'ouvre jamais laisse l'application entièrement fonctionnelle, simplement moins
- * réactive.
+ * It is **not** a source of truth. An `envelope` frame only says "go and look"; the normal poll
+ * is what reads, checks membership and advances the cursor. A session that never opens leaves the
+ * application fully functional, only less responsive.
  *
- * Cette propriété n'est pas un luxe : une connexion dont la panne perdrait des messages serait
- * une connexion qu'il faudrait rendre fiable, et on aurait réinventé le transport au-dessus du
- * transport. Elle explique aussi pourquoi les curseurs envoyés à l'ouverture ne sont qu'une
- * optimisation — les ignorer coûterait une relève, pas un message.
+ * That property is not a luxury: a connection whose failure would lose messages would be a
+ * connection we had to make reliable, and we would have reinvented transport on top of transport.
+ * It also explains why the cursors sent on open are only an optimisation — ignoring them costs a
+ * poll, not a message.
  *
- * # Ce qu'elle retire au serveur
+ * # What it takes away from the server
  *
- * La relève à 1,5 seconde envoyait une requête signée par conversation et par tour : un journal
- * d'activité à la seconde près. Le rattrapage par curseurs supprime en plus la relève de
- * réveil — le serveur ne répond que s'il a quelque chose à dire.
+ * Polling every 1.5 seconds sent one signed request per conversation per round: an activity log
+ * accurate to the second. Catching up by cursors additionally removes the wake-up poll — the
+ * server only answers when it has something to say.
  *
- * # Ce qu'elle lui donne
+ * # What it gives it
  *
- * Un battement régulier, donc la présence. C'est le même compromis que documentait déjà le flux
- * SSE, à ceci près qu'il est ici explicite : le battement est une trame, pas un effet de bord.
+ * A regular heartbeat, hence presence. Same trade-off the SSE stream already documented, except
+ * that here it is explicit: the heartbeat is a frame, not a side effect.
  *
- * # Portée dynamique
+ * # Dynamic scope
  *
- * Contrairement au flux SSE qu'elle remplace, la portée n'est plus figée à l'ouverture. Une
- * conversation découverte en cours de route s'ajoute par une trame `subscribe`, sans rouvrir
- * la connexion ni refaire signer un défi.
+ * Unlike the SSE stream it replaces, the scope is no longer frozen at open time. A conversation
+ * discovered along the way is added with a `subscribe` frame, without reopening the connection or
+ * signing another challenge.
  */
 import { BASE_URL, type Api, type GatewayChallenge } from "./api";
 import { fromBase64, fromHex, toBase64, toHex } from "./keys";
@@ -38,10 +37,10 @@ export interface GatewayHandlers {
   onSignal(groupId: Uint8Array, payload: Uint8Array): void;
 }
 
-/** Plafond du délai de reconnexion. Au-delà, on martèle un serveur déjà en difficulté. */
+/** Reconnection delay ceiling. Beyond it, we hammer a server that is already struggling. */
 const MAX_BACKOFF_MS = 30_000;
 
-/** Dernière séquence connue d'une conversation, telle qu'annoncée à l'ouverture. */
+/** Last known sequence of a conversation, as announced on open. */
 export interface Cursor {
   groupId: Uint8Array;
   seq: number;
@@ -53,15 +52,15 @@ export class Gateway {
   private attempt = 0;
   private heartbeat?: ReturnType<typeof setInterval>;
 
-  /** Rythme imposé par le serveur, écrasé par la valeur annoncée dans `hello`. */
+  /** Pace imposed by the server, overwritten by the value announced in `hello`. */
   private heartbeatMs = 30_000;
 
   /**
-   * Groupes que cette session doit couvrir.
+   * Groups this session must cover.
    *
-   * Tenu ici plutôt que déduit à chaque reconnexion : le serveur abonne d'office aux groupes
-   * dont l'appareil est membre, mais l'ensemble local est ce qui permet de rejouer les
-   * `subscribe` après une coupure sans attendre la relève suivante.
+   * Held here rather than derived on every reconnection: the server subscribes us automatically
+   * to the groups the device belongs to, but the local set is what lets us replay the
+   * `subscribe` frames after a drop without waiting for the next poll.
    */
   private readonly scope = new Set<string>();
 
@@ -69,17 +68,17 @@ export class Gateway {
     private readonly api: Api,
     private readonly handlers: GatewayHandlers,
     /**
-     * Curseurs au moment de la (re)connexion.
+     * Cursors at the moment of (re)connection.
      *
-     * Une fonction, pas une valeur : entre deux tentatives, la relève a pu avancer, et envoyer
-     * un curseur périmé ferait réannoncer des séquences déjà lues.
+     * A function, not a value: between two attempts the poll may have advanced, and sending a
+     * stale cursor would re-announce sequences already read.
      */
     private readonly cursors: () => Cursor[],
     /**
-     * Construction du message signé, fournie par le module WebAssembly.
+     * Builds the signed message, provided by the WebAssembly module.
      *
-     * Injectée plutôt qu'importée, pour la même raison que dans `api.ts` : ce module ne doit
-     * pas dépendre du chargement du WASM, qui est asynchrone et n'a pas lieu au même moment.
+     * Injected rather than imported, for the same reason as in `api.ts`: this module must not
+     * depend on loading the WASM, which is asynchronous and does not happen at the same time.
      */
     private readonly challengeFormat: GatewayChallenge,
   ) {}
@@ -97,10 +96,10 @@ export class Gateway {
   }
 
   /**
-   * Ajoute une conversation à la portée de la session.
+   * Adds a conversation to the session's scope.
    *
-   * Idempotent, et sûr hors connexion : la portée est mémorisée et rejouée à la reconnexion
-   * suivante. C'est ce qui remplace la réouverture complète qu'imposait le flux SSE.
+   * Idempotent, and safe while offline: the scope is remembered and replayed on the next
+   * reconnection. This is what replaces the full reopen the SSE stream required.
    */
   subscribe(groupId: Uint8Array): void {
     const key = toHex(groupId);
@@ -118,15 +117,14 @@ export class Gateway {
   }
 
   /**
-   * Relaie un signal éphémère par la session plutôt que par une requête HTTP.
+   * Relays an ephemeral signal over the session rather than over an HTTP request.
    *
-   * Le MAC de groupe reste ce qui l'authentifie : la session connaît notre identité, mais s'en
-   * servir ici défairait le sealed sender. Le serveur applique exactement la même vérification
-   * que sur le chemin HTTP.
+   * The group MAC remains what authenticates it: the session knows our identity, but using it
+   * here would undo sealed sender. The server applies exactly the same check as on the HTTP path.
    *
-   * Retourne `false` si la session est fermée, l'appelant retombant alors sur la route HTTP.
-   * Celle-ci est **elle aussi anonyme** : le repli ne dégrade donc rien du modèle de menace, il
-   * coûte seulement une requête là où une trame aurait suffi.
+   * Returns `false` when the session is closed, the caller then falling back to the HTTP route.
+   * That route is **anonymous too**: the fallback degrades nothing in the threat model, it merely
+   * costs a request where a frame would have done.
    */
   signal(groupId: Uint8Array, nonce: Uint8Array, mac: Uint8Array, payload: Uint8Array): boolean {
     return this.send({
@@ -138,7 +136,7 @@ export class Gateway {
     });
   }
 
-  /** Vrai quand la socket est ouverte — sert à décider si un signal peut partir. */
+  /** True while the socket is open — used to decide whether a signal can go out. */
   get live(): boolean {
     return this.socket?.readyState === WebSocket.OPEN;
   }
@@ -154,12 +152,12 @@ export class Gateway {
     while (!this.closed) {
       try {
         await this.session();
-        // Terminaison propre du côté serveur : on repart sans pénalité.
+        // Clean termination on the server side: we start over without penalty.
         this.attempt = 0;
       } catch {
-        // Volontairement muet. Une session coupée est un événement ordinaire — bascule de
-        // réseau, veille de l'appareil, redémarrage du serveur — et le signaler à
-        // l'utilisateur suggérerait à tort que quelque chose est perdu.
+        // Deliberately silent. A dropped session is an ordinary event — network switch, device
+        // sleep, server restart — and reporting it to the user would wrongly suggest that
+        // something was lost.
       }
 
       if (this.closed) return;
@@ -170,7 +168,7 @@ export class Gateway {
     }
   }
 
-  /** Une session, de l'ouverture à la fermeture. Résout à la fermeture, rejette sur erreur. */
+  /** One session, from open to close. Resolves on close, rejects on error. */
   private session(): Promise<void> {
     return new Promise((resolve, reject) => {
       const url = `${BASE_URL.replace(/^http/, "ws")}/v1/gateway`;
@@ -178,7 +176,7 @@ export class Gateway {
       socket.binaryType = "arraybuffer";
       this.socket = socket;
 
-      socket.onerror = () => reject(new Error("session gateway refusée"));
+      socket.onerror = () => reject(new Error("gateway session refused"));
 
       socket.onclose = () => {
         this.stopHeartbeat();
@@ -193,8 +191,8 @@ export class Gateway {
         try {
           frame = JSON.parse(event.data) as Record<string, unknown>;
         } catch {
-          // Une trame illisible est ignorée. La session n'est qu'un raccourci : ce qu'elle
-          // laisse tomber, la relève périodique le rattrape.
+          // An unreadable frame is ignored. The session is only a shortcut: whatever it drops,
+          // the periodic poll picks up.
           return;
         }
 
@@ -210,17 +208,17 @@ export class Gateway {
         return;
 
       case "ready": {
-        // La connexion tient : les tentatives suivantes repartent d'un délai court.
+        // The connection holds: subsequent attempts start again from a short delay.
         this.attempt = 0;
 
-        // Le serveur a abonné aux groupes dont il nous sait membre. Ceux que nous connaissons
-        // et qu'il a omis sont réclamés explicitement — sans quoi une conversation créée
-        // pendant une coupure resterait muette jusqu'à la relève suivante.
-        const servis = new Set((frame.groups as string[] | undefined) ?? []);
+        // The server subscribed us to the groups it knows we belong to. Those we know about and
+        // it left out are claimed explicitly — otherwise a conversation created during an outage
+        // would stay silent until the next poll.
+        const served = new Set((frame.groups as string[] | undefined) ?? []);
         for (const key of this.scope) {
-          if (!servis.has(key)) this.send({ op: "subscribe", group_id: key });
+          if (!served.has(key)) this.send({ op: "subscribe", group_id: key });
         }
-        for (const key of servis) this.scope.add(key);
+        for (const key of served) this.scope.add(key);
 
         this.startHeartbeat();
         return;
@@ -237,29 +235,28 @@ export class Gateway {
         );
         return;
 
-      // `heartbeat_ack` et `error` ne demandent rien : le serveur ferme la socket quand une
-      // erreur est fatale, et la boucle de reconnexion s'en charge. Réagir à un motif
-      // d'erreur reviendrait à traiter comme une panne ce qui est le fonctionnement normal.
+      // `heartbeat_ack` and `error` ask for nothing: the server closes the socket when an error
+      // is fatal, and the reconnection loop takes over. Reacting to an error reason would mean
+      // treating normal operation as a failure.
       default:
     }
   }
 
   /**
-   * Relève le défi émis par le serveur.
+   * Answers the challenge issued by the server.
    *
-   * Le nonce vient du serveur et n'est valable qu'une fois : contrairement à l'authentification
-   * HTTP, il n'y a **aucune** fenêtre pendant laquelle une signature captée resterait
-   * utilisable. C'est ce que gagne une session en échange du fait de s'authentifier une seule
-   * fois pour toute sa durée.
+   * The nonce comes from the server and is valid only once: unlike HTTP authentication, there is
+   * **no** window during which a captured signature would stay usable. That is what a session
+   * gains in exchange for authenticating only once for its whole lifetime.
    */
   private async identify(socket: WebSocket, hello: Record<string, unknown>): Promise<void> {
     const nonce = fromBase64(hello.nonce as string);
 
-    // Le rythme est dicté par le serveur, pas choisi ici : c'est lui qui sait au bout de
-    // combien de silence il ferme. Le coder en dur des deux côtés les ferait diverger à la
-    // première fois où l'un des deux changerait.
-    const annonce = hello.heartbeat_ms;
-    if (typeof annonce === "number" && annonce > 0) this.heartbeatMs = annonce;
+    // The pace is dictated by the server, not chosen here: it is the one that knows after how
+    // much silence it closes. Hardcoding it on both sides would make them diverge the first time
+    // one of the two changed.
+    const announced = hello.heartbeat_ms;
+    if (typeof announced === "number" && announced > 0) this.heartbeatMs = announced;
 
     socket.send(
       JSON.stringify({
@@ -276,16 +273,15 @@ export class Gateway {
   }
 
   /**
-   * Bat au rythme annoncé par le serveur, divisé par deux.
+   * Beats at the pace announced by the server, halved.
    *
-   * Le battement n'est pas qu'un signe de vie : c'est lui qui déclenche côté serveur la
-   * revérification de nos appartenances. Le sauter laisserait la session servir des groupes
-   * dont nous venons d'être retirés.
+   * The heartbeat is not just a sign of life: it is what triggers the server-side re-check of our
+   * memberships. Skipping it would let the session serve groups we have just been removed from.
    */
   private startHeartbeat(): void {
     this.stopHeartbeat();
-    // Deux fois plus vite que le rythme annoncé : un battement perdu sur une bascule de réseau
-    // ne doit pas coûter une reconnexion, avec son défi et son rattrapage.
+    // Twice as fast as the announced pace: one beat lost on a network switch must not cost a
+    // reconnection, with its challenge and its catch-up.
     this.heartbeat = setInterval(() => this.send({ op: "heartbeat" }), this.heartbeatMs / 2);
   }
 

@@ -1,13 +1,13 @@
 /**
- * Format du contenu transporté *à l'intérieur* d'un message MLS.
+ * Format of the content carried *inside* an MLS message.
  *
- * Le plaintext MLS n'est qu'une suite d'octets : c'est à l'application de dire s'il s'agit
- * de texte ou du descripteur d'une pièce jointe. Un octet de type suffit, et laisse la place
- * à d'autres formes plus tard.
+ * The MLS plaintext is just a byte string: it is up to the application to say whether it holds
+ * text or an attachment descriptor. A single type byte is enough, and leaves room for other
+ * forms later.
  *
- * Tout ce qui passe par ici est chiffré de bout en bout — y compris le nom du fichier, son
- * type et sa clé. C'est délibéré : ce sont des informations sur le contenu, et le serveur
- * n'a aucune raison de les connaître.
+ * Everything that goes through here is end-to-end encrypted — including the file name, its type
+ * and its key. That is deliberate: they are facts about the content, and the server has no
+ * reason to know them.
  */
 import type { AttachmentRef } from "./attachments";
 
@@ -29,11 +29,10 @@ export type Content =
   | { kind: "reply"; target: number; text: string };
 
 /**
- * Ce qu'un accusé constate.
+ * What a receipt attests.
  *
- * `delivered` est mécanique : l'appareil a relevé l'enveloppe. `read` engage une personne —
- * le message a été affiché. C'est cette différence qui justifie que seul le second soit
- * désactivable.
+ * `delivered` is mechanical: the device picked the envelope up. `read` commits a person — the
+ * message was displayed. That difference is why only the second one can be turned off.
  */
 export type ReceiptState = "delivered" | "read";
 
@@ -41,20 +40,20 @@ const RECEIPT_DELIVERED = 0;
 const RECEIPT_READ = 1;
 
 /**
- * Tête de journal transmise à un correspondant, **dans un message chiffré**.
+ * A log head handed to a correspondent, **inside an encrypted message**.
  *
- * # Pourquoi ce canal et pas un autre
+ * # Why this channel and no other
  *
- * Un journal auditable a une faiblesse que ni la signature ni les preuves ne couvrent : le
- * serveur peut en tenir **deux** et en servir un à chacun. Chaque victime voit un journal
- * signé, cohérent, où sa propre vue est parfaite.
+ * An auditable log has one weakness that neither signatures nor proofs cover: the server can
+ * keep **two** of them and serve one to each side. Each victim sees a signed, consistent log in
+ * which their own view is perfect.
  *
- * La détecter demande de comparer les vues de deux personnes par un canal que le serveur ne
- * contrôle pas. Ce canal existe déjà : la conversation elle-même. Le serveur transporte ces
- * octets sans pouvoir les lire ni les modifier — c'est exactement ce qu'il faut.
+ * Detecting it means comparing two people's views over a channel the server does not control.
+ * That channel already exists: the conversation itself. The server carries these bytes without
+ * being able to read or alter them — exactly what is needed.
  *
- * Le destinataire demande alors au serveur de prouver que **son** journal prolonge la vue
- * reçue. Si le serveur a servi deux journaux, il ne le peut pas.
+ * The recipient then asks the server to prove that **its** log extends the view it received. If
+ * the server served two logs, it cannot.
  */
 export interface GossipHead {
   size: number;
@@ -70,11 +69,11 @@ export function encodeText(text: string): Uint8Array {
 }
 
 /**
- * Encode une tête de journal. Format fixe : `u32 taille ‖ 32 octets de racine`.
+ * Encodes a log head. Fixed layout: `u32 size ‖ 32 bytes of root`.
  *
- * Ni signature ni horodatage : le destinataire ne vérifie pas cette tête pour elle-même, il
- * s'en sert comme **ancre** et demande au serveur de prouver que son propre journal la
- * prolonge. Transporter la signature laisserait croire qu'elle sert à quelque chose ici.
+ * No signature, no timestamp: the recipient does not verify this head for its own sake, it uses
+ * it as an **anchor** and asks the server to prove that its own log extends it. Carrying the
+ * signature would suggest it serves some purpose here.
  */
 export function encodeGossip(head: GossipHead): Uint8Array {
   const out = new Uint8Array(1 + 4 + 32);
@@ -85,20 +84,20 @@ export function encodeGossip(head: GossipHead): Uint8Array {
 }
 
 /**
- * Encode n'importe quel contenu. Un point d'entrée unique, pour que l'ajout d'un type oblige
- * à traiter le cas partout — la version précédente écrivait « si texte, sinon pièce jointe »
- * en deux endroits, ce qui aurait envoyé du gossip encodé comme une pièce jointe.
+ * Encodes any content. A single entry point, so that adding a type forces the case to be handled
+ * everywhere — the previous version wrote "if text, else attachment" in two places, which would
+ * have sent gossip encoded as an attachment.
  */
 /**
- * Ce contenu est-il du **trafic de protocole** plutôt qu'un message ?
+ * Is this content **protocol traffic** rather than a message?
  *
- * Le gossip et la clé de dépôt circulent dans le même canal chiffré que les messages, parce
- * que c'est précisément ce qu'on veut : un canal que le serveur transporte sans pouvoir le
- * lire. Mais ce ne sont pas des messages — les afficher noie la conversation sous des bulles
- * vides, et les archiver remplit le coffre de choses que personne ne relira jamais.
+ * Gossip and the posting key travel through the same encrypted channel as messages, because that
+ * is exactly what we want: a channel the server carries without being able to read it. But they
+ * are not messages — displaying them drowns the conversation in empty bubbles, and archiving them
+ * fills the vault with things nobody will ever read again.
  *
- * La distinction est ici, dans un seul endroit, pour qu'un nouveau type de contrôle n'oblige
- * pas à se souvenir de le filtrer à l'envoi **et** à la réception.
+ * The distinction lives here, in one place, so that a new control type does not have to be
+ * remembered on send **and** on receive.
  */
 export function isControl(body: Content): boolean {
   return body.kind === "gossip" || body.kind === "posting-key" || body.kind === "receipt";
@@ -124,13 +123,13 @@ export function encode(body: Content): Uint8Array {
 }
 
 /**
- * Encode un accusé. Format fixe : `u8 état ‖ u64 BE seq`.
+ * Encodes a receipt. Fixed layout: `u8 state ‖ u64 BE seq`.
  *
- * # Cumulatif, et c'est tout le dimensionnement
+ * # Cumulative, and that is the whole sizing argument
  *
- * L'accusé porte « jusqu'à ce numéro », pas « ce message-ci ». Une session de lecture coûte
- * donc une enveloppe et non une par bulle — sans quoi ouvrir une conversation en retard de
- * deux cents messages en produirait deux cents, dans une table qui n'est jamais purgée.
+ * A receipt carries "up to this number", not "this message". A reading session therefore costs
+ * one envelope instead of one per bubble — otherwise opening a conversation two hundred messages
+ * behind would produce two hundred of them, in a table that is never purged.
  */
 export function encodeReceipt(state: ReceiptState, seq: number): Uint8Array {
   const out = new Uint8Array(1 + 1 + 8);
@@ -141,11 +140,10 @@ export function encodeReceipt(state: ReceiptState, seq: number): Uint8Array {
 }
 
 /**
- * Encode les deux formes qui désignent un message antérieur : `u64 BE cible ‖ UTF-8`.
+ * Encodes the two forms that point at an earlier message: `u64 BE target ‖ UTF-8`.
  *
- * Réaction et réponse partagent leur structure et ne diffèrent que par leur octet de type.
- * Les écrire deux fois inviterait à ce que l'une gagne une correction que l'autre n'aurait
- * pas.
+ * Reaction and reply share their layout and differ only by their type byte. Writing them twice
+ * would invite one of them to get a fix the other never did.
  */
 function encodeTargeted(type: number, target: number, text: string): Uint8Array {
   const body = new TextEncoder().encode(text);
@@ -157,17 +155,17 @@ function encodeTargeted(type: number, target: number, text: string): Uint8Array 
 }
 
 /**
- * Transmet la clé de dépôt du groupe aux autres membres.
+ * Hands the group's posting key to the other members.
  *
- * # Pourquoi elle passe par le contenu chiffré
+ * # Why it travels inside the encrypted content
  *
- * Cette clé permet de déposer dans le groupe sans s'identifier auprès du serveur. La faire
- * transiter par le serveur reviendrait à lui demander de distribuer le moyen de ne pas lui
- * parler — il pourrait la donner à qui il veut, ou la retenir. Elle passe donc par MLS, comme
- * n'importe quel autre secret du groupe.
+ * This key allows posting to the group without identifying yourself to the server. Routing it
+ * through the server would mean asking it to distribute the means of not talking to it — it could
+ * hand it to whoever it likes, or withhold it. So it goes through MLS, like any other group
+ * secret.
  *
- * Le serveur la détient malgré tout : il doit vérifier les MAC. Ce qu'il ne peut pas, c'est
- * décider qui d'autre l'obtient.
+ * The server holds it anyway: it has to verify the MACs. What it cannot do is decide who else
+ * gets it.
  */
 export function encodePostingKey(key: Uint8Array): Uint8Array {
   const out = new Uint8Array(1 + 32);
@@ -185,15 +183,15 @@ export function encodeAttachment(ref: AttachmentRef): Uint8Array {
 }
 
 /**
- * Ces octets ont été authentifiés par MLS : ils viennent bien d'un membre du groupe. Cela
- * ne les rend pas pour autant bien formés — un membre peut envoyer n'importe quoi, par
- * erreur ou volontairement. La lecture doit donc échouer proprement.
+ * These bytes were authenticated by MLS: they really do come from a group member. That does not
+ * make them well-formed — a member can send anything at all, by mistake or on purpose. So
+ * decoding has to fail cleanly.
  *
- * Compatibilité ascendante : un message d'une version ultérieure, portant un type inconnu,
- * ne doit pas casser la conversation.
+ * Forward compatibility: a message from a later version, carrying an unknown type, must not break
+ * the conversation.
  */
 export function decode(bytes: Uint8Array): Content {
-  if (bytes.length < 1) throw new Error("contenu vide");
+  if (bytes.length < 1) throw new Error("empty content");
 
   const body = bytes.subarray(1);
 
@@ -202,7 +200,7 @@ export function decode(bytes: Uint8Array): Content {
       return { kind: "text", text: new TextDecoder().decode(body) };
 
     case TYPE_GOSSIP: {
-      if (body.length !== 4 + 32) throw new Error("tête de journal mal dimensionnée");
+      if (body.length !== 4 + 32) throw new Error("badly sized log head");
       return {
         kind: "gossip",
         head: {
@@ -213,46 +211,46 @@ export function decode(bytes: Uint8Array): Content {
     }
 
     case TYPE_POSTING_KEY: {
-      if (body.length !== 32) throw new Error("clé de dépôt mal dimensionnée");
+      if (body.length !== 32) throw new Error("badly sized posting key");
       return { kind: "posting-key", key: body.slice(0, 32) };
     }
 
     case TYPE_RECEIPT: {
-      if (body.length !== 1 + 8) throw new Error("accusé mal dimensionné");
-      const vue = new DataView(body.buffer, body.byteOffset);
+      if (body.length !== 1 + 8) throw new Error("badly sized receipt");
+      const view = new DataView(body.buffer, body.byteOffset);
       return {
         kind: "receipt",
         state: body[0] === RECEIPT_READ ? "read" : "delivered",
-        // `Number` plutôt que `bigint` : les numéros de séquence restent très en deçà de
-        // 2^53, et un bigint contaminerait toute l'arithmétique de curseur en aval.
-        seq: Number(vue.getBigUint64(1, false)),
+        // `Number` rather than `bigint`: sequence numbers stay well below 2^53, and a bigint
+        // would contaminate all the cursor arithmetic downstream.
+        seq: Number(view.getBigUint64(1, false)),
       };
     }
 
     case TYPE_REACTION:
     case TYPE_REPLY: {
-      if (body.length < 8) throw new Error("référence de message manquante");
+      if (body.length < 8) throw new Error("missing message reference");
       const target = Number(new DataView(body.buffer, body.byteOffset).getBigUint64(0, false));
-      const texte = new TextDecoder().decode(body.subarray(8));
+      const text = new TextDecoder().decode(body.subarray(8));
       return bytes[0] === TYPE_REACTION
-        ? { kind: "reaction", target, emoji: texte }
-        : { kind: "reply", target, text: texte };
+        ? { kind: "reaction", target, emoji: text }
+        : { kind: "reply", target, text };
     }
 
     case TYPE_ATTACHMENT: {
       const ref = JSON.parse(new TextDecoder().decode(body)) as AttachmentRef;
-      for (const champ of ["id", "key", "iv", "name", "mime"] as const) {
-        if (typeof ref[champ] !== "string") {
-          throw new Error(`descripteur de pièce jointe invalide : ${champ} manquant`);
+      for (const field of ["id", "key", "iv", "name", "mime"] as const) {
+        if (typeof ref[field] !== "string") {
+          throw new Error(`invalid attachment descriptor: ${field} missing`);
         }
       }
       if (typeof ref.size !== "number") {
-        throw new Error("descripteur de pièce jointe invalide : size manquant");
+        throw new Error("invalid attachment descriptor: size missing");
       }
       return { kind: "attachment", ref };
     }
 
     default:
-      throw new Error(`type de contenu inconnu : ${bytes[0]}`);
+      throw new Error(`unknown content type: ${bytes[0]}`);
   }
 }

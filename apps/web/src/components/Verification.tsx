@@ -4,33 +4,29 @@ import type { VerificationState } from "@/lib/session";
 import { Fingerprint } from "./Fingerprint";
 
 /**
- * Vérification d'identité : silencieuse en régime nominal, franche sur anomalie.
+ * Identity verification: silent when nothing is wrong, blunt on anomaly.
  *
- * # Pourquoi ne rien afficher tant que tout va bien
+ * # Why nothing is shown while all is well
  *
- * Un avertissement permanent « identité non vérifiée » s'apprend à ignorer en quelques
- * jours. Le jour où il compte — l'empreinte a changé — il est déjà devenu invisible. Un
- * bandeau perpétuel n'est donc pas une précaution : c'est ce qui rend l'alerte utile
- * inaudible.
+ * A permanent "identity not verified" warning takes a few days to learn to ignore. On the day
+ * it matters — the fingerprint changed — it has already become invisible. A perpetual banner
+ * is not a precaution: it is what makes the useful alert inaudible.
  *
- * Signal et WhatsApp ne disent rien en nominal et n'alertent que sur un changement. C'est
- * meilleur pour l'utilisateur *et* pour la sécurité, parce que ça préserve la valeur
- * d'attention de l'alerte.
+ * Signal and WhatsApp say nothing in the nominal case and only warn on a change. That is
+ * better for the user *and* for security, because it preserves the alert's claim on attention.
  *
- * # Ce qui reste à faire pour supprimer le trou de confiance initial
+ * # What is still missing to close the initial trust gap
  *
- * Le silence sur `unverified` fait un pari : que le premier KeyPackage servi était bien
- * celui du correspondant (trust on first use). Le combler demande de la **key transparency**
- * — un log Merkle auditable des clés publiques, que le client vérifie automatiquement.
- * C'est ce que déploient WhatsApp et Apple, et c'est ce qui permet de ne rien demander à
- * l'utilisateur sans pour autant faire confiance au serveur.
+ * Staying silent on `unverified` is a bet: that the first KeyPackage served really was the
+ * peer's (trust on first use). Closing it takes **key transparency** — an auditable Merkle log
+ * of public keys that the client checks automatically. That is what WhatsApp and Apple deploy,
+ * and it is what lets you ask nothing of the user without trusting the server either.
  *
- * # L'empreinte porte sur le compte, pas sur l'appareil
+ * # The fingerprint covers the account, not the device
  *
- * Elle ne bouge donc pas quand le correspondant ajoute un téléphone. C'est délibéré : une
- * empreinte qui changerait à chaque appareil ajouté obligerait à revérifier après chaque
- * événement banal, et serait ignorée en quelques semaines. Les ajouts d'appareils sont
- * signalés à part, par [`DeviceAdded`].
+ * So it does not move when a peer adds a phone. That is deliberate: a fingerprint that changed
+ * on every added device would force a re-check after every mundane event, and would be ignored
+ * within weeks. Device additions are reported separately, by [`DeviceAdded`].
  */
 export function Verification({
   account,
@@ -39,8 +35,8 @@ export function Verification({
   account: ResolvedAccount;
   state: VerificationState;
 }) {
-  // Le serveur a servi un appareil qu'il n'aurait pas pu produire. C'est plus grave qu'un
-  // changement d'empreinte : il n'existe aucune explication bénigne.
+  // The server served a device it could not have produced. This is worse than a fingerprint
+  // change: there is no benign explanation.
   if (account.rejected.length > 0) {
     return (
       <div
@@ -48,19 +44,20 @@ export function Verification({
         className="border-b border-(--color-danger) bg-(--color-danger)/20 px-4 py-3 text-sm"
       >
         <p className="font-medium text-(--color-danger)">
-          Appareil non attesté présenté pour @{account.handle}
+          Unattested device presented for @{account.handle}
         </p>
         <p className="mt-1 text-(--color-ink-muted)">
-          Le serveur a annoncé {account.rejected.length} appareil(s) dont la signature ne
-          correspond pas à ce compte. Un compte légitime ne peut pas produire cela : soit le
-          serveur a été compromis, soit il tente de s&apos;insérer dans la conversation. Ces
-          appareils ont été écartés et ne reçoivent rien.
+          The server announced {account.rejected.length}{" "}
+          {account.rejected.length === 1 ? "device" : "devices"} whose signature does not match
+          this account. A legitimate account cannot produce that: either the server has been
+          compromised, or it is trying to insert itself into the conversation. These devices were
+          discarded and receive nothing.
         </p>
       </div>
     );
   }
 
-  // Nominal : rien. Ni coche verte, ni bandeau, ni pastille.
+  // Nominal: nothing. No green check, no banner, no dot.
   if (state.status !== "changed") return null;
 
   return (
@@ -69,44 +66,43 @@ export function Verification({
       className="border-b border-(--color-danger) bg-(--color-danger)/10 px-4 py-3 text-sm"
     >
       <p className="font-medium text-(--color-danger)">
-        L&apos;empreinte de @{account.handle} a changé
+        @{account.handle}&apos;s fingerprint has changed
       </p>
       <p className="mt-1 text-(--color-ink-muted)">
-        Soit @{account.handle} a restauré son compte depuis sa phrase de récupération, soit
-        quelqu&apos;un s&apos;est interposé. La première explication est rare, la seconde est
-        une attaque — et rien dans le protocole ne permet de les distinguer. Vérifiez avant
-        d&apos;envoyer quoi que ce soit de sensible.
+        Either @{account.handle} restored their account from their recovery phrase, or someone
+        has stepped in between. The first explanation is rare, the second is an attack — and
+        nothing in the protocol tells them apart. Check before you send anything sensitive.
       </p>
     </div>
   );
 }
 
 /**
- * Signale les appareils apparus chez un correspondant.
+ * Reports devices that have appeared on a peer's account.
  *
- * C'est **cette notification, et non l'empreinte, qui détecte un appareil hostile**. Un
- * appareil ajouté par un compte compromis est dûment attesté, donc indiscernable d'un ajout
- * légitime : seul l'utilisateur peut dire s'il possède bien cet appareil. D'où l'affichage
- * plutôt qu'un verdict automatique.
+ * It is **this notification, not the fingerprint, that catches a hostile device**. A device
+ * added by a compromised account is duly attested, so indistinguishable from a legitimate
+ * addition: only the user can say whether they really own that device. Hence a notice rather
+ * than an automatic verdict.
  */
 export function DeviceAdded({ handle, devices }: { handle: string; devices: string[] }) {
   if (devices.length === 0) return null;
 
   return (
     <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-2 text-xs text-(--color-ink-muted)">
-      @{handle} a ajouté {devices.length === 1 ? "un appareil" : `${devices.length} appareils`} :{" "}
-      {devices.join(", ")}. Si ce n&apos;est pas vous, ce compte est peut-être compromis.
+      @{handle} added {devices.length === 1 ? "a device" : `${devices.length} devices`}:{" "}
+      {devices.join(", ")}. If this was not you, that account may be compromised.
     </div>
   );
 }
 
 /**
- * Comparaison manuelle des empreintes, à la demande.
+ * Manual fingerprint comparison, on demand.
  *
- * Reste accessible pour qui veut vraiment vérifier, sans imposer la démarche à tout le
- * monde. La suite naturelle est un QR code affiché et scanné : deux secondes et aucune
- * erreur de lecture, là où comparer des chiffres à l'œil est pénible et peu fiable — mais
- * cela suppose l'accès à la caméra, hors périmètre ici.
+ * Stays available for whoever really wants to check, without forcing the ritual on everyone.
+ * The natural next step is a QR code shown and scanned: two seconds and no misreading, where
+ * comparing digits by eye is tedious and unreliable — but that assumes camera access, out of
+ * scope here.
  */
 export function VerificationPanel({
   account,
@@ -126,21 +122,20 @@ export function VerificationPanel({
   return (
     <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Vérifier l&apos;identité de @{account.handle}</h2>
+        <h2 className="font-medium">Verify @{account.handle}&apos;s identity</h2>
         <button type="button" onClick={onClose} className="text-(--color-ink-muted) underline">
-          Fermer
+          Close
         </button>
       </div>
 
       <p className="mt-2 text-(--color-ink-muted)">
-        Comparez ces deux empreintes de vive voix ou par un autre canal. Si elles
-        correspondent, personne ne s&apos;est interposé.
+        Compare these two fingerprints out loud or over another channel. If they match, nobody
+        has stepped in between.
       </p>
 
       <p className="mt-1 text-xs text-(--color-ink-muted)">
-        L&apos;empreinte porte sur le compte : elle reste la même quand @{account.handle}
-        ajoute ou retire un appareil. Ce compte en déclare actuellement{" "}
-        {account.devices.length}.
+        The fingerprint covers the account: it stays the same when @{account.handle} adds or
+        removes a device. This account currently declares {account.devices.length}.
       </p>
 
       <div className="mt-4 space-y-3">
@@ -154,7 +149,7 @@ export function VerificationPanel({
         {state.status === "changed" && (
           <div className="space-y-1">
             <p className="text-xs uppercase tracking-wide text-(--color-danger)">
-              Empreinte vérifiée précédemment
+              Previously verified fingerprint
             </p>
             <Fingerprint value={state.previous} />
           </div>
@@ -162,28 +157,28 @@ export function VerificationPanel({
 
         <div className="space-y-1">
           <p className="text-xs uppercase tracking-wide text-(--color-ink-muted)">
-            {myName} (la vôtre)
+            {myName} (yours)
           </p>
           <Fingerprint value={myFingerprint} />
         </div>
       </div>
 
       {state.status === "verified" ? (
-        <p className="mt-4 text-(--color-ok)">✓ Vous avez déjà vérifié cette empreinte.</p>
+        <p className="mt-4 text-(--color-ok)">✓ You have already verified this fingerprint.</p>
       ) : (
         <button
           type="button"
           onClick={onVerified}
           className="mt-4 rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white"
         >
-          Les empreintes correspondent
+          The fingerprints match
         </button>
       )}
     </div>
   );
 }
 
-/** Bouton discret d'accès à la vérification, dans l'en-tête de conversation. */
+/** Discreet entry point to verification, in the conversation header. */
 export function VerificationToggle({
   state,
   onClick,
@@ -198,10 +193,10 @@ export function VerificationToggle({
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title="Vérifier l'identité"
+      title="Verify identity"
       className={`text-xs ${state.status === "verified" ? "text-(--color-ok)" : "text-(--color-ink-muted)"} ${hover ? "underline" : ""}`}
     >
-      {state.status === "verified" ? "✓ vérifié" : "vérifier l'identité"}
+      {state.status === "verified" ? "✓ verified" : "verify identity"}
     </button>
   );
 }

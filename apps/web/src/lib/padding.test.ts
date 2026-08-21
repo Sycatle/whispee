@@ -1,46 +1,46 @@
 /**
- * Le rembourrage est réversible ou il ne sert à rien : une erreur ici rend les messages
- * illisibles, pas seulement moins privés.
+ * Padding is reversible or it is worthless: a mistake here makes messages unreadable, not just
+ * less private.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pad, unpad } from "./padding.ts";
 
-test("tout contenu survit à un aller-retour", () => {
+test("any content survives a round trip", () => {
   for (const length of [0, 1, 2, 255, 256, 257, 511, 512, 513, 1024, 5000]) {
     const body = new Uint8Array(length).map((_, i) => (i * 7) % 256);
-    assert.deepEqual(unpad(pad(body)), body, `longueur ${length}`);
+    assert.deepEqual(unpad(pad(body)), body, `length ${length}`);
   }
 });
 
-/** Le point du dispositif : les messages écrits courants deviennent indiscernables. */
-test("les messages courts ont tous la même taille", () => {
-  const tailles = new Set(
-    ["ok", "oui", "je te rappelle dans dix minutes", "a".repeat(200)].map(
-      (texte) => pad(new TextEncoder().encode(texte)).length,
+/** The whole point of the scheme: ordinary typed messages become indistinguishable. */
+test("short messages all have the same size", () => {
+  const sizes = new Set(
+    ["ok", "yes", "I'll call you back in ten minutes", "a".repeat(200)].map(
+      (text) => pad(new TextEncoder().encode(text)).length,
     ),
   );
-  assert.equal(tailles.size, 1);
-  assert.equal([...tailles][0], 256);
+  assert.equal(sizes.size, 1);
+  assert.equal([...sizes][0], 256);
 });
 
-/** Le gaspillage reste borné : c'est ce qui rend le doublement acceptable. */
-test("le rembourrage ne double jamais la taille", () => {
+/** The waste stays bounded: that is what makes the doubling acceptable. */
+test("padding never doubles the size", () => {
   for (let length = 256; length < 20000; length += 37) {
     assert.ok(pad(new Uint8Array(length)).length < length * 2 + 256);
   }
 });
 
 /**
- * Un contenu se terminant par des zéros est le cas que le marqueur existe pour couvrir : sans
- * lui, ces zéros seraient pris pour du rembourrage et le message serait tronqué.
+ * Content ending in zeros is the case the marker exists for: without it, those zeros would be
+ * taken for padding and the message would be truncated.
  */
-test("un contenu terminé par des zéros est restitué intact", () => {
+test("content ending in zeros is returned intact", () => {
   const body = new Uint8Array([1, 2, 3, 0, 0, 0]);
   assert.deepEqual(unpad(pad(body)), body);
 });
 
-test("un rembourrage mal formé est refusé plutôt que deviné", () => {
+test("malformed padding is rejected rather than guessed", () => {
   assert.throws(() => unpad(new Uint8Array(256)));
   assert.throws(() => unpad(new Uint8Array([1, 2, 3])));
 });

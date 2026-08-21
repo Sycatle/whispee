@@ -1,30 +1,29 @@
 /**
- * Verrou local : chiffrement au repos de l'état, sous un mot de passe.
+ * Local lock: encryption of state at rest, under a password.
  *
- * # L'indirection, et pourquoi elle n'est pas un raffinement
+ * # The indirection, and why it is not a refinement
  *
  * ```
- * mot de passe --Argon2id--> clé de déverrouillage --chiffre--> clé maîtresse --chiffre--> état
+ * password --Argon2id--> unlock key --encrypts--> master key --encrypts--> state
  * ```
  *
- * La clé maîtresse est aléatoire et ne dépend pas du mot de passe. Changer celui-ci ne
- * re-chiffre donc que 32 octets, jamais l'état complet — qui pèse plusieurs kilooctets et
- * grandit avec le nombre de conversations. Sans cette indirection, un changement de mot de
- * passe imposerait de déchiffrer puis re-chiffrer tout l'état : une opération longue, faite
- * au pire moment (l'utilisateur soupçonne une compromission), et qui laisse l'état en clair
- * en mémoire pendant toute sa durée.
+ * The master key is random and does not depend on the password. Changing the password therefore
+ * re-encrypts 32 bytes, never the whole state — which weighs several kilobytes and grows with the
+ * number of conversations. Without this indirection, a password change would mean decrypting then
+ * re-encrypting all the state: a long operation, done at the worst moment (the user suspects a
+ * compromise), leaving the state in the clear in memory for its whole duration.
  *
- * # Ce qui change par rapport à la clé non-extractable
+ * # What changes compared to the non-extractable key
  *
- * Jusqu'ici l'état était chiffré par une `CryptoKey` non-extractable rangée dans IndexedDB.
- * Cela protège contre l'exfiltration par script — la clé ne peut pas être lue — mais **pas
- * contre quiconque obtient la session du navigateur** : il lui suffit d'appeler l'API de
- * déchiffrement. Avec le verrou, la clé maîtresse n'existe qu'en mémoire, après saisie.
+ * Until now state was encrypted by a non-extractable `CryptoKey` stored in IndexedDB. That
+ * protects against exfiltration by script — the key cannot be read — but **not against whoever
+ * gets the browser session**: they only have to call the decryption API. With the lock, the master
+ * key only exists in memory, after an entry.
  */
 import { fromBase64, toBase64 } from "./keys";
 import { loadCrypto } from "./wasm";
 
-/** Voir la note sur `buffer` dans `keys.ts`. */
+/** See the note on `buffer` in `keys.ts`. */
 function buffer(bytes: Uint8Array): BufferSource {
   return bytes as unknown as BufferSource;
 }
@@ -32,30 +31,30 @@ function buffer(bytes: Uint8Array): BufferSource {
 const SALT_LEN = 16;
 const IV_LEN = 12;
 
-/** Ce qui est stocké en clair à côté de l'état. Rien ici n'est secret. */
+/** What is stored in the clear next to the state. Nothing here is secret. */
 export interface LockEnvelope {
-  /** Sel Argon2id. Public : son rôle est d'interdire les tables précalculées. */
+  /** Argon2id salt. Public: its role is to rule out precomputed tables. */
   salt: string;
-  /** Clé maîtresse chiffrée sous la clé de déverrouillage : `iv ‖ ciphertext`. */
+  /** Master key encrypted under the unlock key: `iv ‖ ciphertext`. */
   wrapped: string;
 }
 
-/** Crée un verrou neuf : clé maîtresse aléatoire, scellée sous le mot de passe. */
+/** Creates a fresh lock: random master key, sealed under the password. */
 export async function createLock(password: string): Promise<[LockEnvelope, CryptoKey]> {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_LEN));
   const master = crypto.getRandomValues(new Uint8Array(32));
 
   const envelope = { salt: toBase64(salt), wrapped: await seal(password, salt, master) };
-  return [envelope, await importMaster(master)];
+  return [envelope, await importRawMaster(master)];
 }
 
 /**
- * Ouvre le verrou. Rejette si le mot de passe est faux.
+ * Opens the lock. Rejects if the password is wrong.
  *
- * L'échec vient de l'AEAD : sans la bonne clé, le déchiffrement de la clé maîtresse ne
- * produit pas des octets faux, il échoue. Il n'y a donc rien à comparer et pas de risque de
- * comparaison non constante — c'est la propriété qui permet de se passer d'un « hash du mot
- * de passe » stocké à côté, lequel serait une cible d'attaque hors ligne supplémentaire.
+ * The failure comes from the AEAD: without the right key, decrypting the master key does not
+ * produce wrong bytes, it fails. So there is nothing to compare and no risk of a non-constant
+ * comparison — that property is what lets us do without a "password hash" stored alongside, which
+ * would be one more target for an offline attack.
  */
 export async function openLock(envelope: LockEnvelope, password: string): Promise<CryptoKey> {
   const salt = fromBase64(envelope.salt);
@@ -70,28 +69,28 @@ export async function openLock(envelope: LockEnvelope, password: string): Promis
     ),
   );
 
-  return importMaster(master);
+  return importRawMaster(master);
 }
 
 /**
- * Change le mot de passe sans toucher à l'état chiffré.
+ * Changes the password without touching the encrypted state.
  *
- * Exige l'ancien : sans lui on ne peut pas retrouver la clé maîtresse, et la remplacer par une
- * neuve rendrait tout l'état illisible. Quelqu'un qui trouve un appareil déverrouillé ne peut
- * donc pas en changer le mot de passe pour s'en approprier le contenu.
+ * Requires the old one: without it the master key cannot be recovered, and replacing it with a
+ * fresh one would make all the state unreadable. Someone who finds an unlocked device therefore
+ * cannot change its password to appropriate its contents.
  */
 export async function changePassword(
   envelope: LockEnvelope,
-  ancien: string,
-  nouveau: string,
+  before: string,
+  after: string,
 ): Promise<LockEnvelope> {
-  const master = await openLock(envelope, ancien);
+  const master = await openLock(envelope, before);
   const raw = new Uint8Array(await crypto.subtle.exportKey("raw", master));
 
-  // Sel neuf : réutiliser l'ancien laisserait un attaquant qui a capturé les deux versions
-  // attaquer les deux mots de passe avec le même travail de dérivation.
+  // Fresh salt: reusing the old one would let an attacker who captured both versions attack both
+  // passwords for the same derivation work.
   const salt = crypto.getRandomValues(new Uint8Array(SALT_LEN));
-  return { salt: toBase64(salt), wrapped: await seal(nouveau, salt, raw) };
+  return { salt: toBase64(salt), wrapped: await seal(after, salt, raw) };
 }
 
 async function seal(password: string, salt: Uint8Array, master: Uint8Array): Promise<string> {
@@ -109,17 +108,17 @@ async function seal(password: string, salt: Uint8Array, master: Uint8Array): Pro
 }
 
 /**
- * Dérive la clé de déverrouillage. **Bloque environ une seconde.**
+ * Derives the unlock key. **Blocks for about a second.**
  *
- * Argon2id vient du module WebAssembly : WebCrypto n'offre que PBKDF2, qui ne coûte que du
- * calcul et se parallélise sur GPU pour presque rien. Le coût mémoire d'Argon2id est ce qui
- * rend une attaque hors ligne réellement chère.
+ * Argon2id comes from the WebAssembly module: WebCrypto only offers PBKDF2, which costs compute
+ * alone and parallelises on GPUs for almost nothing. Argon2id's memory cost is what makes an
+ * offline attack genuinely expensive.
  */
 async function unlockKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
   const crypt = await loadCrypto();
   const derived = crypt.deriveUnlockKey(password, salt);
 
-  // Non-extractable : une fois importée, cette clé ne peut plus quitter le navigateur.
+  // Non-extractable: once imported, this key can no longer leave the browser.
   return crypto.subtle.importKey("raw", buffer(derived), "AES-GCM", false, [
     "encrypt",
     "decrypt",
@@ -127,33 +126,33 @@ async function unlockKey(password: string, salt: Uint8Array): Promise<CryptoKey>
 }
 
 /**
- * La clé maîtresse est importée **extractable**, parce qu'un changement de mot de passe doit
- * pouvoir la re-sceller. C'est le seul secret du système dans ce cas, et il ne quitte jamais
- * la mémoire : il n'est ni persisté en clair, ni transmis.
+ * The master key is imported **extractable**, because a password change has to be able to re-seal
+ * it. It is the only secret in the system in that position, and it never leaves memory: it is
+ * neither persisted in the clear nor transmitted.
  */
-function importMaster(raw: Uint8Array): Promise<CryptoKey> {
+function importRawMaster(raw: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", buffer(raw), "AES-GCM", true, ["encrypt", "decrypt"]);
 }
 
 /**
- * Les octets bruts de la clé maîtresse.
+ * The raw bytes of the master key.
  *
- * # Pourquoi cette porte existe
+ * # Why this door exists
  *
- * Le déverrouillage biométrique doit confier la clé au processus natif, qui la scelle et ne la
- * rend qu'après l'invite du système. Sans export, il n'y aurait rien à lui confier.
+ * Biometric unlock has to hand the key to the native process, which seals it and only returns it
+ * after the system prompt. Without an export there would be nothing to hand over.
  *
- * # Pourquoi elle est étroite
+ * # Why it is narrow
  *
- * Un seul appelant, dans `Session.activerBiometrie`, et il fait immédiatement traverser la
- * frontière aux octets. Tout autre usage remettrait en cause le fait que la clé maîtresse
- * n'existe qu'en mémoire — la propriété qui fait tenir le verrou.
+ * A single caller, in `Session.enableBiometric`, and it immediately pushes the bytes across the
+ * boundary. Any other use would call into question the fact that the master key only exists in
+ * memory — the property that makes the lock hold.
  */
-export function exporterMaster(master: CryptoKey): Promise<Uint8Array> {
-  return crypto.subtle.exportKey("raw", master).then((brut) => new Uint8Array(brut));
+export function exportMaster(master: CryptoKey): Promise<Uint8Array> {
+  return crypto.subtle.exportKey("raw", master).then((raw) => new Uint8Array(raw));
 }
 
-/** Réimporte une clé maîtresse rendue par le processus natif. */
-export function importerMaster(brut: Uint8Array): Promise<CryptoKey> {
-  return importMaster(brut);
+/** Re-imports a master key returned by the native process. */
+export function importMaster(raw: Uint8Array): Promise<CryptoKey> {
+  return importRawMaster(raw);
 }

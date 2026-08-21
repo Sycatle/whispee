@@ -1,43 +1,43 @@
 /**
- * Présence : de « vu à telle heure » à « en ligne ».
+ * Presence: from "seen at such a time" to "online".
  *
- * # Pourquoi la décision est ici et non côté serveur
+ * # Why the decision lives here and not on the server
  *
- * Le serveur renvoie un horodatage brut, jamais un booléen. Un booléen figerait la politique
- * dans le protocole et interdirait d'afficher « vu à 14:02 » à partir de la même donnée — alors
- * que c'est exactement la même donnée, lue avec un seuil différent.
+ * The server returns a raw timestamp, never a boolean. A boolean would freeze the policy into the
+ * protocol and rule out showing "last seen at 14:02" from the same data — when it is exactly the
+ * same data, read with a different threshold.
  *
- * # Pourquoi l'heure du serveur voyage avec la réponse
+ * # Why the server's time travels with the response
  *
- * Parce qu'on compare deux horloges. `MAX_CLOCK_SKEW` existe côté serveur précisément parce
- * qu'elles divergent : comparer un horodatage serveur à l'heure locale ferait clignoter le point
- * chez tout utilisateur mal réglé, sans qu'il puisse comprendre pourquoi.
+ * Because we are comparing two clocks. `MAX_CLOCK_SKEW` exists on the server precisely because
+ * they drift: comparing a server timestamp to local time would make the dot flicker for every
+ * badly set user, with no way for them to understand why.
  */
 
 /**
- * Au-delà, un compte est considéré hors ligne.
+ * Past this, an account counts as offline.
  *
- * L'arithmétique, parce que c'est typiquement la valeur qu'on « optimise » plus tard à soixante
- * secondes en s'étonnant que le point clignote :
+ * The arithmetic, because this is typically the value someone "optimises" to sixty seconds later
+ * and is then surprised the dot flickers:
  *
- *  * le serveur ne réécrit qu'une fois par minute (`PRESENCE_REFRESH`) ;
- *  * le client ne relève la présence qu'à chaque tour de relève, soit trente secondes ;
- *  * il faut une marge pour un battement manqué ou une reconnexion de flux, dont le délai de
- *    reprise monte jusqu'à trente secondes.
+ *  * the server only rewrites once a minute (`PRESENCE_REFRESH`);
+ *  * the client only reads presence on each poll round, so every thirty seconds;
+ *  * some margin is needed for a missed heartbeat or a stream reconnection, whose resume delay
+ *    goes up to thirty seconds.
  *
- * Soit deux minutes et demie. Descendre en dessous ne rend pas la présence plus juste, seulement
- * plus nerveuse.
+ * That is two and a half minutes. Going below does not make presence more accurate, only more
+ * nervous.
  */
 export const ONLINE_WINDOW_MS = 150_000;
 
-/** Dernière activité connue d'un compte, en millisecondes. */
+/** An account's last known activity, in milliseconds. */
 export type LastSeen = number | undefined;
 
 /**
- * En ligne ?
+ * Online?
  *
- * Un horodatage dans le futur compte comme « en ligne » : il vient d'un décalage d'horloge, et
- * la seule autre réponse possible — « vu dans trois minutes » — serait absurde.
+ * A timestamp in the future counts as "online": it comes from a clock offset, and the only other
+ * possible answer — "seen in three minutes" — would be absurd.
  */
 export function isOnline(lastSeen: LastSeen, serverNow: number): boolean {
   if (lastSeen === undefined) return false;
@@ -45,21 +45,21 @@ export function isOnline(lastSeen: LastSeen, serverNow: number): boolean {
 }
 
 /**
- * Ce qui s'affiche à côté d'un nom.
+ * What is displayed next to a name.
  *
- * Une chaîne vide quand on ne sait pas — et non « hors ligne ». Un compte dont on n'a jamais eu
- * de nouvelles n'est pas un compte absent : c'est un compte sur lequel le serveur n'a rien à
- * dire, parce qu'il n'a jamais été vu ou parce que son propriétaire a refusé de le diffuser.
- * Trancher à sa place serait le premier mensonge de l'écran.
+ * An empty string when we do not know — not "offline". An account we have never heard from is not
+ * an absent account: it is an account the server has nothing to say about, because it has never
+ * been seen or because its owner declined to broadcast it. Deciding on their behalf would be the
+ * screen's first lie.
  */
 export function describePresence(lastSeen: LastSeen, serverNow: number): string {
   if (lastSeen === undefined) return "";
-  if (isOnline(lastSeen, serverNow)) return "en ligne";
+  if (isOnline(lastSeen, serverNow)) return "online";
 
   const date = new Date(lastSeen);
-  const heures = String(date.getHours()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
   const minutes = String(date.getMinutes()).padStart(2, "0");
 
-  const memeJour = new Date().toDateString() === date.toDateString();
-  return memeJour ? `vu à ${heures}:${minutes}` : `vu le ${date.toLocaleDateString()}`;
+  const sameDay = new Date().toDateString() === date.toDateString();
+  return sameDay ? `last seen at ${hours}:${minutes}` : `last seen on ${date.toLocaleDateString()}`;
 }

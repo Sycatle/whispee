@@ -1,83 +1,81 @@
 /**
- * Lecture d'un code QR par la caméra.
+ * Reading a QR code with the camera.
  *
- * # Ce que le navigateur fournit, et là où il ne fournit rien
+ * # What the browser provides, and where it provides nothing
  *
- * `BarcodeDetector` décode nativement, sans bibliothèque : Chrome sur Android l'expose, donc la
- * WebView de Tauri aussi. WKWebView ne l'expose pas, et Firefox non plus.
+ * `BarcodeDetector` decodes natively, with no library: Chrome on Android exposes it, so Tauri's
+ * WebView does too. WKWebView does not, and neither does Firefox.
  *
- * Sur ces plateformes, il n'y a pas de scan — et **c'est acceptable**, parce que la saisie du
- * code reste là. Embarquer un décodeur en JavaScript coûterait une dépendance de plus dans un
- * client dont tout l'argumentaire est qu'il en a peu, pour remplacer un repli qui fonctionne
- * déjà. Ce n'est pas le même arbitrage que pour l'affichage : là, aucun repli n'existait.
+ * On those platforms there is no scanning — and **that is acceptable**, because typing the code
+ * in is still there. Shipping a JavaScript decoder would cost one more dependency in a client
+ * whose whole argument is that it has few, to replace a fallback that already works. This is not
+ * the same trade-off as for display: there, no fallback existed.
  *
- * # Le scan ne remplace pas la vérification
+ * # Scanning does not replace verification
  *
- * Il remplace une saisie, rien de plus. La sécurité de l'appairage est **physique** : elle tient
- * à ce que l'utilisateur ne scanne que l'écran qu'il a en main, et le code de confirmation
- * affiché des deux côtés est ce qui le lui confirme. Une caméra ne sait pas quel écran elle
- * regarde.
+ * It replaces typing, nothing more. Pairing security is **physical**: it rests on the user only
+ * scanning the screen they are holding, and the confirmation code shown on both sides is what
+ * tells them so. A camera does not know which screen it is looking at.
  */
 
-/** Le décodage natif est-il disponible ? */
-export function scanDisponible(): boolean {
+/** Is native decoding available? */
+export function scanAvailable(): boolean {
   return "BarcodeDetector" in globalThis;
 }
 
-interface DetecteurQr {
+interface QrDetector {
   detect(source: CanvasImageSource): Promise<{ rawValue: string }[]>;
 }
 
 /**
- * Ouvre la caméra, lit jusqu'au premier code, et rend ce qu'il contient.
+ * Opens the camera, reads until the first code, and returns what it contains.
  *
- * Rend aussi de quoi tout arrêter : le flux vidéo doit être coupé quoi qu'il arrive — un scan
- * abandonné qui laisse la caméra allumée est un voyant qui reste vert sur le téléphone, ce qui
- * est au mieux inquiétant et au pire une fuite de vie privée.
+ * Also returns a way to stop everything: the video stream has to be cut whatever happens — an
+ * abandoned scan that leaves the camera on is a light that stays green on the phone, which is at
+ * best unsettling and at worst a privacy leak.
  */
-export async function scanner(video: HTMLVideoElement): Promise<{
-  lecture: Promise<string>;
-  arreter: () => void;
+export async function scan(video: HTMLVideoElement): Promise<{
+  read: Promise<string>;
+  stop: () => void;
 }> {
-  const Detecteur = (globalThis as unknown as {
-    BarcodeDetector: new (options: { formats: string[] }) => DetecteurQr;
+  const Detector = (globalThis as unknown as {
+    BarcodeDetector: new (options: { formats: string[] }) => QrDetector;
   }).BarcodeDetector;
 
-  // `facingMode: environment` demande la caméra arrière : c'est elle qui vise l'autre écran.
-  // Un `ideal` plutôt qu'un `exact` — un ordinateur portable n'a qu'une caméra, et exiger
-  // l'arrière y ferait échouer l'ouverture au lieu de prendre celle qui existe.
-  const flux = await navigator.mediaDevices.getUserMedia({
+  // `facingMode: environment` asks for the rear camera: that is the one aimed at the other
+  // screen. An `ideal` rather than an `exact` — a laptop has only one camera, and demanding the
+  // rear one would fail to open instead of taking the one that exists.
+  const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: "environment" } },
   });
 
-  let vivant = true;
-  const arreter = () => {
-    vivant = false;
-    for (const piste of flux.getTracks()) piste.stop();
+  let alive = true;
+  const stop = () => {
+    alive = false;
+    for (const track of stream.getTracks()) track.stop();
   };
 
-  video.srcObject = flux;
+  video.srcObject = stream;
   await video.play();
 
-  const detecteur = new Detecteur({ formats: ["qr_code"] });
+  const detector = new Detector({ formats: ["qr_code"] });
 
-  const lecture = (async () => {
-    // Une boucle et non un `requestVideoFrameCallback` : la seconde n'existe pas partout, et la
-    // cadence n'a aucune importance ici — l'utilisateur vise un écran fixe, pas un objet en
-    // mouvement.
-    while (vivant) {
-      const codes = await detecteur.detect(video).catch(() => []);
-      const trouve = codes.find((code) => code.rawValue.length > 0);
-      if (trouve) {
-        arreter();
-        return trouve.rawValue;
+  const read = (async () => {
+    // A loop and not a `requestVideoFrameCallback`: the latter does not exist everywhere, and
+    // the rate does not matter here — the user is aiming at a still screen, not a moving object.
+    while (alive) {
+      const codes = await detector.detect(video).catch(() => []);
+      const found = codes.find((code) => code.rawValue.length > 0);
+      if (found) {
+        stop();
+        return found.rawValue;
       }
 
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
 
-    throw new Error("Scan interrompu.");
+    throw new Error("Scan interrupted.");
   })();
 
-  return { lecture, arreter };
+  return { read, stop };
 }

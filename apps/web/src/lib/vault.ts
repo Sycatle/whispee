@@ -1,40 +1,40 @@
 /**
- * Coffre d'historique. **Actif par défaut.**
+ * History vault. **On by default.**
  *
- * # Ce qu'on abandonne en le gardant
+ * # What keeping it gives up
  *
- * MLS détruit ses clés au fil des messages : quiconque met la main sur le transport après coup
- * ne peut rien en tirer — y compris l'utilisateur lui-même sur un appareil neuf. C'est la
- * forward secrecy, et c'est une protection réelle, pas un effet de bord gênant.
+ * MLS destroys its keys as messages go by: whoever gets hold of the transport after the fact can
+ * make nothing of it — including the user themselves on a new device. That is forward secrecy,
+ * and it is real protection, not an inconvenient side effect.
  *
- * Le coffre y renonce **pour l'historique** : les entrées sont chiffrées sous une clé dérivée
- * de la phrase de récupération, donc stable dans le temps. Si cette phrase fuit un jour, tout
- * le passé sauvegardé fuit avec elle, rétroactivement.
+ * The vault gives it up **for history**: entries are encrypted under a key derived from the
+ * recovery phrase, so stable over time. If that phrase ever leaks, everything saved leaks with it,
+ * retroactively.
  *
- * C'est le prix d'un historique qui survit à la perte de tous les appareils, et il a été payé :
- * une messagerie dont la conversation repart vide à chaque rechargement n'en est pas une, et
- * faire porter ce choix par un écran de réglage revenait à le refuser pour presque tout le monde
- * sans que presque personne ne l'ait décidé.
+ * That is the price of a history that survives losing every device, and it has been paid: a
+ * messenger whose conversation starts empty on every reload is not one, and putting the choice
+ * behind a settings screen amounted to refusing it for almost everyone without almost anyone
+ * having decided it.
  *
- * Le compromis est donc pris dans `Session.attach`, énoncé sur l'écran de la phrase de
- * récupération — le seul moment où cette phrase, qui est aussi la clé du coffre, est sous les
- * yeux de quelqu'un — et rappelé au présent dans les réglages, où il reste révocable. Un
- * compromis devenu le défaut est celui qu'on cesse d'énoncer si l'on n'y prend pas garde.
+ * So the trade-off is taken in `Session.attach`, stated on the recovery phrase screen — the one
+ * moment that phrase, which is also the vault key, is in front of someone — and restated in the
+ * present tense in settings, where it stays revocable. A trade-off that became the default is the
+ * one you stop stating unless you are careful.
  *
- * # Ce que le serveur apprend malgré tout
+ * # What the server learns anyway
  *
- * Combien de messages chaque compte archive, et quand. Il savait déjà qui parle à qui ; ceci
- * ajoute un volume et une chronologie. L'éviter demanderait du padding et des dépôts factices.
+ * How many messages each account archives, and when. It already knew who talks to whom; this adds
+ * a volume and a timeline. Avoiding it would take padding and decoy deposits.
  */
 import * as content from "./content.ts";
 import type { Message } from "./session";
 
 /**
- * Ce que le coffre attend du transport, et rien de plus.
+ * What the vault expects from the transport, and nothing more.
  *
- * Déclaré ici plutôt qu'importé depuis `api.ts` pour que le découpage et la pagination
- * ci-dessous soient testables sans réseau : c'est exactement le genre de logique qui échoue en
- * silence si personne ne la vérifie.
+ * Declared here rather than imported from `api.ts` so that the batching and pagination below are
+ * testable without a network: that is exactly the kind of logic that fails silently if nobody
+ * checks it.
  */
 export interface VaultApi {
   storeVault(
@@ -45,33 +45,33 @@ export interface VaultApi {
 }
 
 /**
- * Taille d'un lot, en dépôt comme en relève.
+ * Batch size, on deposit as on retrieval.
  *
- * **Doit rester égale à `MAX_VAULT_ENTRIES` côté serveur** (`crates/server/src/routes.rs`), qui
- * borne les deux : un dépôt plus gros est refusé par un 400, une relève plus longue est tronquée
- * — sans erreur, ce qui est le pire des deux. Tant que le coffre était optionnel, les deux cas
- * restaient rares ; ils deviennent le cas nominal du premier démarrage.
+ * **Must stay equal to `MAX_VAULT_ENTRIES` on the server** (`crates/server/src/routes.rs`), which
+ * bounds both: a larger deposit is refused with a 400, a longer retrieval is truncated — with no
+ * error, which is the worse of the two. While the vault was optional both cases stayed rare; they
+ * become the nominal case of a first start.
  */
 const PAGE = 200;
 
-/** Voir la note sur `buffer` dans `keys.ts`. */
+/** See the note on `buffer` in `keys.ts`. */
 function buffer(bytes: Uint8Array): BufferSource {
   return bytes as unknown as BufferSource;
 }
 
 const IV_LEN = 12;
 
-/** Importe la clé de coffre dérivée de la phrase. Non-extractable une fois dans le navigateur. */
+/** Imports the vault key derived from the phrase. Non-extractable once inside the browser. */
 export function importVaultKey(raw: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", buffer(raw), "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
 /**
- * Forme archivée d'un message.
+ * Archived form of a message.
  *
- * L'expéditeur est conservé : sans lui, un historique restauré ne dirait plus qui a dit quoi,
- * ce qui le rend à peu près inutile. C'est une donnée de plus sous la clé stable du coffre —
- * mais elle est déjà connue du serveur via l'appartenance au groupe.
+ * The sender is kept: without it, a restored history would no longer say who said what, which
+ * makes it more or less useless. It is one more piece of data under the vault's stable key — but
+ * one the server already knows through group membership.
  */
 interface Archived {
   sender: string | null;
@@ -85,8 +85,8 @@ export async function encryptEntry(key: CryptoKey, message: Message): Promise<Ui
   const archived: Archived = { sender: message.sender, mine: message.mine, body: [...body] };
   const plaintext = new TextEncoder().encode(JSON.stringify(archived));
 
-  // Nonce aléatoire par entrée. AES-GCM casse catastrophiquement si un nonce est réutilisé
-  // sous la même clé — et cette clé, elle, ne change jamais.
+  // Random nonce per entry. AES-GCM breaks catastrophically if a nonce is reused under the same
+  // key — and this key never changes.
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv: buffer(iv) }, key, buffer(plaintext)),
@@ -121,12 +121,11 @@ export async function decryptEntry(
 }
 
 /**
- * Dépose des messages dans le coffre. Idempotent côté serveur.
+ * Deposits messages into the vault. Idempotent on the server side.
  *
- * Découpé en lots : un appareil qui rattrape un retard peut avoir bien plus de `PAGE` messages
- * à archiver d'un coup, et le serveur refuse le lot entier au-delà. En série et non en
- * parallèle — l'archivage est du travail de fond, rien ne justifie d'ouvrir dix requêtes
- * concurrentes pour lui.
+ * Split into batches: a device catching up can have far more than `PAGE` messages to archive at
+ * once, and the server refuses the whole batch beyond that. Serially, not in parallel — archiving
+ * is background work, nothing justifies opening ten concurrent requests for it.
  */
 export async function store(
   api: VaultApi,
@@ -134,11 +133,11 @@ export async function store(
   groupId: Uint8Array,
   messages: Message[],
 ): Promise<void> {
-  for (let debut = 0; debut < messages.length; debut += PAGE) {
-    const lot = messages.slice(debut, debut + PAGE);
+  for (let start = 0; start < messages.length; start += PAGE) {
+    const batch = messages.slice(start, start + PAGE);
 
     const entries = await Promise.all(
-      lot.map(async (message) => ({
+      batch.map(async (message) => ({
         seq: message.seq,
         payload: await encryptEntry(key, message),
       })),
@@ -148,26 +147,26 @@ export async function store(
   }
 }
 
-/** Ce qu'une restauration rapporte, y compris ce qu'elle n'a pas su lire. */
+/** What a restore reports, including what it could not read. */
 export interface Restored {
   messages: Message[];
   /**
-   * Entrées qu'on n'a pas su déchiffrer.
+   * Entries we could not decrypt.
    *
-   * Remonté plutôt que compté en silence : si **toutes** les entrées d'une conversation sont
-   * illisibles, ce n'est pas un vieux format, c'est une rotation de compte — la clé du coffre
-   * dérive de la phrase de récupération, et la tourner rend le passé archivé définitivement
-   * inaccessible. Un fil vide sans explication serait le pire des deux comportements.
+   * Reported rather than silently counted: if **every** entry of a conversation is unreadable, it
+   * is not an old format, it is an account rotation — the vault key derives from the recovery
+   * phrase, and rotating it makes the archived past permanently inaccessible. An empty thread with
+   * no explanation would be the worst of both behaviours.
    */
-  illisibles: number;
+  unreadable: number;
 }
 
 /**
- * Restaure l'historique d'une conversation.
+ * Restores a conversation's history.
  *
- * Une entrée illisible est ignorée plutôt que fatale : elle peut venir d'une version antérieure
- * du format, et perdre tout l'historique parce qu'un message sur mille ne se relit pas serait
- * une réaction disproportionnée.
+ * An unreadable entry is skipped rather than fatal: it may come from an earlier version of the
+ * format, and losing all the history because one message in a thousand does not decode would be a
+ * disproportionate reaction.
  */
 export async function restore(
   api: VaultApi,
@@ -175,12 +174,12 @@ export async function restore(
   groupId: Uint8Array,
 ): Promise<Restored> {
   const messages: Message[] = [];
-  let illisibles = 0;
+  let unreadable = 0;
   let after = 0;
 
-  // Le serveur sert au plus `PAGE` lignes par appel, triées par `seq` croissant. Une seule
-  // requête tronquait donc l'historique **sans erreur** au-delà de deux cents messages : le fil
-  // paraissait simplement plus court, et rien ne le signalait.
+  // The server serves at most `PAGE` rows per call, sorted by ascending `seq`. A single request
+  // therefore truncated history **without an error** beyond two hundred messages: the thread just
+  // looked shorter, and nothing said so.
   for (;;) {
     const rows = await api.fetchVault(groupId, after);
     if (rows.length === 0) break;
@@ -189,8 +188,8 @@ export async function restore(
       try {
         messages.push(await decryptEntry(key, row.seq, row.payload));
       } catch (error) {
-        illisibles += 1;
-        console.warn(`entrée de coffre ${row.seq} illisible`, error);
+        unreadable += 1;
+        console.warn(`vault entry ${row.seq} unreadable`, error);
       }
     }
 
@@ -198,17 +197,17 @@ export async function restore(
     after = rows[rows.length - 1].seq;
   }
 
-  return { messages, illisibles };
+  return { messages, unreadable };
 }
 
 /**
- * Fusionne un historique restauré dans un fil déjà peuplé, sans doublon.
+ * Merges a restored history into an already populated thread, without duplicates.
  *
- * Extrait de `Session` pour être testable : la fusion est une règle métier — le `seq` identifie
- * un message —, pas un détail d'affichage, et `session.ts` n'est pas testable en l'état (WASM,
+ * Pulled out of `Session` to be testable: the merge is a business rule — `seq` identifies a
+ * message — not a display detail, and `session.ts` is not testable as it stands (WASM,
  * IndexedDB).
  */
-export function merge(existants: Message[], archives: Message[]): Message[] {
-  const connus = new Set(existants.map((message) => message.seq));
-  return archives.filter((message) => !connus.has(message.seq));
+export function merge(existing: Message[], archives: Message[]): Message[] {
+  const known = new Set(existing.map((message) => message.seq));
+  return archives.filter((message) => !known.has(message.seq));
 }

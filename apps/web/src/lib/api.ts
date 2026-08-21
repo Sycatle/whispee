@@ -1,15 +1,15 @@
 /**
- * Client du delivery service.
+ * Delivery service client.
  *
- * Chaque requête est signée avec la clé Ed25519 de l'appareil. Le message signé couvre la
- * méthode, le chemin, l'horodatage et l'empreinte du corps : une signature capturée sur un
- * endpoint n'est donc rejouable ni sur un autre chemin, ni avec un corps modifié.
+ * Every request is signed with the device's Ed25519 key. The signed message covers the method,
+ * the path, the timestamp and the body digest: a signature captured on one endpoint is replayable
+ * neither on another path nor with a modified body.
  */
 import type { DeviceCipher } from "./cipher";
 import { fromBase64, toBase64, toHex } from "./keys";
 import type { AttestedDevice } from "./wasm";
 
-/** Voir la note sur `buffer` dans `keys.ts`. */
+/** See the note about `buffer` in `keys.ts`. */
 function buffer(bytes: Uint8Array): BufferSource {
   return bytes as unknown as BufferSource;
 }
@@ -26,12 +26,12 @@ export class ApiError extends Error {
 }
 
 /**
- * Message signé par chaque requête.
+ * The message signed by every request.
  *
- * Le nonce est ce qui rend le message unique quand tout le reste est identique. Sans lui, deux
- * requêtes semblables dans la même seconde porteraient la même signature — Ed25519 étant
- * déterministe — et le serveur ne pourrait pas distinguer un rejeu d'un appel légitime. Il est
- * **dans le message signé**, donc changer le nonce de l'en-tête invalide la signature.
+ * The nonce is what makes the message unique when everything else is identical. Without it, two
+ * similar requests in the same second would carry the same signature — Ed25519 being
+ * deterministic — and the server could not tell a replay from a legitimate call. It is **inside
+ * the signed message**, so changing the header's nonce invalidates the signature.
  */
 async function signingPayload(
   method: string,
@@ -42,42 +42,42 @@ async function signingPayload(
 ): Promise<Uint8Array> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buffer(body)));
   const prefix = new TextEncoder().encode(`${method}\n${path}\n${timestamp}\n`);
-  const separateur = new TextEncoder().encode("\n");
+  const separator = new TextEncoder().encode("\n");
 
   const payload = new Uint8Array(
-    prefix.length + nonce.length + separateur.length + digest.length,
+    prefix.length + nonce.length + separator.length + digest.length,
   );
   payload.set(prefix, 0);
   payload.set(nonce, prefix.length);
-  payload.set(separateur, prefix.length + nonce.length);
-  payload.set(digest, prefix.length + nonce.length + separateur.length);
+  payload.set(separator, prefix.length + nonce.length);
+  payload.set(digest, prefix.length + nonce.length + separator.length);
   return payload;
 }
 
 export class Api {
   constructor(
     /**
-     * Identifiant de cet appareil.
+     * This device's identifier.
      *
-     * Public : la trame `identify` de la gateway doit le nommer explicitement, le handshake
-     * WebSocket ne portant aucun en-tête pour le dire avant.
+     * Public: the gateway's `identify` frame has to name it explicitly, since the WebSocket
+     * handshake carries no header to say it earlier.
      */
     readonly deviceId: string,
     /**
-     * Ce que l'appareil sait faire, et non ce qu'il détient.
+     * What the device can do, not what it holds.
      *
-     * Ce module signait autrefois en manipulant directement les `CryptoKey`. Passer par une
-     * capacité est ce qui permettra à la clé de vivre hors de la webview sans qu'une ligne
-     * d'ici ne change.
+     * This module used to sign by handling `CryptoKey` values directly. Going through a
+     * capability is what will let the key live outside the webview without a single line here
+     * changing.
      */
     private readonly cipher: DeviceCipher,
   ) {}
 
   /**
-   * Crée un compte pseudonyme. Non signé — aucune clé n'est encore connue du serveur.
+   * Creates a pseudonymous account. Unsigned — the server knows no key yet.
    *
-   * Trust on first use : rien ne prouve que le premier à réclamer un handle en est le
-   * propriétaire légitime. Seule une key transparency répondrait à cela ; voir le README.
+   * Trust on first use: nothing proves that the first to claim a handle is its legitimate owner.
+   * Only key transparency would answer that; see the README.
    */
   static async createAccount(handle: string, identityKey: Uint8Array): Promise<void> {
     const response = await fetch(`${BASE_URL}/v1/accounts`, {
@@ -90,27 +90,26 @@ export class Api {
       throw new ApiError(
         response.status,
         response.status === 409
-          ? "Ce pseudonyme est déjà pris par un autre compte."
+          ? "handle already taken by another account"
           : await response.text(),
       );
     }
   }
 
   /**
-   * Enregistre l'appareil et son rattachement attesté au compte.
+   * Registers the device and its attested attachment to the account.
    *
-   * L'attestation est ce qui empêche quiconque — serveur compris — de déclarer un appareil
-   * dans le compte d'autrui et de se faire inviter dans ses conversations.
+   * The attestation is what stops anyone — the server included — from declaring a device in
+   * someone else's account and getting invited into their conversations.
    */
   static async register(
     deviceId: string,
     handle: string,
     /**
-     * La clé publique d'authentification, en octets.
+     * The public authentication key, as bytes.
      *
-     * Passée telle quelle plutôt que déduite d'un `DeviceKeys` : l'appelant peut détenir ses
-     * clés dans la webview ou dans le processus natif, et l'enregistrement n'a aucune raison de
-     * savoir lequel des deux.
+     * Passed as-is rather than derived from a `DeviceKeys`: the caller may hold its keys in the
+     * webview or in the native process, and registration has no reason to know which.
      */
     authKey: Uint8Array,
     mlsKey: Uint8Array,
@@ -132,7 +131,7 @@ export class Api {
       throw new ApiError(
         response.status,
         response.status === 409
-          ? "Cet identifiant est déjà pris par un autre appareil."
+          ? "id already taken by another device"
           : await response.text(),
       );
     }
@@ -143,7 +142,7 @@ export class Api {
     return this.requestRaw(method, path, encoded, "json");
   }
 
-  /** Variante binaire, pour les corps qui ne sont pas du JSON. */
+  /** Binary variant, for bodies that are not JSON. */
   private async requestRaw<T>(
     method: "GET" | "POST",
     path: string,
@@ -159,8 +158,8 @@ export class Api {
     const response = await fetch(`${BASE_URL}${path}`, {
       method,
       headers: {
-        // Le serveur n'inspecte pas le corps : ce type est indicatif, et les pièces jointes
-        // sont de toute façon des octets opaques.
+        // The server does not inspect the body: this type is indicative, and attachments are
+        // opaque bytes anyway.
         "content-type": "application/octet-stream",
         "x-device-id": this.deviceId,
         "x-timestamp": String(timestamp),
@@ -178,12 +177,12 @@ export class Api {
     return response.json() as Promise<T>;
   }
 
-  /** Réapprovisionne le stock. Chaque KeyPackage est à usage unique. */
+  /** Restocks. Each KeyPackage is single-use. */
   publishKeyPackages(packages: Uint8Array[]): Promise<{ published: number }> {
     return this.request("POST", "/v1/key-packages", { packages: packages.map(toBase64) });
   }
 
-  /** À surveiller : à zéro, plus personne ne peut ouvrir de conversation avec cet appareil. */
+  /** Worth watching: at zero, nobody can open a conversation with this device any more. */
   keyPackageStock(): Promise<{ remaining: number }> {
     return this.request("GET", "/v1/key-packages/stock");
   }
@@ -197,11 +196,11 @@ export class Api {
   }
 
   /**
-   * Appareils déclarés d'un compte, tels que le serveur les rapporte.
+   * An account's declared devices, as the server reports them.
    *
-   * **Le résultat n'est pas fiable en l'état.** C'est l'endroit exact par lequel un serveur
-   * malveillant introduirait un appareil qu'il contrôle. Passer systématiquement par
-   * `resolveAccount` dans `account.ts`, qui revérifie chaque attestation.
+   * **The result is not trustworthy as-is.** This is the exact place where a malicious server
+   * would slip in a device it controls. Always go through `resolveAccount` in `account.ts`, which
+   * re-checks every attestation.
    */
   async listAccountDevices(handle: string): Promise<{
     identityKey: Uint8Array;
@@ -235,11 +234,11 @@ export class Api {
   }
 
   /**
-   * Révoque un appareil, certificat signé par le compte à l'appui.
+   * Revokes a device, backed by a certificate signed by the account.
    *
-   * Le certificat n'est pas là pour le serveur — il connaît déjà la clé du compte et pourrait
-   * s'en passer. Il est là pour les **autres membres des groupes**, qui doivent pouvoir
-   * constater la révocation sans nous croire, et commiter le retrait MLS en conséquence.
+   * The certificate is not there for the server — it already knows the account key and could do
+   * without. It is there for the **other group members**, who must be able to observe the
+   * revocation without taking our word for it, and commit the MLS removal accordingly.
    */
   revokeDevice(
     deviceId: string,
@@ -253,11 +252,11 @@ export class Api {
   }
 
   /**
-   * Change la clé d'identité du compte.
+   * Changes the account's identity key.
    *
-   * C'est la seule réponse réelle à un appareil volé : celui-ci détient la graine, donc le
-   * compte entier. Le révoquer ne l'empêche pas d'en attester un nouveau ; changer la clé rend
-   * en revanche invérifiables **toutes** les attestations existantes d'un seul coup.
+   * This is the only real answer to a stolen device: it holds the seed, therefore the whole
+   * account. Revoking it does not stop it from attesting a new one; changing the key, on the
+   * other hand, makes **every** existing attestation unverifiable at once.
    */
   rotateAccount(
     handle: string,
@@ -272,12 +271,12 @@ export class Api {
     });
   }
 
-  /** Tête courante du journal, telle que le serveur la publie. */
+  /** Current log head, as the server publishes it. */
   async logHead(): Promise<SignedHead> {
     return decodeHead(await this.request<RawHead>("GET", "/v1/log/sth"));
   }
 
-  /** Preuve que la clé servie pour ce compte figure dans le journal. */
+  /** Proof that the key served for this account appears in the log. */
   async logProof(handle: string): Promise<{
     identityKey: Uint8Array;
     index: number;
@@ -299,7 +298,7 @@ export class Api {
     };
   }
 
-  /** Preuve que le journal courant prolonge celui de taille `from`. */
+  /** Proof that the current log extends the one of size `from`. */
   async logConsistency(from: number): Promise<{ proof: Uint8Array[]; head: SignedHead }> {
     const body = await this.request<{ proof: string[]; head: RawHead }>(
       "GET",
@@ -309,24 +308,24 @@ export class Api {
     return { proof: body.proof.map(fromBase64), head: decodeHead(body.head) };
   }
 
-  /** Retire des appareils de la liste de diffusion d'un groupe. */
+  /** Removes devices from a group's distribution list. */
   removeGroupMembers(groupId: Uint8Array, deviceIds: string[]): Promise<{ removed: number }> {
     return this.request("POST", `/v1/groups/${toHex(groupId)}/members/remove`, {
       device_ids: deviceIds,
     });
   }
 
-  /** Dépose un paquet d'appairage déjà scellé. Le serveur n'en voit qu'un blob. */
+  /** Deposits an already sealed pairing packet. The server only ever sees a blob. */
   depositPairing(id: Uint8Array, payload: Uint8Array): Promise<{ deposited: boolean }> {
     return this.request("POST", `/v1/pairings/${toHex(id)}`, { payload: toBase64(payload) });
   }
 
   /**
-   * Relève le paquet d'appairage. **Non signé** : le nouvel appareil n'a pas encore d'identité
-   * connue du serveur — c'est justement ce que l'appairage va lui donner.
+   * Collects the pairing packet. **Unsigned**: the new device has no identity the server knows
+   * yet — that is precisely what pairing is about to give it.
    *
-   * La sécurité ne tient donc pas à l'authentification mais au chiffrement : sans la clé
-   * privée éphémère, le paquet est illisible. Retourne `null` tant qu'il n'y a rien.
+   * Security therefore rests on encryption, not authentication: without the ephemeral private
+   * key, the packet is unreadable. Returns `null` while there is nothing.
    */
   static async claimPairing(id: Uint8Array): Promise<Uint8Array | null> {
     const response = await fetch(`${BASE_URL}/v1/pairings/${toHex(id)}`);
@@ -337,7 +336,7 @@ export class Api {
     return fromBase64(body.payload);
   }
 
-  /** Dépose des messages chiffrés dans le coffre du compte. */
+  /** Deposits encrypted messages into the account's vault. */
   storeVault(
     groupId: Uint8Array,
     entries: { seq: number; payload: Uint8Array }[],
@@ -347,7 +346,7 @@ export class Api {
     });
   }
 
-  /** Relève le coffre du compte. Le serveur ne sert que celui de l'appareil signataire. */
+  /** Collects the account's vault. The server only serves the signing device's own. */
   async fetchVault(
     groupId: Uint8Array,
     after: number,
@@ -360,14 +359,14 @@ export class Api {
   }
 
   /**
-   * Dernière activité des comptes demandés.
+   * Last activity of the requested accounts.
    *
-   * `POST` et non `GET` : les handles restent hors de l'URL, donc hors des journaux d'accès de
-   * tout proxy traversé. Même argument que celui qui a écarté `EventSource` pour le flux — et le
-   * corps est de toute façon couvert par la signature.
+   * `POST` and not `GET`: handles stay out of the URL, hence out of the access logs of any proxy
+   * along the way. Same argument that ruled out `EventSource` for the stream — and the body is
+   * covered by the signature anyway.
    *
-   * Le serveur renvoie sa propre horloge avec la réponse : la fraîcheur se juge en comparant
-   * deux horodatages, et celui du navigateur peut être n'importe quoi.
+   * The server returns its own clock with the response: freshness is judged by comparing two
+   * timestamps, and the browser's can be anything.
    */
   presence(handles: string[]): Promise<{
     now: number;
@@ -376,22 +375,22 @@ export class Api {
     return this.request("POST", "/v1/presence", { handles });
   }
 
-  /** Coupe ou rétablit la diffusion de sa présence. Réciproque : couper, c'est cesser de voir. */
+  /** Stops or resumes broadcasting presence. Reciprocal: opting out means ceasing to see. */
   setPresenceOptout(optout: boolean): Promise<void> {
     return this.request("POST", "/v1/presence/optout", { optout });
   }
 
-  /** Groupes où le serveur nous a déclaré membre — comment on découvre un Welcome. */
+  /** Groups where the server declared us a member — how a Welcome gets discovered. */
   listGroups(): Promise<string[]> {
     return this.request("GET", "/v1/groups");
   }
 
   /**
-   * Déclare des membres auprès du serveur.
+   * Declares members to the server.
    *
-   * `postingKey` n'est acceptée qu'à la **création** du groupe : le serveur l'ignore ensuite.
-   * Permettre de la changer laisserait un membre rendre tous les autres muets, sans qu'aucune
-   * erreur ne l'explique.
+   * `postingKey` is only accepted when the group is **created**: the server ignores it
+   * afterwards. Allowing it to change would let one member mute all the others, with no error to
+   * explain it.
    */
   addMembers(
     groupId: Uint8Array,
@@ -405,11 +404,11 @@ export class Api {
   }
 
   /**
-   * Dépose une enveloppe.
+   * Posts an envelope.
    *
-   * Avec une clé de dépôt, la requête n'est **pas signée** : elle porte un MAC qui prouve
-   * l'appartenance au groupe sans dire lequel de ses membres écrit. Sans clé, on retombe sur
-   * la signature d'appareil — et le serveur apprend qui parle à qui, quand.
+   * With a posting key, the request is **not signed**: it carries a MAC that proves group
+   * membership without saying which member is writing. Without a key, we fall back on the device
+   * signature — and the server learns who talks to whom, and when.
    */
   postEnvelope(
     groupId: Uint8Array,
@@ -421,9 +420,9 @@ export class Api {
 
     if (!posting) return this.request("POST", path, body);
 
-    // Le corps est sérialisé **une seule fois** : le MAC couvre les octets exacts qui partent.
-    // Re-sérialiser pour l'envoi produirait potentiellement d'autres octets, et le serveur
-    // rejetterait tout.
+    // The body is serialised **exactly once**: the MAC covers the exact bytes that go out.
+    // Re-serialising to send could produce different bytes, and the server would reject
+    // everything.
     const encoded = new TextEncoder().encode(JSON.stringify(body));
     const nonce = crypto.getRandomValues(new Uint8Array(16));
     const mac = posting.mac(posting.key, groupId, nonce, encoded);
@@ -431,7 +430,7 @@ export class Api {
     return this.anonymous(path, encoded, nonce, mac);
   }
 
-  /** Dépôt sans signature d'appareil : le serveur n'apprend pas qui écrit. */
+  /** Posting without a device signature: the server does not learn who is writing. */
   private async anonymous<T>(
     path: string,
     encoded: Uint8Array,
@@ -442,8 +441,8 @@ export class Api {
       method: "POST",
       headers: {
         "content-type": "application/octet-stream",
-        // Ni `x-device-id`, ni `x-signature`, ni horodatage : c'est tout l'objet. Les
-        // envoyer « au cas où » annulerait le dispositif sans qu'aucun test ne le signale.
+        // No `x-device-id`, no `x-signature`, no timestamp: that is the whole point. Sending
+        // them "just in case" would defeat the mechanism without any test noticing.
         "x-group-nonce": toBase64(nonce),
         "x-group-mac": toBase64(mac),
       },
@@ -455,10 +454,10 @@ export class Api {
   }
 
   /**
-   * Dépose une pièce jointe **déjà chiffrée**.
+   * Uploads an **already encrypted** attachment.
    *
-   * Le corps part en binaire brut : encoder en base64 coûterait un tiers de bande passante
-   * pour rien. La signature couvre l'empreinte du corps, donc le procédé reste identique.
+   * The body goes out as raw binary: base64 would cost a third of the bandwidth for nothing. The
+   * signature covers the body digest, so the scheme is unchanged.
    */
   async uploadAttachment(groupId: Uint8Array, ciphertext: Uint8Array): Promise<{ id: string }> {
     return this.requestRaw("POST", `/v1/groups/${toHex(groupId)}/attachments`, ciphertext, "json");
@@ -474,28 +473,28 @@ export class Api {
   }
 
   /**
-   * Signe le défi émis par le serveur à l'ouverture d'une session gateway.
+   * Signs the challenge the server issues when a gateway session opens.
    *
-   * # Pourquoi un défi, là où le HTTP se contente d'un horodatage
+   * # Why a challenge, where HTTP makes do with a timestamp
    *
-   * L'API `WebSocket` du navigateur n'accepte **aucun en-tête**, pas plus qu'`EventSource`. On
-   * ne peut donc pas authentifier le handshake sans mettre la signature dans l'URL, où elle
-   * atterrirait dans les journaux d'accès de tout intermédiaire. La socket s'ouvre donc sans
-   * identité, et rien n'est servi avant cette signature.
+   * The browser's `WebSocket` API accepts **no header**, and neither does `EventSource`. The
+   * handshake therefore cannot be authenticated without putting the signature in the URL, where
+   * it would land in the access logs of every intermediary. So the socket opens without an
+   * identity, and nothing is served before this signature.
    *
-   * Le nonce venant du serveur et n'étant valable qu'une fois, il n'y a ici aucune fenêtre de
-   * rejeu — contrairement aux soixante secondes que laisse l'authentification HTTP.
+   * Since the nonce comes from the server and is valid only once, there is no replay window here
+   * — unlike the sixty seconds HTTP authentication leaves open.
    *
-   * Le message signé est construit par le module WebAssembly — son format canonique vit dans la
-   * crate `attest`, et le réécrire en TypeScript le dupliquerait. Il est passé en paramètre
-   * plutôt qu'importé, pour la même raison que [`PostMac`] : ce module ne doit pas dépendre du
-   * chargement du WASM, qui est asynchrone et n'a pas lieu au même moment.
+   * The signed message is built by the WebAssembly module — its canonical format lives in the
+   * `attest` crate, and rewriting it in TypeScript would duplicate it. It is passed as a
+   * parameter rather than imported, for the same reason as [`PostMac`]: this module must not
+   * depend on loading the WASM, which is asynchronous and does not happen at the same time.
    */
   signGatewayChallenge(nonce: Uint8Array, format: GatewayChallenge): Promise<string> {
     return this.cipher.sign(format(this.deviceId, nonce));
   }
 
-  /** Dépose un signal éphémère. Le serveur le relaie et l'oublie : rien n'est stocké. */
+  /** Posts an ephemeral signal. The server relays it and forgets it: nothing is stored. */
   async postSignal(
     groupId: Uint8Array,
     payload: Uint8Array,
@@ -508,8 +507,8 @@ export class Api {
       method: "POST",
       headers: {
         "content-type": "application/octet-stream",
-        // Comme le dépôt d'enveloppe : aucune signature d'appareil. Le serveur constate
-        // qu'un membre écrit, jamais lequel.
+        // Same as posting an envelope: no device signature. The server sees that a member is
+        // writing, never which one.
         "x-group-nonce": toBase64(nonce),
         "x-group-mac": toBase64(mac),
       },
@@ -531,17 +530,17 @@ export class Api {
   }
 }
 
-/** Tête de journal signée, décodée. */
+/** A signed log head, decoded. */
 export interface SignedHead {
   size: number;
   root: Uint8Array;
   timestamp: number;
   signature: Uint8Array;
   /**
-   * Clé publique du journal.
+   * The log's public key.
    *
-   * Servie par le serveur qu'elle est censée surveiller — pis-aller assumé et documenté. Le
-   * client refuse au moins qu'elle change en cours de route.
+   * Served by the very server it is meant to police — an acknowledged, documented stopgap. The
+   * client at least refuses to let it change mid-course.
    */
   logKey: Uint8Array;
 }
@@ -565,10 +564,10 @@ function decodeHead(raw: RawHead): SignedHead {
 }
 
 /**
- * Calcul du MAC de dépôt, fourni par le module WebAssembly.
+ * Posting MAC computation, provided by the WebAssembly module.
  *
- * Passé en paramètre plutôt qu'importé : `api.ts` ne doit pas dépendre du chargement du
- * module WASM, qui est asynchrone et n'a pas lieu au même moment.
+ * Passed as a parameter rather than imported: `api.ts` must not depend on loading the WASM
+ * module, which is asynchronous and does not happen at the same time.
  */
 export type PostMac = (
   key: Uint8Array,
@@ -578,9 +577,9 @@ export type PostMac = (
 ) => Uint8Array;
 
 /**
- * Construction du message signé à l'ouverture d'une session gateway.
+ * Builds the message signed when a gateway session opens.
  *
- * Fourni par le module WebAssembly, pour la même raison que [`PostMac`] : le format canonique
- * vit dans la crate `attest` et ne doit exister qu'en un seul exemplaire.
+ * Provided by the WebAssembly module, for the same reason as [`PostMac`]: the canonical format
+ * lives in the `attest` crate and must exist in only one copy.
  */
 export type GatewayChallenge = (deviceId: string, nonce: Uint8Array) => Uint8Array;

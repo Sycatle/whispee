@@ -1,114 +1,112 @@
 /**
- * La session rangée par le processus natif, plutôt que par la webview.
+ * The session kept by the native process rather than by the webview.
  *
- * # Ce que cela achète
+ * # What that buys
  *
- * De la durabilité, et rien d'autre. Le stockage d'une webview mobile **n'est pas garanti** : iOS
- * évince les données de WKWebView après sept jours d'inactivité, Android purge sous pression
- * mémoire. Et la perte est définitive — le ratchet MLS détruit ses clés au fur et à mesure, donc
- * l'historique devient illisible et les conversations sont à recréer. Le répertoire privé de
- * l'application, lui, n'est purgé qu'à la désinstallation.
+ * Durability, and nothing else. A mobile webview's storage **is not guaranteed**: iOS evicts
+ * WKWebView data after seven days of inactivity, Android purges under memory pressure. And the
+ * loss is permanent — the MLS ratchet destroys its keys as it goes, so history becomes
+ * unreadable and conversations have to be recreated. The app's private directory, by contrast,
+ * is only purged on uninstall.
  *
- * # Le chiffrement reste ici, pas côté Rust
+ * # Encryption stays here, not on the Rust side
  *
- * `session_save` écrit les octets qu'on lui donne, sans les regarder. C'est délibéré : le
- * chiffrement passe par `DeviceCipher`, la même abstraction que sur le web, donc le format sur
- * disque ne dépend pas de la plateforme et le jour où un verrou local change la clé au repos, il
- * n'y a qu'un endroit à toucher.
+ * `session_save` writes the bytes it is given, without looking at them. That is deliberate:
+ * encryption goes through `DeviceCipher`, the same abstraction as on the web, so the on-disk
+ * format does not depend on the platform and the day a local lock changes the at-rest key, there
+ * is only one place to touch.
  *
- * # Pourquoi le pont est injecté
+ * # Why the bridge is injected
  *
- * `invoke` n'existe que dans une webview Tauri. Le passer en paramètre rend cette classe
- * testable sans application — et le test qui compte ici est celui d'un aller-retour complet, y
- * compris le scellement, puisque c'est l'enchaînement codec → chiffrement → fichier qui peut
- * perdre un compte, pas chacun de ses maillons.
+ * `invoke` only exists inside a Tauri webview. Passing it as a parameter makes this class
+ * testable without an app — and the test that matters here is a full round trip, sealing
+ * included, since it is the codec → encryption → file chain that can lose an account, not any
+ * one of its links.
  */
 import { invoke } from "@tauri-apps/api/core";
 
 import { fromBase64, toBase64 } from "./keys.ts";
-import { decoderSession, encoderSession } from "./session-codec.ts";
+import { decodeSession, encodeSession } from "./session-codec.ts";
 import type { SessionStore, StoredSession } from "./storage.ts";
 import type { DeviceCipher } from "./cipher.ts";
 
 /**
- * Les trois commandes natives dont le store a besoin.
+ * The three native commands the store needs.
  *
- * Volontairement plus étroit que l'ensemble des commandes : ce qui manipule les clés passe par
- * `DeviceCipher`, ce qui manipule le fichier passe par ici, et aucun des deux ne peut faire le
- * travail de l'autre.
+ * Deliberately narrower than the full command set: what handles keys goes through
+ * `DeviceCipher`, what handles the file goes through here, and neither can do the other's job.
  */
-export interface PontSession {
-  /** Le blob scellé, en base64, ou `null` au premier lancement. */
-  charger(): Promise<string | null>;
-  enregistrer(contenu: string): Promise<void>;
-  effacer(): Promise<void>;
+export interface SessionBridge {
+  /** The sealed blob, in base64, or `null` on first launch. */
+  load(): Promise<string | null>;
+  save(content: string): Promise<void>;
+  clear(): Promise<void>;
 }
 
 /**
- * Le pont réel, adossé à l'IPC de Tauri.
+ * The real bridge, backed by Tauri's IPC.
  *
- * `invoke` est importé statiquement : `cipher.ts` le fait déjà, donc le différer ici ne
- * retirerait rien du paquet — cela donnerait seulement l'illusion que le module se charge sans
- * Tauri. L'appel, lui, n'a lieu que si quelqu'un construit ce pont.
+ * `invoke` is imported statically: `cipher.ts` already does it, so deferring it here would take
+ * nothing out of the bundle — it would only create the illusion that the module loads without
+ * Tauri. The call itself only happens if someone builds this bridge.
  */
-export function pontTauri(): PontSession {
+export function tauriBridge(): SessionBridge {
   return {
-    charger: () => invoke<string | null>("session_load"),
-    enregistrer: (contenu) => invoke<void>("session_save", { contenu }),
-    effacer: () => invoke<void>("session_clear"),
+    load: () => invoke<string | null>("session_load"),
+    save: (content) => invoke<void>("session_save", { content }),
+    clear: () => invoke<void>("session_clear"),
   };
 }
 
 /**
- * Le store natif.
+ * The native store.
  *
- * # Le même port que le store du navigateur
+ * # The same port as the browser store
  *
- * `StoredSession` ne porte aucune clé : celles du navigateur sont rangées par `IndexedDbStore`,
- * celles-ci vivent dans le processus natif. C'est ce qui permet aux deux stores de remplir la
- * même interface, et à la session d'ignorer laquelle des deux la sert.
+ * `StoredSession` carries no keys: the browser's are kept by `IndexedDbStore`, these live in the
+ * native process. That is what lets both stores satisfy the same interface, and the session
+ * ignore which of the two serves it.
  *
- * # Une installation existante ne bascule pas dessus telle quelle
+ * # An existing install does not switch over as it is
  *
- * Ses clés sont enfermées dans IndexedDB, non extractables, et le serveur **refuse d'en changer**
- * (clause sur `auth_key` dans `register_device`). Un store natif adossé à des clés natives neuves
- * ne saurait ni relire son ancien état ni prouver son identité : il faut enregistrer un appareil
- * neuf et révoquer l'ancien. Voir `migration.ts`.
+ * Its keys are locked inside IndexedDB, non-extractable, and the server **refuses to change
+ * them** (the `auth_key` clause in `register_device`). A native store backed by fresh native keys
+ * could neither read its old state nor prove its identity: a new device has to be registered and
+ * the old one revoked. See `migration.ts`.
  */
 export class NativeStore implements SessionStore {
-  // Champs déclarés plutôt que propriétés de paramètre : le lanceur de tests de Node se
-  // contente de retirer les types, et une propriété de paramètre demanderait une transformation.
+  // Declared fields rather than parameter properties: Node's test runner only strips types, and
+  // a parameter property would require a transform.
   private readonly cipher: DeviceCipher;
-  private readonly pont: PontSession;
+  private readonly bridge: SessionBridge;
 
-  constructor(cipher: DeviceCipher, pont: PontSession) {
+  constructor(cipher: DeviceCipher, bridge: SessionBridge) {
     this.cipher = cipher;
-    this.pont = pont;
+    this.bridge = bridge;
   }
 
   async load(): Promise<StoredSession | undefined> {
-    const scelle = await this.pont.charger();
-    // `null` est un premier lancement, pas une panne. Les confondre créerait un compte neuf
-    // par-dessus un état encore présent, ce qui est irréversible.
-    if (scelle === null) return undefined;
+    const sealed = await this.bridge.load();
+    // `null` is a first launch, not a failure. Confusing the two would create a fresh account on
+    // top of a state that is still there, which is irreversible.
+    if (sealed === null) return undefined;
 
-    return decoderSession(await this.cipher.open(fromBase64(scelle)));
+    return decodeSession(await this.cipher.open(fromBase64(sealed)));
   }
 
   async save(session: StoredSession): Promise<void> {
-    const scelle = await this.cipher.seal(encoderSession(session));
-    await this.pont.enregistrer(toBase64(scelle));
+    const sealed = await this.cipher.seal(encodeSession(session));
+    await this.bridge.save(toBase64(sealed));
   }
 
   /**
-   * Efface la session, **et pas les secrets**.
+   * Erases the session, **and not the secrets**.
    *
-   * La commande native s'en tient là volontairement : oublier une session laisse un appareil
-   * enregistré qui repart de zéro, effacer les secrets laisse une identité que le serveur
-   * connaît encore mais que plus personne ne peut prouver. Le second effacement existe, et c'est
-   * un autre appel.
+   * The native command deliberately stops there: forgetting a session leaves a registered device
+   * that starts over, erasing the secrets leaves an identity the server still knows about but
+   * that nobody can prove any more. The second erasure exists, and it is another call.
    */
   async clear(): Promise<void> {
-    await this.pont.effacer();
+    await this.bridge.clear();
   }
 }

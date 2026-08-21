@@ -1,52 +1,51 @@
 import { useEffect, useState } from "react";
-import { MIN_LENGTH, bitsApproximatifs, verifier } from "@/lib/password";
-import { biometrieActive, biometrieDisponible } from "@/lib/biometrics";
-import type { MigrationProposee, Session } from "@/lib/session";
+import { MIN_LENGTH, approximateBits, check } from "@/lib/password";
+import { biometricEnabled, biometricAvailable } from "@/lib/biometrics";
+import type { ProposedMigration, Session } from "@/lib/session";
 
-/** Saisie du mot de passe au démarrage, quand un verrou est posé. */
+/** Password prompt at startup, when a lock is set. */
 export function Unlock({
   onUnlocked,
   onError,
 }: {
-  // La proposition de migration voyage avec la session : elle naît du même démarrage, et la
-  // laisser ici la perdrait pour les installations verrouillées — précisément celles dont
-  // l'état ne devient lisible qu'à cet instant.
-  onUnlocked: (session: Session, migration?: MigrationProposee) => void;
+  // The migration proposal travels with the session: it comes out of the same startup, and
+  // dropping it here would lose it for locked installs — precisely the ones whose state only
+  // becomes readable at this moment.
+  onUnlocked: (session: Session, migration?: ProposedMigration) => void;
   onError: (message: string) => void;
 }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [refus, setRefus] = useState(false);
-  const [parBiometrie, setParBiometrie] = useState(false);
+  const [refused, setRefused] = useState(false);
+  const [canUseBiometric, setCanUseBiometric] = useState(false);
 
   useEffect(() => {
-    void biometrieActive().then(setParBiometrie);
+    void biometricEnabled().then(setCanUseBiometric);
   }, []);
 
   /**
-   * Déverrouillage par l'invite du système.
+   * Unlocking through the system prompt.
    *
-   * L'invite est déclenchée dans le processus natif, sur le chemin de la clé — ce composant ne
-   * fait que demander. Un refus laisse l'écran tel quel, avec le champ de mot de passe : la
-   * biométrie est un raccourci, jamais le seul chemin, sans quoi un capteur en panne
-   * enfermerait le compte dehors.
+   * The prompt is raised in the native process, on the key's path — this component only asks. A
+   * refusal leaves the screen as it is, password field included: biometrics are a shortcut, never
+   * the only way in, otherwise a broken sensor would lock the account out.
    */
-  const parEmpreinte = async () => {
+  const unlockByPrompt = async () => {
     setBusy(true);
-    setRefus(false);
+    setRefused(false);
     try {
-      const { ouvrirParBiometrie } = await import("@/lib/biometrics");
-      const master = await ouvrirParBiometrie();
+      const { unlockWithBiometric } = await import("@/lib/biometrics");
+      const master = await unlockWithBiometric();
       if (!master) return;
 
-      const [{ demarrer }, { importerMaster }] = await Promise.all([
+      const [{ start }, { importMaster }] = await Promise.all([
         import("@/lib/session"),
         import("@/lib/lock"),
       ]);
-      const { session, migration } = await demarrer(await importerMaster(master));
+      const { session, migration } = await start(await importMaster(master));
       if (session) onUnlocked(session, migration);
     } catch {
-      setRefus(true);
+      setRefused(true);
     } finally {
       setBusy(false);
     }
@@ -55,17 +54,17 @@ export function Unlock({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
-    setRefus(false);
+    setRefused(false);
     try {
-      const { demarrer } = await import("@/lib/session");
-      // Le même chemin qu'au démarrage sans verrou : une installation à migrer doit l'être
-      // ici aussi, et c'est seulement maintenant que l'état est lisible.
-      const { session, migration } = await demarrer(password);
+      const { start } = await import("@/lib/session");
+      // The same path as an unlocked startup: an install that needs migrating must be migrated
+      // here too, and only now is the state readable.
+      const { session, migration } = await start(password);
       if (session) onUnlocked(session, migration);
     } catch {
-      // Toute erreur est présentée comme un mot de passe incorrect : distinguer « mauvais mot
-      // de passe » de « données corrompues » apprendrait à un attaquant quand il approche.
-      setRefus(true);
+      // Every error is presented as a wrong password: telling "bad password" apart from "corrupted
+      // data" would teach an attacker when they are getting close.
+      setRefused(true);
     } finally {
       setBusy(false);
     }
@@ -74,21 +73,21 @@ export function Unlock({
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 p-6">
       <div>
-        <h1 className="text-xl font-medium">Déverrouiller</h1>
+        <h1 className="text-xl font-medium">Unlock</h1>
         <p className="mt-2 text-sm text-(--color-ink-muted)">
-          Vos conversations sont chiffrées sur cet appareil. Le mot de passe les déverrouille
-          ici, et nulle part ailleurs : il n&apos;est jamais transmis au serveur.
+          Your conversations are encrypted on this device. The password unlocks them here and
+          nowhere else: it is never sent to the server.
         </p>
       </div>
 
-      {parBiometrie && (
+      {canUseBiometric && (
         <button
           type="button"
-          onClick={() => void parEmpreinte()}
+          onClick={() => void unlockByPrompt()}
           disabled={busy}
-          className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50 tactile:min-h-11"
+          className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50 touch:min-h-11"
         >
-          Déverrouiller par empreinte ou visage
+          Unlock with fingerprint or face
         </button>
       )}
 
@@ -97,7 +96,7 @@ export function Unlock({
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="mot de passe"
+          placeholder="password"
           required
           autoFocus
           className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2"
@@ -107,21 +106,20 @@ export function Unlock({
           disabled={busy || !password}
           className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50"
         >
-          {busy ? "Déverrouillage…" : "Déverrouiller"}
+          {busy ? "Unlocking…" : "Unlock"}
         </button>
       </form>
 
       {busy && (
         <p className="text-xs text-(--color-ink-muted)">
-          La dérivation prend environ une seconde et 64 Mio de mémoire. Cette lenteur est
-          délibérée : elle coûte le même prix à chaque essai de quelqu&apos;un qui aurait
-          récupéré vos données.
+          Deriving the key takes about a second and 64 MiB of memory. The slowness is deliberate:
+          it costs the same on every attempt by someone who has taken a copy of your data.
         </p>
       )}
 
-      {refus && (
+      {refused && (
         <p role="alert" className="text-sm text-(--color-danger)">
-          Mot de passe incorrect.
+          Wrong password.
         </p>
       )}
 
@@ -134,62 +132,61 @@ export function Unlock({
         }}
         className="text-sm text-(--color-ink-muted) underline"
       >
-        J&apos;ai oublié ce mot de passe
+        I forgot this password
       </button>
 
       <p className="text-xs text-(--color-ink-muted)">
-        L&apos;oublier ne fait rien perdre définitivement : effacez cet appareil, puis
-        récupérez le compte avec votre phrase de douze mots. Les conversations en cours, elles,
-        ne suivront pas — un appareil déjà en place devra vous y réintégrer.
+        Forgetting it loses nothing for good: erase this device, then recover the account with your
+        twelve-word phrase. Conversations in progress will not follow, though — a device already in
+        place will have to add you back.
       </p>
     </main>
   );
 }
 
-/** Réglage du verrou depuis l'application. */
+/** Lock settings, from inside the app. */
 /**
- * Interrupteur du déverrouillage biométrique.
+ * Switch for biometric unlocking.
  *
- * # Pourquoi il n'apparaît que sous un verrou posé
+ * # Why it only appears under a lock that is already set
  *
- * La biométrie ne crée pas de clé : elle garde celle du verrou. Sans verrou, il n'y a rien à
- * garder, et un interrupteur qui poserait un verrou en douce ferait dépendre la lisibilité des
- * conversations d'un doigt — sans mot de passe pour reprendre la main le jour où le capteur
- * refuse.
+ * Biometrics create no key: they hold the lock's key. Without a lock there is nothing to hold, and
+ * a switch that quietly set one would make the readability of your conversations depend on a
+ * finger — with no password to fall back on the day the sensor says no.
  *
- * # Pourquoi le texte insiste sur ce qu'on perd
+ * # Why the copy dwells on what you give up
  *
- * L'échange n'est pas intuitif : un mot de passe n'est stocké nulle part, la clé rangée pour la
- * biométrie l'est. Le confort se paie en surface d'attaque, et quelqu'un qui ne le sait pas
- * croira renforcer sa sécurité en activant l'option.
+ * The trade is not intuitive: a password is stored nowhere, the key stashed for biometrics is.
+ * Convenience is paid for in attack surface, and someone who does not know that will believe they
+ * are hardening their security by turning the option on.
  */
 function BiometricToggle({ session }: { session: Session }) {
-  const [disponible, setDisponible] = useState(false);
-  const [active, setActive] = useState(false);
+  const [available, setAvailable] = useState(false);
+  const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void Promise.all([biometrieDisponible(), biometrieActive()]).then(([peut, est]) => {
-      setDisponible(peut);
-      setActive(est);
+    void Promise.all([biometricAvailable(), biometricEnabled()]).then(([canUse, isOn]) => {
+      setAvailable(canUse);
+      setEnabled(isOn);
     });
   }, []);
 
-  // Rien à proposer : ni bloc, ni explication. Un réglage grisé sur un ordinateur de bureau ne
-  // renseignerait que sur l'existence d'une fonction inaccessible.
-  if (!disponible) return null;
+  // Nothing to offer: no block, no explanation. A greyed-out setting on a desktop machine would
+  // only advertise a feature that cannot be reached.
+  if (!available) return null;
 
-  const basculer = async () => {
+  const toggle = async () => {
     setBusy(true);
     setError(null);
     try {
-      if (active) {
-        await session.retirerBiometrie();
-        setActive(false);
+      if (enabled) {
+        await session.disableBiometric();
+        setEnabled(false);
       } else {
-        await session.activerBiometrie();
-        setActive(true);
+        await session.enableBiometric();
+        setEnabled(true);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -200,19 +197,19 @@ function BiometricToggle({ session }: { session: Session }) {
 
   return (
     <div className="mt-4 border-t border-(--color-border-subtle) pt-3">
-      <h3 className="font-medium">Ouvrir par empreinte ou visage</h3>
+      <h3 className="font-medium">Open with fingerprint or face</h3>
       <p className="mt-1 text-(--color-ink-muted)">
-        {active
-          ? "La clé de votre verrou est gardée par le système, derrière son invite. Le mot de passe continue de fonctionner."
-          : "Votre mot de passe n'est stocké nulle part. L'activer range la clé de votre verrou sur cet appareil, protégée par le système : plus commode, et plus exposé si quelqu'un extrait le stockage du téléphone."}
+        {enabled
+          ? "Your lock's key is held by the system, behind its prompt. Your password still works."
+          : "Your password is stored nowhere. Turning this on stores your lock's key on this device instead, protected by the system: more convenient, and more exposed if someone extracts the phone's storage."}
       </p>
       <button
         type="button"
-        onClick={() => void basculer()}
+        onClick={() => void toggle()}
         disabled={busy}
-        className="mt-2 underline disabled:opacity-50 tactile:min-h-11"
+        className="mt-2 underline disabled:opacity-50 touch:min-h-11"
       >
-        {busy ? "…" : active ? "Désactiver" : "Activer"}
+        {busy ? "…" : enabled ? "Turn off" : "Turn on"}
       </button>
       {error && (
         <p role="alert" className="mt-2 text-(--color-danger)">
@@ -229,9 +226,9 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const verdict = verifier(password);
-  const bits = bitsApproximatifs(password);
-  const concordent = password === confirmation;
+  const verdict = check(password);
+  const bits = approximateBits(password);
+  const match = password === confirmation;
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -255,21 +252,21 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
     return (
       <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
         <div className="flex items-baseline justify-between gap-4">
-          <h2 className="font-medium">Retirer le verrou</h2>
+          <h2 className="font-medium">Remove the lock</h2>
           <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
-            Fermer
+            Close
           </button>
         </div>
         <p className="mt-2 text-(--color-ink-muted)">
-          Sans verrou, vos conversations restent chiffrées sur le disque, mais quiconque ouvre
-          ce navigateur peut les lire.
+          Without a lock, your conversations stay encrypted on disk, but anyone who opens this
+          browser can read them.
         </p>
         <form onSubmit={submit} className="mt-3 flex gap-2">
           <input
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="mot de passe actuel"
+            placeholder="current password"
             required
             className="flex-1 rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5"
           />
@@ -278,12 +275,12 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
             disabled={busy || !password}
             className="rounded-md bg-(--color-danger) px-3 py-1.5 font-medium text-white disabled:opacity-50"
           >
-            {busy ? "…" : "Retirer"}
+            {busy ? "…" : "Remove"}
           </button>
         </form>
         {error && (
           <p role="alert" className="mt-2 text-(--color-danger)">
-            Mot de passe incorrect.
+            Wrong password.
           </p>
         )}
 
@@ -295,16 +292,16 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
   return (
     <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Verrouiller cet appareil</h2>
+        <h2 className="font-medium">Lock this device</h2>
         <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
-          Fermer
+          Close
         </button>
       </div>
 
       <p className="mt-2 text-(--color-ink-muted)">
-        Vos conversations seront chiffrées par ce mot de passe, qui ne quitte jamais cet
-        appareil. Ce n&apos;est pas un moyen de récupération : l&apos;oublier ne fait rien
-        perdre, votre phrase de douze mots reste le seul chemin de restauration.
+        Your conversations will be encrypted with this password, which never leaves this device. It
+        is not a recovery method: forgetting it loses nothing, your twelve-word phrase remains the
+        only way back in.
       </p>
 
       <form onSubmit={submit} className="mt-3 space-y-2">
@@ -312,7 +309,7 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder={`mot de passe (${MIN_LENGTH} caractères minimum)`}
+          placeholder={`password (${MIN_LENGTH} characters minimum)`}
           required
           className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5"
         />
@@ -325,25 +322,23 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
           className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5"
         />
 
-        {password && !verdict.ok && (
-          <p className="text-(--color-danger)">{verdict.raison}</p>
-        )}
+        {password && !verdict.ok && <p className="text-(--color-danger)">{verdict.reason}</p>}
         {password && verdict.ok && (
           <p className="text-xs text-(--color-ink-muted)">
-            Environ {bits} bits, en supposant des caractères tirés au hasard — ce qu&apos;un
-            humain ne fait jamais. Prenez cette valeur pour un plafond, pas pour une garantie.
+            About {bits} bits, assuming characters picked at random — which no human ever does.
+            Treat this as a ceiling, not a guarantee.
           </p>
         )}
-        {confirmation && !concordent && (
-          <p className="text-(--color-danger)">Les deux saisies diffèrent.</p>
+        {confirmation && !match && (
+          <p className="text-(--color-danger)">The two entries do not match.</p>
         )}
 
         <button
           type="submit"
-          disabled={busy || !verdict.ok || !concordent}
+          disabled={busy || !verdict.ok || !match}
           className="rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
         >
-          {busy ? "Chiffrement…" : "Activer le verrou"}
+          {busy ? "Encrypting…" : "Turn on the lock"}
         </button>
       </form>
 

@@ -12,50 +12,50 @@ function key(): Promise<CryptoKey> {
 }
 
 function message(seq: number): Message {
-  return { seq, sender: "alice", mine: false, content: { kind: "text", text: `n°${seq}` } };
+  return { seq, sender: "alice", mine: false, content: { kind: "text", text: `no. ${seq}` } };
 }
 
-/** Transport factice : enregistre les lots déposés, sert des pages à la demande. */
-function faux(pages: { seq: number; payload: Uint8Array }[][] = []): VaultApi & {
-  lots: number[];
-  demandes: number[];
+/** A fake transport: records the batches posted, serves pages on demand. */
+function fake(pages: { seq: number; payload: Uint8Array }[][] = []): VaultApi & {
+  batches: number[];
+  requests: number[];
 } {
-  const lots: number[] = [];
-  const demandes: number[] = [];
+  const batches: number[] = [];
+  const requests: number[] = [];
 
   return {
-    lots,
-    demandes,
+    batches,
+    requests,
     async storeVault(_groupId, entries) {
-      lots.push(entries.length);
+      batches.push(entries.length);
       return { stored: entries.length };
     },
     async fetchVault(_groupId, after) {
-      demandes.push(after);
+      requests.push(after);
       return pages.shift() ?? [];
     },
   };
 }
 
-test("une entrée archivée se relit à l'identique", async () => {
+test("an archived entry reads back identically", async () => {
   const k = await key();
   const original: Message = {
     seq: 42,
     sender: "bob",
     mine: true,
-    content: { kind: "reply", target: 7, text: "d'accord" },
+    content: { kind: "reply", target: 7, text: "agreed" },
   };
 
-  const relu = await decryptEntry(k, 42, await encryptEntry(k, original));
-  assert.deepEqual(relu, original);
+  const readBack = await decryptEntry(k, 42, await encryptEntry(k, original));
+  assert.deepEqual(readBack, original);
 });
 
 /**
- * La clé du coffre dérive de la phrase de récupération : elle ne change **jamais**. AES-GCM
- * casse catastrophiquement si un nonce est réutilisé sous la même clé — c'est le seul endroit
- * du projet où cette règle n'a aucun filet.
+ * The vault key derives from the recovery phrase: it **never** changes. AES-GCM fails
+ * catastrophically if a nonce is reused under the same key — this is the one place in the project
+ * where that rule has no safety net.
  */
-test("deux chiffrements du même message n'ont pas le même nonce", async () => {
+test("two encryptions of the same message do not share a nonce", async () => {
   const k = await key();
   const a = await encryptEntry(k, message(1));
   const b = await encryptEntry(k, message(1));
@@ -64,63 +64,63 @@ test("deux chiffrements du même message n'ont pas le même nonce", async () => 
 });
 
 /**
- * **Le test qui empêche le 400 silencieux.** Le serveur refuse tout lot de plus de deux cents
- * entrées ; un appareil qui rattrape un retard en a bien davantage à archiver d'un coup.
+ * **The test that prevents the silent 400.** The server rejects any batch of more than two
+ * hundred entries; a device catching up on a backlog has far more than that to archive at once.
  */
-test("un dépôt trop gros est découpé en lots que le serveur accepte", async () => {
-  const api = faux();
+test("an oversized upload is split into batches the server accepts", async () => {
+  const api = fake();
   await store(api, await key(), GROUP, Array.from({ length: 450 }, (_, i) => message(i)));
 
-  assert.deepEqual(api.lots, [200, 200, 50]);
+  assert.deepEqual(api.batches, [200, 200, 50]);
 });
 
-test("un dépôt vide ne parle pas au serveur", async () => {
-  const api = faux();
+test("an empty upload does not talk to the server", async () => {
+  const api = fake();
   await store(api, await key(), GROUP, []);
 
-  assert.deepEqual(api.lots, []);
+  assert.deepEqual(api.batches, []);
 });
 
 /**
- * **Le test qui empêche l'historique tronqué en silence.** Le serveur sert au plus deux cents
- * lignes ; sans pagination, tout ce qui suit disparaissait sans la moindre erreur.
+ * **The test that prevents silently truncated history.** The server serves at most two hundred
+ * rows; without pagination, everything after that vanished without the slightest error.
  */
-test("une restauration suit le curseur jusqu'à épuisement", async () => {
+test("a restore follows the cursor until it runs out", async () => {
   const k = await key();
 
-  const page = async (debut: number, taille: number) =>
+  const page = async (start: number, size: number) =>
     await Promise.all(
-      Array.from({ length: taille }, async (_, i) => ({
-        seq: debut + i,
-        payload: await encryptEntry(k, message(debut + i)),
+      Array.from({ length: size }, async (_, i) => ({
+        seq: start + i,
+        payload: await encryptEntry(k, message(start + i)),
       })),
     );
 
-  const api = faux([await page(1, 200), await page(201, 200), await page(401, 30)]);
-  const { messages, illisibles } = await restore(api, k, GROUP);
+  const api = fake([await page(1, 200), await page(201, 200), await page(401, 30)]);
+  const { messages, unreadable } = await restore(api, k, GROUP);
 
   assert.equal(messages.length, 430);
-  assert.equal(illisibles, 0);
-  // Le curseur repart du dernier `seq` servi, jamais d'un décompte local.
-  assert.deepEqual(api.demandes, [0, 200, 400]);
+  assert.equal(unreadable, 0);
+  // The cursor resumes from the last `seq` served, never from a local count.
+  assert.deepEqual(api.requests, [0, 200, 400]);
 });
 
-test("une page pleine suivie du vide ne boucle pas indéfiniment", async () => {
+test("a full page followed by an empty one does not loop forever", async () => {
   const k = await key();
-  const pleine = await Promise.all(
+  const full = await Promise.all(
     Array.from({ length: 200 }, async (_, i) => ({
       seq: i + 1,
       payload: await encryptEntry(k, message(i + 1)),
     })),
   );
 
-  const { messages } = await restore(faux([pleine, []]), k, GROUP);
+  const { messages } = await restore(fake([full, []]), k, GROUP);
   assert.equal(messages.length, 200);
 });
 
-test("une entrée illisible est comptée, pas fatale", async () => {
+test("an unreadable entry is counted, not fatal", async () => {
   const k = await key();
-  const api = faux([
+  const api = fake([
     [
       { seq: 1, payload: await encryptEntry(k, message(1)) },
       { seq: 2, payload: new Uint8Array(40) },
@@ -128,15 +128,15 @@ test("une entrée illisible est comptée, pas fatale", async () => {
     ],
   ]);
 
-  const { messages, illisibles } = await restore(api, k, GROUP);
+  const { messages, unreadable } = await restore(api, k, GROUP);
   assert.deepEqual(messages.map((m) => m.seq), [1, 3]);
-  assert.equal(illisibles, 1);
+  assert.equal(unreadable, 1);
 });
 
-test("la fusion ne rapatrie que ce qui manque au fil", () => {
-  const existants = [message(1), message(2)];
+test("the merge brings back only what the thread is missing", () => {
+  const existing = [message(1), message(2)];
   assert.deepEqual(
-    merge(existants, [message(1), message(2), message(3)]).map((m) => m.seq),
+    merge(existing, [message(1), message(2), message(3)]).map((m) => m.seq),
     [3],
   );
 });

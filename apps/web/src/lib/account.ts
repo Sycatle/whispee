@@ -1,74 +1,74 @@
 /**
- * Résolution d'un compte en appareils, et vérification de ce que le serveur raconte.
+ * Resolving an account into devices, and checking what the server says.
  *
- * # Pourquoi ce module existe
+ * # Why this module exists
  *
- * Dès qu'un compte regroupe plusieurs appareils, quelqu'un doit dire lesquels. Ce quelqu'un
- * est le serveur : c'est lui qui tient la liste, et lui qui la sert. Une liste qu'il compose
- * librement lui suffirait à s'inviter dans n'importe quelle conversation — le message resterait
- * chiffré de bout en bout, simplement l'un des bouts serait lui.
+ * As soon as an account gathers several devices, someone has to say which ones. That someone is
+ * the server: it keeps the list, and it serves it. A list it composes freely would be enough for
+ * it to invite itself into any conversation — the message would stay end-to-end encrypted, one of
+ * the ends would simply be the server.
  *
- * Chaque appareil servi porte donc une attestation signée par le compte. Ce module la
- * revérifie, systématiquement, avant que le moindre appareil n'entre dans un groupe.
+ * So every served device carries an attestation signed by the account. This module re-verifies it,
+ * systematically, before any device enters a group.
  *
- * # Ce que l'attestation n'empêche pas
+ * # What the attestation does not prevent
  *
- * Le serveur peut encore **omettre** un appareil légitime de la liste. La victime constate
- * alors qu'un de ses appareils cesse de recevoir les nouvelles conversations : c'est de la
- * censure, bruyante et sans intérêt pour qui veut lire en silence. Le détecter demanderait un
- * journal auditable de type key transparency, hors périmètre.
+ * The server can still **omit** a legitimate device from the list. The victim then notices that
+ * one of their devices stops receiving new conversations: that is censorship, noisy and useless to
+ * anyone who wants to read quietly. Detecting it would take an auditable key transparency log, out
+ * of scope here.
  *
- * L'asymétrie est le gain : le serveur peut retrancher, jamais ajouter.
+ * The asymmetry is the win: the server can subtract, never add.
  *
- * # Ne pas se fier à la vérification du serveur
+ * # Do not rely on the server's verification
  *
- * Le serveur vérifie déjà les attestations à l'écriture, mais c'est précisément lui qu'on
- * soupçonne : sa vérification n'est qu'un filtre précoce, jamais une garantie. Toute la
- * protection tient à ce que ce fichier refasse le travail.
+ * The server already verifies attestations on write, but the server is exactly who we suspect: its
+ * verification is only an early filter, never a guarantee. All the protection rests on this file
+ * doing the work again.
  */
 import type { Api } from "./api";
 import type { AttestedDevice, Crypto } from "./wasm";
 
 export interface ResolvedAccount {
   handle: string;
-  /** Clé publique du compte. C'est elle qu'on compare hors bande, via son empreinte. */
+  /** The account's public key. This is what gets compared out of band, via its fingerprint. */
   identityKey: Uint8Array;
-  /** Empreinte à afficher. Stable quand le compte gagne ou perd un appareil. */
+  /** Fingerprint to display. Stable when the account gains or loses a device. */
   fingerprint: string;
-  /** Appareils actifs dont l'attestation a été vérifiée ici même. */
+  /** Active devices whose attestation was verified right here. */
   devices: AttestedDevice[];
   /**
-   * Appareils dont la révocation a été vérifiée ici même.
+   * Devices whose revocation was verified right here.
    *
-   * Servis par le serveur plutôt que tus, pour que l'omission reste distinguable de la
-   * révocation. Leurs clés MLS alimentent la politique de groupe : c'est ce qui autorise un
-   * membre non-admin à les évincer sans attendre le retour d'un admin.
+   * Served by the server rather than hidden, so that omission stays distinguishable from
+   * revocation. Their MLS keys feed the group policy: that is what lets a non-admin member evict
+   * them without waiting for an admin to come back.
    */
   revoked: AttestedDevice[];
   /**
-   * Clés de signature MLS des appareils révoqués, prêtes pour `Client.process`.
+   * MLS signature keys of the revoked devices, ready for `Client.process`.
    *
-   * Un contexte vide n'est pas neutre : il fait refuser exactement le retrait d'un appareil
-   * volé. C'est le piège d'implémentation le plus probable, d'où ce champ tout préparé plutôt
-   * qu'un filtrage à refaire chez chaque appelant.
+   * An empty context is not neutral: it makes the removal of a stolen device fail, of all things.
+   * That is the most likely implementation trap, hence this ready-made field rather than a filter
+   * every caller has to redo.
    */
   revokedKeys: Uint8Array[];
   /**
-   * Appareils servis par le serveur mais rejetés.
+   * Devices served by the server but rejected.
    *
-   * Non vide signifie que le serveur a servi quelque chose qu'il n'aurait pas dû pouvoir
-   * produire. Ce n'est pas une erreur bénigne à absorber en silence : c'est le signal exact
-   * qu'on cherchait à obtenir, et l'interface doit le montrer.
+   * Non-empty means the server served something it should not have been able to produce. This is
+   * not a benign error to absorb in silence: it is the exact signal we were after, and the
+   * interface has to show it.
    */
   rejected: AttestedDevice[];
 }
 
 /**
- * Interroge le serveur et ne garde que ce qui vérifie.
+ * Queries the server and keeps only what verifies.
  *
- * L'appelant reçoit une liste dont chaque élément a été prouvé rattaché au compte. Les
- * autres sont rendus séparément plutôt que jetés : les faire disparaître reviendrait à
- * masquer une tentative de substitution.
+ * The caller gets a list whose every element has been proven to belong to the account. The others
+ * are returned separately rather than thrown away: making them disappear would amount to hiding a
+ * substitution attempt.
  */
 export async function resolveAccount(
   api: Api,
@@ -101,11 +101,10 @@ export async function resolveAccount(
       continue;
     }
 
-    // Une révocation annoncée sans certificat valide n'est pas une révocation : c'est le
-    // serveur qui tente d'écarter un appareil légitime. On la refuse et on garde l'appareil
-    // actif — le traiter comme révoqué reviendrait à exécuter la censure qu'on cherche à
-    // détecter.
-    const certifie = crypto.verifyRevocation(
+    // A revocation announced without a valid certificate is not a revocation: it is the server
+    // trying to push aside a legitimate device. We refuse it and keep the device active —
+    // treating it as revoked would mean carrying out the censorship we are trying to detect.
+    const certified = crypto.verifyRevocation(
       identityKey,
       handle,
       device.id,
@@ -113,7 +112,7 @@ export async function resolveAccount(
       device.revocation,
     );
 
-    if (certifie) {
+    if (certified) {
       revoked.push(device);
     } else {
       rejected.push(device);

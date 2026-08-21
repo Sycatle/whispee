@@ -12,12 +12,12 @@ import {
 
 const T0 = 1_000_000;
 
-test("le seuil d'émission ne dépasse pas la moitié du TTL", () => {
-  // Au-delà, la dernière émission peut expirer avant la suivante : l'indicateur clignote.
+test("the send threshold never exceeds half the TTL", () => {
+  // Beyond that, the last signal can expire before the next one: the indicator flickers.
   assert.ok(TYPING_DEBOUNCE_MS * 2 <= TYPING_TTL_MS);
 });
 
-test("un indicateur expire au bout du TTL, pas avant", () => {
+test("an indicator expires at the end of the TTL, not before", () => {
   const typing: Typing[] = [{ handle: "alice", at: T0 }];
 
   assert.equal(fresh(typing, T0 + TYPING_TTL_MS - 1).length, 1);
@@ -25,12 +25,11 @@ test("un indicateur expire au bout du TTL, pas avant", () => {
 });
 
 /**
- * **Le test qui empêche l'indicateur de rester allumé.** L'expiration ne s'évalue qu'au rendu,
- * et rien ne provoque de rendu quand quelqu'un cesse d'écrire. Sans ce délai, l'affichage
- * n'apprend la péremption qu'au prochain événement quelconque — jusqu'à trente secondes plus
- * tard.
+ * **The test that keeps the indicator from staying lit.** Expiry is only evaluated at render
+ * time, and nothing triggers a render when someone stops typing. Without this delay, the display
+ * only learns of the expiry at the next event of any kind — up to thirty seconds later.
  */
-test("le délai d'expiration vise la plus ancienne entrée", () => {
+test("the expiry delay targets the oldest entry", () => {
   const typing: Typing[] = [
     { handle: "alice", at: T0 },
     { handle: "bob", at: T0 + 500 },
@@ -40,20 +39,20 @@ test("le délai d'expiration vise la plus ancienne entrée", () => {
   assert.equal(nextExpiry(typing, T0 + 1000), TYPING_TTL_MS - 1000);
 });
 
-test("sans indicateur, aucun réveil n'est programmé", () => {
+test("with no indicator, no wake-up is scheduled", () => {
   assert.equal(nextExpiry([], T0), undefined);
 });
 
-test("une entrée déjà expirée demande un rendu immédiat, jamais un délai négatif", () => {
+test("an already expired entry asks for an immediate render, never a negative delay", () => {
   const typing: Typing[] = [{ handle: "alice", at: T0 }];
   assert.equal(nextExpiry(typing, T0 + TYPING_TTL_MS * 10), 0);
 });
 
 /**
- * Ce que fait `absorb` quand un message arrive : l'envoi prouve que son auteur a fini d'écrire.
- * Sans cela, l'expéditeur paraît continuer d'écrire pendant tout le TTL après avoir envoyé.
+ * What `absorb` does when a message arrives: sending proves its author has finished typing.
+ * Without it, the sender appears to keep typing for the whole TTL after hitting send.
  */
-test("retirer un correspondant ne touche pas les autres", () => {
+test("removing one correspondent leaves the others untouched", () => {
   const typing: Typing[] = [
     { handle: "alice", at: T0 },
     { handle: "bob", at: T0 },

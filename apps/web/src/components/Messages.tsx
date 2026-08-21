@@ -1,10 +1,9 @@
 /**
- * Fil de messages : bulles, réactions repliées, citations, état de lecture.
+ * Message thread: bubbles, folded reactions, quotes, read state.
  *
- * Extrait de `page.tsx` quand les réactions ont transformé une liste plate en arbre : une
- * réaction n'est pas une bulle, c'est une annotation d'une autre bulle, et la même chose vaut
- * pour la citation d'une réponse. Garder cette logique dans le rendu de la page mêlait la
- * mise en page de l'application à la structure de la conversation.
+ * Split out of `page.tsx` once reactions turned a flat list into a tree: a reaction is not a
+ * bubble, it is an annotation on another bubble, and the same goes for the quote in a reply.
+ * Keeping that logic in the page render mixed the app layout with the shape of a conversation.
  */
 import { useEffect, useRef, useState } from "react";
 
@@ -12,7 +11,7 @@ import { Attachment } from "@/components/Attachment";
 import type { ConversationView, Session } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
 
-/** Palette proposée au survol. Volontairement courte : un sélecteur complet est un autre sujet. */
+/** Palette offered on hover. Deliberately short: a full picker is a different subject. */
 const EMOJIS = ["👍", "❤️", "😂", "😮", "🙏"];
 
 export function Messages({
@@ -32,51 +31,51 @@ export function Messages({
 
   const messages = view.messages.slice().sort((a, b) => a.seq - b.seq);
 
-  // Les réactions sont retirées du fil et rattachées à leur cible. Un emoji vide retire la
-  // réaction de son auteur : c'est le dernier état qui compte, pas l'accumulation.
+  // Reactions are pulled out of the thread and attached to their target. An empty emoji removes
+  // its author's reaction: the last state is what counts, not the accumulation.
   const reactions = new Map<number, Map<string, string>>();
   for (const message of messages) {
     if (message.content.kind !== "reaction") continue;
-    const auteur = message.mine ? session.handle : (message.sender ?? "inconnu");
-    const cible = reactions.get(message.content.target) ?? new Map<string, string>();
-    if (message.content.emoji) cible.set(auteur, message.content.emoji);
-    else cible.delete(auteur);
-    reactions.set(message.content.target, cible);
+    const author = message.mine ? session.handle : (message.sender ?? "unknown");
+    const target = reactions.get(message.content.target) ?? new Map<string, string>();
+    if (message.content.emoji) target.set(author, message.content.emoji);
+    else target.delete(author);
+    reactions.set(message.content.target, target);
   }
 
-  const texteDe = (seq: number): string => {
-    const cible = messages.find((message) => message.seq === seq);
-    if (!cible) return "message indisponible";
-    if (cible.content.kind === "text") return cible.content.text;
-    if (cible.content.kind === "reply") return cible.content.text;
-    if (cible.content.kind === "attachment") return cible.content.ref.name;
+  const textOf = (seq: number): string => {
+    const target = messages.find((message) => message.seq === seq);
+    if (!target) return "message unavailable";
+    if (target.content.kind === "text") return target.content.text;
+    if (target.content.kind === "reply") return target.content.text;
+    if (target.content.kind === "attachment") return target.content.ref.name;
     return "…";
   };
 
-  const visibles = messages.filter((message) => message.content.kind !== "reaction");
+  const visible = messages.filter((message) => message.content.kind !== "reaction");
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
-  }, [visibles.length]);
+  }, [visible.length]);
 
-  // « Lu » veut dire **affiché à quelqu'un**. C'est donc ici, dans le composant qui rend le fil,
-  // que cela se décide — pas dans la relève, qui tourne même fenêtre fermée.
+  // "Read" means **shown to someone**. So it is decided here, in the component that renders the
+  // thread — not in the poll loop, which runs even with the window closed.
   //
-  // La visibilité de l'onglet en fait partie : un fil rendu dans un onglet d'arrière-plan a été
-  // reçu, pas lu. Le navigateur ralentit déjà les onglets cachés, ce qui produit à peu près le
-  // bon comportement — mais s'appuyer sur cet effet de bord reviendrait à laisser une règle de
-  // vie privée dépendre d'une heuristique d'économie de batterie.
+  // Tab visibility is part of that: a thread rendered in a background tab was delivered, not
+  // read. The browser already throttles hidden tabs, which roughly produces the right behaviour
+  // — but leaning on that side effect would make a privacy rule depend on a battery-saving
+  // heuristic.
   useEffect(() => {
-    const marquer = () => {
+    const mark = () => {
       if (document.visibilityState === "visible") {
         session.markRead(view);
         onChanged();
       }
     };
 
-    marquer();
-    document.addEventListener("visibilitychange", marquer);
-    return () => document.removeEventListener("visibilitychange", marquer);
+    mark();
+    document.addEventListener("visibilitychange", mark);
+    return () => document.removeEventListener("visibilitychange", mark);
   }, [session, view, view.contentCursor, onChanged]);
 
   const react = (seq: number, emoji: string) => {
@@ -85,32 +84,32 @@ export function Messages({
     });
   };
 
-  const enTrainDEcrire = session.typingIn(view);
+  const isTyping = session.typingIn(view);
 
-  // Réveil à l'expiration.
+  // Wake-up on expiry.
   //
-  // `typingIn` filtre les indicateurs périmés, mais il ne s'exécute qu'au rendu — et quand le
-  // correspondant cesse d'écrire, plus rien ne provoque de rendu : aucun signal n'arrive, et la
-  // relève périodique ne repasse que trente secondes plus tard. L'indicateur restait donc peint
-  // à l'écran bien après avoir cessé d'être vrai.
+  // `typingIn` filters out stale indicators, but it only runs on render — and once the peer
+  // stops typing, nothing triggers a render: no signal arrives, and the periodic poll only comes
+  // back thirty seconds later. The indicator stayed painted on screen long after it stopped
+  // being true.
   //
-  // Ce minuteur n'ajoute aucune donnée : il ne fait que redemander un rendu à l'instant où le
-  // filtre changera d'avis. `tick` n'est jamais lu, seul son changement compte.
+  // This timer adds no data: it only asks for a render at the moment the filter changes its
+  // mind. `tick` is never read, only its change matters.
   const [, setTick] = useState(0);
   useEffect(() => {
-    const delai = nextExpiry(view.typing, Date.now());
-    if (delai === undefined) return;
+    const delay = nextExpiry(view.typing, Date.now());
+    if (delay === undefined) return;
 
-    const minuteur = setTimeout(() => setTick((n) => n + 1), delai);
-    return () => clearTimeout(minuteur);
+    const timer = setTimeout(() => setTick((n) => n + 1), delay);
+    return () => clearTimeout(timer);
   });
 
   return (
     <>
       <ol className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4">
-        {visibles.map((message) => {
-          // Extrait avant le JSX : le rétrécissement de type se perd à l'intérieur d'une
-          // closure, et le contourner dans l'expression rendait le rendu illisible.
+        {visible.map((message) => {
+          // Extracted before the JSX: type narrowing is lost inside a closure, and working
+          // around it inline made the render unreadable.
           const attachment = message.content.kind === "attachment" ? message.content.ref : null;
           const cite = message.content.kind === "reply" ? message.content.target : null;
           const emojis = [...(reactions.get(message.seq)?.values() ?? [])];
@@ -125,12 +124,12 @@ export function Messages({
                 }`}
               >
                 {!message.mine && view.peers.length > 1 && (
-                  <span className="block text-xs opacity-70">{message.sender ?? "inconnu"}</span>
+                  <span className="block text-xs opacity-70">{message.sender ?? "unknown"}</span>
                 )}
 
                 {cite !== null && (
                   <span className="mb-1 block border-l-2 border-current/40 pl-2 text-xs opacity-70">
-                    {texteDe(cite)}
+                    {textOf(cite)}
                   </span>
                 )}
 
@@ -149,7 +148,7 @@ export function Messages({
               </div>
 
               {emojis.length > 0 && (
-                <div className="mt-0.5 text-xs" aria-label="réactions">
+                <div className="mt-0.5 text-xs" aria-label="reactions">
                   {emojis.join(" ")}
                 </div>
               )}
@@ -161,7 +160,7 @@ export function Messages({
                     type="button"
                     onClick={() => react(message.seq, emoji)}
                     className="rounded px-1 hover:bg-(--color-surface-raised)"
-                    title={`Réagir ${emoji}`}
+                    title={`React ${emoji}`}
                   >
                     {emoji}
                   </button>
@@ -171,7 +170,7 @@ export function Messages({
                   onClick={() => onReplyTo(message.seq)}
                   className="rounded px-1 opacity-70 hover:bg-(--color-surface-raised)"
                 >
-                  Répondre
+                  Reply
                 </button>
               </div>
             </li>
@@ -181,17 +180,17 @@ export function Messages({
       </ol>
 
       {/*
-        Ligne d'activité. Elle s'éteint de deux façons, aucune ne dépendant d'un signal « a cessé
-        d'écrire » — un tel signal peut se perdre et laisserait l'indicateur allumé pour toujours.
+        Activity line. It goes out in two ways, neither depending on a "stopped typing" signal —
+        such a signal can be lost and would leave the indicator lit forever.
 
-        À l'arrivée d'un message de l'auteur, immédiatement : l'envoi prouve qu'il a fini, et
-        cette preuve ne peut pas s'égarer puisqu'on ne l'attend pas. Sinon, par expiration locale,
-        réveillée par le minuteur ci-dessus.
+        Immediately when a message from that author arrives: sending proves they are done, and
+        that proof cannot go missing since we never wait for it. Otherwise, by local expiry,
+        woken by the timer above.
       */}
-      {enTrainDEcrire.length > 0 && (
+      {isTyping.length > 0 && (
         <p className="px-4 pb-1 text-xs opacity-60" aria-live="polite">
-          {enTrainDEcrire.map((handle) => `@${handle}`).join(", ")}{" "}
-          {enTrainDEcrire.length > 1 ? "écrivent" : "écrit"}…
+          {isTyping.map((handle) => `@${handle}`).join(", ")}{" "}
+          {isTyping.length > 1 ? "are typing" : "is typing"}…
         </p>
       )}
     </>
@@ -199,24 +198,24 @@ export function Messages({
 }
 
 /**
- * État d'un message qu'on a envoyé.
+ * State of a message we sent.
  *
- * Trois états et pas deux : « envoyé » signifie que le serveur l'a accepté, « reçu » qu'un
- * appareil l'a relevé, « lu » qu'une personne l'a eu à l'écran. Les confondre ferait passer
- * un téléphone allumé pour une attention humaine.
+ * Three states and not two: "sent" means the server accepted it, "delivered" that a device
+ * picked it up, "read" that a person had it on screen. Conflating them would pass a powered-on
+ * phone off as human attention.
  */
 function Status({ state }: { state: "sent" | "delivered" | "read" }) {
-  const libelle = { sent: "envoyé", delivered: "reçu", read: "lu" }[state];
-  const marque = { sent: "✓", delivered: "✓✓", read: "✓✓" }[state];
+  const label = { sent: "sent", delivered: "delivered", read: "read" }[state];
+  const mark = { sent: "✓", delivered: "✓✓", read: "✓✓" }[state];
 
   return (
     <span
       className={`ml-2 align-bottom text-xs ${state === "read" ? "opacity-100" : "opacity-60"}`}
-      title={libelle}
-      aria-label={libelle}
+      title={label}
+      aria-label={label}
       data-receipt={state}
     >
-      {marque}
+      {mark}
     </span>
   );
 }

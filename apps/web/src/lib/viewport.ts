@@ -1,102 +1,101 @@
 /**
- * Ce que la fenêtre laisse réellement voir.
+ * What the window actually shows.
  *
- * # Pourquoi `100vh` ne suffit pas, et n'a jamais suffi
+ * # Why `100vh` is not enough, and never was
  *
- * Sur mobile, `100vh` vaut la hauteur de la fenêtre **barres d'interface déployées** — la barre
- * d'adresse qui se rétracte au défilement, la barre système. Une mise en page qui s'y fie
- * dépasse l'écran d'une centaine de pixels : sur une messagerie, ce sont exactement le champ de
- * saisie et le dernier message qui passent dessous.
+ * On mobile, `100vh` is the height of the window **with the browser chrome expanded** — the
+ * address bar that retracts on scroll, the system bar. A layout that trusts it overflows the
+ * screen by a hundred pixels or so: on a messenger, that is exactly the composer and the last
+ * message going under the fold.
  *
- * `100dvh` corrige ce cas et se suffit à lui-même en CSS. Ce module traite ce que le CSS ne sait
- * pas dire.
+ * `100dvh` fixes that case and needs no help from JavaScript. This module handles what CSS
+ * cannot express.
  *
- * # Ce que le CSS ne sait pas dire : le clavier
+ * # What CSS cannot express: the keyboard
  *
- * Quand le clavier logiciel s'ouvre, iOS ne redimensionne pas la fenêtre — il **fait glisser**
- * la page sous le clavier, sans rien en dire à la mise en page. Aucune requête média ne se
- * déclenche, `dvh` ne bouge pas, et le champ de saisie se retrouve masqué par le clavier qui
- * vient d'y donner le focus.
+ * When the software keyboard opens, iOS does not resize the window — it **slides** the page
+ * under the keyboard, and tells the layout nothing. No media query fires, `dvh` does not move,
+ * and the input ends up hidden behind the keyboard that just focused it.
  *
- * Seul `visualViewport` le rapporte : sa hauteur est celle de la zone réellement visible, et
- * elle diminue à l'ouverture du clavier. C'est la seule source qui distingue « la fenêtre a
- * changé de taille » de « quelque chose recouvre la fenêtre ».
+ * Only `visualViewport` reports it: its height is that of the genuinely visible area, and it
+ * shrinks when the keyboard opens. It is the only source that tells "the window resized" apart
+ * from "something is covering the window".
  *
- * # Ce que ce module ne fait pas
+ * # What this module does not do
  *
- * Il ne décide de rien. Il rapporte une hauteur et une occlusion ; ce qu'il faut en faire —
- * remonter une barre de saisie, réduire une liste, ne rien changer — appartient aux composants,
- * qui seuls savent ce qui doit rester visible.
+ * It decides nothing. It reports a height and an occlusion; what to do with them — raise a
+ * composer, shrink a list, change nothing — belongs to the components, the only ones that know
+ * what has to stay visible.
  */
 import { useEffect, useState } from "react";
 
 export interface Viewport {
-  /** Hauteur réellement visible, en pixels CSS. */
-  hauteur: number;
+  /** Genuinely visible height, in CSS pixels. */
+  height: number;
   /**
-   * Hauteur masquée en bas par le clavier logiciel, en pixels CSS. Zéro s'il est fermé.
+   * Height hidden at the bottom by the software keyboard, in CSS pixels. Zero when it is closed.
    *
-   * Mesurée par différence plutôt que demandée : aucune API ne dit « le clavier est ouvert »,
-   * et l'inférer d'un focus se tromperait sur un clavier matériel, où le focus n'occulte rien.
+   * Measured by difference rather than asked for: no API says "the keyboard is open", and
+   * inferring it from focus would be wrong with a hardware keyboard, where focus hides nothing.
    */
   occlusion: number;
 }
 
 /**
- * Mesure l'état courant.
+ * Measures the current state.
  *
- * Se rabat sur `innerHeight` là où `visualViewport` n'existe pas — navigateurs anciens, et
- * environnements de test sans DOM. L'occlusion y vaut zéro : c'est faux seulement dans les cas
- * que ces navigateurs ne rencontrent pas.
+ * Falls back to `innerHeight` where `visualViewport` does not exist — old browsers, and test
+ * environments without a DOM. Occlusion is zero there: wrong only in the cases those browsers
+ * never meet.
  */
-export function mesurer(): Viewport {
-  const vue = globalThis.visualViewport;
-  if (!vue) return { hauteur: globalThis.innerHeight ?? 0, occlusion: 0 };
+export function measure(): Viewport {
+  const view = globalThis.visualViewport;
+  if (!view) return { height: globalThis.innerHeight ?? 0, occlusion: 0 };
 
-  // `offsetTop` compte : la page glissée sous le clavier décale la vue vers le bas, et ce
-  // décalage fait partie de ce qui est masqué.
-  const masque = globalThis.innerHeight - vue.height - vue.offsetTop;
+  // `offsetTop` counts: a page slid under the keyboard shifts the view down, and that shift is
+  // part of what is hidden.
+  const hidden = globalThis.innerHeight - view.height - view.offsetTop;
 
-  // Un pixel ou deux d'écart apparaissent au repos, par arrondi. Les traiter comme une
-  // occlusion ferait vibrer la mise en page à chaque défilement.
-  return { hauteur: vue.height, occlusion: masque > 24 ? masque : 0 };
+  // A pixel or two of difference shows up at rest, from rounding. Treating that as occlusion
+  // would make the layout jitter on every scroll.
+  return { height: view.height, occlusion: hidden > 24 ? hidden : 0 };
 }
 
 /**
- * S'abonne aux changements, et rend de quoi se désabonner.
+ * Subscribes to changes, and returns a way to unsubscribe.
  *
- * Les deux événements sont nécessaires et disent des choses différentes : `resize` couvre la
- * rotation et l'ouverture du clavier, `scroll` couvre le glissement de la page sous le clavier,
- * qui change l'occlusion sans changer la hauteur.
+ * Both events are needed and say different things: `resize` covers rotation and the keyboard
+ * opening, `scroll` covers the page sliding under the keyboard, which changes the occlusion
+ * without changing the height.
  */
-export function observer(reagir: (vue: Viewport) => void): () => void {
-  const vue = globalThis.visualViewport;
-  const relever = () => reagir(mesurer());
+export function observe(react: (view: Viewport) => void): () => void {
+  const view = globalThis.visualViewport;
+  const refresh = () => react(measure());
 
-  if (!vue) {
-    globalThis.addEventListener?.("resize", relever);
-    return () => globalThis.removeEventListener?.("resize", relever);
+  if (!view) {
+    globalThis.addEventListener?.("resize", refresh);
+    return () => globalThis.removeEventListener?.("resize", refresh);
   }
 
-  vue.addEventListener("resize", relever);
-  vue.addEventListener("scroll", relever);
+  view.addEventListener("resize", refresh);
+  view.addEventListener("scroll", refresh);
   return () => {
-    vue.removeEventListener("resize", relever);
-    vue.removeEventListener("scroll", relever);
+    view.removeEventListener("resize", refresh);
+    view.removeEventListener("scroll", refresh);
   };
 }
 
 /**
- * La hauteur masquée par le clavier, suivie au fil de son ouverture.
+ * The height hidden by the keyboard, tracked as it opens.
  *
- * Rendue en pixels, à appliquer en marge ou en retrait par le composant. Le module ne pose pas
- * lui-même de style : la même mesure sert à décaler une barre de saisie ou à raccourcir une
- * liste, et seul l'appelant sait laquelle des deux est juste.
+ * Returned in pixels, for the component to apply as a margin or a padding. The module sets no
+ * style itself: the same measurement serves to offset a composer or to shorten a list, and only
+ * the caller knows which of the two is right.
  */
 export function useOcclusion(): number {
   const [occlusion, setOcclusion] = useState(0);
 
-  useEffect(() => observer((vue) => setOcclusion(vue.occlusion)), []);
+  useEffect(() => observe((view) => setOcclusion(view.occlusion)), []);
 
   return occlusion;
 }

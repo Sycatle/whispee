@@ -1,63 +1,63 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { NativeStore, type PontSession } from "./storage-native.ts";
+import { NativeStore, type SessionBridge } from "./storage-native.ts";
 import type { StoredSession } from "./storage.ts";
 import type { DeviceCipher } from "./cipher.ts";
 
 /**
- * Un chiffrement factice, mais **pas transparent** : il décale chaque octet.
+ * A fake cipher, but **not a transparent one**: it shifts every byte.
  *
- * Un faux qui rendrait le clair laisserait passer un store qui oublie de sceller — la panne
- * exacte qu'on veut interdire, puisqu'elle écrirait l'état MLS en clair sur le disque sans que
- * rien ne le signale.
+ * A fake that returned the plaintext would let a store that forgets to seal go through — exactly
+ * the failure we want to rule out, since it would write the MLS state to disk in the clear with
+ * nothing to signal it.
  */
-function cipherFactice(): DeviceCipher & { vuEnClair: boolean } {
-  const decaler = (octets: Uint8Array, sens: number) =>
-    Uint8Array.from(octets, (octet) => (octet + sens + 256) % 256);
+function fakeCipher(): DeviceCipher & { sawPlaintext: boolean } {
+  const shift = (bytes: Uint8Array, direction: number) =>
+    Uint8Array.from(bytes, (byte) => (byte + direction + 256) % 256);
 
   return {
-    vuEnClair: false,
+    sawPlaintext: false,
     authPublicKey: () => Promise.resolve(new Uint8Array([1])),
     sign: () => Promise.resolve(""),
-    seal: (clair) => Promise.resolve(decaler(clair, 1)),
-    open: (blob) => Promise.resolve(decaler(blob, -1)),
+    seal: (plaintext) => Promise.resolve(shift(plaintext, 1)),
+    open: (blob) => Promise.resolve(shift(blob, -1)),
   };
 }
 
-function pontMemoire(): PontSession & { contenu: string | null } {
+function memoryBridge(): SessionBridge & { content: string | null } {
   return {
-    contenu: null,
-    charger() {
-      return Promise.resolve(this.contenu);
+    content: null,
+    load() {
+      return Promise.resolve(this.content);
     },
-    enregistrer(contenu: string) {
-      this.contenu = contenu;
+    save(content: string) {
+      this.content = content;
       return Promise.resolve();
     },
-    effacer() {
-      this.contenu = null;
+    clear() {
+      this.content = null;
       return Promise.resolve();
     },
   };
 }
 
-function session(ajouts: Partial<StoredSession> = {}): StoredSession {
+function session(extra: Partial<StoredSession> = {}): StoredSession {
   return {
-    deviceId: "appareil-1",
+    deviceId: "device-1",
     handle: "alice",
     accountSeed: new Uint8Array([1, 2, 3, 4]),
     groupIds: [],
     verified: {},
     cursors: {},
     knownDevices: {},
-    ...ajouts,
+    ...extra,
   };
 }
 
-test("une session enregistrée se relit à l'identique", async () => {
-  const pont = pontMemoire();
-  const store = new NativeStore(cipherFactice(), pont);
+test("a saved session reads back identically", async () => {
+  const bridge = memoryBridge();
+  const store = new NativeStore(fakeCipher(), bridge);
 
   const original = session({
     state: new Uint8Array([9, 8, 7]),
@@ -70,28 +70,28 @@ test("une session enregistrée se relit à l'identique", async () => {
 });
 
 /**
- * **Le test qui porte la propriété du module.**
+ * **The test that carries the property of the module.**
  *
- * Ce qui atteint le pont ne doit rien laisser voir. Le handle est en clair côté serveur, mais
- * l'état MLS ne l'est nulle part — et un store qui oublierait de sceller écrirait tout sur le
- * disque sans qu'aucun autre test ne s'en aperçoive.
+ * What reaches the bridge must give nothing away. The handle is in the clear on the server, but
+ * the MLS state is in the clear nowhere — and a store that forgot to seal would write everything
+ * to disk without any other test noticing.
  */
-test("rien n'atteint le disque en clair", async () => {
-  const pont = pontMemoire();
-  await new NativeStore(cipherFactice(), pont).save(session({ handle: "alice" }));
+test("nothing reaches the disk in the clear", async () => {
+  const bridge = memoryBridge();
+  await new NativeStore(fakeCipher(), bridge).save(session({ handle: "alice" }));
 
-  assert.ok(pont.contenu !== null);
-  assert.ok(!atob(pont.contenu).includes("alice"), "le contenu a été écrit sans être scellé");
+  assert.ok(bridge.content !== null);
+  assert.ok(!atob(bridge.content).includes("alice"), "the content was written unsealed");
 });
 
-/** Un premier lancement rend `undefined`, et non une session vide. */
-test("l'absence de fichier n'est pas une session", async () => {
-  assert.equal(await new NativeStore(cipherFactice(), pontMemoire()).load(), undefined);
+/** A first launch yields `undefined`, and not an empty session. */
+test("a missing file is not a session", async () => {
+  assert.equal(await new NativeStore(fakeCipher(), memoryBridge()).load(), undefined);
 });
 
-test("l'effacement rend le stockage vierge", async () => {
-  const pont = pontMemoire();
-  const store = new NativeStore(cipherFactice(), pont);
+test("clearing leaves the storage blank", async () => {
+  const bridge = memoryBridge();
+  const store = new NativeStore(fakeCipher(), bridge);
 
   await store.save(session());
   await store.clear();
@@ -100,14 +100,14 @@ test("l'effacement rend le stockage vierge", async () => {
 });
 
 /**
- * Un blob illisible lève, plutôt que de passer pour une installation neuve.
+ * An unreadable blob throws, rather than passing for a fresh install.
  *
- * Les deux situations demandent des réponses opposées : l'une crée un compte, l'autre alerte.
- * Les confondre effacerait un compte au lieu de signaler un disque en panne.
+ * The two situations call for opposite answers: one creates an account, the other raises an
+ * alarm. Confusing them would erase an account instead of reporting a broken disk.
  */
-test("un blob corrompu ne passe pas pour un premier lancement", async () => {
-  const pont = pontMemoire();
-  pont.contenu = btoa("des octets qui ne sont pas une session");
+test("a corrupted blob does not pass for a first launch", async () => {
+  const bridge = memoryBridge();
+  bridge.content = btoa("bytes that are not a session");
 
-  await assert.rejects(() => new NativeStore(cipherFactice(), pont).load());
+  await assert.rejects(() => new NativeStore(fakeCipher(), bridge).load());
 });

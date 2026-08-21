@@ -1,70 +1,67 @@
 /**
- * Ce qu'un appareil sait faire avec ses secrets, sans jamais les montrer.
+ * What a device can do with its secrets, without ever showing them.
  *
- * # Une capacité, pas un porteur de clé
+ * # A capability, not a key holder
  *
- * `DeviceKeys` — deux `CryptoKey` passées de fonction en fonction — imposait que le secret
- * circule, fût-ce sous une forme que WebCrypto refuse d'exporter. Cette interface impose
- * l'inverse : l'appelant demande une signature ou un déchiffrement, et ne voit jamais de
- * matériel de clé.
+ * `DeviceKeys` — two `CryptoKey`s passed from function to function — required the secret to
+ * circulate, even in a form WebCrypto refuses to export. This interface requires the opposite:
+ * the caller asks for a signature or a decryption, and never sees key material.
  *
- * La distinction n'est pas cosmétique. C'est elle qui permettra à la clé de vivre ailleurs que
- * dans la webview — dans le processus Rust, puis dans le trousseau du système — sans que le
- * reste du code sache que quoi que ce soit a changé.
+ * The distinction is not cosmetic. It is what will let the key live somewhere other than the
+ * webview — in the Rust process, then in the system keychain — without the rest of the code
+ * knowing anything changed.
  *
- * # Le problème que cela prépare
+ * # The problem this prepares for
  *
- * L'état MLS est aujourd'hui persisté dans IndexedDB. Sur mobile, ce stockage **n'est pas
- * garanti** : iOS évince les données de WKWebView après sept jours d'inactivité, Android purge
- * sous pression mémoire. Et sa perte est **définitive** — le ratchet MLS détruit ses clés au fur
- * et à mesure, donc l'historique devient illisible et les conversations sont à recréer.
+ * MLS state is currently persisted in IndexedDB. On mobile that storage is **not guaranteed**:
+ * iOS evicts WKWebView data after seven days of inactivity, Android purges under memory pressure.
+ * And losing it is **final** — the MLS ratchet destroys its keys as it goes, so history becomes
+ * unreadable and conversations have to be recreated.
  *
- * Déplacer l'état ne suffirait pas : la clé d'authentification de l'appareil est au moins aussi
- * mortelle à perdre, et pire, elle est non extractable et le serveur **refuse d'en changer**
- * (voir la clause sur `auth_key` dans `register_device`). Un état sauvé dont la clé
- * d'authentification a disparu ne sert à rien : l'appareil ne peut plus émettre une requête.
+ * Moving the state alone would not be enough: the device's authentication key is at least as
+ * fatal to lose, and worse, it is non-extractable and the server **refuses to change it** (see the
+ * `auth_key` clause in `register_device`). Saved state whose authentication key has vanished is
+ * useless: the device can no longer issue a request.
  *
- * D'où une interface qui couvre les deux — signer et sceller — plutôt qu'un simple port de
- * stockage.
+ * Hence an interface that covers both — signing and sealing — rather than a plain storage port.
  *
- * # Ce que « non extractable » protège, et ce que ça ne protège pas
+ * # What "non-extractable" protects, and what it does not
  *
- * Cela empêche l'exfiltration du matériel de clé. Cela n'empêche **pas** un script hostile de
- * s'en servir tant que la page est ouverte. La distinction compte : un vol de clé est permanent,
- * un usage abusif cesse avec la session. Une clé détenue par le processus Rust et exposée par
- * IPC offrira exactement la même propriété, garantie cette fois par une frontière de processus
- * plutôt que par une politique de moteur JavaScript.
+ * It prevents key material from being exfiltrated. It does **not** prevent a hostile script from
+ * using it while the page is open. The distinction matters: a stolen key is permanent, abuse ends
+ * with the session. A key held by the Rust process and exposed over IPC offers exactly the same
+ * property, guaranteed this time by a process boundary rather than by a JavaScript engine policy.
  */
 import { invoke } from "@tauri-apps/api/core";
 
 import {
   type DeviceKeys,
   fromBase64,
-  sign as signAvecWebCrypto,
+  sign as signWithWebCrypto,
   toBase64,
   unwrapState,
   wrapState,
 } from "./keys";
 
 export interface DeviceCipher {
-  /** La clé publique d'authentification, en octets — la seule moitié qui quitte l'appareil. */
+  /** The public authentication key, as bytes — the only half that leaves the device. */
   authPublicKey(): Promise<Uint8Array>;
 
-  /** Signe un message de requête. Rend la signature en base64, prête pour l'en-tête. */
+  /** Signs a request message. Returns the signature in base64, ready for the header. */
   sign(payload: Uint8Array): Promise<string>;
 
-  /** Chiffre pour la persistance locale. */
+  /** Encrypts for local persistence. */
   seal(plaintext: Uint8Array): Promise<Uint8Array>;
 
-  /** Déchiffre ce que `seal` a produit. */
+  /** Decrypts what `seal` produced. */
   open(blob: Uint8Array): Promise<Uint8Array>;
 }
 
 /**
- * L'implémentation historique, adossée aux `CryptoKey` non extractables d'IndexedDB.
+ * The original implementation, backed by the non-extractable `CryptoKey`s in IndexedDB.
  *
- * Reste le seul chemin sur le web, où il n'y a rien de mieux : le navigateur est le seul à
- * pouvoir garder un secret hors de portée du script qu'il exécute.
+ * Still the only path on the web, where there is nothing better: the browser is the only party
+ * able to keep a secret out of reach of the script it runs.
  */
 export class WebCryptoCipher implements DeviceCipher {
   private readonly keys: DeviceKeys;
@@ -78,14 +75,14 @@ export class WebCryptoCipher implements DeviceCipher {
   }
 
   sign(payload: Uint8Array): Promise<string> {
-    return signAvecWebCrypto(this.keys, payload);
+    return signWithWebCrypto(this.keys, payload);
   }
 
   /**
-   * Chiffre sous la clé non extractable rangée à côté des clés d'identité.
+   * Encrypts under the non-extractable key stored next to the identity keys.
    *
-   * Elle protège de l'exfiltration par script, pas de qui obtient la session du navigateur.
-   * C'est exactement ce que le verrou local vient corriger — voir `LockedCipher`.
+   * It protects against exfiltration by script, not against whoever gets the browser session.
+   * That is exactly what the local lock fixes — see `LockedCipher`.
    */
   seal(plaintext: Uint8Array): Promise<Uint8Array> {
     return wrapState(this.keys.wrap, plaintext);
@@ -97,37 +94,35 @@ export class WebCryptoCipher implements DeviceCipher {
 }
 
 /**
- * Les mêmes capacités, rendues par le processus natif.
+ * The same capabilities, provided by the native process.
  *
- * # Ce que cela change, et ce que cela ne change pas
+ * # What it changes, and what it does not
  *
- * Les clés vivent côté Rust, dans le répertoire privé de l'application — qui n'est purgé qu'à la
- * désinstallation, là où le stockage d'une webview mobile est évincé sans préavis. C'est la
- * durabilité qu'on vient chercher.
+ * The keys live on the Rust side, in the application's private directory — only purged on
+ * uninstall, where a mobile webview's storage is evicted without warning. Durability is what
+ * we are after here.
  *
- * Ce n'est **pas** un renforcement contre un script hostile. Il pouvait déjà utiliser les
- * `CryptoKey` non extractables sans les extraire ; il peut toujours appeler ces commandes. Ce
- * qui change est la garantie qui empêche l'extraction : une frontière de processus au lieu d'une
- * politique de moteur JavaScript.
+ * It is **not** a hardening measure against a hostile script. It could already use the
+ * non-extractable `CryptoKey`s without extracting them; it can still call these commands. What
+ * changes is the guarantee that prevents extraction: a process boundary instead of a JavaScript
+ * engine policy.
  *
- * # Pourquoi rien ne l'utilise encore
+ * # Why nothing uses it yet
  *
- * Basculer une installation existante vers ces clés-ci la casserait : les clés natives sont
- * neuves, donc l'état chiffré sous l'ancienne clé devient illisible et le serveur ne reconnaît
- * plus la signature de l'appareil. La bascule est indissociable de la migration, et la migration
- * bute sur un point dur — la clé d'authentification actuelle est non extractable et
- * `register_device` refuse d'en changer, donc les appareils déjà enregistrés ne peuvent pas la
- * déplacer.
+ * Switching an existing installation over to these keys would break it: the native keys are new,
+ * so state encrypted under the old key becomes unreadable and the server no longer recognises the
+ * device's signature. The switch is inseparable from the migration, and the migration hits a hard
+ * point — the current authentication key is non-extractable and `register_device` refuses to
+ * change it, so already-registered devices cannot move it.
  *
- * Le brancher avant d'avoir tranché cela ne ferait pas gagner de temps : cela ferait perdre des
- * comptes.
+ * Wiring it up before settling that would not save time: it would lose accounts.
  */
 export class NativeCipher implements DeviceCipher {
   async authPublicKey(): Promise<Uint8Array> {
     return fromBase64(await invoke<string>("device_public_key"));
   }
 
-  /** Rend déjà du base64 : la commande native signe et encode, il n'y a rien à reconvertir. */
+  /** Already returns base64: the native command signs and encodes, there is nothing to convert. */
   sign(payload: Uint8Array): Promise<string> {
     return invoke<string>("device_sign", { payload: toBase64(payload) });
   }
@@ -142,42 +137,42 @@ export class NativeCipher implements DeviceCipher {
 }
 
 /**
- * Un appareil dont l'état au repos est protégé par un mot de passe.
+ * A device whose state at rest is protected by a password.
  *
- * # Ce qui change, et ce qui ne change pas
+ * # What changes, and what does not
  *
- * L'identité ne bouge pas : signer reste l'affaire du socle, donc le serveur ne voit rien et
- * poser ou retirer un verrou n'est jamais un événement de compte. Seule bascule la clé qui
- * protège l'état sur le disque.
+ * The identity does not move: signing stays the base layer's job, so the server sees nothing
+ * and setting or removing a lock is never an account event. Only the key that protects state on
+ * disk swaps out.
  *
- * # Pourquoi il enveloppe au lieu de remplacer
+ * # Why it wraps instead of replacing
  *
- * Le verrou est orthogonal à l'endroit où vivent les clés. Un appareil web verrouillé et un
- * appareil natif verrouillé posent le même problème — chiffrer sous une clé maîtresse qui
- * n'existe qu'en mémoire après saisie — et il n'y a aucune raison d'en écrire deux versions.
+ * The lock is orthogonal to where the keys live. A locked web device and a locked native device
+ * pose the same problem — encrypting under a master key that only exists in memory once
+ * entered — and there is no reason to write two versions of it.
  *
- * # Le socle ne scelle pas par-dessus
+ * # The base layer does not seal on top
  *
- * L'état est chiffré sous la clé maîtresse, un point c'est tout. Déléguer ensuite au socle
- * ajouterait une couche, changerait le format déjà écrit chez les installations existantes, et
- * n'apporterait rien contre le seul attaquant que ce verrou vise : celui qui tient l'appareil
- * et n'a pas le mot de passe. Sans le mot de passe, l'état est illisible dans les deux cas.
+ * State is encrypted under the master key, full stop. Delegating to the base layer afterwards
+ * would add a layer, change the format already written on existing installations, and bring
+ * nothing against the only attacker this lock targets: the one holding the device without the
+ * password. Without the password, the state is unreadable either way.
  */
 export class LockedCipher implements DeviceCipher {
-  private readonly socle: DeviceCipher;
+  private readonly base: DeviceCipher;
   private readonly master: CryptoKey;
 
-  constructor(socle: DeviceCipher, master: CryptoKey) {
-    this.socle = socle;
+  constructor(base: DeviceCipher, master: CryptoKey) {
+    this.base = base;
     this.master = master;
   }
 
   authPublicKey(): Promise<Uint8Array> {
-    return this.socle.authPublicKey();
+    return this.base.authPublicKey();
   }
 
   sign(payload: Uint8Array): Promise<string> {
-    return this.socle.sign(payload);
+    return this.base.sign(payload);
   }
 
   seal(plaintext: Uint8Array): Promise<Uint8Array> {
@@ -189,16 +184,16 @@ export class LockedCipher implements DeviceCipher {
   }
 
   /**
-   * La clé maîtresse, pour la confier au processus natif.
+   * The master key, to hand over to the native process.
    *
-   * Le seul appelant légitime est l'activation du déverrouillage biométrique, qui doit la faire
-   * sceller là où l'invite du système la garde. Tout autre usage annulerait ce qui fait tenir le
-   * verrou : que cette clé n'existe qu'en mémoire, et seulement après une saisie.
+   * The only legitimate caller is enabling biometric unlock, which has to get it sealed where the
+   * system prompt keeps it. Any other use would undo what makes the lock hold: that this key only
+   * exists in memory, and only after an entry.
    */
-  cleMaitresse(): CryptoKey {
+  masterKey(): CryptoKey {
     return this.master;
   }
 }
 
-/** Réexporté pour que les appelants n'aient pas à importer `keys.ts` juste pour encoder. */
+/** Re-exported so callers do not have to import `keys.ts` just to encode. */
 export { toBase64 };

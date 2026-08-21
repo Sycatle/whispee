@@ -26,55 +26,54 @@
   }
 }
 
-/* Deux panneaux côte à côte, ou un seul à la fois.
+/* Two panes side by side, or one at a time.
  *
- * Le seuil ne décrit pas un appareil mais une **capacité** : y a-t-il la place d'afficher la
- * liste et la conversation ensemble ? Une tablette en portrait répond non, un téléphone posé en
- * paysage aussi, et un ordinateur à fenêtre étroite également. Nommer la variante d'après ce
- * qu'elle permet plutôt que d'après un appareil évite d'avoir à la renommer au premier cas qui
- * ne rentre pas dans la case.
+ * The breakpoint describes a **capability**, not a device: is there room to show the list and
+ * the conversation together? A tablet in portrait says no, so does a phone laid flat in
+ * landscape, so does a narrow desktop window. Naming the variant after what it allows rather
+ * than after a device avoids renaming it at the first case that does not fit the box.
  *
- * `min-width` et non `pointer` : le nombre de panneaux est affaire de largeur. Le doigt est un
- * autre problème, traité par `tactile:`. */
+ * `min-width` and not `pointer`: the number of panes is a question of width. The finger is a
+ * separate problem, handled by `touch:`. */
 @custom-variant duo (@media (min-width: 48rem));
 
-/* Ce qui est manipulé au doigt.
+/* What gets manipulated with a finger.
  *
- * Distinct de la largeur, et le distinguer est tout l'intérêt : une tablette est large **et**
- * tactile, un ordinateur portable à écran tactile aussi. Les confondre donnerait des cibles
- * minuscules sur l'une et des boutons démesurés sur l'autre.
+ * Distinct from width, and keeping them distinct is the whole point: a tablet is wide **and**
+ * touch, so is a laptop with a touchscreen. Conflating them would give tiny targets on one and
+ * oversized buttons on the other.
  *
- * `pointer: coarse` désigne le périphérique principal — un doigt, un stylet — et c'est bien la
- * question posée : quelle précision peut-on exiger de l'utilisateur ? */
-@custom-variant tactile (@media (pointer: coarse));
+ * `pointer: coarse` describes the primary input device — a finger, a stylus — which is exactly
+ * the question being asked: how much precision can be demanded of the user? */
+@custom-variant touch (@media (pointer: coarse));
 
 body {
   background: var(--color-surface);
   color: var(--color-ink);
 }
 
-/* Les retraits du système, exposés comme utilitaires.
+/* System insets, exposed as utilities.
  *
- * Déclarés ici plutôt qu'en classes arbitraires dispersées : `env()` ne s'interpole pas dans la
- * syntaxe entre crochets de Tailwind de façon lisible, et ces quatre valeurs sont les mêmes
- * partout. Elles valent zéro sur un écran sans encoche, donc rien ne les rend conditionnelles. */
-.safe-haut {
+ * Declared here rather than as arbitrary classes scattered around: `env()` does not interpolate
+ * readably inside Tailwind's bracket syntax, and these four values are the same everywhere. They
+ * are zero on a screen without a notch, so nothing needs to make them conditional. */
+.safe-top {
   padding-top: env(safe-area-inset-top);
 }
 
-.safe-bas {
+.safe-bottom {
   padding-bottom: env(safe-area-inset-bottom);
 }
 
-/* Gauche et droite comptent en paysage : l'encoche passe sur le côté, et une barre de saisie
-   qui l'ignore se fait couper ses premiers caractères. */
-.safe-cotes {
+/* Left and right matter in landscape: the notch moves to the side, and an input bar that ignores
+   it gets its first characters clipped. */
+.safe-sides {
   padding-left: env(safe-area-inset-left);
   padding-right: env(safe-area-inset-right);
 }
 
-/* Les empreintes se comparent caractère par caractère : une chasse fixe et un chiffre zéro
-   distinct de la lettre O ne sont pas cosmétiques, ils rendent la comparaison fiable. */
+/* Fingerprints are compared character by character: a fixed pitch and a zero distinct from the
+   letter O are not cosmetic, they make the comparison reliable. */
 .fingerprint {
   font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
   font-variant-ligatures: none;

@@ -1,35 +1,34 @@
 /**
- * Politique de mot de passe.
+ * Password policy.
  *
- * # Pourquoi pas « une majuscule, un chiffre, un caractère spécial »
+ * # Why not "one uppercase, one digit, one symbol"
  *
- * Ces règles ne créent aucune entropie : elles déplacent le `A` au début et le `1!` à la fin.
- * L'espace des mots de passe qu'un humain produit sous ces contraintes est plus petit, pas
- * plus grand — et les attaquants le connaissent mieux que nous. Le NIST les a explicitement
- * abandonnées dans SP 800-63B.
+ * Those rules create no entropy: they move the `A` to the front and the `1!` to the end. The
+ * space of passwords a human produces under those constraints is smaller, not larger — and
+ * attackers know it better than we do. NIST explicitly dropped them in SP 800-63B.
  *
- * Ce qui compte réellement : **la longueur**, et **ne pas figurer dans une liste connue**.
- * C'est ce que ce module vérifie.
+ * What actually counts: **length**, and **not appearing in a known list**. That is what this
+ * module checks.
  *
- * # Ce que ce mot de passe protège
+ * # What this password protects
  *
- * L'état au repos sur cet appareil, rien d'autre. Il n'est pas un facteur de récupération :
- * l'oublier ne fait rien perdre, la phrase de douze mots reste le seul chemin de restauration.
+ * State at rest on this device, nothing else. It is not a recovery factor: forgetting it loses
+ * nothing, the twelve-word phrase remains the only restore path.
  */
 
-/** Longueur minimale. Douze caractères de français courant valent ~40 bits — le plancher
- * en dessous duquel Argon2id lui-même ne suffit plus à rendre une attaque hors ligne coûteuse. */
+/** Minimum length. Twelve characters of everyday prose are worth ~40 bits — the floor below
+ * which even Argon2id no longer makes an offline attack expensive. */
 export const MIN_LENGTH = 12;
 
 /**
- * Mots de passe et motifs les plus fréquemment observés dans les fuites.
+ * The passwords and patterns most often seen in breaches.
  *
- * Cette liste est volontairement courte : elle attrape les cas manifestes sans alourdir le
- * bundle. **Un déploiement réel utiliserait la liste complète** — les 10 000 premiers de
- * rockyou, ou l'API k-anonyme de Have I Been Pwned, qui vérifie sans révéler le mot de passe.
- * C'est noté dans les limites connues du README plutôt que fait à moitié en silence.
+ * This list is deliberately short: it catches the obvious cases without weighing down the
+ * bundle. **A real deployment would use the full list** — the first 10,000 of rockyou, or the
+ * k-anonymous Have I Been Pwned API, which checks without revealing the password. That is noted
+ * in the README's known limits rather than half-done in silence.
  */
-const COMMUNS = [
+const COMMON = [
   "motdepasse", "password", "azertyuiop", "qwertyuiop", "123456789", "1234567890",
   "administrateur", "changeme", "letmein", "welcome1", "iloveyou", "sunshine",
   "princesse", "football", "monkey123", "dragon123", "abc123456", "passw0rd",
@@ -38,48 +37,48 @@ const COMMUNS = [
 
 export interface Verdict {
   ok: boolean;
-  /** Message à afficher. Vide quand le mot de passe convient. */
-  raison: string;
+  /** Message to display. Empty when the password is fine. */
+  reason: string;
 }
 
-export function verifier(password: string): Verdict {
+export function check(password: string): Verdict {
   if (password.length < MIN_LENGTH) {
     return {
       ok: false,
-      raison: `Au moins ${MIN_LENGTH} caractères. La longueur est ce qui protège réellement — pas les majuscules ni les chiffres.`,
+      reason: `At least ${MIN_LENGTH} characters. Length is what actually protects you — not uppercase letters or digits.`,
     };
   }
 
-  const normalise = password.toLowerCase();
+  const normalized = password.toLowerCase();
 
-  if (COMMUNS.some((connu) => normalise.includes(connu))) {
+  if (COMMON.some((known) => normalized.includes(known))) {
     return {
       ok: false,
-      raison: "Ce mot de passe contient une suite figurant dans les listes de fuites connues.",
+      reason: "This password contains a sequence found in known breach lists.",
     };
   }
 
-  // Un seul caractère répété, ou une suite de clavier, passe la longueur minimale sans rien
-  // valoir : « aaaaaaaaaaaa » fait douze caractères et zéro bit d'entropie.
+  // A single repeated character, or a keyboard run, clears the minimum length while being worth
+  // nothing: "aaaaaaaaaaaa" is twelve characters and zero bits of entropy.
   if (new Set(password).size <= 4) {
     return {
       ok: false,
-      raison: "Trop peu de caractères distincts : la longueur seule ne suffit pas.",
+      reason: "Too few distinct characters: length alone is not enough.",
     };
   }
 
-  return { ok: true, raison: "" };
+  return { ok: true, reason: "" };
 }
 
 /**
- * Estimation grossière de l'entropie, en bits, à afficher à titre indicatif.
+ * Rough entropy estimate, in bits, to display as an indication.
  *
- * Grossière et **optimiste** : elle suppose un mot de passe tiré au hasard dans l'alphabet
- * observé, ce qu'un humain ne fait jamais. Un vrai estimateur (zxcvbn) reconnaît les mots du
- * dictionnaire, les dates et les substitutions ; il pèse 400 Ko. La valeur affichée est donc
- * un plafond, à présenter comme tel — jamais comme une garantie.
+ * Rough and **optimistic**: it assumes a password drawn at random from the observed alphabet,
+ * which no human ever does. A real estimator (zxcvbn) recognises dictionary words, dates and
+ * substitutions; it weighs 400 KB. The displayed value is therefore a ceiling, to be presented
+ * as one — never as a guarantee.
  */
-export function bitsApproximatifs(password: string): number {
+export function approximateBits(password: string): number {
   const classes = [
     /[a-z]/.test(password) ? 26 : 0,
     /[A-Z]/.test(password) ? 26 : 0,

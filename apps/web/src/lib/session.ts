@@ -1,9 +1,9 @@
 /**
- * Orchestration : module WASM, delivery service et stockage local.
+ * Orchestration: WASM module, delivery service and local storage.
  *
- * C'est ici que vivent les décisions qui ne sont ni de la crypto ni du transport, et que le
- * protocole ne tranche pas : quand réapprovisionner les KeyPackages, comment un invité
- * découvre le groupe qui l'attend, quand persister l'état.
+ * Home of the decisions that are neither crypto nor transport, and that the protocol does not
+ * settle: when to replenish KeyPackages, how a guest discovers the group waiting for it, when
+ * to persist state.
  */
 import { type ResolvedAccount, resolveAccount } from "./account";
 import { Api, ApiError, type PostMac } from "./api";
@@ -13,17 +13,17 @@ import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./atta
 import * as content from "./content";
 import * as envelope from "./envelope";
 import { fromBase64, toBase64, toHex } from "./keys";
-import { type LockEnvelope, changePassword, createLock, exporterMaster, openLock } from "./lock";
+import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
 import type { SignalSettings } from "./storage";
-import { type Decision, type Etapes, type Presence, decider, migrer } from "./migration";
+import { type Decision, type Steps, type Presence, decide, migrate } from "./migration";
 import {
-  type Ancrage,
-  ancrageCourant,
-  ancrageNatif,
-  ancrageNeuf,
-  ancrageWebExistant,
-  effacerTout,
+  type Anchor,
+  currentAnchor,
+  nativeAnchor,
+  newAnchor,
+  existingWebAnchor,
+  clearAll,
 } from "./persistence";
 import { isTauri } from "./platform";
 import { type ReceiptBook, pending, record, statusOf } from "./receipts";
@@ -53,9 +53,9 @@ import {
   loadCrypto,
 } from "./wasm";
 
-/** Nombre de KeyPackages maintenus en stock sur le serveur. */
+/** How many KeyPackages we keep in stock on the server. */
 const KEY_PACKAGE_TARGET = 10;
-/** Seuil de réapprovisionnement. À zéro, plus personne ne peut nous joindre. */
+/** Replenishment threshold. At zero, nobody can reach us any more. */
 const KEY_PACKAGE_LOW_WATER = 3;
 
 export interface Message {
@@ -63,8 +63,8 @@ export interface Message {
   sender: string | null;
   mine: boolean;
   /**
-   * Le contenu déchiffré ne vit qu'en mémoire. Il n'est jamais persisté : l'écrire sur le
-   * disque annulerait une partie du bénéfice du chiffrement.
+   * Decrypted content lives in memory only. It is never persisted: writing it to disk would
+   * throw away part of what the encryption buys.
    */
   content: content.Content;
 }
@@ -72,10 +72,10 @@ export interface Message {
 export type VerificationState =
   | { status: "unverified" }
   | { status: "verified" }
-  /** L'empreinte a changé depuis la vérification : réinstallation, ou substitution. */
+  /** The fingerprint changed since verification: a reinstall, or a substitution. */
   | { status: "changed"; previous: string };
 
-/** Rôles d'un groupe : un admin unique, des modérateurs sous lui. */
+/** Group roles: a single admin, with moderators under them. */
 export interface Roles {
   admin: string;
   moderators: string[];
@@ -83,91 +83,88 @@ export interface Roles {
 
 export interface ConversationView {
   groupId: Uint8Array;
-  /** Clé d'affichage stable : `Uint8Array` ne s'utilise pas comme clé de Map ou de React. */
+  /** Stable display key: a `Uint8Array` cannot be used as a Map or React key. */
   key: string;
   messages: Message[];
-  /** Un par appareil membre. Deux appareils d'un même compte y figurent deux fois. */
+  /** One per member device. Two devices of the same account appear twice. */
   peers: Peer[];
   /**
-   * Correspondants regroupés par compte, attestations revérifiées.
+   * Peers grouped by account, with attestations re-verified.
    *
-   * Rempli à la relève plutôt qu'au rendu : la résolution passe par le réseau, et un composant
-   * React n'est pas l'endroit où décider de faire confiance à quelqu'un.
+   * Filled during polling rather than at render time: resolution goes over the network, and a
+   * React component is not the place to decide whether to trust someone.
    */
   accounts: ResolvedAccount[];
   epoch: bigint;
   cursor: number;
   /**
-   * Notre tête de journal a-t-elle déjà été diffusée dans cette conversation ?
+   * Has our log head already been gossiped in this conversation?
    *
-   * Volontairement non persisté : à chaque session, une nouvelle diffusion. Le contrôle porte
-   * sur l'existence d'une bifurcation, et la refaire de temps en temps coûte un message.
+   * Deliberately not persisted: one broadcast per session. The check is about the existence of
+   * a fork, and redoing it now and then costs one message.
    */
   gossiped?: boolean;
   /**
-   * L'historique archivé a-t-il déjà été rapatrié dans cette session ?
+   * Has the archived history already been pulled back in this session?
    *
-   * Même raisonnement que `gossiped` : volontairement non persisté, parce que les messages ne
-   * vivent qu'en mémoire. Chaque session doit donc redemander le coffre — une fois, à
-   * l'ouverture de la conversation, pas à chaque relève.
+   * Same reasoning as `gossiped`: deliberately not persisted, because messages only live in
+   * memory. Every session must therefore ask the vault again — once, when the conversation is
+   * opened, not on every poll.
    */
   hydrated?: boolean;
   /**
-   * Clé de dépôt du groupe, si nous la connaissons.
+   * The group's posting key, if we know it.
    *
-   * Sa présence fait basculer les envois sur le chemin anonyme : le serveur cesse d'apprendre
-   * lequel des membres écrit. Son absence n'est pas une erreur — les conversations créées
-   * avant le sealed sender continuent d'utiliser le dépôt signé.
+   * Its presence switches sends onto the anonymous path: the server stops learning which member
+   * is writing. Its absence is not an error — conversations created before sealed sender keep
+   * using signed posts.
    */
   postingKey?: Uint8Array;
-  /** La clé a-t-elle déjà été diffusée dans cette conversation, cette session ? */
+  /** Has the key already been shared in this conversation, this session? */
   postingKeyShared?: boolean;
   /**
-   * Séquences que nous avons nous-mêmes déposées.
+   * Sequence numbers we posted ourselves.
    *
-   * Elles sont déjà appliquées localement et MLS refuse de les relire. On les saute donc à la
-   * relève — mais **sans faire avancer le curseur jusqu'à elles** : le numéro que le serveur
-   * attribue à notre message ne dit rien des enveloppes qui le précèdent. Sauter jusque-là
-   * enjambe les commits des autres, et le groupe se fige à une epoch périmée sans qu'aucune
-   * erreur ne le signale.
+   * They are already applied locally and MLS refuses to read them again. So we skip them when
+   * polling — but **without moving the cursor up to them**: the number the server assigns to our
+   * message says nothing about the envelopes before it. Skipping that far steps over other
+   * members' commits, and the group freezes at a stale epoch with no error to show for it.
    */
   mine: Set<number>;
   /**
-   * Ce que chaque compte a accusé, dans cette conversation.
+   * What each account has acknowledged, in this conversation.
    *
-   * Non persisté : un accusé vaut « à ce moment », et le rejouer d'une session à l'autre
-   * afficherait un état de lecture que personne n'a confirmé depuis. Les accusés reviennent
-   * d'eux-mêmes à la relève suivante.
+   * Not persisted: a receipt means "as of then", and replaying it across sessions would show a
+   * read state nobody has confirmed since. Receipts come back on their own at the next poll.
    */
   receipts: ReceiptBook;
   /**
-   * Plus grand numéro d'un **message reçu et affichable**.
+   * Highest sequence number of a **received, displayable message**.
    *
-   * # Pourquoi il ne suffit pas de réutiliser `cursor`
+   * # Why reusing `cursor` is not enough
    *
-   * `cursor` avance sur toute enveloppe traitée, accusés compris. Accuser réception jusqu'à
-   * `cursor` fait donc accuser réception des accusés : chaque accusé en fait naître un autre,
-   * et la conversation ne s'arrête plus jamais. Mesuré, en production locale : dix enveloppes
-   * en quarante secondes pour deux personnes qui ne disent rien.
+   * `cursor` advances on every processed envelope, receipts included. Acknowledging up to
+   * `cursor` therefore acknowledges the acknowledgements: each receipt breeds another, and the
+   * conversation never stops. Measured, in local production: ten envelopes in forty seconds for
+   * two people saying nothing.
    *
-   * Un accusé annonce « j'ai reçu tes messages jusqu'à N », où N est un message. C'est le seul
-   * curseur qui a une borne : le trafic de protocole ne le fait pas avancer, donc il finit par
-   * se taire.
+   * A receipt says "I received your messages up to N", where N is a message. That is the only
+   * cursor with a bound: protocol traffic does not move it, so it eventually goes quiet.
    */
   contentCursor: number;
-  /** Jusqu'où l'utilisateur a effectivement vu la conversation à l'écran. */
+  /** How far the user has actually seen the conversation on screen. */
   readCursor: number;
-  /** Correspondants actuellement en train d'écrire, avec leur horodatage d'expiration. */
+  /** Peers currently typing, with their expiry timestamp. */
   typing: Typing[];
-  /** Dernière émission d'un indicateur de frappe, pour le débounce. */
+  /** Last time we emitted a typing indicator, for the debounce. */
   typingSentAt?: number;
 }
 
 /**
- * État de signalisation d'une conversation neuve.
+ * Signalling state for a brand-new conversation.
  *
- * Rien de tout cela n'est persisté : un accusé ou un indicateur de frappe vaut « maintenant ».
- * Les restaurer d'une session à l'autre afficherait un état que personne n'a confirmé depuis.
+ * None of it is persisted: a receipt or a typing indicator means "right now". Restoring them
+ * across sessions would show a state nobody has confirmed since.
  */
 function freshSignalState(): Pick<
   ConversationView,
@@ -185,90 +182,87 @@ export class Session {
     private readonly crypto: Crypto,
     private readonly api: Api,
     /**
-     * Où l'état est rangé, et sous quelle identité.
+     * Where the state is kept, and under which identity.
      *
-     * Une paire et non deux champs : la clé qui ouvre l'état doit être celle sous laquelle il a
-     * été scellé, et les dissocier permettrait d'assembler un store avec le chiffreur de
-     * l'autre plateforme — un état illisible, sans autre symptôme qu'un échec de déchiffrement.
+     * One pair rather than two fields: the key that opens the state must be the one it was
+     * sealed under, and splitting them would allow assembling a store with the other platform's
+     * cipher — unreadable state, with no symptom beyond a decryption failure.
      */
-    private readonly ancrage: Ancrage,
+    private readonly anchor: Anchor,
     /**
-     * Ce qui chiffre l'état au repos.
+     * What encrypts the state at rest.
      *
-     * Le socle de l'ancrage quand aucun verrou n'est posé ; un `LockedCipher` sinon, dont la
-     * clé maîtresse n'existe qu'en mémoire après saisie du mot de passe. L'identité, elle, ne
-     * bascule pas : c'est toujours le socle qui signe.
+     * The anchor's own cipher when no lock is set; a `LockedCipher` otherwise, whose master key
+     * only exists in memory once the password has been typed. The identity does not switch: the
+     * anchor's cipher always signs.
      */
     private atRest: DeviceCipher,
     private lock: LockEnvelope | undefined,
     /**
-     * Clé du coffre. Présente par défaut ; `null` seulement si l'utilisateur a coupé la
-     * sauvegarde, ou si sa dérivation a échoué.
+     * Vault key. Present by default; `null` only if the user turned backup off, or if deriving
+     * it failed.
      *
-     * Dérivée de la phrase de récupération, donc **stable dans le temps** : c'est ce qui
-     * permet à un appareil neuf de relire l'historique, et c'est exactement ce à quoi on
-     * renonce en la gardant. Voir `vault.ts`.
+     * Derived from the recovery phrase, so **stable over time**: that is what lets a new device
+     * read the history back, and it is exactly what we give up by keeping it. See `vault.ts`.
      */
     private vaultCipher: CryptoKey | null,
     readonly conversations: Map<string, ConversationView>,
     private verified: Record<string, string>,
     private knownDevices: Record<string, string[]>,
     /**
-     * Réglages de signalisation.
+     * Signalling settings.
      *
-     * Les accusés de lecture sont **actifs par défaut**, comme dans les applications
-     * grand public : les désactiver silencieusement rendrait l'affichage de l'autre côté
-     * incompréhensible. C'est un choix de produit, et il est réversible d'un clic.
+     * Read receipts are **on by default**, as in consumer apps: silently disabling them would
+     * make the other side's display incomprehensible. It is a product choice, and one click
+     * reverses it.
      */
     private signals: SignalSettings = { readReceipts: true, typingIndicator: true, presence: true },
   ) {}
 
-  /** Session temps réel, quand elle est ouverte. Sa panne ne retire aucune fonctionnalité. */
+  /** Real-time session, when it is open. Its failure removes no feature. */
   private gateway?: Gateway;
 
   /**
-   * Dernière tête de journal acceptée.
+   * Last accepted log head.
    *
-   * Sert d'ancre : le serveur devra prouver que son journal la prolonge. Sans mémoire, il
-   * pourrait réécrire une clé déjà publiée et servir un journal tout aussi cohérent.
+   * Acts as an anchor: the server must prove its log extends it. With no memory, it could
+   * rewrite an already published key and serve an equally consistent log.
    */
   private seenHead: log.SeenHead | undefined;
 
   /**
-   * Anomalies du journal constatées depuis le démarrage.
+   * Log anomalies seen since startup.
    *
-   * Conservées et affichées plutôt que jetées : une preuve qui ne vérifie pas n'est pas une
-   * erreur réseau à réessayer, c'est le signal exact que tout ce dispositif existe pour
-   * produire.
+   * Kept and displayed rather than discarded: a proof that does not verify is not a network
+   * error to retry, it is exactly the signal this whole apparatus exists to produce.
    */
   readonly logAlerts: string[] = [];
 
   /**
-   * Relève en cours, s'il y en a une.
+   * The poll in flight, if any.
    *
-   * Le polling est déclenché par un `setInterval` : sans ce verrou, une relève plus lente que
-   * l'intervalle se retrouve en concurrence avec la suivante. Les deux lisent le même curseur
-   * avant que l'une n'ait écrit le sien, retraitent les mêmes enveloppes — et MLS refuse la
-   * seconde lecture, les clés ayant été détruites. Le message est alors perdu définitivement.
+   * Polling is driven by a `setInterval`: without this guard, a poll slower than the interval
+   * races the next one. Both read the same cursor before either writes its own, reprocess the
+   * same envelopes — and MLS refuses the second read, the keys having been destroyed. The
+   * message is then lost for good.
    *
-   * Le symptôme est déroutant : tout fonctionne tant que le réseau est rapide, puis des
-   * messages disparaissent dès qu'une opération allonge la relève.
+   * The symptom is confusing: everything works while the network is fast, then messages vanish
+   * as soon as some operation makes a poll take longer.
    */
   private polling: Promise<void> | null = null;
 
-  /** Empreinte du compte, à comparer hors bande avec son correspondant. */
+  /** Account fingerprint, to be compared out of band with your correspondent. */
   accountFingerprint(): string {
     return this.account.fingerprint();
   }
 
   /**
-   * État de vérification d'un pair.
+   * Verification state of a peer.
    *
-   * Sans comparaison hors bande, un serveur malveillant peut servir à chacun un KeyPackage
-   * qu'il contrôle et relayer en clair entre deux sessions parfaitement chiffrées. Aucune
-   * vérification cryptographique ne le détecte — c'est le maillon faible réel de tout
-   * déploiement E2EE, et la raison pour laquelle cet état est affiché en permanence plutôt
-   * que rangé dans un menu.
+   * Without an out-of-band comparison, a malicious server can serve each side a KeyPackage it
+   * controls and relay in the clear between two perfectly encrypted sessions. No cryptographic
+   * check catches it — this is the real weak link of every E2EE deployment, and the reason this
+   * state is always on screen rather than tucked into a menu.
    */
   verificationOf(account: ResolvedAccount): VerificationState {
     const known = this.verified[account.handle];
@@ -283,11 +277,11 @@ export class Session {
   }
 
   /**
-   * Crée un compte neuf et son premier appareil.
+   * Creates a new account and its first device.
    *
-   * Retourne la phrase de récupération **avec** la session : elle n'existe qu'ici et ne peut
-   * plus être réaffichée ensuite. C'est délibéré — une phrase que l'application sait
-   * remontrer est une phrase que quiconque tient l'appareil déverrouillé peut remontrer.
+   * Returns the recovery phrase **together with** the session: it only exists here and can never
+   * be shown again. That is deliberate — a phrase the app can redisplay is a phrase anyone
+   * holding the unlocked device can redisplay.
    */
   static async create(handle: string): Promise<[Session, string]> {
     const crypto = await loadCrypto();
@@ -301,25 +295,24 @@ export class Session {
   }
 
   /**
-   * Rattache un nouvel appareil à un compte existant, depuis sa phrase de récupération.
+   * Attaches a new device to an existing account, from its recovery phrase.
    *
-   * L'appareil s'atteste lui-même, ce qui suppose de détenir la clé du compte. Sans elle, le
-   * serveur refuse l'enregistrement — c'est ce qui empêche un tiers de se déclarer appareil
-   * d'un compte dont il connaîtrait seulement le pseudonyme.
+   * The device attests itself, which requires holding the account key. Without it the server
+   * refuses the registration — that is what stops a third party from declaring itself a device
+   * of an account whose handle is all it knows.
    *
-   * Ce que ce chemin ne fait pas : rejoindre les conversations existantes. Elles vivent dans
-   * des groupes MLS dont cet appareil n'est pas membre ; il faut qu'un appareil déjà présent
-   * l'y ajoute, ce que fera l'appairage par QR code.
+   * What this path does not do: join existing conversations. They live in MLS groups this device
+   * is not a member of; a device already present has to add it, which is what QR pairing does.
    */
   /**
-   * Rattache cet appareil au compte dont on vient de recevoir la graine par appairage.
+   * Attaches this device to the account whose seed we just received by pairing.
    *
-   * Chemin normal d'ajout d'un appareil : la phrase de récupération n'est jamais ressaisie, et
-   * n'a donc pas à être exposée une seconde fois.
+   * The normal way to add a device: the recovery phrase is never retyped, and so never has to be
+   * exposed a second time.
    */
-  static async fromSeed(handle: string, seed: Uint8Array, ancrage?: Ancrage): Promise<Session> {
+  static async fromSeed(handle: string, seed: Uint8Array, anchor?: Anchor): Promise<Session> {
     const crypto = await loadCrypto();
-    return Session.attach(crypto, crypto.AccountKey.fromSeed(seed), handle, ancrage);
+    return Session.attach(crypto, crypto.AccountKey.fromSeed(seed), handle, anchor);
   }
 
   static async restoreFromPhrase(handle: string, phrase: string): Promise<Session> {
@@ -328,43 +321,43 @@ export class Session {
     return Session.attach(crypto, account, handle);
   }
 
-  /** Enregistre un appareil sous un compte dont on détient déjà la clé. */
+  /** Registers a device under an account whose key we already hold. */
   private static async attach(
     crypto: Crypto,
     account: AccountKey,
     handle: string,
     /**
-     * Ancrage imposé, pour la migration : elle enregistre un appareil natif depuis un appareil
-     * web, donc le défaut de la plateforme ne dit pas ce qu'il faut faire.
+     * Anchor forced from outside, for migration: it registers a native device from a web device,
+     * so the platform default does not say what to do.
      */
-    impose?: Ancrage,
+    imposed?: Anchor,
   ): Promise<Session> {
-    // L'ancrage décide où vivront les clés : dans le processus natif sous Tauri, dans
-    // IndexedDB ailleurs. L'enregistrement n'a pas à savoir lequel des deux — il ne manipule
-    // que la moitié publique.
-    const ancrage = impose ?? (await ancrageNeuf());
-    const authKey = await ancrage.cipher.authPublicKey();
+    // The anchor decides where the keys will live: in the native process under Tauri, in
+    // IndexedDB elsewhere. Registration does not need to know which — it only handles the
+    // public half.
+    const anchor = imposed ?? (await newAnchor());
+    const authKey = await anchor.cipher.authPublicKey();
 
-    // L'identifiant est qualifié par le handle : sans cela l'espace de noms serait global et
-    // le premier arrivé accaparerait « desktop » et « mobile » pour tout le monde. Le serveur
-    // impose ce préfixe, ce n'est pas une simple convention côté client.
+    // The id is qualified by the handle: without that the namespace would be global and the
+    // first comer would grab "desktop" and "mobile" for everyone. The server enforces this
+    // prefix, it is not a client-side convention.
     //
-    // Le nom est détecté, jamais demandé, et décliné en cas de collision : un compte peut
-    // légitimement avoir deux ordinateurs, et ce n'est pas à l'utilisateur de le gérer.
+    // The name is detected, never asked for, and varied on collision: an account may legitimately
+    // own two computers, and that is not the user's problem to solve.
     let client: Client | null = null;
     let deviceId = "";
 
     for (const name of deviceNameCandidates(detectDeviceKind())) {
       deviceId = `${handle}:${name}`;
 
-      // Le credential MLS porte le **handle**, pas l'identifiant d'appareil : c'est le
-      // correspondant qu'on affiche, et il est de toute façon en clair dans l'arbre public.
-      // L'appareil se distingue par sa clé de signature, et se nomme dans l'attestation.
+      // The MLS credential carries the **handle**, not the device id: the peer is what we
+      // display, and it is in the public tree in the clear anyway. A device is told apart by its
+      // signature key, and names itself in the attestation.
       const candidate = crypto.Client.create(handle);
       const mlsKey = candidate.signatureKey();
 
-      // Les deux clés sont attestées ensemble. Les attester séparément permettrait de
-      // recombiner l'attestation d'un appareil légitime avec la clé MLS d'un appareil hostile.
+      // Both keys are attested together. Attesting them separately would allow recombining a
+      // legitimate device's attestation with a hostile device's MLS key.
       const attestation = account.attest(handle, deviceId, authKey, mlsKey);
 
       try {
@@ -372,18 +365,18 @@ export class Session {
         client = candidate;
         break;
       } catch (error) {
-        // 409 : ce nom est déjà pris sur ce compte. Toute autre erreur est réelle.
+        // 409: that name is already taken on this account. Any other error is real.
         if (!(error instanceof ApiError) || error.status !== 409) throw error;
       }
     }
 
     if (!client) {
-      throw new Error("Trop d'appareils portant ce nom sur ce compte.");
+      throw new Error("Too many devices with this name on this account.");
     }
 
-    // Sans verrou, l'état est chiffré par le socle lui-même ; poser un verrou l'enveloppera
-    // sans toucher à l'identité de l'appareil.
-    const api = new Api(deviceId, ancrage.cipher);
+    // With no lock, the state is encrypted by the anchor's own cipher; setting a lock wraps it
+    // without touching the device identity.
+    const api = new Api(deviceId, anchor.cipher);
     const session = new Session(
       deviceId,
       handle,
@@ -391,19 +384,19 @@ export class Session {
       account,
       crypto,
       api,
-      ancrage,
-      // Pas de verrou à la création : l'utilisateur le pose s'il le souhaite, depuis
-      // l'application. L'imposer ici mettrait une saisie de mot de passe juste avant l'écran
-      // de la phrase de récupération, qui mérite toute l'attention disponible.
-      ancrage.cipher,
+      anchor,
+      // No lock at creation: the user sets one if they want to, from the app. Forcing it here
+      // would put a password prompt right before the recovery phrase screen, which deserves all
+      // the attention available.
+      anchor.cipher,
       undefined,
-      // Coffre actif dès la création, donc dès le premier message.
+      // Vault on from creation, so from the very first message.
       //
-      // Renoncer à la forward secrecy sur l'historique reste un vrai renoncement — mais une
-      // messagerie dont la conversation repart vide à chaque rechargement n'en est pas une, et
-      // faire porter ce choix à un écran de réglage revenait à le refuser pour presque tout le
-      // monde. Le compromis est donc pris ici, énoncé sur l'écran de la phrase de récupération
-      // (qui est aussi la clé du coffre), et révocable dans les réglages.
+      // Giving up forward secrecy on history is a real concession — but a messenger whose
+      // conversation restarts empty on every reload is not a messenger, and putting this choice
+      // behind a settings screen amounted to refusing it for almost everyone. So the trade-off
+      // is taken here, stated on the recovery phrase screen (which is also the vault key), and
+      // reversible in settings.
       await vault.importVaultKey(account.vaultKey()),
       new Map(),
       {},
@@ -416,135 +409,134 @@ export class Session {
   }
 
   /**
-   * Enregistre un appareil natif à partir de celui-ci, puis s'efface.
+   * Registers a native device from this one, then erases itself.
    *
-   * # Pourquoi c'est l'ancien appareil qui pilote
+   * # Why the old device drives
    *
-   * Lui seul est membre des groupes MLS. Le nouvel appareil ne peut pas s'y inviter : MLS ne
-   * rattrape pas un membre absent de l'arbre, il faut qu'un membre l'ajoute. C'est exactement
-   * ce que fait `propagateOwnDevices` à chaque relève, sans rien de spécifique à la migration.
+   * It alone is a member of the MLS groups. The new device cannot invite itself: MLS does not
+   * catch up a member absent from the tree, a member has to add it. That is exactly what
+   * `propagateOwnDevices` does on every poll, with nothing migration-specific about it.
    *
-   * # L'ordre est dans `migration.ts`
+   * # The ordering lives in `migration.ts`
    *
-   * Ici, seulement de quoi l'exécuter. La séparation n'est pas cosmétique : l'enchaînement est
-   * le seul endroit qu'une interruption peut abîmer, et il ne serait pas testable mêlé à MLS,
-   * au réseau et à la webview.
+   * Only the means to run it live here. The split is not cosmetic: the sequence is the one place
+   * an interruption can damage, and it would not be testable tangled up with MLS, the network
+   * and the webview.
    */
-  async migrerVersNatif(
+  async migrateToNative(
     decision: Decision,
-    natif: Ancrage,
-    progres?: (etape: string) => void,
+    native: Anchor,
+    onProgress?: (step: string) => void,
   ): Promise<Session> {
-    // Ouverte d'abord si elle existe déjà : une reprise ne réenregistre pas: le serveur
-    // décline les noms pris, donc un second enregistrement créerait un appareil de plus.
-    let nouvelle = await Session.ouvrir(natif);
+    // Opened first if it already exists: a resumed migration must not register again — the
+    // server declines taken names, so a second registration would create one more device.
+    let nextSession = await Session.open(native);
 
-    const etapes: Etapes = {
-      progres,
-      enregistrerAppareilNatif: async () => {
-        nouvelle = await Session.fromSeed(this.handle, this.account.exportSeed(), natif);
-        return nouvelle.deviceId;
+    const steps: Steps = {
+      onProgress,
+      registerNativeDevice: async () => {
+        nextSession = await Session.fromSeed(this.handle, this.account.exportSeed(), native);
+        return nextSession.deviceId;
       },
-      propagerDepuisAncien: () => this.poll(),
-      avancement: async () => {
-        // La nouvelle session relève avant d'être comptée : les groupes n'arrivent pas par
-        // l'ajout lui-même, mais par les Welcome qu'elle doit aller chercher.
-        await nouvelle?.poll();
+      propagateFromOld: () => this.poll(),
+      progress: async () => {
+        // The new session polls before being counted: groups do not arrive through the addition
+        // itself, but through the Welcomes it has to go and fetch.
+        await nextSession?.poll();
         return {
-          rejointes: nouvelle?.conversations.size ?? 0,
-          attendues: this.conversations.size,
+          joined: nextSession?.conversations.size ?? 0,
+          expected: this.conversations.size,
         };
       },
-      restaurerHistorique: async () => {
-        for (const view of nouvelle?.conversations.values() ?? []) {
-          // Une conversation dont l'historique manque reste utilisable : mieux vaut une
-          // migration qui aboutit avec un fil incomplet qu'un compte bloqué sur une entrée
-          // d'archive illisible.
-          await nouvelle?.hydrate(view).catch((error: unknown) => {
-            console.warn("historique non restauré pour une conversation", error);
+      restoreHistory: async () => {
+        for (const view of nextSession?.conversations.values() ?? []) {
+          // A conversation whose history is missing stays usable: better a migration that
+          // completes with an incomplete thread than an account stuck on one unreadable archive
+          // entry.
+          await nextSession?.hydrate(view).catch((error: unknown) => {
+            console.warn("history not restored for one conversation", error);
           });
         }
       },
-      revoquerAncien: (ancien) => {
-        if (!nouvelle) throw new Error("migration : aucun appareil natif à qui confier la suite");
-        return nouvelle.revokeOwnDevice(ancien);
+      revokeOld: (old) => {
+        if (!nextSession) throw new Error("migration: no native device to hand over to");
+        return nextSession.revokeOwnDevice(old);
       },
-      oublierWeb: () => this.forget(),
+      forgetWeb: () => this.forget(),
     };
 
-    await migrer(decision, etapes, this.deviceId);
+    await migrate(decision, steps, this.deviceId);
 
-    if (!nouvelle) throw new Error("migration : l'appareil natif n'a pas été enregistré");
-    return nouvelle;
+    if (!nextSession) throw new Error("migration: the native device was never registered");
+    return nextSession;
   }
 
   /**
-   * Indique si une session verrouillée attend un mot de passe.
+   * Whether a locked session is waiting for a password.
    *
-   * Permet à l'interface de demander la saisie **avant** de tenter une restauration, plutôt
-   * que de traiter l'absence de mot de passe comme une erreur de déchiffrement.
+   * Lets the interface ask for it **before** attempting a restore, rather than treating a
+   * missing password as a decryption error.
    */
   static async isLocked(): Promise<boolean> {
-    const ancrage = await ancrageCourant();
-    const stored = await ancrage?.store.load();
+    const anchor = await currentAnchor();
+    const stored = await anchor?.store.load();
     return Boolean(stored?.state && stored.lock);
   }
 
   /**
-   * Recharge la session précédente, ou `null` s'il n'y en a pas.
+   * Reloads the previous session, or `null` if there is none.
    *
-   * `password` est requis si un verrou est posé. Un mot de passe faux fait échouer l'AEAD :
-   * il n'y a rien à comparer, donc pas de comparaison à rendre constante, et pas de « hash du
-   * mot de passe » stocké à côté qui offrirait une cible d'attaque hors ligne de plus.
+   * `password` is required if a lock is set. A wrong password fails the AEAD: there is nothing
+   * to compare, so no comparison to make constant-time, and no "password hash" stored alongside
+   * offering one more target for an offline attack.
    */
-  static async restore(ouverture?: string | CryptoKey): Promise<Session | null> {
-    const ancrage = await ancrageCourant();
-    return ancrage === undefined ? null : Session.ouvrir(ancrage, ouverture);
+  static async restore(opener?: string | CryptoKey): Promise<Session | null> {
+    const anchor = await currentAnchor();
+    return anchor === undefined ? null : Session.open(anchor, opener);
   }
 
   /**
-   * Recharge la session rangée dans un ancrage précis.
+   * Reloads the session kept in a specific anchor.
    *
-   * Séparé de `restore` pour la migration, qui doit tenir les **deux** sessions ouvertes en
-   * même temps : l'ancienne introduit la nouvelle dans les groupes, et seule l'ancienne peut le
-   * faire — elle seule en est membre.
+   * Separate from `restore` for migration, which has to hold **both** sessions open at once: the
+   * old one introduces the new one into the groups, and only the old one can — it alone is a
+   * member.
    */
-  static async ouvrir(
-    ancrage: Ancrage,
+  static async open(
+    anchor: Anchor,
     /**
-     * De quoi ouvrir le verrou, s'il y en a un.
+     * What opens the lock, if there is one.
      *
-     * Deux formes et non une, parce que les deux chemins n'ont pas la même entrée : le mot de
-     * passe dérive la clé maîtresse, la biométrie la rend directement. Les réunir derrière une
-     * chaîne obligerait à encoder une clé en texte, c'est-à-dire à la faire passer par un
-     * format dont personne n'a besoin.
+     * Two shapes rather than one, because the two paths do not have the same input: a password
+     * derives the master key, biometrics hand it over directly. Uniting them behind a string
+     * would force encoding a key as text, i.e. pushing it through a format nobody needs.
      */
-    ouverture?: string | CryptoKey,
+    opener?: string | CryptoKey,
   ): Promise<Session | null> {
-    const stored = await ancrage.store.load();
+    const stored = await anchor.store.load();
     if (!stored?.state) return null;
 
-    if (stored.lock && ouverture === undefined) {
-      throw new Error("Cette session est verrouillée : mot de passe requis.");
+    if (stored.lock && opener === undefined) {
+      throw new Error("This session is locked: a password is required.");
     }
 
     const master =
-      typeof ouverture === "string" && stored.lock
-        ? await openLock(stored.lock, ouverture)
-        : typeof ouverture === "object"
-          ? ouverture
+      typeof opener === "string" && stored.lock
+        ? await openLock(stored.lock, opener)
+        : typeof opener === "object"
+          ? opener
           : undefined;
 
     const atRest =
-      stored.lock && master ? new LockedCipher(ancrage.cipher, master) : ancrage.cipher;
+      stored.lock && master ? new LockedCipher(anchor.cipher, master) : anchor.cipher;
 
     const crypto = await loadCrypto();
     const state = await atRest.open(stored.state);
     const client = crypto.Client.restore(state, stored.groupIds);
     const account = crypto.AccountKey.fromSeed(await atRest.open(stored.accountSeed));
-    // Le socle et non `atRest` : c'est l'identité qui signe les requêtes, et elle ne bascule
-    // pas avec le verrou — le serveur ne doit voir aucune différence.
-    const api = new Api(stored.deviceId, ancrage.cipher);
+    // The anchor's cipher, not `atRest`: the identity signs the requests, and it does not switch
+    // with the lock — the server must see no difference.
+    const api = new Api(stored.deviceId, anchor.cipher);
 
     const conversations = new Map<string, ConversationView>();
     for (const groupId of stored.groupIds) {
@@ -556,10 +548,10 @@ export class Session {
         accounts: [],
         epoch: client.epoch(groupId),
         cursor: stored.cursors?.[toHex(groupId)] ?? 0,
-        // Les séquences déjà traitées sont derrière le curseur : rien à retenir au rechargement.
+        // Sequences already processed are behind the cursor: nothing to remember on reload.
         mine: new Set<number>(),
-        // Sans cette restauration, le dépôt anonyme et l'indicateur de frappe restent inertes
-        // jusqu'à ce qu'un autre membre rediffuse la clé — donc potentiellement jamais.
+        // Without this restore, anonymous posting and the typing indicator stay inert until some
+        // other member re-shares the key — so possibly never.
         postingKey: stored.postingKeys?.[toHex(groupId)]
           ? fromBase64(stored.postingKeys[toHex(groupId)])
           : undefined,
@@ -574,62 +566,61 @@ export class Session {
       account,
       crypto,
       api,
-      ancrage,
+      anchor,
       atRest,
       stored.lock,
-      // Trois valeurs, pas deux, et c'est toute la migration des comptes existants : `false`
-      // signifie que l'utilisateur a explicitement coupé la sauvegarde, et cela se respecte ;
-      // `undefined` signifie qu'il n'a jamais eu à en décider, et se traite comme un compte
-      // neuf, donc actif. Confondre les deux reviendrait à réactiver le coffre dans le dos de
-      // quelqu'un qui l'avait refusé.
+      // Three values, not two, and that is the whole migration story for existing accounts:
+      // `false` means the user explicitly turned backup off, and that is to be respected;
+      // `undefined` means they never had to decide, so it is treated like a new account, so on.
+      // Conflating the two would re-enable the vault behind the back of someone who refused it.
       stored.vaultEnabled === false ? null : await vaultCipherOf(crypto, account),
       conversations,
       stored.verified ?? {},
       stored.knownDevices ?? {},
-      // `presence` absent vaut activé : c'est le défaut, le drapeau ne retient qu'un refus.
+      // A missing `presence` means enabled: that is the default, the flag only records a refusal.
       { readReceipts: true, typingIndicator: true, ...stored.signals },
     );
   }
 
   /**
-   * Dernière activité connue de chaque correspondant, en millisecondes.
+   * Last known activity of each peer, in milliseconds.
    *
-   * **Jamais persistée**, pour la même raison que les accusés et les indicateurs de frappe : une
-   * présence restaurée d'une session à l'autre afficherait en ligne quelqu'un que personne n'a
-   * vu depuis. Elle revient d'elle-même au premier tour de relève.
+   * **Never persisted**, for the same reason as receipts and typing indicators: presence
+   * restored across sessions would show as online someone nobody has seen since. It comes back
+   * on its own at the first poll.
    */
   private presence = new Map<string, number>();
 
   /**
-   * Horloge du serveur au moment de la dernière relève de présence.
+   * Server clock at the last presence poll.
    *
-   * Conservée parce que la fraîcheur se juge en comparant deux horodatages, et que celui du
-   * navigateur peut être n'importe quoi.
+   * Kept because freshness is judged by comparing two timestamps, and the browser's can be
+   * anything at all.
    */
   private presenceNow = 0;
 
-  /** Dernière activité d'un compte, ou `undefined` si le serveur n'a rien à en dire. */
+  /** Last activity of an account, or `undefined` if the server has nothing to say about it. */
   presenceOf(handle: string): number | undefined {
     return this.presence.get(handle);
   }
 
-  /** Horloge du serveur à la dernière relève : la référence pour juger de la fraîcheur. */
+  /** Server clock at the last poll: the reference for judging freshness. */
   get presenceClock(): number {
     return this.presenceNow;
   }
 
-  /** Le coffre est-il actif sur ce compte ? */
+  /** Is the vault on for this account? */
   get archiving(): boolean {
     return this.vaultCipher !== null;
   }
 
   /**
-   * Réactive le coffre après une coupure explicite.
+   * Turns the vault back on after an explicit shutdown.
    *
-   * Les messages **déjà échangés** ne seront pas archivés : leurs clés MLS sont détruites, et
-   * rien ne permet de les reconstituer. L'archivage reprend maintenant, jamais rétroactivement
-   * — l'interface doit le dire, sans quoi l'utilisateur croira avoir récupéré un passé qui
-   * n'existe plus. C'est vrai de la période pendant laquelle il l'avait coupé.
+   * Messages **already exchanged** will not be archived: their MLS keys are destroyed, and
+   * nothing can reconstruct them. Archiving resumes now, never retroactively — the interface has
+   * to say so, or the user will believe they recovered a past that no longer exists. That holds
+   * for the whole period during which they had it off.
    */
   async enableVault(): Promise<void> {
     this.vaultCipher = await vault.importVaultKey(this.account.vaultKey());
@@ -637,11 +628,11 @@ export class Session {
   }
 
   /**
-   * Désactive le coffre. **N'efface pas ce qui a déjà été archivé** : le serveur conserve les
-   * entrées, et la clé qui les ouvre reste dérivable de la phrase.
+   * Turns the vault off. **Does not erase what is already archived**: the server keeps the
+   * entries, and the key that opens them is still derivable from the phrase.
    *
-   * Le dire plutôt que de laisser croire à un effacement : promettre une suppression qu'on ne
-   * contrôle pas — le serveur pouvant garder des copies — serait un mensonge de sécurité.
+   * Saying so rather than implying an erasure: promising a deletion we do not control — the
+   * server may keep copies — would be a security lie.
    */
   async disableVault(): Promise<void> {
     this.vaultCipher = null;
@@ -649,178 +640,175 @@ export class Session {
   }
 
   /**
-   * Recharge l'historique archivé d'une conversation.
+   * Reloads a conversation's archived history.
    *
-   * Appelé sur demande plutôt qu'au démarrage : la restauration passe par le réseau et
-   * déchiffre message par message, ce qui n'a pas à retarder l'affichage.
+   * Called on demand rather than at startup: restoring goes over the network and decrypts
+   * message by message, which has no business delaying the display.
    */
   async restoreHistory(view: ConversationView): Promise<number> {
     if (!this.vaultCipher) return 0;
 
-    const { messages, illisibles } = await vault.restore(this.api, this.vaultCipher, view.groupId);
-    const nouveaux = vault.merge(view.messages, messages);
+    const { messages, unreadable } = await vault.restore(this.api, this.vaultCipher, view.groupId);
+    const added = vault.merge(view.messages, messages);
 
-    // Rien de lisible alors qu'il y avait des entrées : la clé du coffre n'est plus la bonne,
-    // c'est-à-dire que le compte a été tourné. Le dire plutôt que de rendre un fil vide.
-    if (messages.length === 0 && illisibles > 0) {
-      throw new Error(
-        "L'historique archivé n'est plus lisible : la phrase de récupération a changé.",
-      );
+    // Nothing readable although there were entries: the vault key is no longer the right one,
+    // i.e. the account has been rotated. Say it rather than serve an empty thread.
+    if (messages.length === 0 && unreadable > 0) {
+      throw new Error("The archived history can no longer be read: the recovery phrase changed.");
     }
 
-    view.messages.push(...nouveaux);
-    return nouveaux.length;
+    view.messages.push(...added);
+    return added.length;
   }
 
   /**
-   * Rapatrie l'historique archivé, une seule fois par conversation et par session.
+   * Pulls back the archived history, once per conversation per session.
    *
-   * Appelé à l'ouverture d'une conversation, pas au démarrage : la restauration passe par le
-   * réseau et déchiffre entrée par entrée, ce qui n'a pas à retarder l'affichage de la liste.
-   * Et surtout pas depuis la relève périodique, qui repasse toutes les trente secondes sur
-   * **toutes** les conversations — ce serait un aller-retour réseau par groupe, en boucle.
+   * Called when a conversation is opened, not at startup: restoring goes over the network and
+   * decrypts entry by entry, which has no business delaying the conversation list. And above all
+   * not from the periodic poll, which sweeps **every** conversation every thirty seconds — that
+   * would be one round trip per group, forever.
    *
-   * # Ce qu'elle ne touche pas, et pourquoi
+   * # What it does not touch, and why
    *
-   * Ni `contentCursor`, ni `readCursor`, ni `receipts`. Un message restauré a déjà été accusé
-   * lors d'une session antérieure ; faire avancer le curseur annoncé ferait ré-émettre un accusé
-   * à chaque rechargement, et chaque accusé en engendrerait un autre. C'est le seul chemin par
-   * lequel la boucle décrite dans le README peut renaître.
+   * Neither `contentCursor`, nor `readCursor`, nor `receipts`. A restored message was already
+   * acknowledged in an earlier session; moving the announced cursor would re-emit a receipt on
+   * every reload, and each receipt would breed another. This is the one path by which the loop
+   * described in the README can come back to life.
    *
-   * Ni `view.cursor` non plus : il appartient à l'état MLS, pas à l'affichage. Le coffre ne dit
-   * rien du ratchet.
+   * Nor `view.cursor`: it belongs to the MLS state, not to the display. The vault says nothing
+   * about the ratchet.
    */
   async hydrate(view: ConversationView): Promise<number> {
     if (view.hydrated || !this.vaultCipher) return 0;
 
-    // Posé **avant** l'attente : deux rendus rapprochés lanceraient sinon deux rapatriements
-    // concurrents de la même conversation.
+    // Set **before** awaiting: two renders in quick succession would otherwise start two
+    // concurrent pulls for the same conversation.
     view.hydrated = true;
     return this.restoreHistory(view);
   }
 
-  /** Archive les messages qui viennent d'être lus ou envoyés, si le coffre est actif. */
+  /** Archives the messages just read or sent, if the vault is on. */
   private async archive(view: ConversationView, messages: Message[]): Promise<void> {
     if (!this.vaultCipher || messages.length === 0) return;
 
     try {
       await vault.store(this.api, this.vaultCipher, view.groupId, messages);
     } catch (error) {
-      // Un échec d'archivage ne doit pas empêcher la conversation : le message est déjà
-      // délivré, seule la sauvegarde manque. Elle sera retentée au prochain envoi.
-      console.warn("archivage reporté", error);
+      // A failed archive must not block the conversation: the message is already delivered, only
+      // the backup is missing. It will be retried on the next send.
+      console.warn("archiving deferred", error);
     }
   }
 
-  /** Un verrou est-il posé sur cet appareil ? */
+  /** Is a lock set on this device? */
   get locked(): boolean {
     return this.lock !== undefined;
   }
 
   /**
-   * Pose un verrou : l'état bascule de la clé d'IndexedDB vers une clé maîtresse dérivée.
+   * Sets a lock: the state moves from the IndexedDB key to a derived master key.
    *
-   * La bascule est un simple `persist()` : l'état est ré-chiffré sous la nouvelle clé, et
-   * l'ancienne version est écrasée. La clé non-extractable reste dans IndexedDB — elle sert
-   * toujours à signer les requêtes HTTP — mais ne déchiffre plus rien.
+   * The switch is a plain `persist()`: the state is re-encrypted under the new key, and the old
+   * version is overwritten. The non-extractable key stays in IndexedDB — it still signs HTTP
+   * requests — but no longer decrypts anything.
    */
   async enableLock(password: string): Promise<void> {
-    if (this.lock) throw new Error("Un verrou est déjà posé.");
+    if (this.lock) throw new Error("A lock is already set.");
 
     const [envelope, master] = await createLock(password);
     this.lock = envelope;
-    this.atRest = new LockedCipher(this.ancrage.cipher, master);
+    this.atRest = new LockedCipher(this.anchor.cipher, master);
     await this.persist();
   }
 
   /**
-   * Retire le verrou. Exige le mot de passe courant.
+   * Removes the lock. Requires the current password.
    *
-   * Sans cette exigence, quiconque trouve un appareil déverrouillé le désarme définitivement
-   * en un clic — le verrou ne protégerait plus que jusqu'au premier oubli d'écran.
+   * Without that requirement, anyone who finds an unlocked device disarms it for good in one
+   * click — the lock would only protect until the first forgotten screen.
    */
   async disableLock(password: string): Promise<void> {
     if (!this.lock) return;
 
     await openLock(this.lock, password);
     this.lock = undefined;
-    this.atRest = this.ancrage.cipher;
+    this.atRest = this.anchor.cipher;
 
-    // La clé rangée pour la biométrie n'a plus rien à ouvrir, et la laisser serait pire
-    // qu'inutile : elle survivrait au verrou qui la justifiait.
-    await biometrics.retirerBiometrie().catch(() => {});
+    // The key kept for biometrics has nothing left to open, and leaving it would be worse than
+    // useless: it would outlive the lock that justified it.
+    await biometrics.disableBiometric().catch(() => {});
     await this.persist();
   }
 
   /**
-   * Fait garder la clé maîtresse par le système, derrière l'empreinte ou le visage.
+   * Hands the master key to the system, behind a fingerprint or a face.
    *
-   * # Ce que l'utilisateur échange
+   * # What the user is trading
    *
-   * Son mot de passe n'était nulle part ; sa clé maîtresse le sera. Elle est scellée par les
-   * secrets du processus natif, eux-mêmes en clair dans le répertoire privé de l'application :
-   * la protection devient celle du système et de son invite, solide contre qui prend l'appareil
-   * en main, sans valeur contre qui en extrait le stockage. L'interface doit l'annoncer avant.
+   * Their password was nowhere; their master key will be somewhere. It is sealed by the native
+   * process secrets, themselves in the clear in the app's private directory: the protection
+   * becomes the system's and its prompt — solid against someone who picks up the device,
+   * worthless against someone who extracts its storage. The interface has to say so first.
    *
-   * # Pourquoi le mot de passe n'est pas redemandé
+   * # Why the password is not asked again
    *
-   * Il vient de l'être : sans lui, cette session ne serait pas ouverte. Le redemander
-   * n'ajouterait aucune preuve — quelqu'un qui tient un appareil déverrouillé lit déjà tout —
-   * et ferait payer un geste de sécurité par une gêne sans contrepartie.
+   * It just was: without it, this session would not be open. Asking again would add no proof —
+   * someone holding an unlocked device already reads everything — and would charge a security
+   * gesture with friction that buys nothing.
    */
-  async activerBiometrie(): Promise<void> {
+  async enableBiometric(): Promise<void> {
     if (!(this.atRest instanceof LockedCipher)) {
-      throw new Error("Posez d'abord un verrou : la biométrie garde sa clé, elle n'en crée pas.");
+      throw new Error("Set a lock first: biometrics keep your key, they do not create one.");
     }
 
-    await biometrics.activerBiometrie(await exporterMaster(this.atRest.cleMaitresse()));
+    await biometrics.enableBiometric(await exportMaster(this.atRest.masterKey()));
   }
 
-  /** Retire le déverrouillage biométrique. Le verrou reste posé, le mot de passe l'ouvre encore. */
-  async retirerBiometrie(): Promise<void> {
-    await biometrics.retirerBiometrie();
+  /** Removes biometric unlock. The lock stays set, and the password still opens it. */
+  async disableBiometric(): Promise<void> {
+    await biometrics.disableBiometric();
   }
 
   /**
-   * Change le mot de passe sans re-chiffrer l'état.
+   * Changes the password without re-encrypting the state.
    *
-   * Seuls les 32 octets de la clé maîtresse sont re-scellés. L'état, qui pèse plusieurs
-   * kilooctets et grandit avec les conversations, n'est pas touché — et ne repasse donc pas
-   * en clair en mémoire au moment le plus délicat.
+   * Only the 32 bytes of the master key are re-sealed. The state, which weighs several kilobytes
+   * and grows with the conversations, is untouched — so it never goes back through memory in the
+   * clear at the most delicate moment.
    */
-  async changeLockPassword(ancien: string, nouveau: string): Promise<void> {
-    if (!this.lock) throw new Error("Aucun verrou à modifier.");
-    this.lock = await changePassword(this.lock, ancien, nouveau);
+  async changeLockPassword(current: string, next: string): Promise<void> {
+    if (!this.lock) throw new Error("No lock to change.");
+    this.lock = await changePassword(this.lock, current, next);
     await this.persist();
   }
 
   /**
-   * Efface l'identité de cet appareil.
+   * Erases this device's identity.
    *
-   * # Pourquoi un drapeau, et pas seulement un `clearSession`
+   * # Why a flag, and not just a `clearSession`
    *
-   * L'effacement est suivi d'un rechargement de page, qui n'est pas instantané. Pendant ce
-   * délai, une relève **déjà en vol** se termine et appelle `persist()` — qui réécrit dans la
-   * base l'identité qu'on vient d'effacer. Le rechargement la retrouve alors intacte.
+   * Erasure is followed by a page reload, which is not instantaneous. During that window, a poll
+   * **already in flight** finishes and calls `persist()` — which writes back to the database the
+   * identity we just erased. The reload then finds it intact.
    *
-   * Le symptôme observé : l'écran de création de compte apparaît, on crée une nouvelle
-   * identité, et au rechargement suivant c'est l'ancienne qui revient. Rien ne signale
-   * l'échec.
+   * The observed symptom: the account creation screen appears, a new identity is created, and on
+   * the next reload the old one is back. Nothing reports the failure.
    *
-   * Ce n'est pas un défaut cosmétique : l'utilisateur croit ses clés détruites alors
-   * qu'elles sont toujours là. Le drapeau condamne définitivement cette instance — plus
-   * aucune écriture ne partira d'elle, quelle que soit l'opération encore en cours.
+   * This is not a cosmetic defect: the user believes their keys destroyed while they are still
+   * there. The flag condemns this instance for good — no write will ever leave it again,
+   * whatever operation is still running.
    */
   private forgotten = false;
 
   async forget(): Promise<void> {
     this.forgotten = true;
-    await this.ancrage.store.clear();
+    await this.anchor.store.clear();
   }
 
-  /** Efface sans détenir de session — cas d'un verrou dont on a perdu le mot de passe. */
+  /** Erases without holding a session — the case of a lock whose password was lost. */
   static async forget(): Promise<void> {
-    await effacerTout();
+    await clearAll();
   }
 
   fingerprint(): string {
@@ -828,20 +816,20 @@ export class Session {
   }
 
   /**
-   * Persiste l'état MLS, chiffré.
+   * Persists the MLS state, encrypted.
    *
-   * À appeler après **toute** opération qui fait avancer un groupe. Un état persisté en
-   * retard puis restauré ferait reculer les epochs et rejouerait des clés déjà utilisées.
+   * To be called after **every** operation that moves a group forward. A state persisted late
+   * and then restored would roll epochs back and replay keys already used.
    *
-   * **L'historique ne passe pas par ici.** Rien de ce qui est écrit sur ce disque ne contient
-   * de message : les conserver localement demanderait de les chiffrer sous la clé d'état, ce qui
-   * est faisable, mais fabriquerait un second historique par appareil, à tenir cohérent avec le
-   * premier. C'est le coffre serveur (`vault.ts`) qui tient ce rôle, désormais par défaut, et
-   * la conversation se repeuple à l'ouverture via `hydrate`.
+   * **History does not go through here.** Nothing written to this disk contains a message:
+   * keeping them locally would mean encrypting them under the state key, which is doable, but
+   * would manufacture a second per-device history to keep consistent with the first. The server
+   * vault (`vault.ts`) plays that role, now by default, and the conversation refills itself on
+   * open through `hydrate`.
    */
   private async persist(): Promise<void> {
-    // Voir `forget` : une écriture qui gagnerait la course contre le rechargement
-    // ressusciterait une identité que l'utilisateur croit détruite.
+    // See `forget`: a write that won the race against the reload would resurrect an identity the
+    // user believes destroyed.
     if (this.forgotten) return;
 
     const groupIds = this.client.conversationIds();
@@ -849,11 +837,11 @@ export class Session {
       [...this.conversations.values()].map((view) => [view.key, view.cursor]),
     );
 
-    await this.ancrage.store.save({
+    await this.anchor.store.save({
       cursors,
       deviceId: this.deviceId,
       handle: this.handle,
-      // La graine est chiffrée comme l'état MLS : elle vaut le compte entier.
+      // The seed is encrypted like the MLS state: it is worth the whole account.
       accountSeed: await this.atRest.seal(this.account.exportSeed()),
       lock: this.lock,
       vaultEnabled: this.vaultCipher !== null,
@@ -871,10 +859,10 @@ export class Session {
   }
 
   /**
-   * Recharge le stock si nécessaire.
+   * Refills the stock if needed.
    *
-   * Appelé à chaque relève. L'opération est idempotente et bon marché : une requête de
-   * comptage, puis une publication seulement sous le seuil.
+   * Called on every poll. The operation is idempotent and cheap: one counting request, then a
+   * publish only when below the threshold.
    */
   private async replenishKeyPackagesIfLow(): Promise<void> {
     const { remaining } = await this.api.keyPackageStock();
@@ -890,18 +878,17 @@ export class Session {
   }
 
   /**
-   * Résout un pseudonyme en appareils vérifiés.
+   * Resolves a handle into verified devices.
    *
-   * Passe systématiquement par `resolveAccount`, qui recontrôle chaque attestation. La liste
-   * vient du serveur : sans ce contrôle, il lui suffirait d'y glisser un appareil qu'il
-   * contrôle pour lire toutes les conversations du compte.
+   * Always goes through `resolveAccount`, which re-checks every attestation. The list comes from
+   * the server: without that check, it would only have to slip in a device it controls to read
+   * every conversation of the account.
    */
   async resolve(handle: string): Promise<ResolvedAccount> {
     const account = await resolveAccount(this.api, this.crypto, handle);
 
-    // Les attestations prouvent qu'un appareil appartient au compte. Elles ne disent rien de
-    // la clé du COMPTE, qu'on découvre ici pour la première fois — c'est le trou que le
-    // journal ferme.
+    // Attestations prove a device belongs to the account. They say nothing about the ACCOUNT
+    // key, which we are discovering here for the first time — that is the hole the log closes.
     try {
       const { verdict, head } = await log.verifyAccount(
         this.api,
@@ -912,39 +899,38 @@ export class Session {
       );
 
       if (verdict.ok) {
-        // La tête n'est mémorisée qu'en cas de succès : entériner une tête qu'on vient de
-        // refuser reviendrait à valider ce qu'on rejette.
+        // The head is remembered only on success: endorsing a head we just rejected would amount
+        // to validating what we reject.
         this.seenHead = head;
       } else {
         this.raiseLogAlert(verdict.reason);
       }
     } catch (error) {
-      // Journal injoignable : on n'invente pas une alerte de sécurité pour une panne réseau.
-      // Mais on ne mémorise rien non plus, donc le contrôle sera refait.
-      console.warn("vérification du journal reportée", error);
+      // Log unreachable: we do not invent a security alert for a network failure. But we remember
+      // nothing either, so the check will be redone.
+      console.warn("log verification deferred", error);
     }
 
     return account;
   }
 
   /**
-   * Diffuse notre vue du journal à un correspondant.
+   * Shares our view of the log with a peer.
    *
-   * # Ce que cela ajoute aux preuves
+   * # What this adds to the proofs
    *
-   * Un serveur peut tenir **deux journaux** et en servir un à chacun. Les preuves de chaque
-   * victime vérifient parfaitement : chacune voit un journal signé et cohérent. Rien du côté
-   * client seul ne peut le détecter.
+   * A server can keep **two logs** and serve one to each side. Every victim's proofs verify
+   * perfectly: each sees a signed, consistent log. Nothing on the client side alone can detect
+   * it.
    *
-   * La comparaison entre deux personnes le peut — à condition de passer par un canal que le
-   * serveur ne contrôle pas. Ce canal est la conversation elle-même : il en transporte les
-   * octets sans pouvoir les lire ni les modifier.
+   * Comparing between two people can — provided it goes over a channel the server does not
+   * control. That channel is the conversation itself: it carries the bytes without being able to
+   * read or change them.
    *
-   * # Pourquoi c'est parcimonieux
+   * # Why this is sparing
    *
-   * Une tête par conversation et par session suffit : le contrôle porte sur l'existence d'une
-   * bifurcation, pas sur son instant. En émettre à chaque message ajouterait du trafic sans
-   * rien détecter de plus.
+   * One head per conversation per session is enough: the check is about the existence of a fork,
+   * not its timing. Emitting one per message would add traffic and detect nothing more.
    */
   private async gossip(view: ConversationView): Promise<void> {
     if (!this.seenHead || view.gossiped) return;
@@ -957,43 +943,42 @@ export class Session {
   }
 
   /**
-   * Confronte la vue d'un correspondant à la nôtre.
+   * Confronts a peer's view with ours.
    *
-   * On ne compare pas les racines directement — nos deux journaux ont des tailles différentes,
-   * et une divergence de taille est normale. On demande au serveur de **prouver** que le
-   * journal qu'il nous sert prolonge celui qu'il a servi à l'autre.
+   * We do not compare the roots directly — our two logs have different sizes, and a size
+   * difference is normal. We ask the server to **prove** that the log it serves us extends the
+   * one it served the other side.
    *
-   * S'il a servi deux journaux distincts, il ne le peut pas : aucune preuve de cohérence ne
-   * relie deux arbres qui ont bifurqué. C'est le seul contrôle qui attrape ce cas.
+   * If it served two distinct logs, it cannot: no consistency proof links two trees that have
+   * forked. This is the only check that catches that case.
    */
   private async checkGossip(head: content.GossipHead): Promise<void> {
     try {
-      const courante = await this.api.logHead();
+      const current = await this.api.logHead();
 
       const verdict = await log.verifyExtends(
         this.api,
         this.crypto,
-        { size: head.size, root: head.root, logKey: courante.logKey },
-        courante,
+        { size: head.size, root: head.root, logKey: current.logKey },
+        current,
       );
 
       if (!verdict.ok) {
         this.raiseLogAlert(
-          "Un correspondant voit un journal de clés différent du nôtre. " +
-            "Le serveur en présente deux versions : c'est une attaque, pas une panne.",
+          "Someone you are talking to sees a different key log than you do. " +
+            "The server is presenting two versions of it: that is an attack, not a glitch.",
         );
       }
     } catch (error) {
-      console.warn("comparaison des journaux reportée", error);
+      console.warn("log comparison deferred", error);
     }
   }
 
   /**
-   * De quoi déposer sans s'identifier, si nous détenons la clé du groupe.
+   * What it takes to post without identifying ourselves, if we hold the group key.
    *
-   * `undefined` fait retomber sur le dépôt signé. Ce n'est pas une panne : les conversations
-   * créées avant le sealed sender n'ont pas de clé, et continuer à les servir vaut mieux que
-   * les rendre muettes.
+   * `undefined` falls back to signed posting. That is not a failure: conversations created before
+   * sealed sender have no key, and keeping them working beats striking them mute.
    */
   private posting(view: ConversationView): { key: Uint8Array; mac: PostMac } | undefined {
     if (!view.postingKey) return undefined;
@@ -1001,12 +986,12 @@ export class Session {
   }
 
   /**
-   * Même clé que [`Session.posting`], **autre domaine**.
+   * Same key as [`Session.posting`], **different domain**.
    *
-   * Le serveur vérifie les signaux sous `wac-signal-mac-v1` et les dépôts sous `wac-post-v1` :
-   * réutiliser le second pour un signal produit un 403 que rien n'explique côté client, la
-   * requête étant lancée sans attendre sa réponse. La séparation existe pour qu'un MAC de
-   * signal — dont le rejeu n'est pas contrôlé — ne vaille pas comme MAC de dépôt.
+   * The server checks signals under `wac-signal-mac-v1` and posts under `wac-post-v1`: reusing
+   * the second for a signal yields a 403 that nothing explains client-side, the request being
+   * fired without awaiting its response. The separation exists so that a signal MAC — whose
+   * replay is not checked — cannot pass as a posting MAC.
    */
   private signalPosting(
     view: ConversationView,
@@ -1016,14 +1001,14 @@ export class Session {
   }
 
   /**
-   * Émet un signal éphémère par la session, ou par HTTP si elle est fermée.
+   * Emits an ephemeral signal over the session, or over HTTP if it is closed.
    *
-   * Les deux chemins sont **anonymes** : le serveur vérifie le même MAC de groupe et apprend
-   * qu'un membre écrit, jamais lequel. La session ne fait que rendre le trajet moins cher — une
-   * trame au lieu d'une requête, pour un événement qui se produit à chaque frappe.
+   * Both paths are **anonymous**: the server checks the same group MAC and learns that a member
+   * is typing, never which one. The session only makes the trip cheaper — one frame instead of
+   * one request, for an event that fires on every keystroke.
    *
-   * Le repli n'est donc pas une dégradation de confidentialité, et c'est ce qui permet de le
-   * prendre sans hésiter plutôt que de renoncer au signal.
+   * The fallback is therefore not a privacy downgrade, and that is what makes it safe to take
+   * rather than give the signal up.
    */
   private async emitSignal(
     groupId: Uint8Array,
@@ -1039,12 +1024,11 @@ export class Session {
   }
 
   /**
-   * Transmet la clé de dépôt aux autres membres d'un groupe.
+   * Passes the posting key to the other members of a group.
    *
-   * Émise une fois par session et par groupe, par celui qui la détient. Un membre qui ne l'a
-   * pas encore reçue poste en mode signé entre-temps — moins discret, mais fonctionnel. Faire
-   * l'inverse, refuser d'écrire tant que la clé n'est pas là, transformerait une dégradation
-   * de confidentialité en panne.
+   * Emitted once per session per group, by whoever holds it. A member who has not received it yet
+   * posts in signed mode in the meantime — less discreet, but working. Doing the opposite,
+   * refusing to write until the key arrives, would turn a privacy downgrade into an outage.
    */
   private async sharePostingKey(view: ConversationView): Promise<void> {
     if (!view.postingKey || view.postingKeyShared || view.peers.length === 0) return;
@@ -1053,136 +1037,132 @@ export class Session {
     await this.sendContent(view, { kind: "posting-key", key: view.postingKey });
   }
 
-  /** Enregistre une anomalie du journal, sans doublon. */
+  /** Records a log anomaly, without duplicates. */
   private raiseLogAlert(reason: string): void {
     if (!this.logAlerts.includes(reason)) this.logAlerts.push(reason);
   }
 
   /**
-   * Cherche une conversation dont les participants sont exactement ceux demandés.
+   * Looks for a conversation whose participants are exactly the ones asked for.
    *
-   * La composition est lue dans l'**arbre MLS** (`view.peers`), pas dans un champ local :
-   * l'arbre est l'état authentifié, et c'est lui qui décide qui est membre. Un journal local
-   * divergerait au premier retrait manqué.
+   * Membership is read from the **MLS tree** (`view.peers`), not from a local field: the tree is
+   * the authenticated state, and it decides who is a member. A local record would diverge at the
+   * first missed removal.
    *
-   * On compare des ensembles, pas des listes : l'ordre de saisie ne doit pas produire deux
-   * groupes différents. Un compte à plusieurs appareils apparaît plusieurs fois dans l'arbre,
-   * d'où le passage par un `Set`.
+   * We compare sets, not lists: typing order must not produce two different groups. An account
+   * with several devices appears several times in the tree, hence the `Set`.
    */
   private findConversation(handles: string[]): ConversationView | undefined {
-    const cherche = [...new Set(handles)].sort().join("\u0000");
+    const target = [...new Set(handles)].sort().join("\u0000");
 
     for (const view of this.conversations.values()) {
-      const membres = [...new Set(view.peers.map((peer) => peer.name))]
+      const members = [...new Set(view.peers.map((peer) => peer.name))]
         .filter((name) => name !== this.handle)
         .sort()
         .join("\u0000");
 
-      if (membres === cherche) return view;
+      if (members === target) return view;
     }
 
     return undefined;
   }
 
   /**
-   * Ouvre une conversation avec un ou plusieurs comptes, en y ajoutant **tous** leurs
-   * appareils.
+   * Opens a conversation with one or more accounts, adding **all** of their devices.
    *
-   * # Parité
+   * # Parity
    *
-   * Un appareil oublié est un appareil qui ne reçoit rien : le correspondant verrait la
-   * conversation apparaître sur son téléphone et pas sur sa tablette, sans explication. Tous
-   * les appareils d'un compte ont le même accès, partout — c'est l'invariant que
-   * `addMissingDevices` maintient ensuite à chaque relève.
+   * A forgotten device is a device that receives nothing: the peer would see the conversation
+   * appear on their phone and not on their tablet, with no explanation. Every device of an
+   * account has the same access, everywhere — the invariant `addMissingDevices` then maintains
+   * on every poll.
    *
-   * # Plat ou administré
+   * # Flat or administered
    *
-   * À deux comptes, la conversation est **plate** : des rôles d'administration n'y auraient
-   * aucun sens, et le groupe plat est la forme correcte d'un 1-to-1. Au-delà, le créateur
-   * devient le premier admin.
+   * With two accounts the conversation is **flat**: admin roles would make no sense there, and a
+   * flat group is the correct shape for a 1-to-1. Beyond that, the creator becomes the first
+   * admin.
    */
   async startConversation(handles: string | string[]): Promise<ConversationView> {
     const wanted = [...new Set(typeof handles === "string" ? [handles] : handles)].filter(
       (handle) => handle !== this.handle,
     );
-    if (wanted.length === 0) throw new Error("aucun correspondant indiqué.");
+    if (wanted.length === 0) throw new Error("no recipient given.");
 
-    // Une conversation par interlocuteur, un groupe par composition.
+    // One conversation per set of people, one group per membership.
     //
-    // Sans cette recherche, réécrire le même pseudonyme ouvre un second groupe MLS avec les
-    // mêmes membres : les messages se répartissent entre les deux au gré de celui qu'on a
-    // sélectionné, et l'utilisateur conclut que des messages se perdent. Rien dans le
-    // protocole ne l'interdit — c'est à l'application de décider qu'une conversation est
-    // identifiée par ses participants.
-    const existante = this.findConversation(wanted);
-    if (existante) return existante;
+    // Without this lookup, retyping the same handle opens a second MLS group with the same
+    // members: messages spread across the two depending on which one was selected, and the user
+    // concludes messages are being lost. Nothing in the protocol forbids it — it is up to the
+    // app to decide that a conversation is identified by its participants.
+    const existing = this.findConversation(wanted);
+    if (existing) return existing;
 
     const peers: ResolvedAccount[] = [];
     for (const handle of wanted) {
       const peer = await this.resolve(handle);
 
       if (peer.rejected.length > 0) {
-        // On refuse d'ouvrir la conversation plutôt que d'ignorer discrètement l'intrus. Le
-        // serveur a servi un appareil qu'il n'aurait pas pu produire : c'est le signal qu'on
-        // cherchait, et le taire reviendrait à annuler tout l'intérêt du dispositif.
+        // We refuse to open the conversation rather than quietly drop the intruder. The server
+        // served a device it could not have produced: that is the signal we were looking for, and
+        // keeping quiet about it would cancel out the whole point of the machinery.
         throw new Error(
-          `Le serveur a présenté ${peer.rejected.length} appareil(s) non attesté(s) pour @${handle}. ` +
-            "Conversation refusée.",
+          `The server presented ${peer.rejected.length} unattested device(s) for @${handle}. ` +
+            "Conversation refused.",
         );
       }
       if (peer.devices.length === 0) {
-        throw new Error(`@${handle} n'a aucun appareil joignable.`);
+        throw new Error(`@${handle} has no reachable device.`);
       }
       peers.push(peer);
     }
 
-    // Un groupe est administré, un 1-to-1 ne l'est pas. Le créateur est le premier admin ;
-    // il pourra en désigner d'autres, mais jamais se retirer seul — la politique refuse de
-    // laisser un groupe sans admin, ce qui le gèlerait définitivement.
+    // A group is administered, a 1-to-1 is not. The creator is the first admin; they can appoint
+    // others, but never step down alone — the policy refuses to leave a group without an admin,
+    // which would freeze it for good.
     const groupId =
       peers.length > 1
         ? this.client.createGroup(this.handle)
         : this.client.createConversation();
 
     const invited: string[] = [];
-    /** Enveloppes que nous avons nous-mêmes déposées, et qu'il ne faut pas relire. */
+    /** Envelopes we posted ourselves, and must not read back. */
     const emitted = new Set<number>();
 
-    // Clé de dépôt du groupe : elle permettra à chaque membre d'écrire sans s'identifier
-    // auprès du serveur. Générée ici, déclarée au serveur à la création, puis distribuée aux
-    // autres membres **par MLS** — la faire transiter en clair reviendrait à demander au
-    // serveur de distribuer le moyen de ne pas lui parler.
+    // The group's posting key: it will let every member write without identifying themselves to
+    // the server. Generated here, declared to the server at creation, then distributed to the
+    // other members **through MLS** — sending it in the clear would amount to asking the server
+    // to distribute the means of not talking to it.
     const postingKey = crypto.getRandomValues(new Uint8Array(32));
 
     for (const device of peers.flatMap((peer) => peer.devices)) {
       const claimed = await this.api.claimKeyPackage(device.id);
       const invitation = this.client.invite(groupId, claimed.package) as Invitation;
 
-      // Le serveur doit connaître le membre avant qu'aucun message ne circule : c'est lui
-      // qui contrôle l'accès à la boîte. La clé de dépôt n'est acceptée qu'au premier appel,
-      // celui qui crée le groupe.
+      // The server must know the member before any message flows: it is what controls access to
+      // the mailbox. The posting key is only accepted on the first call, the one that creates the
+      // group.
       await this.api.addMembers(
         groupId,
         [this.deviceId, device.id],
         invited.length === 0 ? postingKey : undefined,
       );
 
-      // Publier le commit AVANT de l'appliquer.
+      // Publish the commit BEFORE applying it.
       //
-      // Chaque ajout fait avancer le groupe d'une epoch, et les membres déjà présents doivent
-      // appliquer ce commit sous peine de rester à l'ancienne. Si la publication échouait
-      // après application, nous aurions changé d'epoch sans que le commit existe nulle part :
-      // le groupe serait mort en silence.
+      // Every addition moves the group one epoch forward, and members already present must apply
+      // that commit or stay behind. If publishing failed after applying, we would have changed
+      // epoch with the commit existing nowhere: the group would die in silence.
       //
-      // Au premier tour il n'y a personne à informer, ce qui masque le problème jusqu'à ce
-      // qu'un correspondant ait deux appareils.
+      // On the first pass there is nobody to inform, which hides the problem until a peer has two
+      // devices.
       if (invited.length > 0) {
         const posted = await this.api.postEnvelope(groupId, envelope.encodeMls(invitation.commit));
         emitted.add(posted.seq);
       }
 
-      // L'arbre de ratchet n'existe qu'une fois le commit appliqué : avant, il ne contient
-      // pas le nouveau membre et son Welcome serait rejeté.
+      // The ratchet tree only exists once the commit is applied: before that it does not contain
+      // the new member and its Welcome would be rejected.
       const tree = this.client.applyPending(groupId);
       const welcomed = await this.api.postEnvelope(
         groupId,
@@ -1216,10 +1196,10 @@ export class Session {
   }
 
   /**
-   * Résout tous les correspondants d'une conversation, nous exclus.
+   * Resolves every peer of a conversation, ourselves excluded.
    *
-   * Un échec réseau ne doit pas vider la liste affichée : on conserve alors ce qu'on avait,
-   * plutôt que de faire disparaître l'état de vérification à la première coupure.
+   * A network failure must not empty the displayed list: we keep what we had rather than make the
+   * verification state vanish at the first dropped connection.
    */
   private async resolvePeers(view: ConversationView): Promise<ResolvedAccount[]> {
     const handles = [...new Set(view.peers.map((peer) => peer.name))].filter(
@@ -1231,7 +1211,7 @@ export class Session {
       try {
         resolved.push(await this.resolve(handle));
       } catch (error) {
-        console.warn(`compte @${handle} non résolu`, error);
+        console.warn(`account @${handle} not resolved`, error);
         const previous = view.accounts.find((account) => account.handle === handle);
         if (previous) resolved.push(previous);
       }
@@ -1239,20 +1219,20 @@ export class Session {
     return resolved;
   }
 
-  /** Rôles d'une conversation, ou `null` si elle est plate (cas du 1-to-1). */
+  /** A conversation's roles, or `null` if it is flat (the 1-to-1 case). */
   roles(view: ConversationView): Roles | null {
     return this.client.roster(view.groupId) as Roles | null;
   }
 
   /**
-   * Remplace les rôles d'un groupe.
+   * Replaces a group's roles.
    *
-   * Le roster vit dans le group context MLS, donc dans l'état authentifié : il n'est ni
-   * rejouable ni falsifiable isolément. **MLS ne l'applique pas pour autant** — ce sont les
-   * clients qui refusent un commit non autorisé, chacun de son côté. Un client qui appliquerait
-   * une autre règle ne provoquerait pas une erreur mais un fork silencieux du groupe.
+   * The roster lives in the MLS group context, so in the authenticated state: it is neither
+   * replayable nor forgeable on its own. **MLS does not enforce it, though** — clients refuse an
+   * unauthorised commit, each on its own. A client applying a different rule would not raise an
+   * error but silently fork the group.
    *
-   * Passer un `admin` différent de l'actuel **transmet le groupe**, sans retour possible.
+   * Passing an `admin` different from the current one **hands the group over**, with no way back.
    */
   async setRoles(view: ConversationView, admin: string, moderators: string[]): Promise<void> {
     const commit = this.client.setRoles(view.groupId, admin, moderators);
@@ -1261,10 +1241,10 @@ export class Session {
     await this.persist();
   }
 
-  /** Nomme ou révoque un modérateur. L'admin seul en a le pouvoir. */
+  /** Appoints or removes a moderator. Only the admin has that power. */
   async setModerator(view: ConversationView, handle: string, moderator: boolean): Promise<void> {
     const roles = this.roles(view);
-    if (!roles) throw new Error("cette conversation n'a pas de rôles.");
+    if (!roles) throw new Error("this conversation has no roles.");
 
     const moderators = roles.moderators.filter((m) => m !== handle);
     if (moderator) moderators.push(handle);
@@ -1273,14 +1253,14 @@ export class Session {
   }
 
   /**
-   * Retire un compte entier d'un groupe, tous ses appareils à la fois.
+   * Removes a whole account from a group, all its devices at once.
    *
-   * La parité impose le « tous » : laisser un appareil d'un compte évincé continuerait de lui
-   * donner accès, et l'interface aurait menti.
+   * Parity forces the "all": leaving one device of an evicted account would keep giving it
+   * access, and the interface would have lied.
    */
   async removeAccount(view: ConversationView, handle: string): Promise<void> {
     const account = view.accounts.find((candidate) => candidate.handle === handle);
-    if (!account) throw new Error(`@${handle} n'est pas dans cette conversation.`);
+    if (!account) throw new Error(`@${handle} is not in this conversation.`);
 
     for (const device of account.devices) {
       const commit = this.client.removeMember(view.groupId, device.mlsKey);
@@ -1294,76 +1274,75 @@ export class Session {
   }
 
   /**
-   * Désigne le successeur d'un admin qui s'en va.
+   * Picks the successor of a departing admin.
    *
-   * # La contrainte qui dicte la règle
+   * # The constraint that dictates the rule
    *
-   * La succession doit être calculable **à l'identique par tous les clients**. Deux clients
-   * qui désigneraient des successeurs différents ne produiraient pas une erreur : ils
-   * installeraient deux rosters incompatibles et le groupe forkerait en silence.
+   * Succession must be computable **identically by every client**. Two clients picking different
+   * successors would not raise an error: they would install two incompatible rosters and the
+   * group would silently fork.
    *
-   * D'où l'ordre de l'arbre MLS, seule chronologie que tous partagent sans rien s'échanger.
+   * Hence the MLS tree order, the only chronology everyone shares without exchanging anything.
    *
-   * # L'approximation, et pourquoi elle est assumée
+   * # The approximation, and why it is accepted
    *
-   * MLS **réutilise les feuilles libérées** : un arrivant tardif peut hériter de la place d'un
-   * membre parti et se retrouver en tête. L'ordre de l'arbre approche donc l'ancienneté sans
-   * la restituer exactement. La vraie ancienneté demanderait de tenir l'ordre d'arrivée dans
-   * le roster et de le mettre à jour à chaque ajout — un commit de plus à chaque entrée. Le
-   * choix ici privilégie le déterminisme, qui est ce qui protège du fork.
+   * MLS **reuses freed leaves**: a late arrival can inherit a departed member's slot and end up
+   * first. Tree order therefore approximates seniority without reproducing it. Real seniority
+   * would require tracking arrival order in the roster and updating it on every addition — one
+   * more commit per join. The choice here favours determinism, which is what guards against
+   * forks.
    */
   private successor(view: ConversationView, roles: Roles): string | null {
-    const membres = view.peers.map((peer) => peer.name).filter((name) => name !== this.handle);
+    const members = view.peers.map((peer) => peer.name).filter((name) => name !== this.handle);
 
-    // Le rang immédiatement en dessous : un modérateur, s'il en reste un dans le groupe.
-    const moderateur = membres.find((name) => roles.moderators.includes(name));
-    if (moderateur !== undefined) return moderateur;
+    // The rank immediately below: a moderator, if one is left in the group.
+    const moderator = members.find((name) => roles.moderators.includes(name));
+    if (moderator !== undefined) return moderator;
 
-    // À défaut, le membre le plus ancien au sens de l'arbre.
-    return membres[0] ?? null;
+    // Failing that, the oldest member in tree order.
+    return members[0] ?? null;
   }
 
   /**
-   * Demande à quitter un groupe.
+   * Asks to leave a group.
    *
-   * # Le départ est une demande, pas un fait
+   * # Leaving is a request, not a fact
    *
-   * La RFC 9420 interdit de se retirer soi-même dans un commit qu'on génère : celui-ci se
-   * signe sous le secret de l'epoch qu'il produit, précisément celle dont on vient d'être
-   * exclu. Un autre membre doit reprendre la proposition.
+   * RFC 9420 forbids removing yourself in a commit you generate: it is signed under the secret of
+   * the epoch it produces, precisely the one you have just been excluded from. Another member has
+   * to pick the proposal up.
    *
-   * Conséquence à afficher honnêtement plutôt qu'à masquer : **tant qu'aucun autre membre n'a
-   * commité, le départ n'a pas eu lieu.** Faire disparaître la conversation de l'écran
-   * laisserait croire le contraire à quelqu'un qui continue d'être lu.
+   * A consequence to display honestly rather than hide: **until another member has committed, the
+   * departure has not happened.** Making the conversation disappear from the screen would suggest
+   * otherwise to someone who is still being read.
    *
-   * # La transmission de l'administration, avant le départ
+   * # Handing over admin, before leaving
    *
-   * Un groupe sans admin est gelé : plus personne ne peut ajouter, retirer, ni même désigner
-   * un admin, l'extension étant elle-même sous leur contrôle. La politique refuse donc de
-   * retirer le dernier admin.
+   * A group without an admin is frozen: nobody can add, remove, or even appoint an admin, the
+   * extension itself being under their control. So the policy refuses to remove the last admin.
    *
-   * Le transfert a lieu **avant** la demande de départ, et par nos soins : nous sommes encore
-   * admin, donc encore autorisés à modifier le roster. Le faire après serait impossible, et le
-   * faire dans le même commit demanderait au successeur de valider une règle de succession
-   * plutôt qu'un roster — plus de surface pour diverger, pour aucun gain.
+   * The transfer happens **before** the leave request, and by us: we are still admin, so still
+   * allowed to change the roster. Doing it afterwards would be impossible, and doing it in the
+   * same commit would ask the successor to validate a succession rule rather than a roster — more
+   * surface to diverge on, for no gain.
    */
   async requestLeave(view: ConversationView): Promise<void> {
     const roles = this.roles(view);
 
     if (roles !== null && roles.admin === this.handle) {
-      const heritier = this.successor(view, roles);
-      if (heritier === null) {
+      const heir = this.successor(view, roles);
+      if (heir === null) {
         throw new Error(
-          "Vous êtes administrateur et dernier membre : quitter revient à supprimer la conversation.",
+          "You are the admin and the last member: leaving means deleting the conversation.",
         );
       }
 
-      // Le successeur est promu admin et sort de la liste des modérateurs : il est désormais
-      // au-dessus, l'y laisser rendrait le roster ambigu.
+      // The successor is promoted to admin and leaves the moderator list: they are above it now,
+      // and leaving them there would make the roster ambiguous.
       await this.setRoles(
         view,
-        heritier,
-        roles.moderators.filter((m) => m !== heritier),
+        heir,
+        roles.moderators.filter((m) => m !== heir),
       );
     }
 
@@ -1374,108 +1353,106 @@ export class Session {
   }
 
   /**
-   * Supprime les conversations dont nous sommes le dernier membre.
+   * Deletes the conversations we are the last member of.
    *
-   * Un groupe à un seul membre n'est plus une conversation : c'est un groupe MLS que personne
-   * ne lira jamais, et qui continuerait pourtant d'apparaître dans la liste, d'être relevé et
-   * d'accepter des messages. Le laisser serait une promesse d'interlocuteur qui n'existe plus.
+   * A group with a single member is no longer a conversation: it is an MLS group nobody will ever
+   * read, which would nonetheless keep showing up in the list, being polled and accepting
+   * messages. Leaving it would promise someone on the other end who no longer exists.
    *
-   * La suppression est **locale**. Le serveur garde la boîte : rien ne prouverait qu'il l'ait
-   * réellement effacée, et le prétendre serait pire que de ne rien dire. Nos enveloppes y
-   * restent chiffrées sous des clés que plus personne ne détient.
+   * The deletion is **local**. The server keeps the mailbox: nothing would prove it actually
+   * erased it, and claiming so would be worse than saying nothing. Our envelopes stay there,
+   * encrypted under keys nobody holds any more.
    */
   private async dropEmptyConversations(): Promise<void> {
-    let supprimees = 0;
+    let removed = 0;
 
     for (const [key, view] of this.conversations) {
       if (view.peers.length > 0) continue;
 
       await this.api.removeGroupMembers(view.groupId, [this.deviceId]).catch(() => {
-        // Le retrait de la liste de diffusion est du confort : la conversation disparaît de
-        // notre côté quoi qu'il arrive.
+        // Removing ourselves from the delivery list is a nicety: the conversation disappears on
+        // our side either way.
       });
       this.conversations.delete(key);
-      supprimees += 1;
+      removed += 1;
     }
 
-    if (supprimees > 0) await this.persist();
+    if (removed > 0) await this.persist();
   }
 
   /**
-   * Révoque un de nos appareils : certificat signé, puis retrait MLS de tous les groupes.
+   * Revokes one of our devices: signed certificate, then MLS removal from every group.
    *
-   * # Ce que cela protège, et ce que cela ne protège pas
+   * # What this protects against, and what it does not
    *
-   * Contre un appareil **perdu ou hors service**, c'est la bonne réponse : il cesse de recevoir
-   * et le commit de retrait re-clé l'arbre, donc il ne déchiffre plus la suite.
+   * Against a **lost or dead** device, it is the right answer: it stops receiving, and the removal
+   * commit re-keys the tree, so it decrypts nothing further.
    *
-   * Contre un appareil **volé**, cela ne suffit pas. Tous les appareils d'un compte détiennent
-   * la graine — c'est la condition de leur parité — donc le voleur détient le compte et
-   * s'atteste un nouvel appareil dans la foulée. La seule réponse est [`Session.rotateAccount`].
+   * Against a **stolen** device, it is not enough. Every device of an account holds the seed —
+   * that is the condition of their parity — so the thief holds the account and attests a new
+   * device moments later. The only answer is [`Session.rotateAccount`].
    */
   async revokeOwnDevice(deviceId: string): Promise<void> {
     if (deviceId === this.deviceId) {
-      throw new Error("un appareil ne se révoque pas lui-même : révoquez-le depuis un autre.");
+      throw new Error("a device cannot revoke itself: revoke it from another one.");
     }
 
     const revokedAt = Math.floor(Date.now() / 1000);
-    const certificat = this.account.revoke(this.handle, deviceId, BigInt(revokedAt));
+    const certificate = this.account.revoke(this.handle, deviceId, BigInt(revokedAt));
 
-    await this.api.revokeDevice(deviceId, certificat, revokedAt);
+    await this.api.revokeDevice(deviceId, certificate, revokedAt);
 
-    // Le retrait des groupes suit à la relève : `reconcileMembers` le fera en lisant le
-    // certificat qu'on vient de déposer, comme le ferait n'importe quel autre membre. Passer
-    // par le même chemin plutôt que par un raccourci garantit qu'il est réellement exercé.
+    // Removal from the groups follows at the next poll: `reconcileMembers` will do it by reading
+    // the certificate we just posted, exactly as any other member would. Going through the same
+    // path rather than a shortcut guarantees that path really is exercised.
     await this.poll();
   }
 
   /**
-   * Change la clé d'identité du compte. **La seule réponse réelle à un appareil volé.**
+   * Changes the account identity key. **The only real answer to a stolen device.**
    *
-   * # Pourquoi la révocation ne suffit pas
+   * # Why revocation is not enough
    *
-   * Chaque appareil détient la graine du compte : c'est ce qui leur donne à tous les mêmes
-   * droits, sans hiérarchie ni appareil « principal ». La contrepartie est qu'un appareil volé
-   * détient le compte entier. Le révoquer ne l'empêche pas d'en attester un nouveau dans la
-   * seconde qui suit.
+   * Every device holds the account seed: that is what gives them all the same rights, with no
+   * hierarchy and no "main" device. The flip side is that a stolen device holds the whole
+   * account. Revoking it does not stop it from attesting a new one a second later.
    *
-   * # Ce que la rotation fait, presque gratuitement
+   * # What rotation does, almost for free
    *
-   * Changer la clé rend **invérifiables toutes les attestations existantes** d'un coup,
-   * puisque chaque client les recalcule contre la clé courante du compte. La révocation totale
-   * n'est pas un mécanisme séparé : c'est une conséquence. Cet appareil se ré-atteste
-   * immédiatement ; les autres, légitimes, devront être ré-appairés par QR.
+   * Changing the key makes **every existing attestation unverifiable** at once, since each client
+   * recomputes them against the account's current key. Total revocation is not a separate
+   * mechanism: it is a consequence. This device re-attests itself immediately; the others,
+   * legitimate ones, will have to be re-paired by QR.
    *
-   * # Les trois prix à payer, à annoncer avant et non après
+   * # The three prices, to be announced before and not after
    *
-   * L'empreinte du compte change, donc tous les correspondants voient l'alerte de changement
-   * d'identité. Elle est **correcte** : la clé a bien changé. Et le voleur détient la même clé
-   * que nous — il peut tourner le premier. Le serveur ne peut pas les distinguer et applique
-   * la première rotation valide qui se présente.
+   * The account fingerprint changes, so every peer sees the identity-change warning. It is
+   * **correct**: the key really did change. And the thief holds the same key we do — they can
+   * rotate first. The server cannot tell them apart and applies the first valid rotation it gets.
    *
-   * Le troisième est apparu avec le coffre par défaut : sa clé dérive de la phrase de
-   * récupération, donc **tout l'historique déjà archivé devient définitivement illisible**.
-   * Tant que le coffre était optionnel, celui qui tournait sa clé savait qu'il en avait un ;
-   * ce n'est plus le cas, et l'interface doit le dire avant de proposer le bouton.
+   * The third arrived with the vault-by-default: its key derives from the recovery phrase, so
+   * **all the already archived history becomes permanently unreadable**. While the vault was
+   * optional, whoever rotated their key knew they had one; that is no longer true, and the
+   * interface has to say so before offering the button.
    *
-   * Retourne la nouvelle phrase de récupération. L'ancienne ne vaut plus rien.
+   * Returns the new recovery phrase. The old one is worthless.
    */
   async rotateAccount(): Promise<string> {
     const created = this.crypto.AccountKey.generate() as CreatedAccount;
     const rotatedAt = Math.floor(Date.now() / 1000);
 
-    // Signé par l'ANCIENNE clé : c'est elle qui désigne sa remplaçante. Sans cette continuité,
-    // n'importe qui reprendrait le handle d'autrui.
+    // Signed by the OLD key: it is the one that names its replacement. Without that continuity,
+    // anyone could take over someone else's handle.
     const signature = this.account.rotate(this.handle, created.identityKey, BigInt(rotatedAt));
 
     await this.api.rotateAccount(this.handle, created.identityKey, signature, rotatedAt);
 
     this.account = this.crypto.AccountKey.restore(created.phrase);
 
-    // Ré-attestation immédiate. Sans elle, cet appareil serait rejeté par tous les clients —
-    // y compris par nous-mêmes à la relève suivante — puisque son attestation porte la
-    // signature d'une clé morte.
-    const authKey = await this.ancrage.cipher.authPublicKey();
+    // Immediate re-attestation. Without it, this device would be rejected by every client —
+    // including by ourselves at the next poll — since its attestation carries the signature of a
+    // dead key.
+    const authKey = await this.anchor.cipher.authPublicKey();
     const mlsKey = this.client.signatureKey();
     await Api.register(
       this.deviceId,
@@ -1485,9 +1462,8 @@ export class Session {
       this.account.attest(this.handle, this.deviceId, authKey, mlsKey),
     );
 
-    // Le coffre est chiffré sous une clé dérivée de l'ancienne graine : les entrées déjà
-    // déposées deviennent illisibles, définitivement. Le dire est préférable à laisser
-    // découvrir un historique vide.
+    // The vault is encrypted under a key derived from the old seed: the entries already stored
+    // become unreadable, permanently. Saying so beats letting someone discover an empty history.
     if (this.vaultCipher) {
       this.vaultCipher = await vault.importVaultKey(this.account.vaultKey());
     }
@@ -1497,13 +1473,13 @@ export class Session {
   }
 
   /**
-   * Appaire un nouvel appareil à partir du code lu sur son écran.
+   * Pairs a new device from the code shown on its screen.
    *
-   * Scelle la graine du compte sous le secret X25519 et la dépose. Sans elle, le nouvel
-   * appareil ne pourrait ni s'attester lui-même ni attester les suivants — il resterait
-   * subordonné à celui-ci, ce qui est fragile pour un compte censé survivre à ses appareils.
+   * Seals the account seed under the X25519 secret and deposits it. Without it, the new device
+   * could neither attest itself nor attest the next ones — it would stay subordinate to this one,
+   * which is fragile for an account meant to outlive its devices.
    *
-   * Retourne le code de confirmation, à comparer avec celui affiché en face.
+   * Returns the confirmation code, to be compared with the one shown on the other side.
    */
   async pairDevice(code: string): Promise<string> {
     const offer: PairingCode = decodePairingCode(code);
@@ -1519,13 +1495,13 @@ export class Session {
   }
 
   /**
-   * Ajoute nos autres appareils à toutes les conversations en cours.
+   * Adds our other devices to every ongoing conversation.
    *
-   * Appelé à chaque relève, et **idempotent** par construction : MLS ne rattrape pas un membre
-   * absent de l'arbre, et un appareil appairé mais jamais ajouté verrait la liste de ses
-   * conversations sans pouvoir en déchiffrer une seule ligne. L'appareil d'origine peut se
-   * fermer au milieu de la propagation ; il n'y a aucune raison de laisser une conversation
-   * orpheline jusqu'à ce qu'on y repense.
+   * Called on every poll, and **idempotent** by construction: MLS does not catch up a member
+   * absent from the tree, and a device that was paired but never added would see its conversation
+   * list without being able to decrypt a single line. The originating device may close mid-way
+   * through the propagation; there is no reason to leave a conversation orphaned until someone
+   * thinks of it again.
    */
   private async propagateOwnDevices(): Promise<void> {
     if (this.conversations.size === 0) return;
@@ -1543,25 +1519,25 @@ export class Session {
   }
 
   /**
-   * Ajoute à une conversation les appareils qui devraient y être et n'y sont pas.
+   * Adds to a conversation the devices that should be in it and are not.
    *
-   * # L'invariant de parité
+   * # The parity invariant
    *
-   * Tous les appareils d'un compte ont le même accès partout. Un appareil absent d'une
-   * conversation n'est pas « en retard » : il est cassé. Il voit la conversation dans sa liste
-   * et n'en déchiffre pas une ligne, sans qu'aucune erreur ne dise pourquoi — MLS ne rattrape
-   * pas un membre absent de l'arbre.
+   * Every device of an account has the same access everywhere. A device missing from a
+   * conversation is not "behind": it is broken. It sees the conversation in its list and decrypts
+   * not one line of it, with no error to say why — MLS does not catch up a member absent from the
+   * tree.
    *
-   * D'où une réconciliation à chaque relève, **idempotente** : elle compare l'arbre à la liste
-   * vérifiée des appareils et comble l'écart. L'appareil d'origine peut se fermer au milieu ;
-   * la relève suivante reprend là où elle en était.
+   * Hence a reconciliation on every poll, **idempotent**: it compares the tree with the verified
+   * device list and closes the gap. The originating device may close mid-way; the next poll picks
+   * up where it left off.
    */
   private async addMissingDevices(
     view: ConversationView,
     devices: AttestedDevice[],
   ): Promise<void> {
-    // L'arbre MLS est la vérité sur qui est membre. S'appuyer sur un journal local
-    // divergerait dès le premier échec réseau.
+    // The MLS tree is the truth about who is a member. Relying on a local record would diverge at
+    // the first network failure.
     const present = new Set(view.peers.map((peer) => peer.fingerprint));
 
     for (const device of devices) {
@@ -1581,38 +1557,37 @@ export class Session {
         );
         view.mine.add(welcomed.seq);
       } catch (error) {
-        // Stock de KeyPackages épuisé, ou appareil déjà membre : on réessaiera à la relève
-        // suivante plutôt que d'interrompre toute la réconciliation.
-        console.warn(`ajout de ${device.id} reporté`, error);
+        // KeyPackage stock exhausted, or device already a member: we retry at the next poll rather
+        // than abort the whole reconciliation.
+        console.warn(`adding ${device.id} deferred`, error);
       }
     }
   }
 
   /**
-   * Évince de l'arbre les appareils dont la révocation a été vérifiée.
+   * Evicts from the tree the devices whose revocation has been verified.
    *
-   * # Pourquoi ce n'est pas le serveur qui le fait
+   * # Why the server does not do it
    *
-   * Le serveur cesse bien de servir les enveloppes à un appareil révoqué, mais ce filtre ne
-   * lui retire **rien** : il détient les secrets du groupe et déchiffrerait tout ce qu'il
-   * obtiendrait par un autre chemin. Seul le commit de retrait re-clé l'arbre. C'est la
-   * post-compromise security, et elle commence au commit, pas à la révocation.
+   * The server does stop serving envelopes to a revoked device, but that filter takes **nothing**
+   * away from it: it holds the group secrets and would decrypt anything it obtained by another
+   * route. Only the removal commit re-keys the tree. That is post-compromise security, and it
+   * starts at the commit, not at the revocation.
    *
-   * # Pourquoi n'importe quel membre peut le faire
+   * # Why any member can do it
    *
-   * Le certificat est vérifiable par tous. Réserver l'éviction aux admins laisserait
-   * l'appareil volé d'un non-admin dans le groupe jusqu'au retour en ligne d'un admin —
-   * exactement le délai que la révocation existe pour supprimer.
+   * The certificate is verifiable by everyone. Reserving eviction to admins would leave a
+   * non-admin's stolen device in the group until an admin came back online — exactly the delay
+   * revocation exists to remove.
    *
-   * # Ce que cela ne règle pas
+   * # What this does not solve
    *
-   * Un appareil volé détient la graine du compte, donc peut s'en attester un nouveau. Le
-   * retrait ne vaut que contre la perte ; contre le vol, la seule réponse est
-   * [`Session.rotateAccount`].
+   * A stolen device holds the account seed, so it can attest itself a new one. Removal only helps
+   * against loss; against theft, the only answer is [`Session.rotateAccount`].
    */
   private async reconcileMembers(): Promise<void> {
     for (const view of this.conversations.values()) {
-      // Toutes les révocations vérifiées, tous comptes confondus — y compris le nôtre.
+      // Every verified revocation, across all accounts — ours included.
       const revoked = new Map<string, string>();
       for (const account of [...view.accounts, await this.resolve(this.handle)]) {
         for (const device of account.revoked) {
@@ -1632,9 +1607,9 @@ export class Session {
           await this.publishAndApply(view, commit);
           await this.api.removeGroupMembers(view.groupId, [deviceId]);
         } catch (error) {
-          // Un autre membre nous a peut-être devancés : l'appareil n'est alors plus dans
-          // l'arbre et l'état voulu est atteint. On réessaiera au prochain tour sinon.
-          console.warn(`éviction de ${deviceId} reportée`, error);
+          // Another member may have beaten us to it: the device is then out of the tree and the
+          // intended state is reached. Otherwise we retry on the next pass.
+          console.warn(`eviction of ${deviceId} deferred`, error);
         }
       }
 
@@ -1645,42 +1620,42 @@ export class Session {
   }
 
   /**
-   * Publie un commit **puis** l'applique, et retourne l'arbre de ratchet à jour.
+   * Publishes a commit **then** applies it, and returns the up-to-date ratchet tree.
    *
-   * L'ordre n'est pas un détail de style. Appliquer avant de publier est irrattrapable : si la
-   * publication échoue, nous avons changé d'epoch pendant que les autres restent à l'ancienne,
-   * et le commit qui les aurait réconciliés n'existe plus nulle part. Le groupe meurt en
-   * silence — plus personne ne déchiffre, et rien ne dit pourquoi.
+   * The order is not a style detail. Applying before publishing is unrecoverable: if publishing
+   * fails, we have changed epoch while the others stay behind, and the commit that would have
+   * reconciled them exists nowhere. The group dies in silence — nobody decrypts, and nothing says
+   * why.
    *
-   * Ce helper existe pour qu'il n'y ait qu'un seul endroit où cet ordre peut être inversé.
+   * This helper exists so there is only one place where that order can be inverted.
    */
   private async publishAndApply(view: ConversationView, commit: Uint8Array): Promise<Uint8Array> {
     const posted = await this.api.postEnvelope(view.groupId, envelope.encodeMls(commit));
 
-    // Déjà appliquée localement : on la note pour ne pas la relire, sans avancer le curseur
-    // au-delà — les enveloppes intermédiaires restent à traiter.
+    // Already applied locally: we note it so as not to read it back, without moving the cursor
+    // past it — the envelopes in between still have to be processed.
     view.mine.add(posted.seq);
 
     return this.client.applyPending(view.groupId);
   }
 
-  /** Resynchronise la vue affichée avec l'état réel du groupe. */
+  /** Resynchronises the displayed view with the real group state. */
   private refreshView(view: ConversationView): void {
     view.peers = this.client.peerFingerprints(view.groupId) as Peer[];
     view.epoch = this.client.epoch(view.groupId);
   }
 
   /**
-   * Signale les appareils apparus chez un correspondant depuis la dernière fois.
+   * Reports the devices that have appeared on a peer's account since last time.
    *
-   * C'est **cette notification, et non l'empreinte, qui détecte un appareil hostile**.
-   * L'empreinte porte sur la clé du compte et reste volontairement stable : la faire changer
-   * à chaque appareil ajouté obligerait à revérifier après chaque événement légitime, et
-   * serait ignorée en quelques semaines.
+   * It is **this notification, not the fingerprint, that detects a hostile device**. The
+   * fingerprint covers the account key and stays deliberately stable: making it change on every
+   * added device would force a re-verification after every legitimate event, and would be ignored
+   * within weeks.
    *
-   * Ce que cela ne couvre pas : un appareil ajouté par un compte réellement compromis. Il est
-   * dûment attesté, donc indiscernable d'un ajout légitime. Seul l'utilisateur peut dire s'il
-   * possède bien cet appareil — d'où l'affichage, plutôt qu'un verdict automatique.
+   * What this does not cover: a device added by a genuinely compromised account. It is duly
+   * attested, so indistinguishable from a legitimate addition. Only the user can say whether they
+   * actually own that device — hence the display, rather than an automatic verdict.
    */
   async newDevicesOf(handle: string): Promise<string[]> {
     const peer = await this.resolve(handle);
@@ -1699,32 +1674,32 @@ export class Session {
   }
 
   /**
-   * Chiffre le fichier, le dépose, puis envoie son descripteur dans un message MLS.
+   * Encrypts the file, uploads it, then sends its descriptor in an MLS message.
    *
-   * L'ordre compte : la pièce jointe doit exister sur le serveur avant que le message qui la
-   * référence ne parte, sinon le destinataire reçoit un lien vers un fichier absent.
+   * Order matters: the attachment must exist on the server before the message referencing it
+   * leaves, otherwise the recipient gets a link to a missing file.
    */
   async sendAttachment(view: ConversationView, file: File): Promise<void> {
     const ref = await encryptAndUpload(this.api, view.groupId, file);
     await this.sendContent(view, { kind: "attachment", ref });
   }
 
-  /** Récupère et déchiffre une pièce jointe reçue. */
+  /** Fetches and decrypts a received attachment. */
   openAttachment(view: ConversationView, ref: AttachmentRef): Promise<Blob> {
     return downloadAndDecrypt(this.api, view.groupId, ref);
   }
 
   /**
-   * Marque la conversation comme vue jusqu'à son dernier message.
+   * Marks the conversation as seen up to its last message.
    *
-   * Appelée par l'affichage, pas par la relève : « lu » désigne ce qu'une personne a eu sous
-   * les yeux. L'accusé lui-même part au tour suivant, avec les autres.
+   * Called by the display, not by the poll: "read" means what a person has had in front of them.
+   * The receipt itself goes out on the next pass, with the others.
    */
   markRead(view: ConversationView): void {
     view.readCursor = Math.max(view.readCursor, view.contentCursor);
   }
 
-  /** État à afficher sur un message qu'on a envoyé : envoyé, reçu, lu. */
+  /** State to show on a message we sent: sent, delivered, read. */
   statusOf(view: ConversationView, seq: number): "sent" | "delivered" | "read" {
     const handles = [...new Set(view.accounts.map((account) => account.handle))].filter(
       (handle) => handle !== this.handle,
@@ -1732,7 +1707,7 @@ export class Session {
     return statusOf(view.receipts, handles, seq, this.signals.readReceipts);
   }
 
-  /** Correspondants en train d'écrire, expirés exclus. */
+  /** Peers currently typing, expired ones excluded. */
   typingIn(view: ConversationView): string[] {
     view.typing = fresh(view.typing, Date.now());
     return [...new Set(view.typing.map((entry) => entry.handle))].filter(
@@ -1741,33 +1716,33 @@ export class Session {
   }
 
   /**
-   * Signale qu'on est en train d'écrire.
+   * Signals that we are typing.
    *
-   * # Ce qui ne se produit pas ici
+   * # What does not happen here
    *
-   * Rien n'est stocké, ni chez nous ni chez le serveur. Le signal est chiffré sous la clé
-   * d'epoch du groupe, déposé sans signature d'appareil, relayé aux membres connectés, puis
-   * oublié. C'est la raison d'être du canal séparé : `envelopes` n'est jamais purgée, et y
-   * faire transiter la frappe conserverait indéfiniment la trace de qui a hésité.
+   * Nothing is stored, neither by us nor by the server. The signal is encrypted under the group's
+   * epoch key, posted without a device signature, relayed to connected members, then forgotten.
+   * That is the point of the separate channel: `envelopes` is never purged, and routing keystrokes
+   * through it would keep a permanent record of who hesitated.
    *
-   * # Ce que le serveur apprend malgré tout
+   * # What the server learns anyway
    *
-   * Qu'un dépôt a lieu vers ce groupe. À deux, il en déduit qu'un des deux membres écrit.
-   * Le sealed sender cache *qui*, pas *que* — seul le réglage le supprime vraiment.
+   * That a post is happening towards this group. With two people, it infers that one of the two is
+   * typing. Sealed sender hides *who*, not *that* — only the setting truly removes it.
    */
   async notifyTyping(view: ConversationView): Promise<void> {
     if (!this.signals.typingIndicator) return;
 
     const posting = this.signalPosting(view);
-    // Sans clé de dépôt, il faudrait signer la requête : le serveur apprendrait qui écrit,
-    // en temps réel, pour une fonctionnalité de confort. On s'abstient plutôt.
+    // Without a posting key we would have to sign the request: the server would learn who is
+    // typing, in real time, for a comfort feature. We abstain instead.
     if (!posting) return;
 
-    const maintenant = Date.now();
-    if (view.typingSentAt !== undefined && maintenant - view.typingSentAt < TYPING_DEBOUNCE_MS) {
+    const now = Date.now();
+    if (view.typingSentAt !== undefined && now - view.typingSentAt < TYPING_DEBOUNCE_MS) {
       return;
     }
-    view.typingSentAt = maintenant;
+    view.typingSentAt = now;
 
     const key = this.client.signalKey(view.groupId);
     const payload = await sealTyping(key, this.handle);
@@ -1775,10 +1750,10 @@ export class Session {
   }
 
   /**
-   * Ouvre un signal reçu par le flux temps réel.
+   * Opens a signal received over the real-time stream.
    *
-   * Un signal illisible est le cas ordinaire — il a été émis sous l'epoch précédente et est
-   * arrivé après le commit — et n'est donc pas remonté comme une erreur.
+   * An unreadable signal is the ordinary case — it was emitted under the previous epoch and
+   * arrived after the commit — and so is not surfaced as an error.
    */
   async absorbSignal(groupId: Uint8Array, payload: Uint8Array): Promise<void> {
     const view = this.conversations.get(toHex(groupId));
@@ -1787,39 +1762,39 @@ export class Session {
     const handle = await openTyping(this.client.signalKey(view.groupId), payload);
     if (handle === undefined || handle === this.handle) return;
 
-    const maintenant = Date.now();
-    view.typing = [...without(fresh(view.typing, maintenant), handle), { handle, at: maintenant }];
+    const now = Date.now();
+    view.typing = [...without(fresh(view.typing, now), handle), { handle, at: now }];
   }
 
   /**
-   * Réagit à un message, ou retire sa réaction avec un emoji vide.
+   * Reacts to a message, or removes the reaction with an empty emoji.
    *
-   * Contrairement aux accusés, une réaction **est** un message : elle s'affiche, elle
-   * s'archive, et son auteur l'assume. C'est pourquoi elle ne passe pas par `isControl`.
+   * Unlike receipts, a reaction **is** a message: it is displayed, it is archived, and its author
+   * owns it. That is why it does not go through `isControl`.
    */
   reactTo(view: ConversationView, target: number, emoji: string): Promise<void> {
     return this.sendContent(view, { kind: "reaction", target, emoji });
   }
 
-  /** Répond en citant un message antérieur. */
+  /** Replies by quoting an earlier message. */
   replyTo(view: ConversationView, target: number, text: string): Promise<void> {
     return this.sendContent(view, { kind: "reply", target, text });
   }
 
-  /** Réglages de signalisation, tels qu'ils s'appliquent maintenant. */
+  /** Signalling settings, as they apply right now. */
   signalSettings(): SignalSettings {
     return { ...this.signals };
   }
 
   /**
-   * Change un réglage de signalisation.
+   * Changes a signalling setting.
    *
-   * Désactiver les accusés de lecture cesse aussi de montrer ceux des autres : voir sans être
-   * vu serait exactement ce que le réglage prétend empêcher.
+   * Turning read receipts off also stops showing other people's: seeing without being seen would
+   * be exactly what the setting claims to prevent.
    *
-   * La présence est le seul de ces réglages qui doive **remonter au serveur** : lui seul peut
-   * cesser d'enregistrer. Un réglage qui se contenterait de ne plus afficher laisserait le
-   * registre se remplir quand même, ce qui n'est pas ce que l'utilisateur a demandé.
+   * Presence is the only one of these settings that must **reach the server**: it alone can stop
+   * recording. A setting that merely stopped displaying would let the register fill up anyway,
+   * which is not what the user asked for.
    */
   async setSignalSetting<K extends keyof SignalSettings>(
     key: K,
@@ -1827,7 +1802,7 @@ export class Session {
   ): Promise<void> {
     if (key === "presence") {
       await this.api.setPresenceOptout(!value);
-      // Ce que le serveur vient d'effacer ne doit pas rester à l'écran jusqu'à la relève.
+      // What the server has just erased must not stay on screen until the next poll.
       this.presence = new Map();
     }
 
@@ -1836,8 +1811,8 @@ export class Session {
   }
 
   private async sendContent(view: ConversationView, body: content.Content): Promise<void> {
-    // Rembourré **avant** chiffrement : c'est la taille du texte clair qui détermine celle du
-    // chiffré. Rembourrer après ne cacherait rien de plus et coûterait autant.
+    // Padded **before** encryption: it is the plaintext size that determines the ciphertext size.
+    // Padding afterwards would hide nothing more and cost as much.
     const encoded = padding.pad(content.encode(body));
 
     const ciphertext = this.client.encrypt(view.groupId, encoded);
@@ -1847,17 +1822,17 @@ export class Session {
       this.posting(view),
     );
 
-    // On note la séquence pour ne pas tenter de la relire, sans toucher au curseur : les
-    // enveloppes déposées entre-temps par d'autres restent à traiter.
+    // We note the sequence so as not to try reading it back, without touching the cursor: the
+    // envelopes posted in the meantime by others still have to be processed.
     view.mine.add(seq);
 
-    // Le throttle repart de zéro : après un envoi, la frappe suivante ouvre un nouveau message
-    // et doit être annoncée tout de suite. La laisser sous le seuil ferait attendre jusqu'à une
-    // seconde et demie avant que le correspondant ne voie qu'on répond de nouveau.
+    // The throttle resets: after a send, the next keystroke opens a new message and must be
+    // announced right away. Leaving it under the threshold would make the peer wait up to a second
+    // and a half before seeing that we are answering again.
     view.typingSentAt = undefined;
 
-    // Le trafic de protocole ne rejoint ni le fil ni le coffre. Il emprunte le même canal
-    // chiffré que les messages — c'est tout l'intérêt — mais ce n'est pas une conversation.
+    // Protocol traffic joins neither the thread nor the vault. It rides the same encrypted channel
+    // as messages — that is the whole point — but it is not a conversation.
     if (content.isControl(body)) {
       await this.persist();
       return;
@@ -1870,25 +1845,23 @@ export class Session {
   }
 
   /**
-   * Relève les nouveaux messages et rejoint les conversations où l'on nous a ajoutés.
+   * Polls for new messages and joins the conversations we have been added to.
    *
-   * Le polling est volontairement simple. Un vrai client utiliserait un WebSocket ou du
-   * push — ce qui ne changerait rien à la cryptographie, seulement à la latence et à la
-   * consommation.
+   * The polling is deliberately simple. A real client would use a WebSocket or push — which would
+   * change nothing about the cryptography, only latency and battery.
    */
   /**
-   * Ouvre le flux temps réel, et le maintient.
+   * Opens the real-time stream, and keeps it up.
    *
-   * # Ce que cela ne change pas
+   * # What this does not change
    *
-   * La correction. Le flux ne fait que déclencher plus tôt une relève qui serait de toute
-   * façon arrivée. Un navigateur qui bloque la connexion, un proxy qui la coupe, un serveur
-   * qui la refuse : l'application continue de fonctionner, simplement au rythme de la relève
-   * périodique.
+   * Correctness. The stream only triggers earlier a poll that would have happened anyway. A
+   * browser that blocks the connection, a proxy that cuts it, a server that refuses it: the app
+   * keeps working, simply at the pace of the periodic poll.
    *
-   * C'est une contrainte de conception, pas une observation : dès que le flux deviendrait
-   * nécessaire à la correction, il faudrait le rendre fiable — et on aurait reconstruit un
-   * transport au-dessus du transport.
+   * That is a design constraint, not an observation: the moment the stream became necessary for
+   * correctness, it would have to be made reliable — and we would have rebuilt a transport on top
+   * of the transport.
    */
   startStream(onChange: () => void): void {
     this.gateway?.close();
@@ -1897,8 +1870,8 @@ export class Session {
       this.api,
       {
         onEnvelope: (groupId) => {
-          // On ne se fie pas au numéro annoncé : on relève par le chemin normal, qui revérifie
-          // l'appartenance et fait avancer le curseur d'une seule main.
+          // We do not trust the announced number: we poll through the normal path, which re-checks
+          // membership and moves the cursor with a single hand.
           if (!this.conversations.has(toHex(groupId))) return;
           void this.poll().then(onChange).catch(() => {});
         },
@@ -1906,8 +1879,8 @@ export class Session {
           void this.absorbSignal(groupId, payload).then(onChange).catch(() => {});
         },
       },
-      // Évalués à chaque (re)connexion, jamais figés : entre deux tentatives, la relève a pu
-      // avancer, et un curseur périmé ferait réannoncer des séquences déjà lues.
+      // Evaluated on every (re)connection, never frozen: between two attempts the poll may have
+      // advanced, and a stale cursor would re-announce sequences already read.
       () =>
         [...this.conversations.values()].map((view) => ({
           groupId: view.groupId,
@@ -1926,15 +1899,15 @@ export class Session {
   }
 
   /**
-   * Aligne la portée de la session sur les conversations connues.
+   * Aligns the session's scope with the known conversations.
    *
-   * Remplace la réouverture complète qu'imposait le flux SSE, dont le serveur figeait la liste
-   * à la connexion. L'ajustement est incrémental : une conversation découverte coûte une trame,
-   * plus une reconnexion avec son défi, sa signature et son rattrapage.
+   * Replaces the full reopen that the SSE stream forced, whose server froze the list at connection
+   * time. The adjustment is incremental: a newly discovered conversation costs one frame, instead
+   * of a reconnection with its challenge, its signature and its catch-up.
    *
-   * Sans appel : une conversation créée après l'ouverture n'est jamais abonnée, et ses
-   * indicateurs de frappe n'arrivent pas — panne silencieuse, puisque tout le reste continue
-   * de fonctionner par la relève.
+   * Without this call: a conversation created after the stream opened is never subscribed, and its
+   * typing indicators never arrive — a silent failure, since everything else keeps working through
+   * the poll.
    */
   private syncScope(): void {
     if (!this.gateway) return;
@@ -1943,8 +1916,8 @@ export class Session {
   }
 
   poll(): Promise<void> {
-    // Une relève déjà en cours est renvoyée telle quelle : l'appelant attend la même, plutôt
-    // que d'en lancer une concurrente.
+    // A poll already running is handed back as is: the caller waits on that one, rather than
+    // starting a competing one.
     this.polling ??= this.pollOnce().finally(() => {
       this.polling = null;
     });
@@ -1952,62 +1925,60 @@ export class Session {
   }
 
   private async pollOnce(): Promise<void> {
-    // Le stock de clés d'accueil se reconstitue tout seul. Sans cela, il s'épuise en
-    // silence et l'appareil devient injoignable sans que rien ne le signale — exactement
-    // le genre de tâche d'entretien qu'un utilisateur ne devrait jamais avoir à porter.
+    // The stock of welcome keys refills itself. Without that, it runs out in silence and the
+    // device becomes unreachable with nothing to say so — exactly the kind of housekeeping a user
+    // should never have to carry.
     await this.replenishKeyPackagesIfLow().catch((error) => {
-      console.warn("réapprovisionnement des clés d'accueil impossible", error);
+      console.warn("could not replenish welcome keys", error);
     });
 
-    const connues = this.conversations.size;
+    const known = this.conversations.size;
     await this.discoverNewConversations();
 
-    // Une conversation découverte doit entrer dans la portée de la session, faute de quoi ses
-    // indicateurs de frappe n'arriveraient jamais. `subscribe` étant idempotent, on peut
-    // resynchroniser sans comparer.
-    if (this.conversations.size !== connues) this.syncScope();
+    // A newly discovered conversation must enter the session's scope, or its typing indicators
+    // would never arrive. `subscribe` being idempotent, we can resynchronise without comparing.
+    if (this.conversations.size !== known) this.syncScope();
 
-    // Rattrape les appareils du compte absents d'une conversation. Idempotent : sans ce
-    // rattrapage, une propagation interrompue laisserait un appareil sourd indéfiniment.
+    // Catches up the account devices missing from a conversation. Idempotent: without this catch-up
+    // an interrupted propagation would leave a device deaf indefinitely.
     await this.propagateOwnDevices().catch((error: unknown) => {
-      console.warn("propagation vers nos autres appareils reportée", error);
+      console.warn("propagation to our other devices deferred", error);
     });
 
-    // Évince les appareils dont la révocation est certifiée. Après la propagation : ajouter
-    // d'abord évite qu'un appareil légitime attende un tour de plus derrière une éviction qui
-    // échoue.
+    // Evicts the devices whose revocation is certified. After the propagation: adding first avoids
+    // making a legitimate device wait one more pass behind a failing eviction.
     await this.reconcileMembers().catch((error: unknown) => {
-      console.warn("éviction des appareils révoqués reportée", error);
+      console.warn("eviction of revoked devices deferred", error);
     });
 
-    // Après les évictions : un groupe peut venir de perdre son dernier autre membre.
+    // After the evictions: a group may have just lost its last other member.
     await this.dropEmptyConversations();
 
-    // Une tête par conversation et par session : le contrôle porte sur l'existence d'une
-    // bifurcation, pas sur son instant.
+    // One head per conversation per session: the check is about the existence of a fork, not its
+    // timing.
     for (const view of this.conversations.values()) {
       await this.gossip(view).catch((error: unknown) => {
-        console.warn("diffusion de la tête de journal reportée", error);
+        console.warn("log head gossip deferred", error);
       });
 
       await this.sharePostingKey(view).catch((error: unknown) => {
-        console.warn("diffusion de la clé de dépôt reportée", error);
+        console.warn("posting key sharing deferred", error);
       });
     }
 
     for (const view of this.conversations.values()) {
       const envelopes = await this.api.fetchEnvelopes(view.groupId, view.cursor);
-      const avant = view.messages.length;
+      const before = view.messages.length;
 
       for (const row of envelopes) {
         try {
           if (!view.mine.has(row.seq)) this.absorb(view, row.seq, row.payload);
         } catch (error) {
-          // Un message illisible ne bloque pas la conversation. Le curseur avance quand même :
-          // une enveloppe qu'on ne sait pas lire aujourd'hui — message déjà traité, enveloppe
-          // corrompue, commit qu'on a soi-même émis — ne deviendra pas lisible demain, et s'y
-          // arrêter figerait la conversation pour de bon.
-          console.warn(`enveloppe ${row.seq} ignorée`, error);
+          // An unreadable message does not block the conversation. The cursor advances anyway: an
+          // envelope we cannot read today — an already processed message, a corrupt envelope, a
+          // commit we emitted ourselves — will not become readable tomorrow, and stopping there
+          // would freeze the conversation for good.
+          console.warn(`envelope ${row.seq} skipped`, error);
         }
         view.cursor = Math.max(view.cursor, row.seq);
       }
@@ -2015,52 +1986,50 @@ export class Session {
       view.epoch = this.client.epoch(view.groupId);
       view.peers = this.client.peerFingerprints(view.groupId) as Peer[];
 
-      await this.archive(view, view.messages.slice(avant));
+      await this.archive(view, view.messages.slice(before));
 
-      // Persister ICI, avant tout nouvel appel réseau.
+      // Persist HERE, before any further network call.
       //
-      // `process` fait avancer le ratchet même lorsqu'il finit par échouer. Si une erreur
-      // ultérieure — une résolution de compte, une coupure — empêchait d'enregistrer le
-      // curseur, l'état MLS repartirait en avance sur lui : on relirait des enveloppes que le
-      // ratchet a déjà dépassées, et MLS les refuserait pour de bon. Le message serait perdu
-      // sans que rien ne le signale.
+      // `process` moves the ratchet forward even when it ends up failing. If a later error — an
+      // account resolution, a dropped connection — prevented recording the cursor, the MLS state
+      // would restart ahead of it: we would read back envelopes the ratchet has already passed, and
+      // MLS would refuse them for good. The message would be lost with nothing to report it.
       //
-      // Le curseur appartient à l'état cryptographique, pas à l'affichage. Les deux avancent
-      // ensemble ou pas du tout.
+      // The cursor belongs to the cryptographic state, not to the display. The two advance together
+      // or not at all.
       await this.persist();
 
-      // La résolution des comptes est cosmétique et passe par le réseau : elle vient après,
-      // et son échec ne doit rien annuler.
+      // Resolving accounts is cosmetic and goes over the network: it comes after, and its failure
+      // must undo nothing.
       try {
         view.accounts = await this.resolvePeers(view);
       } catch (error) {
-        console.warn("comptes non résolus pour cette conversation", error);
+        console.warn("accounts not resolved for this conversation", error);
       }
 
-      // En dernier : un accusé est une enveloppe, et l'émettre avant d'avoir tout absorbé
-      // annoncerait un numéro qu'on n'a pas encore traité.
+      // Last: a receipt is an envelope, and emitting it before everything is absorbed would
+      // announce a number we have not processed yet.
       await this.acknowledge(view).catch((error: unknown) => {
-        console.warn("accusé reporté", error);
+        console.warn("receipt deferred", error);
       });
     }
 
     await this.refreshPresence().catch((error: unknown) => {
-      console.warn("présence non relevée", error);
+      console.warn("presence not polled", error);
     });
   }
 
   /**
-   * Relève la présence de tous les correspondants connus, en une requête.
+   * Polls the presence of every known peer, in one request.
    *
-   * # Pourquoi c'est ici et pas sur un minuteur à part
+   * # Why this is here and not on a timer of its own
    *
-   * Parce qu'un minuteur dédié redonnerait au serveur le journal d'activité à la seconde que le
-   * flux lui a précisément retiré — pour un point de couleur. La relève existe déjà, elle passe
-   * toutes les trente secondes, et c'est une granularité honnête pour cette information.
+   * Because a dedicated timer would hand the server back the second-by-second activity log that
+   * the stream had precisely taken away from it — for one coloured dot. The poll already exists,
+   * it runs every thirty seconds, and that is an honest granularity for this information.
    *
-   * Et pas non plus par le flux : le point vert en dépendrait, or un flux bloqué par un proxy
-   * afficherait alors tout le monde hors ligne. Une interface fausse est pire qu'une interface
-   * en retard.
+   * And not over the stream either: the green dot would depend on it, and a stream blocked by a
+   * proxy would then show everyone offline. A wrong interface is worse than a late one.
    */
   private async refreshPresence(): Promise<void> {
     if (!this.signals.presence) return;
@@ -2074,9 +2043,8 @@ export class Session {
     ];
     if (handles.length === 0) return;
 
-    // Le serveur plafonne à 64 par requête. Au-delà, on relève les premiers : c'est une
-    // limite visible plutôt qu'un 400 silencieux, et un carnet de cette taille demanderait
-    // de toute façon un autre découpage.
+    // The server caps at 64 per request. Beyond that we poll the first ones: a visible limit beats
+    // a silent 400, and an address book that size would need a different split anyway.
     const { now, accounts } = await this.api.presence(handles.slice(0, 64));
 
     this.presenceNow = now * 1000;
@@ -2084,42 +2052,42 @@ export class Session {
   }
 
   /**
-   * Annonce ce qu'on a reçu, et ce qu'on a lu.
+   * Announces what we received, and what we read.
    *
-   * # Pourquoi rien ne part la plupart du temps
+   * # Why nothing goes out most of the time
    *
-   * `pending` ne rend un numéro que s'il dépasse ce que **notre compte** a déjà accusé — et
-   * nos propres accusés nous reviennent comme aux autres. Un tour de relève sans nouveauté
-   * n'émet donc rien, ce qui est la seule chose qui empêche la conversation de se nourrir
-   * d'elle-même indéfiniment.
+   * `pending` only yields a number if it exceeds what **our account** has already acknowledged —
+   * and our own receipts come back to us like everyone else's. A poll with nothing new therefore
+   * emits nothing, which is the only thing keeping the conversation from feeding on itself
+   * indefinitely.
    */
   private async acknowledge(view: ConversationView): Promise<void> {
-    const livre = pending(view.receipts, this.handle, "delivered", view.contentCursor);
-    if (livre !== undefined) {
-      record(view.receipts, this.handle, "delivered", livre);
-      await this.sendContent(view, { kind: "receipt", state: "delivered", seq: livre });
+    const delivered = pending(view.receipts, this.handle, "delivered", view.contentCursor);
+    if (delivered !== undefined) {
+      record(view.receipts, this.handle, "delivered", delivered);
+      await this.sendContent(view, { kind: "receipt", state: "delivered", seq: delivered });
     }
 
-    // Le réglage coupe l'émission à la source. Il coupe aussi l'affichage, dans `statusOf` :
-    // la réciprocité doit tenir même si l'un des deux endroits est oublié.
+    // The setting cuts emission at the source. It also cuts the display, in `statusOf`: the
+    // reciprocity must hold even if one of the two places is forgotten.
     if (!this.signals.readReceipts) return;
 
-    const lu = pending(view.receipts, this.handle, "read", view.readCursor);
-    if (lu !== undefined) {
-      record(view.receipts, this.handle, "read", lu);
-      await this.sendContent(view, { kind: "receipt", state: "read", seq: lu });
+    const read = pending(view.receipts, this.handle, "read", view.readCursor);
+    if (read !== undefined) {
+      record(view.receipts, this.handle, "read", read);
+      await this.sendContent(view, { kind: "receipt", state: "read", seq: read });
     }
   }
 
   private absorb(view: ConversationView, seq: number, payload: Uint8Array): void {
     const parsed = envelope.decode(payload);
 
-    // Un Welcome pour un groupe qu'on a déjà rejoint : rien à faire.
+    // A Welcome for a group we have already joined: nothing to do.
     if (parsed.kind === "welcome") return;
 
-    // Les clés révoquées **vérifiées** de tous les comptes de la conversation. Sans elles, la
-    // politique de groupe refuse le retrait d'un appareil volé commité par un non-admin —
-    // c'est-à-dire précisément le cas qu'elle existe pour permettre.
+    // The **verified** revoked keys of every account in the conversation. Without them, the group
+    // policy refuses the removal of a stolen device committed by a non-admin — that is, precisely
+    // the case it exists to allow.
     const revoked = view.accounts.flatMap((account) => account.revokedKeys);
 
     const incoming = this.client.process(view.groupId, parsed.payload, revoked) as Incoming;
@@ -2127,26 +2095,25 @@ export class Session {
 
     const decode = content.decode(padding.unpad(incoming.plaintext));
 
-    // Le trafic de protocole est traité puis écarté du fil : l'afficher noierait la
-    // conversation sous des bulles vides.
+    // Protocol traffic is processed then kept out of the thread: showing it would drown the
+    // conversation in empty bubbles.
     if (content.isControl(decode)) {
       if (decode.kind === "gossip") void this.checkGossip(decode.head);
-      // La clé de dépôt vient de MLS, donc d'un membre authentifié : le serveur l'a
-      // transportée sans pouvoir la lire ni la remplacer.
+      // The posting key comes from MLS, so from an authenticated member: the server carried it
+      // without being able to read or replace it.
       if (decode.kind === "posting-key") view.postingKey ??= decode.key;
-      // Le handle vient du credential MLS, pas du corps du message : un membre ne peut pas
-      // accuser réception au nom d'un autre. C'est aussi ce qui fait fonctionner la
-      // déduplication entre les appareils d'un même compte — ils portent le même handle.
+      // The handle comes from the MLS credential, not from the message body: a member cannot
+      // acknowledge on behalf of another. It is also what makes deduplication work between the
+      // devices of one account — they carry the same handle.
       if (decode.kind === "receipt" && incoming.sender) {
         record(view.receipts, incoming.sender, decode.state, decode.seq);
       }
       return;
     }
 
-    // L'auteur vient d'envoyer : il n'écrit plus. Aucun signal « a cessé d'écrire » n'est
-    // nécessaire — le message lui-même en est la preuve, et il ne peut pas se perdre puisqu'on
-    // ne l'attend pas. Sans cela, l'expéditeur paraît continuer d'écrire tout le temps du TTL
-    // après avoir appuyé sur Entrée.
+    // The author has just sent: they are no longer typing. No "stopped typing" signal is needed —
+    // the message itself is the proof, and it cannot get lost since we are not waiting for it.
+    // Without this, the sender appears to keep typing for the whole TTL after pressing Enter.
     if (incoming.sender) view.typing = without(view.typing, incoming.sender);
 
     view.messages.push({
@@ -2156,20 +2123,20 @@ export class Session {
       mine: false,
     });
 
-    // Seuls les messages font avancer ce curseur. Voir sa définition : c'est ce qui empêche
-    // les accusés de s'engendrer les uns les autres.
+    // Only messages move this cursor. See its definition: it is what stops receipts from breeding
+    // one another.
     view.contentCursor = Math.max(view.contentCursor, seq);
   }
 
   /**
-   * Détecte les groupes où le serveur nous a déclaré membre et y cherche **notre** Welcome.
+   * Detects the groups the server has declared us a member of, and looks for **our** Welcome.
    *
-   * Un groupe en contient plusieurs dès qu'un compte a plusieurs appareils : un par membre
-   * ajouté. Ils sont indiscernables de l'extérieur — c'est voulu, le serveur n'a pas à savoir
-   * lequel s'adresse à qui. Il faut donc les essayer tous et garder celui qui s'ouvre.
+   * A group contains several as soon as an account has several devices: one per added member. They
+   * are indistinguishable from the outside — deliberately, the server has no business knowing
+   * which one addresses whom. So they all have to be tried, keeping the one that opens.
    *
-   * Prendre le premier venu échoue avec « No matching key package was found » : le Welcome
-   * était chiffré pour le KeyPackage d'un autre appareil.
+   * Taking the first one fails with "No matching key package was found": the Welcome was encrypted
+   * for another device's KeyPackage.
    */
   private async discoverNewConversations(): Promise<void> {
     const groups = await this.api.listGroups();
@@ -2201,11 +2168,11 @@ export class Session {
             cursor: row.seq,
             mine: new Set<number>(),
             ...freshSignalState(),
-        ...freshSignalState(),
+            ...freshSignalState(),
           });
           break;
         } catch {
-          // Welcome destiné à un autre appareil : rien d'anormal, on essaie le suivant.
+          // Welcome meant for another device: nothing unusual, we try the next one.
         }
       }
     }
@@ -2224,99 +2191,98 @@ export { fromBase64 };
 
 
 /**
- * Importe la clé du coffre depuis le compte.
+ * Imports the vault key from the account.
  *
- * Isolé en fonction pour que `Session.restore` reste lisible : la dérivation elle-même est
- * dans `crypto-core`, ce module ne fait que la transformer en `CryptoKey`.
+ * Split out so `Session.restore` stays readable: the derivation itself lives in `crypto-core`,
+ * this module only turns it into a `CryptoKey`.
  *
- * Retourne `null` plutôt que de lever. Depuis que le coffre est actif par défaut, cet appel est
- * sur le chemin d'ouverture de **toute** session : y laisser une exception rendrait les messages
- * inaccessibles parce que leur sauvegarde a échoué. On perd l'archivage, jamais la conversation.
+ * Returns `null` rather than throwing. Now that the vault is on by default, this call sits on the
+ * opening path of **every** session: leaving an exception there would make messages inaccessible
+ * because their backup failed. We lose archiving, never the conversation.
  */
 async function vaultCipherOf(_crypto: Crypto, account: AccountKey): Promise<CryptoKey | null> {
   try {
     return await vault.importVaultKey(account.vaultKey());
   } catch (error) {
-    console.warn("clé de coffre indisponible : archivage désactivé pour cette session", error);
+    console.warn("vault key unavailable: archiving off for this session", error);
     return null;
   }
 }
 
 /**
- * Ce que le démarrage propose : une migration, à laquelle il ne procède pas.
+ * What startup offers: a migration, which it does not carry out.
  *
- * Elle enregistre un appareil et **en révoque un autre**. Ce sont des gestes de compte, visibles
- * du serveur et des correspondants, et rien dans « ouvrir l'application » ne les demande. Les
- * exécuter d'office reviendrait à décider à la place de quelqu'un qui n'a rien demandé.
+ * It registers a device and **revokes another**. Those are account-level acts, visible to the
+ * server and to peers, and nothing about "opening the app" asks for them. Running them
+ * automatically would decide on behalf of someone who asked for nothing.
  *
- * Différer ne coûte rien : l'application continue exactement comme avant, et la proposition
- * revient au démarrage suivant.
+ * Deferring costs nothing: the app carries on exactly as before, and the offer comes back at the
+ * next startup.
  */
-export interface MigrationProposee {
+export interface ProposedMigration {
   /**
-   * A-t-elle déjà commencé ?
+   * Has it already started?
    *
-   * Change ce qu'il faut dire, pas ce qu'il faut faire : deux appareils sont alors actifs — un
-   * état sain, seulement redondant — et l'utilisateur mérite de savoir pourquoi il en voit deux
-   * dans ses réglages.
+   * Changes what to say, not what to do: two devices are then active — a healthy state, merely
+   * redundant — and the user deserves to know why they see two of them in their settings.
    */
-  reprise: boolean;
-  executer(progres?: (etape: string) => void): Promise<Session>;
+  resume: boolean;
+  execute(onProgress?: (step: string) => void): Promise<Session>;
 }
 
 /**
- * Ce qu'il faut faire au démarrage.
+ * What to do at startup.
  *
- * # Pourquoi ce n'est pas dans `Session.restore`
+ * # Why this is not in `Session.restore`
  *
- * Une migration tient **deux** sessions ouvertes en même temps — l'ancienne est la seule membre
- * des groupes, donc la seule à pouvoir y introduire la nouvelle — et `restore` en rend une.
+ * A migration holds **two** sessions open at once — the old one is the only member of the groups,
+ * so the only one able to introduce the new one — and `restore` returns one.
  *
- * # Le repli n'est pas un échec silencieux
+ * # Falling back is not a silent failure
  *
- * Quand la migration est impossible — coffre coupé, ou stockage natif occupé par un autre compte
- * — l'application continue sur IndexedDB et `repli` porte la raison. La taire laisserait croire à
- * une durabilité qui n'existe pas.
+ * When migration is impossible — vault turned off, or native storage occupied by another account —
+ * the app carries on with IndexedDB and `fallback` carries the reason. Keeping quiet about it
+ * would suggest a durability that does not exist.
  */
-export async function demarrer(
+export async function start(
   /**
-   * De quoi ouvrir le verrou : le mot de passe saisi, ou la clé maîtresse rendue par l'invite
-   * du système. Les deux mènent au même endroit, par des chemins qui n'ont pas la même entrée.
+   * What opens the lock: the password that was typed, or the master key handed back by the system
+   * prompt. Both lead to the same place, by paths that do not share an input.
    */
-  ouverture?: string | CryptoKey,
-): Promise<{ session: Session | null; migration?: MigrationProposee; repli?: string }> {
-  if (!isTauri()) return { session: await Session.restore(ouverture) };
+  opener?: string | CryptoKey,
+): Promise<{ session: Session | null; migration?: ProposedMigration; fallback?: string }> {
+  if (!isTauri()) return { session: await Session.restore(opener) };
 
-  const natif = ancrageNatif();
-  const web = await ancrageWebExistant();
+  const native = nativeAnchor();
+  const web = await existingWebAnchor();
 
-  const decision = decider(await presenceDe(web), await presenceDe(natif));
+  const decision = decide(await presenceOf(web), await presenceOf(native));
 
-  if (decision.quoi === "repli") {
-    return { session: web ? await Session.ouvrir(web, ouverture) : null, repli: decision.raison };
+  if (decision.kind === "fallback") {
+    return { session: web ? await Session.open(web, opener) : null, fallback: decision.reason };
   }
 
-  if (decision.quoi !== "demarrer" && decision.quoi !== "reprendre") {
-    return { session: await Session.restore(ouverture) };
+  if (decision.kind !== "start" && decision.kind !== "resume") {
+    return { session: await Session.restore(opener) };
   }
 
-  // L'ancienne session doit être ouverte : elle seule est membre des groupes. Un verrou posé
-  // impose donc de proposer la migration après la saisie, pas avant.
-  const ancienne = web ? await Session.ouvrir(web, ouverture) : null;
-  if (!ancienne) return { session: await Session.restore(ouverture) };
+  // The old session has to be open: it alone is a member of the groups. A lock in place therefore
+  // forces offering the migration after the password is typed, not before.
+  const previous = web ? await Session.open(web, opener) : null;
+  if (!previous) return { session: await Session.restore(opener) };
 
   return {
-    session: ancienne,
+    session: previous,
     migration: {
-      reprise: decision.quoi === "reprendre",
-      executer: (progres) => ancienne.migrerVersNatif(decision, natif, progres),
+      resume: decision.kind === "resume",
+      execute: (onProgress) => previous.migrateToNative(decision, native, onProgress),
     },
   };
 }
 
-/** Ce qu'un ancrage révèle sans être ouvert : de quoi décider, et rien de plus. */
-async function presenceDe(ancrage: Ancrage | undefined): Promise<Presence | undefined> {
-  const stored = await ancrage?.store.load();
+/** What an anchor reveals without being opened: enough to decide, and nothing more. */
+async function presenceOf(anchor: Anchor | undefined): Promise<Presence | undefined> {
+  const stored = await anchor?.store.load();
   if (!stored?.state) return undefined;
 
   return { handle: stored.handle, vaultEnabled: stored.vaultEnabled };

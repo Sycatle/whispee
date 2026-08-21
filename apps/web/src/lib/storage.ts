@@ -1,22 +1,21 @@
 /**
- * Persistance locale.
+ * Local persistence.
  *
- * # Deux implémentations, une interface
+ * # Two implementations, one interface
  *
- * Sur le web, IndexedDB. Sous Tauri, un fichier écrit par le processus Rust — parce que le
- * stockage d'une webview mobile **n'est pas garanti** : iOS évince les données de WKWebView
- * après sept jours d'inactivité, Android purge sous pression mémoire. Et la perte est
- * définitive : le ratchet MLS détruit ses clés au fur et à mesure.
+ * On the web, IndexedDB. Under Tauri, a file written by the Rust process — because a mobile
+ * webview's storage **is not guaranteed**: iOS evicts WKWebView data after seven days of
+ * inactivity, Android purges under memory pressure. And the loss is permanent: the MLS ratchet
+ * destroys its keys as it goes.
  *
- * # Les clés ne passent pas par ici
+ * # Keys do not go through here
  *
- * `StoredSession` n'en porte aucune. Sur le web elles existent bel et bien dans la même base —
- * ce sont des `CryptoKey` non extractables, qu'IndexedDB accepte telles quelles et qu'aucun
- * fichier ne pourrait recevoir — mais c'est l'affaire du store, pas de la session. Celle-ci
- * demande un scellement à `DeviceCipher` et ne voit jamais de matériel de clé, ce qui est
- * précisément ce qui lui permet d'être la même sur les deux plateformes.
+ * `StoredSession` carries none. On the web they do exist in the same database — non-extractable
+ * `CryptoKey` values, which IndexedDB accepts as-is and no file could hold — but that is the
+ * store's business, not the session's. The session asks `DeviceCipher` to seal and never sees key
+ * material, which is exactly what lets it be the same on both platforms.
  *
- * L'état MLS, lui, est chiffré avant d'arriver ici (voir `wrapState`).
+ * The MLS state is encrypted before it gets here (see `wrapState`).
  */
 import { isTauri } from "./platform";
 import type { DeviceKeys } from "./keys";
@@ -28,137 +27,132 @@ const STORE = "device";
 
 interface StoredSession {
   deviceId: string;
-  /** Pseudonyme du compte. En clair côté serveur, comme le credential MLS. */
+  /** The account's handle. Plaintext server-side, like the MLS credential. */
   handle: string;
   /**
-   * Graine du compte, **chiffrée** avec la même clé que l'état MLS.
+   * The account seed, **encrypted** with the same key as the MLS state.
    *
-   * Elle vaut le compte entier : elle permet d'attester de nouveaux appareils et d'en
-   * révoquer. Elle est conservée parce qu'un appareil doit pouvoir en appairer un autre sans
-   * redemander la phrase à l'utilisateur — mais elle ne doit jamais toucher le disque en
-   * clair, ni partir sur le réseau autrement que scellée dans un blob d'appairage.
+   * It is worth the whole account: it can attest new devices and revoke them. It is kept because
+   * a device must be able to pair another without asking the user for the phrase again — but it
+   * must never touch the disk in the clear, nor leave over the network other than sealed inside a
+   * pairing blob.
    */
   accountSeed: Uint8Array;
   /**
-   * Verrou local, s'il est activé.
+   * The local lock, if enabled.
    *
-   * Absent, l'état est chiffré par la clé non-extractable d'`DeviceKeys` : elle protège de
-   * l'exfiltration par script, mais pas de qui obtient la session du navigateur. Présent,
-   * l'état est chiffré par une clé maîtresse qui n'existe qu'en mémoire après saisie du mot
-   * de passe.
+   * Absent, the state is encrypted by the non-extractable key of `DeviceKeys`: that protects
+   * against exfiltration by script, but not against whoever gets the browser session. Present,
+   * the state is encrypted by a master key that only exists in memory once the password has been
+   * entered.
    *
-   * Rien de ce qui est stocké ici n'est secret : le sel est public, et la clé maîtresse y
-   * figure chiffrée.
+   * Nothing stored here is secret: the salt is public, and the master key appears encrypted.
    */
   lock?: LockEnvelope;
   /**
-   * Le coffre d'historique est-il actif ?
+   * Is the history vault enabled?
    *
-   * **Absent vaut actif.** Le coffre est le défaut ; ce drapeau ne sert donc qu'à retenir un
-   * refus. Trois valeurs, pas deux : `false` est une décision de l'utilisateur et se respecte,
-   * `undefined` est l'absence de décision et se traite comme un compte neuf. Les confondre
-   * rallumerait la sauvegarde dans le dos de quelqu'un qui l'avait coupée.
+   * **Absent means enabled.** The vault is the default; this flag only records a refusal. Three
+   * values, not two: `false` is a user decision and must be honoured, `undefined` is the absence
+   * of a decision and is treated as a fresh account. Conflating them would turn backup back on
+   * behind the back of someone who had turned it off.
    *
-   * Seul le drapeau est stocké : la clé se redérive de la graine du compte, elle-même
-   * chiffrée juste au-dessus. La conserver ici ferait une copie de plus d'un secret qui
-   * ouvre tout le passé archivé.
+   * Only the flag is stored: the key is re-derived from the account seed, itself encrypted just
+   * above. Keeping it here would make one more copy of a secret that opens the whole archived
+   * past.
    */
   vaultEnabled?: boolean;
-  /** État MLS chiffré. Jamais en clair sur le disque. */
+  /** Encrypted MLS state. Never in the clear on disk. */
   state?: Uint8Array;
-  /** Le stockage MLS ne s'énumère pas : la liste des groupes se conserve à côté. */
+  /** MLS storage cannot be enumerated: the group list is kept alongside it. */
   groupIds: Uint8Array[];
   /**
-   * Empreintes de compte déjà vérifiées hors bande, par handle.
+   * Account fingerprints already verified out of band, by handle.
    *
-   * Conserver la valeur vérifiée — et non un simple booléen — est ce qui permet de
-   * **détecter un changement**. L'empreinte porte sur la clé du compte, pas sur celle d'un
-   * appareil : elle ne bouge donc pas quand le correspondant ajoute un téléphone. Si elle
-   * change malgré tout, c'est soit une récupération depuis la phrase, soit une substitution
-   * par le serveur. L'un est rare, l'autre est l'attaque ; l'utilisateur seul peut trancher,
-   * mais il faut d'abord le lui dire.
+   * Keeping the verified value — rather than a mere boolean — is what makes it possible to
+   * **detect a change**. The fingerprint covers the account key, not a device key: it does not
+   * move when the correspondent adds a phone. If it changes anyway, it is either a recovery from
+   * the phrase or a substitution by the server. One is rare, the other is the attack; only the
+   * user can decide, but they have to be told first.
    */
   verified: Record<string, string>;
   /**
-   * Dernière séquence traitée par conversation, indexée par identifiant de groupe en hex.
+   * Last sequence processed per conversation, indexed by hex group id.
    *
-   * Doit être persisté avec l'état MLS, et non recalculé au démarrage. Chaque clé de message
-   * est consommée puis détruite à la lecture : reprendre le flux depuis le début ferait
-   * échouer tous les messages déjà lus, et la conversation resterait vide après un simple
-   * rechargement de page.
+   * Must be persisted with the MLS state, not recomputed at startup. Each message key is consumed
+   * then destroyed on read: replaying the stream from the beginning would fail every message
+   * already read, and the conversation would stay empty after a mere page reload.
    */
   cursors: Record<string, number>;
   /**
-   * Appareils connus de chaque correspondant, par handle.
+   * Devices known for each correspondent, by handle.
    *
-   * Sert à repérer un ajout : un appareil qui apparaît chez un pair est un événement à
-   * signaler, et c'est cette notification — non l'empreinte, volontairement stable — qui
-   * révèle un appareil hostile légitimement attesté par un compte compromis.
+   * Used to spot an addition: a device appearing on a peer is an event worth reporting, and it is
+   * that notification — not the fingerprint, deliberately stable — that reveals a hostile device
+   * legitimately attested by a compromised account.
    */
   knownDevices: Record<string, string[]>;
   /**
-   * Réglages de signalisation. Absent sur les sessions antérieures, d'où l'optionnalité.
+   * Signalling settings. Absent on earlier sessions, hence optional.
    *
-   * Ils vivent ici et nulle part ailleurs : ce sont des préférences locales, et les faire
-   * connaître au serveur reviendrait à lui apprendre qui refuse d'être observé.
+   * They live here and nowhere else: they are local preferences, and telling the server about
+   * them would amount to teaching it who refuses to be observed.
    */
   signals?: SignalSettings;
   /**
-   * Clé de dépôt par conversation, indexée par identifiant de groupe en hex.
+   * Posting key per conversation, indexed by hex group id.
    *
-   * # Pourquoi la persister
+   * # Why persist it
    *
-   * Sans elle, chaque rechargement de page retire au client sa capacité de déposer
-   * anonymement, jusqu'à ce qu'un autre membre la rediffuse — ce qui suppose qu'il soit en
-   * ligne. Le sealed sender et l'indicateur de frappe retombaient silencieusement sur « rien »
-   * pendant ce temps : la panne la plus difficile à voir, puisque tout le reste fonctionne.
+   * Without it, every page reload strips the client of its ability to post anonymously, until
+   * another member rebroadcasts it — which assumes that member is online. Sealed sender and the
+   * typing indicator silently fell back to "nothing" in the meantime: the hardest kind of failure
+   * to see, since everything else works.
    *
-   * # Ce que cela n'expose pas
+   * # What it does not expose
    *
-   * Rien de neuf. Cette clé est déjà connue de tous les membres du groupe **et du serveur**,
-   * qui doit vérifier les MAC. Elle n'ouvre aucun contenu ; elle prouve seulement
-   * l'appartenance. Elle est de toute façon rangée dans l'état chiffré au repos, comme les
-   * clés MLS qui, elles, valent bien davantage.
+   * Nothing new. This key is already known to every group member **and to the server**, which has
+   * to verify the MACs. It opens no content; it only proves membership. It sits in the encrypted
+   * state at rest anyway, like the MLS keys, which are worth far more.
    */
   postingKeys?: Record<string, string>;
 }
 
-/** Ce que l'utilisateur accepte d'émettre. */
+/** What the user agrees to emit. */
 export interface SignalSettings {
   /**
-   * Émettre — et donc voir — les accusés de lecture.
+   * Emit — and therefore see — read receipts.
    *
-   * Un seul drapeau pour les deux sens : la réciprocité est la règle, et deux drapeaux
-   * distincts inviteraient à voir sans être vu.
+   * A single flag for both directions: reciprocity is the rule, and two separate flags would
+   * invite seeing without being seen.
    */
   readReceipts: boolean;
-  /** Émettre l'indicateur de frappe. Le recevoir reste possible : rien à cacher à s'en priver. */
+  /** Emit the typing indicator. Receiving it stays possible: nothing to hide in going without. */
   typingIndicator: boolean;
   /**
-   * Diffuser — et donc voir — sa présence.
+   * Broadcast — and therefore see — presence.
    *
-   * Un seul drapeau, comme pour les accusés de lecture, et pour la même raison : deux drapeaux
-   * distincts inviteraient à voir sans être vu. La réciprocité est en outre **appliquée par le
-   * serveur**, qui cesse d'enregistrer autant que de servir ; ce drapeau-ci ne fait qu'éviter
-   * une requête inutile et refléter l'état à l'écran.
+   * A single flag, as for read receipts, and for the same reason: two separate flags would invite
+   * seeing without being seen. Reciprocity is moreover **enforced by the server**, which stops
+   * recording as much as serving; this flag only avoids a pointless request and reflects the
+   * state on screen.
    *
-   * Absent vaut activé : la présence est le défaut, ce drapeau ne sert qu'à retenir un refus.
+   * Absent means enabled: presence is the default, this flag only records a refusal.
    */
   presence?: boolean;
 }
 
 /**
- * Délai au-delà duquel on considère l'ouverture bloquée.
+ * Delay past which the open is considered stuck.
  *
- * IndexedDB ne signale pas toujours `onblocked` : une base en cours de suppression, ou un
- * autre onglet qui retient l'ancienne version, laisse la requête muette — ni succès, ni
- * erreur, indéfiniment. Sans ce garde-fou, l'application reste sur « Chargement… » sans que
- * rien n'indique pourquoi.
+ * IndexedDB does not always report `onblocked`: a database being deleted, or another tab holding
+ * the old version, leaves the request silent — neither success nor error, indefinitely. Without
+ * this guard, the application sits on "Loading…" with nothing to say why.
  */
 const OPEN_TIMEOUT_MS = 5000;
 
 const BLOCKED =
-  "Base locale inaccessible. Un autre onglet de l'application la retient : fermez-le, puis rechargez.";
+  "Local database unavailable. Another tab of the application is holding it: close it, then reload.";
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -191,35 +185,35 @@ function transact<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => I
 }
 
 /**
- * Où la session est rangée.
+ * Where the session is kept.
  *
- * Trois opérations et rien de plus : tout ce qui décide *quoi* ranger vit dans `Session`, et
- * tout ce qui décide *comment le protéger* vit dans `DeviceCipher`. Un port qui saurait aussi
- * chiffrer devrait connaître les clés, ce qui est précisément ce qu'on cherche à éviter.
+ * Three operations and no more: everything that decides *what* to keep lives in `Session`, and
+ * everything that decides *how to protect it* lives in `DeviceCipher`. A port that also knew how
+ * to encrypt would have to know the keys, which is precisely what we are trying to avoid.
  */
 export interface SessionStore {
   load(): Promise<StoredSession | undefined>;
   save(session: StoredSession): Promise<void>;
   /**
-   * Efface tout.
+   * Erases everything.
    *
-   * Sur le web, les clés non extractables disparaissent avec la base : sans elles, l'état
-   * chiffré résiduel est définitivement illisible, y compris par nous.
+   * On the web, non-extractable keys disappear with the database: without them, any leftover
+   * encrypted state is permanently unreadable, by us included.
    */
   clear(): Promise<void>;
 }
 
-/** Ce qu'IndexedDB contient réellement : la session, plus les clés que seul le store manipule. */
+/** What IndexedDB actually holds: the session, plus the keys only the store handles. */
 interface StoredWithKeys extends StoredSession {
   keys: DeviceKeys;
 }
 
 /**
- * Le store du navigateur, qui range aussi les clés de l'appareil.
+ * The browser store, which also keeps the device keys.
  *
- * Il les tient parce qu'il est le seul à pouvoir : elles ne se sérialisent pas, donc elles ne
- * peuvent vivre que là où le clonage structuré les accepte. La session, elle, les ignore — ce
- * qui lui permet d'être identique sous Tauri, où elles vivent dans un autre processus.
+ * It holds them because it is the only thing that can: they do not serialise, so they can only
+ * live where structured cloning accepts them. The session ignores them — which is what lets it be
+ * identical under Tauri, where they live in another process.
  */
 export class IndexedDbStore implements SessionStore {
   private keys: DeviceKeys;
@@ -234,8 +228,8 @@ export class IndexedDbStore implements SessionStore {
     );
     if (!stored) return undefined;
 
-    // Les clés lues font autorité sur celles reçues à la construction : au rechargement, ce
-    // sont les seules qui déchiffrent l'état déjà écrit.
+    // The keys read from storage override those received at construction: on reload, they are
+    // the only ones that decrypt the state already written.
     this.keys = stored.keys;
     return stored;
   }
@@ -250,11 +244,11 @@ export class IndexedDbStore implements SessionStore {
 }
 
 /**
- * Lit les clés déjà rangées dans la base, s'il y en a.
+ * Reads the keys already kept in the database, if there are any.
  *
- * Séparé de `load` parce que l'ordre l'exige : il faut les clés pour construire le chiffreur,
- * et le chiffreur pour ouvrir l'état. Sur le web les deux sortent de la même base, ce qui invite
- * à les confondre — sous Tauri elles viennent d'un autre processus, et la confusion se paierait.
+ * Separate from `load` because the order demands it: the keys are needed to build the cipher, and
+ * the cipher to open the state. On the web both come out of the same database, which invites
+ * confusing them — under Tauri they come from another process, and the confusion would cost.
  */
 export async function readStoredKeys(): Promise<DeviceKeys | undefined> {
   const stored = await transact<StoredWithKeys | undefined>("readonly", (store) =>

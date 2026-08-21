@@ -17,6 +17,7 @@ import { sanitize, validate } from "./display-name";
 import * as envelope from "./envelope";
 import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
+import * as derive from "./conversation-view.ts";
 import { composeStored } from "./session-persist.ts";
 import { fromBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
@@ -32,7 +33,7 @@ import {
   clearAll,
 } from "./persistence";
 import { isTauri } from "./platform";
-import { pending, record, statusOf } from "./receipts";
+import { pending, record } from "./receipts";
 import {
   TYPING_DEBOUNCE_MS,
   fresh,
@@ -247,10 +248,7 @@ export class Session {
    * state is always on screen rather than tucked into a menu.
    */
   verificationOf(account: ResolvedAccount): VerificationState {
-    const known = this.verified[account.handle];
-    if (!known) return { status: "unverified" };
-    if (known === account.fingerprint) return { status: "verified" };
-    return { status: "changed", previous: known };
+    return derive.verificationOf(this.verified, account);
   }
 
   async markVerified(account: ResolvedAccount): Promise<void> {
@@ -1104,21 +1102,6 @@ export class Session {
    * We compare sets, not lists: typing order must not produce two different groups. An account
    * with several devices appears several times in the tree, hence the `Set`.
    */
-  private findConversation(handles: string[]): ConversationView | undefined {
-    const target = [...new Set(handles)].sort().join("\u0000");
-
-    for (const view of this.conversations.values()) {
-      const members = [...new Set(view.peers.map((peer) => peer.name))]
-        .filter((name) => name !== this.handle)
-        .sort()
-        .join("\u0000");
-
-      if (members === target) return view;
-    }
-
-    return undefined;
-  }
-
   /**
    * Opens a conversation with one or more accounts, adding **all** of their devices.
    *
@@ -1147,7 +1130,7 @@ export class Session {
     // members: messages spread across the two depending on which one was selected, and the user
     // concludes messages are being lost. Nothing in the protocol forbids it — it is up to the
     // app to decide that a conversation is identified by its participants.
-    const existing = this.findConversation(wanted);
+    const existing = derive.matchingConversation(this.conversations.values(), wanted, this.handle);
     if (existing) return existing;
 
     const peers: ResolvedAccount[] = [];
@@ -1503,17 +1486,6 @@ export class Session {
    * more commit per join. The choice here favours determinism, which is what guards against
    * forks.
    */
-  private successor(view: ConversationView, roles: Roles): string | null {
-    const members = view.peers.map((peer) => peer.name).filter((name) => name !== this.handle);
-
-    // The rank immediately below: a moderator, if one is left in the group.
-    const moderator = members.find((name) => roles.moderators.includes(name));
-    if (moderator !== undefined) return moderator;
-
-    // Failing that, the oldest member in tree order.
-    return members[0] ?? null;
-  }
-
   /**
    * Asks to leave a group.
    *
@@ -1541,7 +1513,7 @@ export class Session {
     const roles = this.roles(view);
 
     if (roles !== null && roles.admin === this.handle) {
-      const heir = this.successor(view, roles);
+      const heir = derive.successorOf(view, roles, this.handle);
       if (heir === null) {
         throw new Error(
           "You are the admin and the last member: leaving means deleting the conversation.",
@@ -2013,7 +1985,7 @@ export class Session {
    * messages. Our own are excluded: nobody is behind on what they wrote themselves.
    */
   unreadIn(view: ConversationView): number {
-    return view.messages.filter((message) => !message.mine && message.seq > view.readCursor).length;
+    return derive.unreadIn(view);
   }
 
   /**
@@ -2024,20 +1996,12 @@ export class Session {
    * the conversation you just wrote in is the one you are in.
    */
   lastActivityIn(view: ConversationView): number {
-    const written = view.outbox.reduce((latest, entry) => Math.max(latest, entry.sentAt), 0);
-    const received = view.messages.reduce(
-      (latest, message) => Math.max(latest, message.sentAt ?? 0),
-      0,
-    );
-    return Math.max(written, received);
+    return derive.lastActivityIn(view);
   }
 
   /** State to show on a message we sent: sent, delivered, read. */
   statusOf(view: ConversationView, seq: number): "sent" | "delivered" | "read" {
-    const handles = [...new Set(view.accounts.map((account) => account.handle))].filter(
-      (handle) => handle !== this.handle,
-    );
-    return statusOf(view.receipts, handles, seq, this.signals.readReceipts);
+    return derive.deliveryStatus(view, seq, this.handle, this.signals.readReceipts);
   }
 
   /** Peers currently typing, expired ones excluded. */

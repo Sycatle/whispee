@@ -1,5 +1,6 @@
 import type { ReactElement, ReactNode } from "react";
 import * as RadixMenu from "@radix-ui/react-dropdown-menu";
+import { type BindingId, bindingOf } from "../lib/keymap.ts";
 import { formatShortcut } from "../lib/shortcuts.ts";
 import { cn } from "./cn.ts";
 import { Icon, type IconName } from "./Icon.tsx";
@@ -138,8 +139,15 @@ function MenuItem({
   children,
 }: {
   icon?: IconName;
-  /** A combo in the `lib/shortcuts.ts` spelling — `"mod+k"`. Drawn, not bound. */
-  shortcut?: string;
+  /**
+   * The binding to draw beside the item. Drawn, not bound — the chord is answered by whoever
+   * claimed it, and an item that merely names it must not be a second way to register it.
+   *
+   * A `BindingId` and not a combo string: written as `"mod+k"` the hint could name a chord
+   * nothing answers, and would keep naming it after the chord changed. As an id it is the
+   * compiler's business, and the combo is read from the one list at draw time.
+   */
+  shortcut?: BindingId;
   tone?: "default" | "danger";
   disabled?: boolean;
   onSelect: () => void;
@@ -175,7 +183,7 @@ function MenuItem({
           aria-hidden="true"
           className="shrink-0 font-evidence text-caption text-(--color-ink-muted) group-data-[highlighted]:text-(--color-accent-ink)"
         >
-          {formatShortcut(shortcut)}
+          {formatShortcut(bindingOf(shortcut).combo)}
         </span>
       )}
     </RadixMenu.Item>

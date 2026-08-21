@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { COMPOSER_ID, Conversation } from "@/components/Conversation";
 import { useDuo, useTrio } from "@/lib/duo";
@@ -10,6 +10,8 @@ import { EmptyCenter } from "./EmptyCenter";
 import { NewConversation } from "./NewConversation";
 import { Rail } from "./Rail";
 import { SettingsScreen } from "./SettingsScreen";
+import { useBinding } from "./Shortcuts";
+import { ShortcutsHelp } from "./ShortcutsHelp";
 
 /**
  * Three columns, one route, three renderings of it.
@@ -131,6 +133,23 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
     // this effect would never re-run when the first poll fills the map.
   }, [duo, route, session, navigate, revision]);
 
+  const [helping, setHelping] = useState(false);
+
+  /**
+   * The two bindings that belong to the shell rather than to a panel.
+   *
+   * `settings.open` because the route exists whatever is on screen, and `help.shortcuts` because
+   * a list of shortcuts has to be reachable from every screen or it is not a reference. Both are
+   * claimed for as long as the shell is mounted, which is as long as there is a session.
+   *
+   * `?` carries no modifier, so `useShortcut` refuses it while a field has the focus — which is
+   * exactly right here, since the composer now takes the focus when a conversation opens and a
+   * question mark typed into a message must stay a question mark. It is reachable from the thread
+   * and from the rail, and from the composer after Escape.
+   */
+  useBinding("settings.open", () => navigate({ kind: "settings", section: null }));
+  useBinding("help.shortcuts", () => setHelping(true));
+
   const centre = () => {
     switch (route.kind) {
       case "home":
@@ -184,6 +203,8 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
             {centre()}
           </main>
         )}
+
+        <ShortcutsHelp open={helping} onOpenChange={setHelping} />
       </div>
     );
   }
@@ -261,6 +282,8 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
           )}
         </div>
       </div>
+
+      <ShortcutsHelp open={helping} onOpenChange={setHelping} />
     </div>
   );
 }

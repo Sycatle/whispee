@@ -7,7 +7,6 @@ import { useDuo, useTrio } from "@/lib/duo";
 import { normalize, validate } from "@/lib/handle";
 import { compactNameOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
-import { useShortcut } from "@/lib/shortcuts";
 import { Button } from "@/ui/Button";
 import { cn } from "@/ui/cn";
 import { Field } from "@/ui/Field";
@@ -20,6 +19,7 @@ import { Tooltip } from "@/ui/Tooltip";
 import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
+import { useBinding } from "@/app/Shortcuts";
 import { useNavigate, useRoute } from "@/routes/Router";
 
 /**
@@ -92,7 +92,7 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
   // drift apart. Below `duo` this component is not mounted while the detail panel is on screen —
   // the shell mounts one pane at a time — so `mod+i` opens the panel there and the back gesture
   // closes it, which is the same arrangement as before this bar moved.
-  useShortcut("mod+i", toggleDetail);
+  useBinding("detail.toggle", toggleDetail);
 
   /*
     One line and no room for a second: the line under this one belongs to the typing indicator

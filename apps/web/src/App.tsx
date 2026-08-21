@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/app/Shell";
+import { ShortcutsProvider } from "@/app/Shortcuts";
 import { Unlock } from "@/components/Lock";
 import { preload } from "@/lib/emoji-sprite";
 import { MigrationBanner } from "@/components/Migration";
@@ -173,20 +174,22 @@ function Boot() {
   return (
     <SessionProvider value={store}>
       <RouterProvider>
-        <OverlayProvider>
-          <TooltipProvider>
-            <Frame
-              relock={relock}
-              migration={migration}
-              onMigrated={(fresh) => {
-                setMigration(null);
-                setSession(fresh);
-              }}
-              fallback={fallback}
-              onDismissFallback={() => setFallback(null)}
-            />
-          </TooltipProvider>
-        </OverlayProvider>
+        <ShortcutsProvider>
+          <OverlayProvider>
+            <TooltipProvider>
+              <Frame
+                relock={relock}
+                migration={migration}
+                onMigrated={(fresh) => {
+                  setMigration(null);
+                  setSession(fresh);
+                }}
+                fallback={fallback}
+                onDismissFallback={() => setFallback(null)}
+              />
+            </TooltipProvider>
+          </OverlayProvider>
+        </ShortcutsProvider>
       </RouterProvider>
     </SessionProvider>
   );

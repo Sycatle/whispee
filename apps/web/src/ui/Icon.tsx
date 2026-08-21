@@ -3,6 +3,7 @@ import {
   Check,
   ChevronDown,
   ChevronLeft,
+  CircleQuestionMark,
   Copy,
   Ellipsis,
   Info,
@@ -26,12 +27,12 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 /**
- * The icon inventory. Twenty-three, named by role, and closed.
+ * The icon inventory. Twenty-four, named by role, and closed.
  *
  * # Named imports only, never `import * as icons`
  *
  * A star import defeats tree-shaking: the bundler cannot prove which of the fifteen hundred
- * modules in `lucide-react` are unreachable, so it keeps them. Twenty-three named imports are a few
+ * modules in `lucide-react` are unreachable, so it keeps them. Twenty-four named imports are a few
  * kilobytes; the star import is the whole set. This is not a style preference, it is the
  * difference between the budget the plan allowed for icons and roughly three hundred times it.
  *
@@ -68,6 +69,7 @@ export type IconName =
   | "copy"
   | "devices"
   | "emoji"
+  | "help"
   | "info"
   | "lock"
   | "more"
@@ -118,6 +120,14 @@ const ICONS: Record<IconName, LucideIcon> = {
    * an interface control and belongs to the same line-art set as everything else here.
    */
   emoji: SmilePlus,
+  /**
+   * The list of keyboard shortcuts.
+   *
+   * A question mark and not `info`, which already means "details of this conversation" two
+   * inches away in the same interface. One glyph for two unrelated things is how an icon stops
+   * being read and starts being ignored.
+   */
+  help: CircleQuestionMark,
   /** Opens the detail panel, where verification actually happens. */
   info: Info,
   /** The local lock. A padlock, and no attempt to distinguish locked from unlocked by shape. */

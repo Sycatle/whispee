@@ -3,6 +3,7 @@ import { useCallback, useState } from "react";
 import { PresenceDot } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
 import { compactNameOf, nameMatches, nameOf } from "@/lib/naming";
+import { useBinding, useRunBinding } from "@/app/Shortcuts";
 import { roster } from "@/lib/roster";
 import { useRoving } from "@/lib/useRoving";
 import type { ConversationView } from "@/lib/session";
@@ -221,6 +222,32 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
     currentKey,
   );
   const people = useRoving<HTMLUListElement>(contacts, null);
+
+  /**
+   * The shortcut that reaches a conversation without the mouse.
+   *
+   * It opens the filter and puts the caret in it, from wherever the reader was — including the
+   * composer, since the chord carries a modifier and so survives a field having focus. Down then
+   * walks into the results and Enter opens one, which is the whole gesture without leaving the
+   * keyboard.
+   *
+   * The field is rendered on `searching` alone, so the shortcut also works below the six
+   * conversations that make the search button appear: the button is hidden because it would be
+   * clutter next to a list you can see all of, which is not a reason to refuse the chord.
+   *
+   * `requestAnimationFrame` because the field does not exist yet at the moment the state is set —
+   * focusing it in the same tick would find nothing and leave the caret where it was.
+   *
+   * Claimed here rather than in the shell, so it is claimed only while the rail is on screen. On
+   * one column with a conversation open the rail is not mounted, nothing asks for the chord, and
+   * ⌘K goes to the browser untouched rather than being swallowed by a handler with nothing to do.
+   */
+  const run = useRunBinding();
+
+  useBinding("rail.filter", () => {
+    setSearching(true);
+    requestAnimationFrame(() => document.getElementById(FILTER_FIELD_ID)?.focus());
+  });
 
   /**
    * Every handle the rail draws, in one set.
@@ -638,6 +665,25 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             onSelect={() => navigate({ kind: "settings", section: "notifications" })}
           >
             Notifications
+          </Menu.Item>
+
+          {/* Where a keyboard shortcut becomes findable. A chord nobody can discover is a chord
+              for whoever wrote it, so the one entry that lists them all sits in the menu people
+              already open — with its own chord drawn beside it, which is how anybody learns that
+              the column on the right of this menu means anything.
+
+              `shortcut` had been a prop of `Menu.Item` since it was written and no call site had
+              ever passed it: the column was rendered by code that ran for nobody. This is its
+              first user.
+
+              `run` and not a local handler: the item and the chord must open the same thing, and
+              two implementations of "open the shortcuts" is how one of them ends up doing less. */}
+          <Menu.Item
+            icon="help"
+            shortcut="help.shortcuts"
+            onSelect={() => run("help.shortcuts")}
+          >
+            Keyboard shortcuts
           </Menu.Item>
 
           <Menu.Separator />

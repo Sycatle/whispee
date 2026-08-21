@@ -16,9 +16,15 @@
  * off-by-one in the modifier set fires a shortcut on the wrong chord — so they are the part that
  * is tested. `useShortcut` is the thin, untestable-without-a-DOM shell around them.
  *
- * What this module does not do: it binds nothing itself. The shell wires `mod+k`, `mod+,` and
- * `mod+i`; this only provides the mechanism, and it deliberately has no registry — two
- * components claiming the same chord both fire, and no error says so.
+ * What this module does not do: it binds nothing itself, and it names no shortcut. Which chords
+ * exist is `lib/keymap.ts`, and who answers them is `app/Shortcuts.tsx`. This layer is the
+ * mechanism alone.
+ *
+ * That separation is a repair rather than a preference. This comment used to state that the
+ * shell wired `mod+k`, `mod+,` and `mod+i`. Two of the three were never written: the sentence
+ * was accurate when someone meant to write them and became false without a line of code
+ * changing, which is the failure mode a prose list of bindings has. The registry cannot drift
+ * that way — the help screen is generated from the bindings that are actually mounted.
  */
 import { useEffect, useRef } from "react";
 
@@ -176,18 +182,36 @@ export type Chord = Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey"
  *
  * `mod` resolves here rather than in the parser so that one parsed combo is valid on both
  * platforms, and so the resolution is visible at the point where it matters.
+ *
+ * # The one modifier that is not compared, and when
+ *
+ * Shift is exempt when the combo asks for a punctuation character. `?` is Shift+/ on a US
+ * keyboard, Shift+, on a French one, and an unshifted key on a Spanish one: the browser reports
+ * `key: "?"` with `shiftKey: true` on the first two, so a combo parsed as "? with no modifiers"
+ * could never match a real press of `?`. The shift is not part of the intention, it is part of
+ * how that character is typed on that layout — and which layout is in front of us is precisely
+ * what we cannot know.
+ *
+ * Letters keep the strict comparison, because there Shift *is* an intention: `mod+k` must not
+ * fire on ⌘⇧K, which is a chord somebody may want for something else.
+ *
+ * What this does not solve: `mod+,` and `mod+shift+,` become indistinguishable, and so does any
+ * other pair that differs only by Shift on a punctuation key. Nothing here has both, and a
+ * project that wanted both would have to ask the user's layout, which the platform does not
+ * offer.
  */
 export function matches(combo: Combo, chord: Chord, apple: boolean = isApplePlatform()): boolean {
   if (chord.key.toLowerCase() !== combo.key) return false;
 
   const wantsMeta = apple ? combo.mod : false;
   const wantsCtrl = combo.ctrl || (apple ? false : combo.mod);
+  const punctuation = combo.key.length === 1 && !/[a-z0-9]/.test(combo.key);
 
   return (
     chord.metaKey === wantsMeta &&
     chord.ctrlKey === wantsCtrl &&
     chord.altKey === combo.alt &&
-    chord.shiftKey === combo.shift
+    (punctuation || chord.shiftKey === combo.shift)
   );
 }
 

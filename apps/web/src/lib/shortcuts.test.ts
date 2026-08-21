@@ -133,3 +133,32 @@ test("a bare key matches only with nothing held", () => {
   assert.ok(matches(combo, press("Escape"), true));
   assert.equal(matches(combo, press("Escape", { shiftKey: true }), true), false);
 });
+
+test("a punctuation combo matches however the layout produces the character", () => {
+  // `?` is Shift+/ on a US keyboard and Shift+, on a French one, so the browser reports it with
+  // `shiftKey: true` — while the combo, written `"?"`, parses as asking for no modifier at all.
+  // Comparing shift strictly here meant `?` could never fire on either layout.
+  const combo = parseCombo("?");
+
+  assert.ok(matches(combo, press("?", { shiftKey: true }), false));
+  // And on a layout where the character is unshifted, the same combo still matches.
+  assert.ok(matches(combo, press("?"), false));
+});
+
+test("a letter combo still compares shift strictly", () => {
+  // The exemption is for punctuation only. Shift on a letter is an intention, and `mod+k` must
+  // leave ⌘⇧K alone for whatever wants it.
+  const combo = parseCombo("mod+k");
+
+  assert.ok(matches(combo, press("k", { ctrlKey: true }), false));
+  assert.equal(matches(combo, press("k", { ctrlKey: true, shiftKey: true }), false), false);
+});
+
+test("a punctuation combo still compares every other modifier", () => {
+  // Only shift is exempt: `mod+,` must not fire on a bare comma typed into a message.
+  const combo = parseCombo("mod+,");
+
+  assert.ok(matches(combo, press(",", { ctrlKey: true }), false));
+  assert.equal(matches(combo, press(","), false), false);
+  assert.equal(matches(combo, press(",", { ctrlKey: true, altKey: true }), false), false);
+});

@@ -306,6 +306,31 @@ export function Conversation({ view }: { view: ConversationView }) {
     composer.current?.focus();
   };
 
+  /**
+   * Opening a conversation puts the caret where the writing happens.
+   *
+   * Arriving in a thread and having to Tab to the field is a step nobody wants: the reason to
+   * open a conversation is nearly always to answer it. This is what makes the composer the first
+   * thing the keyboard reaches, without reordering the document to get there.
+   *
+   * Fine pointers only, and that is not a detail. Focusing a text field on a phone raises the
+   * software keyboard, which takes half the screen and hides the thread the user just asked to
+   * see — so on touch, opening a conversation would show them a keyboard instead of the messages.
+   * The same `pointer: coarse` test as the send button and the Enter key, so all three agree.
+   *
+   * What this does not solve: entering a field is what switches NVDA and JAWS into forms mode, so
+   * a screen-reader user arrives with the arrow keys bound to the field rather than to the
+   * document, and has to leave it to browse the thread. The plan had this focusing the heading
+   * for that reason; the caret in the field is the deliberate trade, and Escape from the composer
+   * is what walks it back.
+   */
+  useEffect(() => {
+    if (matchMedia("(pointer: coarse)").matches) return;
+    composer.current?.focus();
+    // Keyed on the conversation alone: re-running it on every render would drag the focus back
+    // out of whatever the user moved it to, once per arriving message.
+  }, [view.key]);
+
   // The same list the bar above the thread names people against. See `membersOf`: two lists would
   // let the two halves of one screen disagree about who "Charlie" is.
   const members = membersOf(view);
@@ -521,19 +546,31 @@ export function Conversation({ view }: { view: ConversationView }) {
             />
 
             {/*
-              The send button stays, and it is not negotiable.
+              The send button exists exactly where it is the only way to submit, and nowhere else.
 
-              Under a coarse pointer Enter deliberately does not send — see the `keydown` above —
-              so on a phone this button is the *only* way to send anything. Removing it because a
-              desktop chat client does without one would leave every touch user with a composer
-              they cannot submit. Icon only, with the name kept in `label` for the tooltip and the
-              screen reader: the word disappears, the affordance does not.
+              Under a coarse pointer Enter deliberately does not send — see the `keydown` above,
+              where it returns early — because the Enter key of a software keyboard is how a
+              message gets a second line. So on a phone this button is not decoration, it is the
+              submit. Under a fine pointer it is redundant with a key the writer's hands are
+              already on, and one more thing between the text and the thread.
+
+              `hidden touch:inline-flex` and not an opacity: `display: none` takes it out of the
+              tab order, which is the whole point here — the opposite of the action bar in
+              `Messages.tsx`, where hiding it that way was the bug. There is nothing to reach with
+              Tab on a desktop because Enter has already done the job.
+
+              The rule is the same `pointer: coarse` the keydown tests, so the two cannot drift:
+              the button is present in precisely the case where Enter declines to send.
+
+              Icon only, with the name kept in `label` for the tooltip and the screen reader: the
+              word disappears, the affordance does not.
             */}
             <Tooltip label="Send">
               <IconButton
                 type="submit"
                 label="Send"
                 variant="primary"
+                className="hidden touch:inline-flex"
                 icon={sending ? <Spinner size="sm" /> : <Icon name="send" size={18} />}
                 // Empty means nothing to do. `send` still returns early, but a control that looks
                 // pressable and answers with silence is the defect this replaces.

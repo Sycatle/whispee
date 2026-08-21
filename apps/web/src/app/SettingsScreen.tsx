@@ -206,12 +206,20 @@ export function SettingsScreen({ section }: { section: SettingsSection | null })
   return (
     <section className="flex min-h-0 flex-1 bg-(--color-surface)">
       {showNavigation && (
+        // No `border-r`. The shell no longer divides anything with a hairline — panes are
+        // separated by the gutter of ground between them — and a rule drawn here would be the
+        // only vertical line left in the window, which would read as an accident rather than as
+        // a system.
+        //
+        // What that does not solve: this is a split *inside* one pane, so there is no gutter to
+        // do the separating either. The list and the section it opens now touch, and what tells
+        // them apart is the section's own header and the selected row's `surface-raised`. If
+        // that turns out to be too little, the answer is to give the list a background of its
+        // own — not to bring the hairline back.
         <div
           className={cn(
             "safe-top min-h-0 overflow-y-auto",
-            duo
-              ? "w-64 shrink-0 border-r border-(--color-border-subtle) bg-(--color-surface)"
-              : "safe-sides w-full",
+            duo ? "w-64 shrink-0 bg-(--color-surface)" : "safe-sides w-full",
           )}
         >
           <header className="flex items-center gap-snug px-pane py-snug">

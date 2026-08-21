@@ -117,7 +117,10 @@ function Section({
 
   return (
     <details open={open} onToggle={(e) => setOpen(e.currentTarget.open)} className="group">
-      <summary className="sticky top-0 z-(--z-index-sticky) flex cursor-default list-none items-center gap-tight bg-(--color-surface-sunken) px-gutter py-snug text-caption font-medium tracking-wide text-(--color-ink-muted) uppercase focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) [&::-webkit-details-marker]:hidden">
+      {/* The background here is not decoration: a sticky header with a transparent background
+          lets the rows scroll visibly underneath the label. It has to be whatever the rail's
+          background is, so it moves with it — the rail is a `surface` now, not a sunken edge. */}
+      <summary className="sticky top-0 z-(--z-index-sticky) flex cursor-default list-none items-center gap-tight bg-(--color-surface) px-gutter py-snug text-caption font-medium tracking-wide text-(--color-ink-muted) uppercase focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) [&::-webkit-details-marker]:hidden">
         <Icon
           name="collapse"
           size={14}
@@ -238,10 +241,15 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
     }
   };
 
+  // A surface, not a sunken edge: the window behind the columns is what is sunken now, and the
+  // gutter the shell puts between this column and the thread is what separates the two. Hence no
+  // `border-r` — a hairline drawn along the side of a gap reads as a seam in the ground rather
+  // than as an edge of the rail. `overflow-hidden` so the rounded corners survive the sticky
+  // section headers, which paint their own background right up to the edge.
   return (
     <aside
       aria-label="Conversations and contacts"
-      className="safe-top safe-sides flex h-full w-full shrink-0 flex-col bg-(--color-surface-sunken) duo:w-72 duo:border-r duo:border-(--color-border-subtle)"
+      className="safe-top safe-sides flex h-full w-full shrink-0 flex-col overflow-hidden bg-(--color-surface) duo:w-72 duo:rounded-surface"
     >
       <div className="flex items-center gap-tight border-b border-(--color-border-subtle) px-gutter py-snug">
         <h2 className="flex-1 text-body font-medium">Whispee</h2>
@@ -327,12 +335,17 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     // `touch:` and not `duo:`: the question is not screen width but pointer
                     // precision. A tablet is wide **and** finger-driven; a width breakpoint would
                     // give it targets designed for a mouse.
+                    // The hover tint is `surface-sunken` and not `surface-raised`: now that the
+                    // rail itself is a `surface`, a hover that lifted would land on the exact
+                    // colour the selected row already uses, and pointing at a row would make it
+                    // look selected. Recessing instead keeps three legible steps in the column —
+                    // sunken under the pointer, surface at rest, raised where you are.
                     className={cn(
                       "flex w-full items-start gap-snug rounded-control px-snug py-snug text-left text-body touch:min-h-11",
                       "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)",
                       selected
                         ? "bg-(--color-surface-raised) font-medium"
-                        : "hover:bg-(--color-surface)",
+                        : "hover:bg-(--color-surface-sunken)",
                     )}
                   >
                     <Avatar
@@ -406,7 +419,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                   <button
                     type="button"
                     onClick={() => void open(handle)}
-                    className="flex w-full items-center gap-snug rounded-control px-snug py-snug text-left text-body hover:bg-(--color-surface) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
+                    className="flex w-full items-center gap-snug rounded-control px-snug py-snug text-left text-body hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
                   >
                     <Avatar label={contact.primary} size="sm" className="shrink-0" />
                     <span className="min-w-0 flex-1">
@@ -450,7 +463,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
           trigger={
             <button
               type="button"
-              className="flex w-full items-center gap-snug rounded-control p-snug text-left hover:bg-(--color-surface) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
+              className="flex w-full items-center gap-snug rounded-control p-snug text-left hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
             >
               <Avatar
                 seed={session.accountFingerprint()}

@@ -15,19 +15,40 @@ import { SettingsScreen } from "./SettingsScreen";
  *
  * # The shape
  *
- * A 288 pixel rail on `surface-sunken`, a centre that takes the rest on `surface`, a 320 pixel
- * detail column on `surface-sunken`. Two sunken edges around a raised middle is what says "the
- * conversation is the thing" without a shadow, a card or a border doing the talking.
+ * The window is the sunken thing. `surface-sunken` runs edge to edge as the ground, and each
+ * column — the 288 pixel rail, the centre, the 320 pixel detail column — is a `surface` laid on
+ * top of it with `--radius-surface` corners and `--spacing-gap` of ground showing between them
+ * and around them. One gutter value, everywhere, is the whole idea: what separates two panes is
+ * the space between them, so no column needs a hairline to say where it ends. That is why every
+ * `border-r`/`border-l` that used to divide the columns is gone rather than merely thinner.
+ *
+ * The gutter is conditioned on `duo` and deliberately absent below it. Below 48rem exactly one
+ * pane is mounted and it is the window; eight pixels of ground on each side of a 390 pixel
+ * screen is eight pixels taken from the text, and a card that fills the viewport exactly is a
+ * card that does not read as floating at all. A rounded corner needs something visible behind it
+ * to mean "detached", and on one column there is nothing behind it. So: `duo:gap-gap duo:p-gap`
+ * on the container, `duo:rounded-surface` on the columns, square and flush otherwise.
+ *
+ * **What this does not solve.** In the light palette `surface-sunken` is `oklch(0.955 0.004 265)`
+ * against `surface` at `oklch(0.985 0.003 265)` — three percent of lightness between the ground
+ * and the things standing on it. That is comfortable in the dark palette, where the same pair is
+ * 0.13 against 0.17 and the shadow has somewhere to fall; in daylight it may well be too little,
+ * and the columns may read as one flat field with seams rather than as separate surfaces. If
+ * that turns out to be the case the fix is to **darken the light `surface-sunken`** until the
+ * ground reads as ground. It is not to put the border back: a border and a gutter doing the same
+ * job at once is the muddle this batch exists to end.
  *
  * - **`trio` (≥ 64rem)** — all three side by side. Opening the detail column *shrinks* the
  *   conversation; nothing is covered, because there is room not to cover it.
  * - **`duo` (≥ 48rem)** — rail and centre. The detail column slides in **over the right hand
- *   side of the centre**, not over the window: `absolute inset-y-0 right-0 w-80` inside the
- *   centre, with a `shadow-overlay` and a `border-strong` hairline because in the dark palette
- *   the shadow does nothing on its own. `inset-y-0` and not the logical `inset-block-0`:
- *   Tailwind v4 already emits `inset-block` for the `-y-` utilities and has no class under the
- *   logical name, so the logical spelling would compile to nothing and the panel would collapse
- *   to the height of its content.
+ *   side of the centre**, not over the window: `absolute inset-y-gap right-gap w-80` inside the
+ *   centre, so it is inset by the same gutter as everything else and reads as a card lifted off
+ *   the thread rather than a slab welded to its edge. It keeps `shadow-overlay` and drops the
+ *   `border-strong` hairline: in the dark palette the shadow does little on its own, but the
+ *   gutter and the corners now carry the separation that the hairline was compensating for.
+ *   `inset-y-gap` and not the logical `inset-block-gap`: Tailwind v4 already emits `inset-block`
+ *   for the `-y-` utilities and has no class under the logical name, so the logical spelling
+ *   would compile to nothing and the panel would collapse to the height of its content.
  *
  *   **It is deliberately not a modal dialog here.** A dialog would trap focus, mark the rest
  *   `inert` and dim it — which means covering the composer. Somebody who opens the details
@@ -132,8 +153,12 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
     );
   }
 
+  // The ground the columns stand on, and the only place the gutter is declared: one `gap-gap`
+  // between the columns, one `p-gap` around them, so the distance from a column to its neighbour
+  // and the distance from a column to the window edge are the same number by construction rather
+  // than by two values that agree today.
   return (
-    <div className="flex min-h-0 flex-1">
+    <div className="flex min-h-0 flex-1 bg-(--color-surface-sunken) duo:gap-gap duo:p-gap">
       {/*
         First focusable thing in the shell. Three columns means tabbing from the rail to the
         composer crosses every conversation in the list, and there can be dozens.
@@ -154,19 +179,25 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
       <Rail onLock={onLock} onForget={onForget} />
 
       {/* `relative` so the two-pane detail column can be positioned against the centre rather
-          than against the window: it must cover the thread and stop at the rail. */}
-      <div className="relative flex min-h-0 min-w-0 flex-1">
+          than against the window: it must cover the thread and stop at the rail.
+
+          `overflow-hidden` is what makes the rounded corners real: the children — a sticky
+          header, a scrolling thread, a composer — all paint their own backgrounds square, and
+          without the clip they would fill the corners back in. It also clips the sliding detail
+          panel at the centre's right edge, which is what makes it appear from under that edge
+          instead of from off-window. */}
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-(--color-surface) duo:rounded-surface">
         {centre()}
 
         {!trio && detailOpen && view !== null && (
-          <div className="absolute inset-y-0 right-0 z-(--z-index-overlay) w-80 max-w-full border-l border-(--color-border-strong) bg-(--color-surface-sunken) shadow-overlay duration-(--duration-panel) ease-out starting:translate-x-full motion-safe:transition-transform">
+          <div className="absolute inset-y-gap right-gap z-(--z-index-overlay) w-80 max-w-full overflow-hidden rounded-surface bg-(--color-surface) shadow-overlay duration-(--duration-panel) ease-out starting:translate-x-full motion-safe:transition-transform">
             <DetailPanel view={view} />
           </div>
         )}
       </div>
 
       {trio && detailOpen && view !== null && (
-        <div className="w-80 shrink-0 border-l border-(--color-border-subtle)">
+        <div className="w-80 shrink-0 overflow-hidden bg-(--color-surface) duo:rounded-surface">
           <DetailPanel view={view} />
         </div>
       )}

@@ -11,7 +11,7 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use sha2::Digest;
 use common::{TestAccount, Device, TestServer, now, start, unique};
-use crypto_core::{Conversation, Identity};
+use crypto_core::{Conversation, Identity, Incoming};
 
 fn group_path(group_id: &[u8], suffix: &str) -> String {
     format!("/v1/groups/{}{}", hex::encode(group_id), suffix)
@@ -3647,4 +3647,216 @@ async fn a_stranger_cannot_rename_somebody_else() {
         )
         .await;
     assert_eq!(refused.status(), 403);
+}
+
+// ---------------------------------------------------------------- two accounts, end to end
+
+/// Two accounts hold a conversation through the real server, under the real identity model.
+///
+/// # What this covers that nothing else does
+///
+/// `crates/crypto-core/tests/conversation.rs` exercises MLS with both parties in one process and
+/// no server. The tests above exercise the server with opaque bytes and no MLS. Neither of them
+/// crosses the seam this batch moved, which is where an account's *name* meets its *identity*:
+///
+/// - the MLS credential carries the account id, so the sender a peer reads out of a decrypted
+///   message is that id and not a handle;
+/// - the device id is prefixed with the account id, and the server refuses any other prefix;
+/// - the key package is claimed by device id, and the device belongs to the account by an
+///   attestation signed over the account id under `wac-attest-v2`;
+/// - the envelope is authorised by group membership, which is stated in terms of device ids.
+///
+/// The MLS handshake itself stays in this process on purpose. Routing the Welcome and the ratchet
+/// tree through the server as well would mean reimplementing the client's `publishAndApply`
+/// ordering here, and a test that reimplements the thing it is testing pins the reimplementation.
+#[tokio::test]
+async fn two_accounts_exchange_a_message_through_the_server() {
+    let server = start().await;
+
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+    let bob = TestAccount::create(&server, &unique("bob")).await;
+    let alice_device = alice.device(&server, "desktop").await;
+    let bob_device = bob.device(&server, "desktop").await;
+
+    // The device id is qualified by the account id, not by the handle. This is what survives a
+    // rename, and the server enforces it — `alice.device` would have failed otherwise.
+    assert!(alice_device.id.starts_with(&alice.id));
+    assert!(bob_device.id.starts_with(&bob.id));
+
+    // The credential names the account, exactly as `Session.attach` builds it.
+    let alice_mls = Identity::create(&alice.id).unwrap();
+    let bob_mls = Identity::create(&bob.id).unwrap();
+
+    // Bob publishes a key package so he can be reached while offline; Alice claims one.
+    bob_device
+        .post(
+            "/v1/key-packages",
+            serde_json::json!({
+                "packages": [BASE64_STANDARD.encode(bob_mls.publish_key_package().unwrap())],
+            }),
+        )
+        .await;
+
+    let claimed: serde_json::Value = alice_device
+        .post(&format!("/v1/key-packages/{}/claim", bob_device.id), serde_json::json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let package = BASE64_STANDARD.decode(claimed["package"].as_str().unwrap()).unwrap();
+
+    let mut alice_group = Conversation::create(&alice_mls).unwrap();
+    let invitation = alice_group.invite(&alice_mls, &package).unwrap();
+    let tree = alice_group.apply_pending(&alice_mls).unwrap();
+    let mut bob_group = Conversation::join(&bob_mls, &invitation.welcome, &tree).unwrap();
+
+    let group_id = alice_group.id();
+    alice_device
+        .post(
+            &group_path(&group_id, "/members"),
+            serde_json::json!({ "device_ids": [alice_device.id, bob_device.id] }),
+        )
+        .await;
+
+    // Alice writes. The server carries the bytes and cannot read them.
+    let ciphertext = alice_group.encrypt(&alice_mls, b"hello from the other account").unwrap();
+    let posted = alice_device
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode(&ciphertext) }),
+        )
+        .await;
+    assert!(posted.status().is_success(), "the envelope was refused: {:?}", posted.status());
+
+    let inbox: serde_json::Value =
+        bob_device.get(&group_path(&group_id, "/envelopes")).await.json().await.unwrap();
+    let envelopes = inbox["envelopes"].as_array().unwrap();
+    assert_eq!(envelopes.len(), 1, "Bob did not receive the message");
+
+    let carried = BASE64_STANDARD.decode(envelopes[0]["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(carried, ciphertext, "the server altered the bytes in transit");
+
+    match bob_group.process(&bob_mls, &carried, &Default::default()).unwrap() {
+        Incoming::Application { sender, plaintext } => {
+            assert_eq!(plaintext, b"hello from the other account");
+            // The sender is the **account**, not the handle and not the device. This is the line
+            // that would have read `alice` before the identity change, and reading it as an id is
+            // what lets Alice rename herself without every peer seeing a new identity.
+            assert_eq!(sender.as_deref(), Some(alice.id.as_str()));
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+
+    // And back the other way, so the test says "conversation" rather than "delivery".
+    let reply = bob_group.encrypt(&bob_mls, b"received").unwrap();
+    bob_device
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode(&reply) }),
+        )
+        .await;
+
+    let back: serde_json::Value = alice_device
+        .get(&group_path(&group_id, "/envelopes?after=1"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let carried = BASE64_STANDARD
+        .decode(back["envelopes"].as_array().unwrap()[0]["payload"].as_str().unwrap())
+        .unwrap();
+
+    match alice_group.process(&alice_mls, &carried, &Default::default()).unwrap() {
+        Incoming::Application { sender, plaintext } => {
+            assert_eq!(plaintext, b"received");
+            assert_eq!(sender.as_deref(), Some(bob.id.as_str()));
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+}
+
+/// A rename does not interrupt a conversation already under way.
+///
+/// The promise the whole identity change was made for, stated as a test: Alice renames herself
+/// mid-thread and Bob keeps decrypting her messages, still attributing them to the same account.
+/// Before, the handle was the credential's subject, so this would have been a new identity and a
+/// changed fingerprint on Bob's screen.
+#[tokio::test]
+async fn renaming_mid_conversation_changes_nothing_about_it() {
+    let server = start().await;
+
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+    let bob = TestAccount::create(&server, &unique("bob")).await;
+    let alice_device = alice.device(&server, "desktop").await;
+    let bob_device = bob.device(&server, "desktop").await;
+
+    let alice_mls = Identity::create(&alice.id).unwrap();
+    let bob_mls = Identity::create(&bob.id).unwrap();
+
+    bob_device
+        .post(
+            "/v1/key-packages",
+            serde_json::json!({
+                "packages": [BASE64_STANDARD.encode(bob_mls.publish_key_package().unwrap())],
+            }),
+        )
+        .await;
+    let claimed: serde_json::Value = alice_device
+        .post(&format!("/v1/key-packages/{}/claim", bob_device.id), serde_json::json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let package = BASE64_STANDARD.decode(claimed["package"].as_str().unwrap()).unwrap();
+
+    let mut alice_group = Conversation::create(&alice_mls).unwrap();
+    let invitation = alice_group.invite(&alice_mls, &package).unwrap();
+    let tree = alice_group.apply_pending(&alice_mls).unwrap();
+    let mut bob_group = Conversation::join(&bob_mls, &invitation.welcome, &tree).unwrap();
+
+    let group_id = alice_group.id();
+    alice_device
+        .post(
+            &group_path(&group_id, "/members"),
+            serde_json::json!({ "device_ids": [alice_device.id, bob_device.id] }),
+        )
+        .await;
+
+    // Alice takes a new name, through the real route.
+    let renamed = unique("renamed");
+    let response = alice_device
+        .post(
+            &format!("/v1/accounts/{}/handle", alice.id),
+            serde_json::json!({ "handle": renamed }),
+        )
+        .await;
+    assert!(response.status().is_success(), "rename refused: {:?}", response.status());
+
+    // Her device is still her device, under the id it was registered with.
+    let devices: serde_json::Value =
+        bob_device.get(&format!("/v1/accounts/{}/devices", alice.id)).await.json().await.unwrap();
+    assert_eq!(devices["devices"].as_array().unwrap().len(), 1);
+
+    // And she keeps talking, in the same group, at the same epoch, as the same account.
+    let ciphertext = alice_group.encrypt(&alice_mls, b"still me").unwrap();
+    alice_device
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode(&ciphertext) }),
+        )
+        .await;
+
+    let inbox: serde_json::Value =
+        bob_device.get(&group_path(&group_id, "/envelopes")).await.json().await.unwrap();
+    let carried = BASE64_STANDARD
+        .decode(inbox["envelopes"].as_array().unwrap()[0]["payload"].as_str().unwrap())
+        .unwrap();
+
+    match bob_group.process(&bob_mls, &carried, &Default::default()).unwrap() {
+        Incoming::Application { sender, plaintext } => {
+            assert_eq!(plaintext, b"still me");
+            assert_eq!(sender.as_deref(), Some(alice.id.as_str()), "the rename moved the account");
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
 }

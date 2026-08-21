@@ -1,0 +1,23 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/Sycatle/whispee/security/advisories/new
+    about: >-
+      Never open a public issue for a security bug. Use GitHub's private vulnerability
+      reporting; the scope, the expectations and the honest limits of the response are in
+      SECURITY.md.
+  - name: Security policy, scope, and what is out of scope
+    url: https://github.com/Sycatle/whispee/blob/main/SECURITY.md
+    about: >-
+      Whispee has never been audited, and ratchet-lab is teaching code that is explicitly
+      not for production. Read this before reporting anything security-related.
+  - name: Known limitations
+    url: https://github.com/Sycatle/whispee/blob/main/docs/THREAT-MODEL.md
+    about: >-
+      Many surprising behaviours are deliberate and already written down with their cost.
+      Check here before filing a bug.
+  - name: Contributing guide
+    url: https://github.com/Sycatle/whispee/blob/main/CONTRIBUTING.md
+    about: >-
+      Branches, the invariants a patch must not break, how to run the tests, and why they
+      must be run in release.

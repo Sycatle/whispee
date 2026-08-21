@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "wasm": "wasm-pack build --target web --release --out-dir pkg ../../crates/crypto-wasm && cp ../../crates/crypto-wasm/pkg/crypto_wasm_bg.wasm public/ && cp ../../crates/crypto-wasm/pkg/crypto_wasm.js src/lib/generated/ && cp ../../crates/crypto-wasm/pkg/crypto_wasm.d.ts src/lib/generated/ && node scripts/patch-wasm-glue.mjs",
-    "emoji": "node scripts/emoji-assets.mjs",
+    "emoji": "node --experimental-strip-types scripts/emoji-assets.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
@@ -36,6 +36,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "emojibase-data": "^17.0.0",
     "svgo": "^4.0.2",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.9.0",

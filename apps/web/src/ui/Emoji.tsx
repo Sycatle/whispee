@@ -1,67 +1,51 @@
-import { useState } from "react";
+import { useSyncExternalStore } from "react";
 
-import { fileOf, onlyEmoji, segment } from "@/lib/emoji";
+import { onlyEmoji, segment } from "@/lib/emoji";
+import { revision, symbolOf } from "@/lib/emoji-sprite";
 import { cn } from "@/ui/cn";
 
 /**
  * The one place in the tree that knows an emoji is a picture.
  *
  * Everything upstream — `Messages`, `Rail`, the picker — hands over a string and gets back
- * something to render. `lib/emoji.ts` carries the argument for why these are images and not a
- * font; the short version is that no colour font format renders Fluent on WebKitGTK, which is
- * the engine behind our own Linux build.
+ * something to render. `lib/emoji.ts` carries the argument for why these are pictures and not a
+ * font; `lib/emoji-sprite.ts` carries the argument for why they arrive in seven sheets rather
+ * than four thousand files.
  *
- * # Why the fallback is per-image rather than per-catalogue
+ * # There is no fallback to the platform font, and that is the point
  *
- * Fluent draws 1,595 emoji and Unicode defines more, so some strings have no artwork. The
- * obvious design consults the catalogue before rendering — and it is wrong twice: the catalogue
- * is 185 kB loaded asynchronously, so a bubble would flash unstyled text on every mount, and a
- * copy of the coverage list in code would drift from the generated tree the day someone bumps
- * the pinned commit.
+ * The previous version rendered `<img src="/emoji/1f600.svg">` and fell back to `<span>{char}</span>`
+ * when the file 404'd. Falling back meant the system font, which is exactly what this feature
+ * exists to stop using: tofu on a Linux build with no emoji font, three different pictures on
+ * three platforms, and the letters "FR" where a peer had sent `🇫🇷`.
  *
- * `onError` answers the same question from the only source that cannot be stale: whether the
- * file is there. The cost is one failed request per uncovered emoji per session, and the answer
- * is cached in `MISSING` so it is not paid twice.
+ * Two things replace it. The generator refuses to emit a catalogue entry it has no artwork for,
+ * so the coverage question is settled at build time instead of being asked of the network. And
+ * anything that still escapes — a Unicode release newer than the pinned tag — draws the sheet's
+ * neutral placeholder. Never the raw character.
  *
- * # What this does not solve
+ * # Why the character is still in the DOM
  *
- * **Country flags.** Microsoft ships none: `🇫🇷` finds no artwork and falls back to the platform,
- * which on Windows draws the letters "FR". Nothing here can fix that — it needs artwork from
- * somewhere, which is a decision about mixing two emoji sets, not a rendering detail.
+ * `<use>` copies as nothing and announces as nothing. The old `<img alt={char}>` gave us both for
+ * free, and losing them would have been the silent cost of this change: selecting a bubble and
+ * copying it would have yielded the prose with holes in it, and a screen reader would have read
+ * a sentence with the emoji missing.
+ *
+ * So the character sits beside the drawing in an `sr-only` span. It is clipped, not hidden — it
+ * stays in the selection range, so copy works, and it stays in the accessibility tree, so the
+ * announcement works. That span is load-bearing; it is not decoration.
  */
-
-/**
- * Sequences that have already 404'd this session.
- *
- * Module scope rather than state: a thread of two hundred messages can mention the same
- * uncovered emoji thirty times, and thirty failed requests for one answer is thirty too many.
- * Never invalidated, because the generated tree cannot change while the page is open.
- */
-const MISSING = new Set<string>();
 
 export function Emoji({ char, className }: { char: string; className?: string }) {
-  // The failing character rather than a boolean: React reuses this component across renders when
-  // it keeps its position in a list, so a message whose text changed would inherit the previous
-  // emoji's verdict and refuse to draw artwork that exists.
-  const [failed, setFailed] = useState<string | null>(null);
+  // Redraw when a sheet lands. `symbolOf` returns null until then, so without this subscription
+  // an emoji that mounted before its sheet arrived would stay an empty box for the rest of the
+  // session — the picker's tone sheets being the obvious case.
+  useSyncExternalStore(revision.subscribe, revision.getSnapshot);
 
-  // The raw character, drawn by whatever font the platform has. Not a great outcome, but the
-  // only honest one: a placeholder box would hide that something was said.
-  if (failed === char || MISSING.has(char)) return <span className={className}>{char}</span>;
+  const symbol = symbolOf(char);
 
   return (
-    <img
-      src={fileOf(char)}
-      // The character itself, so that selecting a bubble and copying it yields the emoji rather
-      // than a shortcode or a gap — and so a screen reader announces something a person can
-      // repeat. This is the whole reason the substitution stays invisible to the user.
-      alt={char}
-      draggable={false}
-      loading="lazy"
-      onError={() => {
-        MISSING.add(char);
-        setFailed(char);
-      }}
+    <span
       className={cn(
         // Sized in `em` and not in pixels: an emoji inside a caption should be caption-sized, and
         // the same component serves the bubble, the reply quote and the rail preview. The
@@ -69,7 +53,16 @@ export function Emoji({ char, className }: { char: string; className?: string })
         "inline-block h-[1.25em] w-[1.25em] align-[-0.25em]",
         className,
       )}
-    />
+    >
+      {/*
+        Drawn even while `symbol` is null: the box is already at its final size, so the drawing
+        appears in place rather than pushing the rest of the line sideways when the sheet lands.
+      */}
+      <svg viewBox="0 0 36 36" aria-hidden="true" className="h-full w-full">
+        {symbol && <use href={`#${symbol}`} />}
+      </svg>
+      <span className="sr-only">{char}</span>
+    </span>
   );
 }
 

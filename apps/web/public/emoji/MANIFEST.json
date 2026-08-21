@@ -1,6 +1,13 @@
 {
-  "source": "microsoft/fluentui-emoji",
-  "licence": "MIT",
-  "commit": "62ecdc0d7ca5c6df32148c169556bc8d3782fca4",
-  "sha256": "5689b3e4f8787ce6ae85ecf624fdc0ca2e43a47d7a1cb54c25ffe8bae4be742b"
+  "artwork": {
+    "source": "jdecked/twemoji",
+    "licence": "CC-BY-4.0",
+    "tag": "v17.0.3",
+    "commit": "b6b55fef1e8636b540a6d016a4729ca8cdf2e60b",
+    "sha256": "705d79de1460e5e775f362f0d0f01fbe3ef8d65bf4648c490e4649704584f747"
+  },
+  "catalogue": {
+    "source": "emojibase-data",
+    "licence": "MIT"
+  }
 }

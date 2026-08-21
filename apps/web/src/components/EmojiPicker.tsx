@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useDuo } from "@/lib/duo";
-import { type Catalogue, type Entry, type Tone, applyTone, catalogue, search } from "@/lib/emoji";
+import {
+  type Catalogue,
+  type Entry,
+  TONE_SAMPLES,
+  type Tone,
+  applyTone,
+  catalogue,
+  search,
+} from "@/lib/emoji";
 import { useSession } from "@/state/SessionProvider";
 import { cn } from "@/ui/cn";
 import { Emoji } from "@/ui/Emoji";
@@ -24,45 +32,43 @@ import { Spinner } from "@/ui/Spinner";
  *
  * # The catalogue arrives late, on purpose
  *
- * 185 kB of names and keywords, loaded by a dynamic import the first time a picker opens and
+ * 238 kB of names and keywords, loaded by a dynamic import the first time a picker opens and
  * memoised in `lib/emoji.ts` for every one after. It is not needed to *render* an emoji —
- * `ui/Emoji.tsx` computes a filename from codepoints — only to list, name and search them. That
+ * `ui/Emoji.tsx` computes a sheet key from codepoints — only to list, name and search them. That
  * is why the initial bundle does not carry it and a message bubble never waits for it.
  *
- * # Why there is no virtualisation library, and no `content-visibility` either
+ * # Why there is no virtualisation library, and no `content-visibility`
  *
- * The cost that matters here is the network, not the DOM: 1,595 buttons is a large tree and an
- * ordinary one, while 1,595 image requests is a megabyte of traffic to show one thumb.
- * `loading="lazy"` on the images answers that, and it is the whole strategy.
+ * The cost that used to matter here was the network: 1,595 cells meant 1,595 image requests, and
+ * `loading="lazy"` was the whole strategy. That is gone. The artwork now arrives in one sheet and
+ * every cell draws from it with no request of its own (`lib/emoji-sprite.ts`).
  *
- * `content-visibility: auto` per category was the obvious companion — skip layout and paint for
- * the sections off screen — and it had to come out. The two do not compose: an image marked
- * lazy inside a subtree whose rendering is being skipped is not loaded, and when the subtree
- * becomes relevant again the images come back **blank** while they refetch. Scrolling the grid
- * with the arrow keys made whole rows empty and fill in behind the cursor. Paying for the layout
- * of a tree the browser is good at is the cheaper mistake.
+ * `content-visibility: auto` per section was tried, twice, and is deliberately absent. The first
+ * time it had to come out because it does not compose with `loading="lazy"`: images inside a
+ * skipped subtree unload, and scrolling with the arrow keys left blank rows filling in behind the
+ * cursor. That objection died with the images — but the remaining benefit is layout and paint for
+ * sections nobody is looking at, which the browser is good at, against a real cost in scroll
+ * jitter when `contain-intrinsic-size` guesses a section's height wrong. Adding it back would be
+ * trading a measured annoyance for an unmeasured saving.
+ *
+ * What is left is 1,914 buttons in one tree, which is large and ordinary. If it ever measures
+ * badly the answer is virtualising the rows, not a CSS property that only skips paint.
  *
  * # What this does not solve
  *
- * The set is Fluent's, which draws 1,595 emoji and **no country flags at all** — Microsoft ships
- * none. `🇫🇷` cannot be picked here, and one arriving from a peer falls back to the platform
- * font. Fixing that means mixing a second emoji set into the first, which is a decision about
- * what the product looks like, not a gap to paper over.
+ * Nothing about coverage, any more. Twemoji draws every emoji the catalogue lists — flags,
+ * keycaps, `©️` — and the generator refuses to emit an entry it has no artwork for. What is not
+ * here is `:shortcode:` completion while typing, which Emojibase would now give us for free and
+ * which belongs to the composer rather than to this panel.
  */
 
 /** The keyboard's idea of the grid. Twelve is what fits the popover at the width it opens. */
 const COLUMNS = 12;
 
-/**
- * The palette the tone swatches are drawn from: a hand, at each tone.
- *
- * A hand rather than an abstract swatch, because the setting is about hands and faces and a row
- * of coloured squares does not say so — and because the swatch then *is* the artwork, so what
- * you pick is exactly what you will see.
- */
-const TONE_SAMPLES = ["✋", "✋🏻", "✋🏼", "✋🏽", "✋🏾", "✋🏿"];
-
 const TONE_NAMES = ["default", "light", "medium-light", "medium", "medium-dark", "dark"];
+
+/** The label the recents section carries. Written once: two spellings would be two sections. */
+const RECENTS = "Recently used";
 
 /** A category as the grid lays it out: a heading, and the emoji under it. */
 interface Section {
@@ -91,7 +97,7 @@ function sectionsOf(from: Catalogue, recents: Entry[]): Section[] {
   return [
     // Recents first and only when there are any: an empty "Recently used" heading is a promise
     // the interface has not kept yet.
-    ...(recents.length > 0 ? [{ label: "Recently used", entries: recents }] : []),
+    ...(recents.length > 0 ? [{ label: RECENTS, entries: recents }] : []),
     ...groups.filter((group) => group.entries.length > 0),
   ];
 }
@@ -189,7 +195,7 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
             // Down from the field enters the grid. Without it the only way in is Tab, which on a
-            // grid of 1,595 roving-tabindex cells lands on exactly one of them anyway — but a
+            // grid of 1,914 roving-tabindex cells lands on exactly one of them anyway — but a
             // person who has just typed a query expects the arrow key to do this.
             if (event.key !== "ArrowDown") return;
             event.preventDefault();
@@ -232,7 +238,7 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
                       role="gridcell"
                       data-cell
                       // Roving tabindex: exactly one cell in the whole grid is reachable by Tab,
-                      // and the arrow keys move between them. 1,595 tab stops is not a grid, it
+                      // and the arrow keys move between them. 1,914 tab stops is not a grid, it
                       // is a wall.
                       tabIndex={index === 0 && line === 0 && column === 0 ? 0 : -1}
                       aria-label={entry.label}

@@ -55,8 +55,14 @@ export function Tooltip({
   side = "top",
   children,
 }: {
-  /** Short. A sentence in a tooltip is a sentence nobody finished reading. */
-  label: string;
+  /**
+   * Short. A sentence in a tooltip is a sentence nobody finished reading.
+   *
+   * A node rather than a string, so that a label containing an emoji can draw it as artwork like
+   * everywhere else. Interpolating one into a template literal was the last thing in the
+   * application still rendered by the platform's emoji font.
+   */
+  label: ReactNode;
   side?: "top" | "bottom" | "left" | "right";
   children: ReactNode;
 }): ReactElement {

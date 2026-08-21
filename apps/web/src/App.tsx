@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/app/Shell";
 import { Unlock } from "@/components/Lock";
+import { preload } from "@/lib/emoji-sprite";
 import { MigrationBanner } from "@/components/Migration";
 import { Onboarding } from "@/components/Onboarding";
 import { RELOCK_MS, networkReported, observeIdle, observeLifecycle } from "@/lib/lifecycle";
@@ -291,6 +292,30 @@ function Frame({
       removeEventListener("offline", lost);
     };
   }, [session, bump, report, relock]);
+
+  /**
+   * The emoji artwork, once, after the first paint.
+   *
+   * One request for the whole untoned set. It is not on the critical path — nothing on screen
+   * needs it to lay out, and `ui/Emoji.tsx` draws an empty box of the right size until it lands —
+   * so it waits for an idle moment rather than competing with the session opening its socket.
+   *
+   * It happens here and not in the picker because a *received* message needs it too, and the
+   * first one usually arrives before anybody opens a picker.
+   *
+   * `requestIdleCallback` is absent from Safari before 17 and therefore from some of the WebKit
+   * builds we ship into; the timeout is the fallback rather than a second chance, hence the
+   * either-or.
+   */
+  useEffect(() => {
+    if (typeof requestIdleCallback === "function") {
+      const id = requestIdleCallback(preload, { timeout: 2_000 });
+      return () => cancelIdleCallback(id);
+    }
+
+    const id = setTimeout(preload, 500);
+    return () => clearTimeout(id);
+  }, []);
 
   /**
    * The same lock, for a device nobody has taken away.

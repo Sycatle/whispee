@@ -46,8 +46,9 @@ import type { LucideIcon } from "lucide-react";
  *
  * They used to be Unicode, drawn by whatever font the platform had — which meant three different
  * pictures on three platforms, and tofu on a Linux build with no emoji font installed. They are
- * now Fluent artwork served from `public/emoji`, and `ui/Emoji.tsx` is where that lives. The
- * conclusion is unchanged and the reason is stronger: content is not an entry in this table.
+ * now Twemoji artwork, shipped in the sprite sheets under `public/emoji` and drawn by
+ * `ui/Emoji.tsx`. The conclusion is unchanged and the reason is stronger: content is not an entry
+ * in this table.
  *
  * `emoji` below is the exception that proves it. It is the *button* that opens the picker, which
  * is an interface control like any other.
@@ -98,7 +99,7 @@ const ICONS: Record<IconName, LucideIcon> = {
    *
    * Chrome, not content — which is the distinction the note at the top of this file draws, and
    * the reason it survives the emoji becoming artwork of their own. What a person *says* is a
-   * Fluent SVG on every platform (`ui/Emoji.tsx`); the button that opens the drawer of them is
+   * Twemoji SVG on every platform (`ui/Emoji.tsx`); the button that opens the drawer of them is
    * an interface control and belongs to the same line-art set as everything else here.
    */
   emoji: SmilePlus,

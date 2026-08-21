@@ -46,8 +46,14 @@ import { Tooltip } from "@/ui/Tooltip";
  * further from the thumb. Once somebody has reacted a few times these are replaced by
  * `preferences.recentEmojis`, which is the same idea with the choosing done by the person using
  * it rather than by us. The full set is a keypress away in the picker beside them.
+ *
+ * Two of these carry an invisible `FE0F` and it is not an accident: `👍️` and `❤️` have a text
+ * presentation as well as an emoji one, so the catalogue spells them fully qualified. Writing the
+ * bare codepoint here would make `withoutTone("👍")` and `withoutTone("👍️")` two different
+ * entries in the recents list — the same emoji, remembered twice, one from this row and one from
+ * the picker.
  */
-const EMOJIS = ["👍", "❤️", "😂", "😮", "🙏"];
+const EMOJIS = ["👍️", "❤️", "😂", "😮", "🙏"];
 
 export function Messages({
   view,
@@ -479,7 +485,17 @@ export function Messages({
                     data-actions
                   >
                     {quick.map((emoji) => (
-                      <Tooltip key={emoji} label={`React ${emoji}`}>
+                      // The label is a node and not a string so the emoji in it is artwork like
+                      // every other emoji on screen. Interpolated into a template literal it was
+                      // the last glyph in the application still drawn by the platform font.
+                      <Tooltip
+                        key={emoji}
+                        label={
+                          <>
+                            React with <Emoji char={emoji} />
+                          </>
+                        }
+                      >
                         <IconButton
                           label={`React with ${emoji}`}
                           icon={<Emoji char={emoji} />}

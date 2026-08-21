@@ -9,31 +9,34 @@
  * receiver see the same thing" is not a nicety.
  *
  * The tidy fix would be a self-hosted colour font — the glyphs stay text, selection and copy come
- * free. It is not available: the formats that can carry Fluent's artwork are COLRv1, which WebKit
- * does not implement, and OT-SVG, which WebKitGTK leaves switched off by default. WebKitGTK is
- * the engine behind the Tauri build on Linux. What every browser does support is COLRv0, which
- * has no gradients, so no Fluent.
+ * free. It is not available: the formats that can carry this artwork are COLRv1, which WebKit does
+ * not implement, and OT-SVG, which WebKitGTK leaves switched off by default. WebKitGTK is the
+ * engine behind the Tauri build on Linux. What every browser does support is COLRv0, which has no
+ * gradients and so cannot express any of these sets.
  *
  * So: substitution. `segment()` splits a message into runs of text and runs of emoji, and
- * `ui/Emoji.tsx` renders the latter as `<img>`. Discord, Slack and X all do exactly this, for
- * exactly this reason.
+ * `ui/Emoji.tsx` renders the latter as artwork. Discord, Slack and X all do exactly this, for
+ * exactly this reason — and Telegram and Signal do it too, from Apple's set, which is not ours
+ * to redistribute.
+ *
+ * # Twemoji, and why it replaced Fluent
+ *
+ * Not taste. Fluent draws 1,595 emoji and **no country flag at all**, so `🇫🇷` arriving from a
+ * peer had nothing to draw and fell back to the platform — the letters "FR" on Windows. Twemoji
+ * (`jdecked/twemoji`, CC-BY 4.0) covers Unicode completely: flags, keycaps, `©️`, `®️`. The
+ * coverage question stops being a question, and one set means one licence.
  *
  * # Nothing here needs the catalogue to render
  *
- * `segment()` and `fileOf()` are synchronous and data-free: one asks Unicode whether a grapheme
- * is pictographic, the other computes a filename from codepoints. That matters because a message
+ * `segment()` and `keyOf()` are synchronous and data-free: one asks Unicode whether a grapheme
+ * is pictographic, the other computes a key from codepoints. That matters because a message
  * bubble cannot await a promise — a catalogue-gated renderer would flash unstyled text on every
  * mount, on every conversation switch.
  *
  * The catalogue is loaded only by the picker, which is the only thing that needs to enumerate,
- * name and search emoji. It is a dynamic import, so its 185 kB stay out of the initial bundle.
- *
- * # What this does not solve
- *
- * Coverage. Fluent draws 1,595 emoji and Unicode defines more, so `ui/Emoji.tsx` keeps a
- * fallback to the raw character for anything it fails to fetch. The notable gap is **country
- * flags**, which Microsoft omits from the set entirely: `🇫🇷` arrives from a peer, finds no
- * artwork, and falls back to the platform — which on Windows means the letters "FR".
+ * name and search emoji. It is a dynamic import, so its bulk stays out of the initial bundle.
+ * The *artwork* travels separately, in sprite sheets — see `lib/emoji-sprite.ts`, which explains
+ * why 4,009 files became seven.
  */
 
 /** One emoji, as the picker needs to know it. */
@@ -46,9 +49,17 @@ export interface Entry {
   /** Index into `Catalogue.groups`. */
   group: number;
   /**
+   * The `:shortcode:` names this emoji answers to, most canonical first.
+   *
+   * Emojibase's own preset rather than GitHub's: 3,979 sequences against 1,870, and it keeps the
+   * familiar spellings as aliases — `:joy:` alongside `:tears_of_joy:` — so nothing anybody
+   * already types is lost by taking the larger set. `lib/shortcode.ts` is what reads them.
+   */
+  codes?: string[];
+  /**
    * The five toned variants, lightest first, when this emoji takes a skin tone.
    *
-   * Absent rather than a five-fold repetition of `char`: 1,285 of the 1,595 emoji take no tone,
+   * Absent rather than a five-fold repetition of `char`: 1,584 of the 1,914 emoji take no tone,
    * and an array of identical values would say they do.
    */
   tones?: string[];
@@ -69,40 +80,90 @@ export interface Catalogue {
 export type Tone = 0 | 1 | 2 | 3 | 4 | 5;
 
 /**
- * Where the artwork for a sequence lives.
+ * The hand the picker's six tone swatches are drawn from, neutral first.
  *
- * `FE0F` is dropped, and this is the most breakable line in the feature. The variation selector
- * means "draw the previous character as an emoji, not as text": the generator's filenames omit
- * it, while text typed on any platform almost always carries it — `❤️` is `2764 FE0F`. Drop it in
- * one place and not the other and the emoji renders for whoever picked it, whose string came
- * from the catalogue, and not for whoever received it, whose string came from the wire.
+ * Data rather than a constant in the component, because the generator needs it too: these six
+ * sequences are copied into the **base** sheet even though five of them carry a modifier. Without
+ * that, opening the picker fetches all five tone sheets at once — 4.5 MB — just to draw six
+ * swatches a reader may never click, which is precisely what sharding by tone exists to avoid.
  *
- * Zero-width joiners and skin tone modifiers are **kept**: they distinguish separate artworks.
+ * A hand rather than an abstract swatch, because the setting is about hands and faces and a row
+ * of coloured squares does not say so — and because the swatch then *is* the artwork, so what you
+ * pick is exactly what you will see.
  */
-export function fileOf(char: string): string {
-  const codepoints = [...char]
-    .map((glyph) => glyph.codePointAt(0) ?? 0)
-    .filter((codepoint) => codepoint !== 0xfe0f)
-    .map((codepoint) => codepoint.toString(16));
+export const TONE_SAMPLES = ["\u270b", "\u270b\u{1f3fb}", "\u270b\u{1f3fc}", "\u270b\u{1f3fd}", "\u270b\u{1f3fe}", "\u270b\u{1f3ff}"];
 
-  return `/emoji/${codepoints.join("-")}.svg`;
+/**
+ * The key a sequence is filed under, in the sprite sheets and in the generator.
+ *
+ * This is the most breakable line in the feature, and the rule is **not** the obvious one.
+ *
+ * `FE0F` is the variation selector: "draw the previous character as a picture, not as text".
+ * Twemoji drops it from its names — except when the sequence also contains a zero-width joiner,
+ * where it keeps it. That is not a quirk we can normalise away, it is upstream's own rule
+ * (`twemoji.js`, `grabTheRightIcon`), and 972 of the 4,009 names depend on it:
+ *
+ * ```
+ * ❤️   2764 fe0f             -> 2764                   no joiner: the selector goes
+ * 🏴‍☠️  1f3f4 200d 2620 fe0f  -> 1f3f4-200d-2620-fe0f   joiner: the selector stays
+ * ```
+ *
+ * Strip it unconditionally — which is what this did while the artwork was Fluent's — and the
+ * pirate flag, the rainbow flag, the trans flag and every gendered person (`🏃‍♀️`, `🧑‍⚕️`) find
+ * no artwork. Keep it unconditionally and `❤️`, the most-sent emoji there is, finds none.
+ *
+ * The generator imports this very function rather than restating it, because the failure is
+ * silent on the side that picked the emoji and visible only on the side that received it.
+ *
+ * Skin tone modifiers are always kept: they name separate artworks.
+ */
+export function keyOf(char: string): string {
+  const codepoints = [...char].map((glyph) => glyph.codePointAt(0) ?? 0);
+  const joined = codepoints.includes(0x200d);
+
+  const key = codepoints
+    .filter((codepoint) => joined || codepoint !== 0xfe0f)
+    .map((codepoint) => codepoint.toString(16))
+    .join("-");
+
+  return EXCEPTIONS[key] ?? key;
 }
+
+/**
+ * The one sequence upstream files against its own rule.
+ *
+ * `👁️‍🗨️` carries a joiner, so by the rule above it should keep both selectors — and Twemoji
+ * names it `1f441-200d-1f5e8` anyway, with neither. It is a single, long-standing quirk in the
+ * upstream tree, not a pattern to generalise from.
+ *
+ * It lives here rather than in the generator because both sides must agree: the generator writes
+ * the sheet under this key, the renderer looks it up under this key, and the bijection check that
+ * found this exception in the first place only means anything while there is one definition.
+ */
+const EXCEPTIONS: Record<string, string> = {
+  "1f441-fe0f-200d-1f5e8-fe0f": "1f441-200d-1f5e8",
+};
 
 /**
  * Does this grapheme want to be drawn as an emoji?
  *
  * `Extended_Pictographic` covers the pictures; `Regional_Indicator` covers flags, whose two
- * letters are not pictographic on their own. Deliberately **not** a coverage test: whether Fluent
- * actually drew this one is answered by the image failing to load, which needs no data here and
- * cannot go stale against the generated tree.
+ * letters are not pictographic on their own. Deliberately **not** a coverage test, and it no
+ * longer needs to be one: the generator refuses to emit a catalogue entry it has no artwork for,
+ * so anything Unicode calls an emoji is something the sheets can draw.
  *
  * Digits and `#`/`*` are excluded on purpose. They are pictographic only when followed by
  * `FE0F 20E3` (the keycap sequence), and treating a bare `7` in a message as an emoji would turn
  * every phone number into a row of pictures.
+ *
+ * The keycaps themselves need the third clause, and it is not a redundancy: `1️⃣` is `31 FE0F 20E3`
+ * and **not one of its three codepoints is `Extended_Pictographic`**. Without the enclosing keycap
+ * mark named here, all twelve of them fell through to prose and were drawn by the platform font —
+ * invisibly so while the artwork was Fluent's, which had no keycaps to draw either.
  */
 function pictographic(grapheme: string): boolean {
   if (/^[0-9#*]$/u.test(grapheme)) return false;
-  return /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(grapheme);
+  return /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(grapheme);
 }
 
 /** A stretch of a message: either prose, or one emoji to be drawn. */
@@ -179,7 +240,7 @@ export function catalogue(): Promise<Catalogue> {
 /**
  * Strips diacritics and case, so that a French keyboard finds "café" under "cafe".
  *
- * The catalogue is English — Fluent's CLDR names are — but the person typing may not have an
+ * The catalogue is English — Emojibase's CLDR names are — but the person typing may not have an
  * English keyboard, and `é` is one keystroke on theirs.
  */
 function fold(value: string): string {

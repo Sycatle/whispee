@@ -10,8 +10,8 @@ import { useOverlayContainer } from "./Overlays.tsx";
  *
  * They look alike and they are not interchangeable. `Menu` is a Radix `DropdownMenu`, which
  * gives every child `role="menuitem"` and moves between them with the arrow keys in one
- * dimension. The first caller here is an emoji grid of 1,595 cells: announced as a menu it would
- * be 1,595 menu items, and navigated as one it would take 1,595 presses of the down arrow to
+ * dimension. The first caller here is an emoji grid of 1,914 cells: announced as a menu it would
+ * be 1,914 menu items, and navigated as one it would take 1,914 presses of the down arrow to
  * cross. A grid is a grid, and `Popover` is the primitive that lets it be one — it contributes
  * a labelled dialog and nothing else, and its content owns its own keyboard model.
  *

@@ -2655,3 +2655,119 @@ async fn a_removed_token_no_longer_wakes() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(wakes.0.lock().unwrap().is_empty(), "a removed token was used");
 }
+
+// ---------------------------------------------------------------- purge
+
+/// Sixteen random bytes, the length both nonce tables and `pairings.id` require.
+///
+/// Random rather than derived from `unique`: these tests share a database with whatever else is
+/// running against it, and a collision on a primary key would fail the insert for a reason that
+/// has nothing to do with what is being checked.
+fn random_id() -> Vec<u8> {
+    use rand_core::RngCore;
+
+    let mut bytes = vec![0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    bytes
+}
+
+/// **The test that pins down the purge.**
+///
+/// `posting_nonces` and `pairings` had no `DELETE` anywhere in the tree. Every sealed-sender
+/// post added a row plus an index entry, for the lifetime of the deployment — migration 0007
+/// even creates `posting_nonces_used_at_idx`, an index built for a cleanup nobody had written.
+///
+/// The assertions look at named rows and never at the counts the purge returns: the database is
+/// shared, and another test posting an envelope at the same moment would move any total.
+#[tokio::test]
+async fn the_purge_erases_what_has_expired_and_keeps_what_has_not() {
+    let server = start().await;
+
+    let group_id = random_id();
+    let (stale_nonce, fresh_nonce) = (random_id(), random_id());
+
+    for (nonce, age) in [(&stale_nonce, "30 days"), (&fresh_nonce, "1 second")] {
+        sqlx::query(&format!(
+            "INSERT INTO posting_nonces (group_id, nonce, used_at)
+             VALUES ($1, $2, now() - interval '{age}')"
+        ))
+        .bind(&group_id)
+        .bind(nonce)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    }
+
+    let (expired_pairing, live_pairing) = (random_id(), random_id());
+
+    for (id, expiry) in [(&expired_pairing, "-1 minute"), (&live_pairing, "5 minutes")] {
+        sqlx::query(&format!(
+            "INSERT INTO pairings (id, payload, expires_at)
+             VALUES ($1, $2, now() + interval '{expiry}')"
+        ))
+        .bind(id)
+        .bind(b"sealed".as_slice())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    }
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let survives = async |table: &str, column: &str, id: &Vec<u8>| -> bool {
+        let found: Option<(i32,)> =
+            sqlx::query_as(&format!("SELECT 1 FROM {table} WHERE {column} = $1"))
+                .bind(id)
+                .fetch_optional(&server.pool)
+                .await
+                .unwrap();
+        found.is_some()
+    };
+
+    assert!(
+        !survives("posting_nonces", "nonce", &stale_nonce).await,
+        "a nonce older than the retention keeps the table growing forever"
+    );
+    assert!(
+        survives("posting_nonces", "nonce", &fresh_nonce).await,
+        "erasing a recent nonce reopens the replay it exists to refuse"
+    );
+
+    assert!(
+        !survives("pairings", "id", &expired_pairing).await,
+        "an expired drop box no reader can see is dead weight"
+    );
+    assert!(
+        survives("pairings", "id", &live_pairing).await,
+        "a pairing still inside its window was destroyed under the user's QR code"
+    );
+}
+
+/// A pairing survives the purge until it expires, and no longer.
+///
+/// Deleting exactly at expiry needs no safety margin, unlike the nonce windows: `claim_pairing`
+/// already filters on `expires_at > now()`, so the row is invisible to every reader before the
+/// purge touches it. The test pins that equivalence — a margin added later would be a
+/// misunderstanding of why there is none.
+#[tokio::test]
+async fn an_expired_pairing_is_already_unreadable_before_it_is_purged() {
+    let server = start().await;
+    let id = random_id();
+
+    sqlx::query(
+        "INSERT INTO pairings (id, payload, expires_at) VALUES ($1, $2, now() - interval '1 second')",
+    )
+    .bind(&id)
+    .bind(b"sealed".as_slice())
+    .execute(&server.pool)
+    .await
+    .unwrap();
+
+    let refused = reqwest::Client::new()
+        .get(format!("{}/v1/pairings/{}", server.base_url, hex::encode(&id)))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(refused.status(), 404, "an expired packet was served");
+}

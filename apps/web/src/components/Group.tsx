@@ -6,6 +6,7 @@ import { ContextMenu } from "@/ui/ContextMenu";
 import { Dialog } from "@/ui/Dialog";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { useNames } from "@/state/names";
+import { useNavigate } from "@/routes/Router";
 import { useReport } from "@/state/report";
 
 /**
@@ -65,6 +66,7 @@ export function GroupPanel({
   const bump = useBump();
   const report = useReport();
   const names = useNames();
+  const navigate = useNavigate();
 
   const [busy, setBusy] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -116,9 +118,32 @@ export function GroupPanel({
    * both. The confirmations further down deliberately do not — see the comment above the first
    * of them.
    */
-  const Member = ({ name }: { name: { primary: string; secondary: string | null } }) => (
+  /**
+   * A member's name, and a way in to their card.
+   *
+   * `handle` is optional because our own row has nowhere to go: the card behind these names is a
+   * verification panel, and there is nothing to verify about the key this device holds. Without
+   * it the name renders as plain text — no underline, no pointer, nothing promised.
+   */
+  const Member = ({
+    name,
+    handle,
+  }: {
+    name: { primary: string; secondary: string | null };
+    handle?: string;
+  }) => (
     <>
-      <span>{name.primary}</span>
+      {handle === undefined ? (
+        <span>{name.primary}</span>
+      ) : (
+        <button
+          type="button"
+          onClick={() => navigate({ kind: "conversation", key: view.key, detail: { handle } })}
+          className="rounded-control underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent)"
+        >
+          {name.primary}
+        </button>
+      )}
       {name.secondary !== null && (
         <span className="font-evidence text-caption text-(--color-ink-muted)">
           {name.secondary}
@@ -164,7 +189,7 @@ export function GroupPanel({
               key={account.handle}
               trigger={
             <li className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
-              <Member name={nameOf(account.handle, names)} />
+              <Member name={nameOf(account.handle, names)} handle={account.handle} />
               <Role handle={account.handle} />
               <span className="text-caption text-(--color-ink-muted)">
                 {account.devices.length} device{account.devices.length > 1 ? "s" : ""}

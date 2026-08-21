@@ -124,6 +124,7 @@ export function Messages({
   const bump = useBump();
   const report = useReport();
   const names = useNames();
+  const navigate = useNavigate();
   const bottom = useRef<HTMLDivElement>(null);
 
   /**
@@ -159,6 +160,12 @@ export function Messages({
    * your own laptop announce themselves to each other in your own thread is noise, and the
    * distinction is available in the receipts anyway.
    */
+  /** The card behind a face and a name. Never our own — there is no key of ours to verify. */
+  const openAuthor = (handle: string | null) => {
+    if (handle === null || handle === session.handle) return;
+    navigate({ kind: "conversation", key: view.key, detail: { handle } });
+  };
+
   const authorOf = (message: (typeof visible)[number]) =>
     message.mine ? session.handle : message.sender;
 
@@ -637,12 +644,42 @@ export function Messages({
                       </time>
                     )
                   ) : (
-                    <Avatar
-                      seed={seedOf(authorOf(message))}
-                      label={nameOfAuthor(authorOf(message))}
-                      size="sm"
-                      className={AVATAR_40}
-                    />
+                    /*
+                      The face is the control, not the column around it: the column also holds
+                      the hour on continuation lines, and clicking an hour never meant "open a
+                      card".
+                      
+                      A `<button>` rather than a `<div onClick>` — the codebase had no clickable
+                      non-interactive element anywhere before this, and the linter said so the
+                      moment one appeared. `tabIndex={-1}` because the name beside it is the same
+                      action and is a proper tab stop: a second one would add an arrival per turn
+                      that goes exactly where the first went. A redundant pointer target for
+                      something the keyboard already reaches, which is a different thing from a
+                      target the keyboard cannot reach at all.
+                    */
+                    message.mine ? (
+                      <Avatar
+                        seed={seedOf(authorOf(message))}
+                        label={nameOfAuthor(authorOf(message))}
+                        size="sm"
+                        className={AVATAR_40}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        aria-hidden="true"
+                        onClick={() => openAuthor(authorOf(message))}
+                        className="cursor-pointer"
+                      >
+                        <Avatar
+                          seed={seedOf(authorOf(message))}
+                          label={nameOfAuthor(authorOf(message))}
+                          size="sm"
+                          className={AVATAR_40}
+                        />
+                      </button>
+                    )
                   )}
                 </div>
                 </AuthorMenu>
@@ -658,16 +695,24 @@ export function Messages({
                   {!continues && (
                     <div className="flex items-baseline gap-snug">
                       <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
-                        <span
-                          data-author={message.mine ? undefined : ""}
-                          data-author-name={message.mine ? undefined : ""}
-                          className={cn(
-                            "truncate text-body font-medium",
-                            !message.mine && "hover:underline",
-                          )}
-                        >
-                          {nameOfAuthor(authorOf(message))}
-                        </span>
+                        {message.mine ? (
+                          <span className="truncate text-body font-medium">
+                            {nameOfAuthor(authorOf(message))}
+                          </span>
+                        ) : (
+                          /* A real button, because the underline promises one. It is the only
+                             tab stop the pair adds, and it lands once per turn rather than once
+                             per message — the name is drawn only when the speaker changes. */
+                          <button
+                            type="button"
+                            data-author
+                            data-author-name
+                            onClick={() => openAuthor(authorOf(message))}
+                            className="truncate rounded-control text-body font-medium underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent)"
+                          >
+                            {nameOfAuthor(authorOf(message))}
+                          </button>
+                        )}
                       </AuthorMenu>
                       {/*
                         `<time>` with a machine-readable `dateTime`, so a screen reader announces

@@ -315,12 +315,21 @@ export function freshSignalState(): Pick<
  * a local reset costs, and it should not be found out the hard way.
  */
 export class LogProofRefused extends Error {
-  constructor(
-    readonly handle: string,
-    reason: string,
-  ) {
+  /**
+   * Declared and assigned rather than written as a constructor parameter property.
+   *
+   * The two are the same to a reader and not the same to the test runner: `node --test` runs with
+   * `--experimental-strip-types`, which erases annotations without rewriting anything, and a
+   * parameter property is the one piece of TypeScript that needs rewriting. One of them in this
+   * file made the whole file unimportable from a test — including `freshPreferences` and
+   * `freshSignalState`, which every conversation fixture needs.
+   */
+  readonly handle: string;
+
+  constructor(handle: string, reason: string) {
     super(`The server failed to prove its key for @${handle}: ${reason}`);
     this.name = "LogProofRefused";
+    this.handle = handle;
   }
 }
 

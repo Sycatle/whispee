@@ -15,9 +15,10 @@ import * as content from "./content";
 import { withoutTone } from "./emoji";
 import { sanitize, validate } from "./display-name";
 import * as envelope from "./envelope";
-import { type Cached, decodeHistory, encodeHistory } from "./history";
+import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
-import { fromBase64, toBase64, toHex } from "./keys";
+import { composeStored } from "./session-persist.ts";
+import { fromBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
 import type { SignalSettings } from "./storage";
@@ -866,65 +867,32 @@ export class Session {
     // user believes destroyed.
     if (this.forgotten) return;
 
-    const groupIds = this.client.conversationIds();
-    const cursors = Object.fromEntries(
-      [...this.conversations.values()].map((view) => [view.key, view.cursor]),
+    // The MLS state and the group list are read here, together, before anything is awaited.
+    // `Client.restore` consumes them as a pair, and they used to be read an `await` apart — the
+    // list before the first seal, the state after it — so a commit landing in between would have
+    // written a state describing groups the list did not mention.
+    await this.anchor.store.save(
+      await composeStored({
+        deviceId: this.deviceId,
+        handle: this.handle,
+        accountSeed: this.account.exportSeed(),
+        mlsState: this.client.exportState(),
+        groupIds: this.client.conversationIds(),
+        conversations: this.conversations,
+        lock: this.lock,
+        vaultEnabled: this.vaultCipher !== null,
+        verified: this.verified,
+        knownDevices: this.knownDevices,
+        signals: this.signals,
+        discloseConversationName: this.discloseConversationName,
+        preferences: this.preferences,
+        displayName: this.displayName,
+        profiles: this.profiles,
+        petnames: this.petnames,
+        seenHead: this.seenHead,
+        seal: (bytes) => this.atRest.seal(bytes),
+      }),
     );
-
-    await this.anchor.store.save({
-      cursors,
-      deviceId: this.deviceId,
-      handle: this.handle,
-      // The seed is encrypted like the MLS state: it is worth the whole account.
-      accountSeed: await this.atRest.seal(this.account.exportSeed()),
-      lock: this.lock,
-      vaultEnabled: this.vaultCipher !== null,
-      state: await this.atRest.seal(this.client.exportState()),
-      groupIds,
-      verified: this.verified,
-      knownDevices: this.knownDevices,
-      signals: this.signals,
-      postingKeys: Object.fromEntries(
-        [...this.conversations.values()]
-          .filter((view) => view.postingKey)
-          .map((view) => [view.key, toBase64(view.postingKey as Uint8Array)]),
-      ),
-      discloseConversationName: this.discloseConversationName,
-      conversationFlags: this.preferences.conversations,
-      searchCoverage: this.preferences.searchCoverage,
-      blocked: this.preferences.blocked,
-      recentEmojis: this.preferences.recentEmojis,
-      // Written only when there is something to write. An account that never named itself and
-      // never received a name keeps the exact on-disk shape it had before this feature existed,
-      // which is what makes the unchanged `VERSION` honest rather than merely tolerated.
-      ...(this.displayName === undefined ? {} : { displayName: this.displayName }),
-      ...(Object.keys(this.profiles).length === 0 ? {} : { profiles: this.profiles }),
-      ...(Object.keys(this.petnames).length === 0 ? {} : { petnames: this.petnames }),
-      ...(this.preferences.locale === undefined ? {} : { locale: this.preferences.locale }),
-      ...(this.preferences.contactPolicy === undefined
-        ? {}
-        : { contactPolicy: this.preferences.contactPolicy }),
-      ...(this.preferences.skinTone === undefined ? {} : { skinTone: this.preferences.skinTone }),
-      history: await this.atRest.seal(
-        encodeHistory(
-          new Map(
-            [...this.conversations].map(([key, view]) => [
-              key,
-              { messages: view.messages, outbox: view.outbox, readCursor: view.readCursor },
-            ]),
-          ),
-        ),
-      ),
-      ...(this.seenHead
-        ? {
-            logHead: {
-              size: this.seenHead.size,
-              root: toBase64(this.seenHead.root),
-              logKey: toBase64(this.seenHead.logKey),
-            },
-          }
-        : {}),
-    });
   }
 
   /**

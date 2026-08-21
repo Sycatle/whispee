@@ -502,3 +502,92 @@ async fn post_signal(
         .await
         .unwrap()
 }
+
+/// **The frame without which a purge becomes a silent corruption.**
+///
+/// A session that says nothing about a group is read by the client as "nothing happened there".
+/// That reading was true while envelopes were never deleted; it stopped being true the day
+/// `purge_once` learned to delete them. Without the `gap` frame a device coming back after a
+/// month would reconnect, hear silence, and sit forever on an application ratchet that can no
+/// longer advance — with no error anywhere to explain why.
+#[tokio::test]
+async fn the_gateway_announces_a_gap_rather_than_staying_silent_about_purged_envelopes() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let bob = Device::register(&server, &unique("bob")).await;
+    let group_id = group_with(&server, &alice, &bob).await;
+
+    // A group whose head has run five hundred sequences ahead, with only one old envelope left
+    // to purge. Planted rather than posted: the point is the frame, not `post_envelope`.
+    sqlx::query("UPDATE groups SET next_seq = 1000 WHERE id = $1")
+        .bind(&group_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO envelopes (group_id, seq, payload, created_at)
+         VALUES ($1, 1, $2, now() - interval '60 days'), ($1, 900, $2, now())",
+    )
+    .bind(&group_id)
+    .bind(b"opaque".as_slice())
+    .execute(&server.pool)
+    .await
+    .unwrap();
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    // Bob comes back believing he is up to date at sequence 1 — the very envelope that is gone.
+    let mut socket = session(
+        &server,
+        &bob,
+        serde_json::json!([{ "group_id": hex::encode(&group_id), "seq": 1 }]),
+    )
+    .await;
+    assert_eq!(read_frame(&mut socket).await.unwrap()["op"], "ready");
+
+    let frame = read_frame(&mut socket).await.expect("the session must not stay silent");
+    assert_eq!(
+        frame["op"], "gap",
+        "the client was told nothing about a history it can no longer read"
+    );
+    assert_eq!(frame["oldest"], 900, "the gap does not say where the mailbox now begins");
+
+    // And it comes first: a client reading frames in order must learn its history is broken
+    // before it is handed sequences to go and fetch.
+    let next = read_frame(&mut socket).await.expect("the surviving sequence is still announced");
+    assert_eq!(next["op"], "envelope");
+    assert_eq!(next["seq"], 900);
+}
+
+/// The counterpart: an intact conversation gets no `gap`.
+///
+/// A frame that fired on a healthy group would be worse than no frame at all — clients would
+/// learn to ignore it, and the one time it mattered they would.
+#[tokio::test]
+async fn a_session_resuming_inside_the_history_is_told_of_no_gap() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let bob = Device::register(&server, &unique("bob")).await;
+    let group_id = group_with(&server, &alice, &bob).await;
+
+    for i in 0..2 {
+        post_envelope(&server, &alice, &group_id, format!("message {i}").as_bytes()).await;
+    }
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let mut socket = session(
+        &server,
+        &bob,
+        serde_json::json!([{ "group_id": hex::encode(&group_id), "seq": 1 }]),
+    )
+    .await;
+    assert_eq!(read_frame(&mut socket).await.unwrap()["op"], "ready");
+
+    let frame = read_frame(&mut socket).await.expect("the backlog must still be announced");
+    assert_eq!(
+        frame["op"], "envelope",
+        "an intact conversation was reported as interrupted, which teaches clients to ignore the frame"
+    );
+    assert_eq!(frame["seq"], 2);
+}

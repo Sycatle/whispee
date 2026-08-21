@@ -867,17 +867,18 @@ async fn envelopes_are_ordered_and_paginated() {
         assert_eq!(body["seq"], i as i64 + 1, "non-monotonic sequence");
     }
 
-    let all_of_them: Vec<serde_json::Value> =
+    let all_of_them: serde_json::Value =
         bob.get(&group_path(&group_id, "/envelopes")).await.json().await.unwrap();
-    assert_eq!(all_of_them.len(), 5);
+    assert_eq!(all_of_them["envelopes"].as_array().unwrap().len(), 5);
 
     // Cursor: only re-deliver what follows.
-    let rest: Vec<serde_json::Value> = bob
+    let rest: serde_json::Value = bob
         .get(&group_path(&group_id, "/envelopes?after=3"))
         .await
         .json()
         .await
         .unwrap();
+    let rest = rest["envelopes"].as_array().unwrap();
     assert_eq!(rest.len(), 2);
     assert_eq!(rest[0]["seq"], 4);
 }
@@ -964,10 +965,10 @@ async fn the_server_only_sees_ciphertext() {
     );
 
     // And the legitimate recipient must indeed be able to read it.
-    let received: Vec<serde_json::Value> =
+    let received: serde_json::Value =
         bob.get(&group_path(&group_id, "/envelopes")).await.json().await.unwrap();
     let payload = BASE64_STANDARD
-        .decode(received[0]["payload"].as_str().unwrap())
+        .decode(received["envelopes"][0]["payload"].as_str().unwrap())
         .unwrap();
 
     match bob_group.process(&bob_mls, &payload, &Default::default()).unwrap() {
@@ -1883,7 +1884,7 @@ async fn an_anonymous_post_succeeds_without_identifying_the_sender() {
         .json()
         .await
         .unwrap();
-    assert_eq!(envelopes.as_array().unwrap().len(), 1);
+    assert_eq!(envelopes["envelopes"].as_array().unwrap().len(), 1);
 }
 
 /// Without the key, the anonymous post is refused: the server is not an open mailbox. That is
@@ -2938,4 +2939,458 @@ async fn an_unchanged_log_keeps_serving_the_same_root() {
     if first["size"] == second["size"] {
         assert_eq!(first["root"], second["root"], "the same log produced two roots");
     }
+}
+
+// ---------------------------------------------------------------- retention
+
+/// Plants a group whose head is already at `next_seq`, without posting anything.
+///
+/// The tail clause compares `seq` against `groups.next_seq`, so a test of the age half of the
+/// rule needs a group that has *already* moved five hundred sequences on. Posting five hundred
+/// envelopes through the API to obtain that number would be exercising `post_envelope`, not the
+/// purge, and would take a hundred times longer.
+///
+/// The member is not decoration, and neither is the transaction. The purge deletes groups nobody
+/// belongs to, the whole suite shares one database, and tests run concurrently — so a group
+/// inserted on its own is liable to be swept away by a *different* test's purge pass before its
+/// member lands, taking everything with it through the cascade.
+///
+/// Two separate statements are not enough either, and the reason is the interesting one: under
+/// READ COMMITTED the purge's `NOT EXISTS (… group_members …)` is evaluated against a snapshot
+/// taken before the membership row committed, so it deletes a group that has just acquired a
+/// member. One transaction removes the window entirely — the group is invisible until it already
+/// has its member — and that is exactly why `add_members` creates the row and its first member
+/// together rather than one after the other.
+async fn plant_group(pool: &sqlx::PgPool, group_id: &[u8], next_seq: i64, member: &Device) {
+    let mut tx = pool.begin().await.unwrap();
+
+    sqlx::query("INSERT INTO groups (id, next_seq) VALUES ($1, $2)")
+        .bind(group_id)
+        .bind(next_seq)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    sqlx::query("INSERT INTO group_members (group_id, device_id) VALUES ($1, $2)")
+        .bind(group_id)
+        .bind(&member.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    tx.commit().await.unwrap();
+}
+
+/// Inserts an envelope with an explicit age.
+///
+/// Back-dated rather than waited for, obviously — but the reason is worth naming: `created_at`
+/// has a `DEFAULT now()` and no code path ever sets it, so a test that did not write it could
+/// only ever observe the "too young to purge" branch.
+async fn plant_envelope(pool: &sqlx::PgPool, group_id: &[u8], seq: i64, age_days: i64) {
+    sqlx::query(
+        "INSERT INTO envelopes (group_id, seq, payload, created_at)
+         VALUES ($1, $2, $3, now() - make_interval(days => $4))",
+    )
+    .bind(group_id)
+    .bind(seq)
+    .bind(b"opaque".as_slice())
+    .bind(age_days as i32)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Sequences the group still holds, smallest first.
+///
+/// Every retention assertion is made **per group**, never on the counters `purge_once` returns.
+/// The database persists between runs and is shared by every test in the binary, so any total is
+/// moved by whatever else is posting at that instant — the same trap the pairing purge test
+/// already documents.
+async fn surviving_seqs(pool: &sqlx::PgPool, group_id: &[u8]) -> Vec<i64> {
+    let rows: Vec<(i64,)> =
+        sqlx::query_as("SELECT seq FROM envelopes WHERE group_id = $1 ORDER BY seq")
+            .bind(group_id)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    rows.into_iter().map(|(seq,)| seq).collect()
+}
+
+#[tokio::test]
+async fn an_envelope_older_than_the_retention_is_purged() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+
+    plant_group(&server.pool, &group_id, 1_000, &alice).await;
+    plant_envelope(&server.pool, &group_id, 1, 60).await;
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    assert!(
+        surviving_seqs(&server.pool, &group_id).await.is_empty(),
+        "an envelope two months old and a thousand sequences behind kept the table growing"
+    );
+}
+
+#[tokio::test]
+async fn an_envelope_within_the_retention_survives_the_purge() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+
+    // Far enough behind the head to satisfy the tail clause on its own: what has to keep this
+    // envelope alive is its age, and nothing else. A test that satisfied neither clause would
+    // pass even if the conditions were disjoined by mistake.
+    plant_group(&server.pool, &group_id, 1_000, &alice).await;
+    plant_envelope(&server.pool, &group_id, 1, 29).await;
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    assert_eq!(
+        surviving_seqs(&server.pool, &group_id).await,
+        vec![1],
+        "an envelope one day inside the retention was taken from a device still allowed to be offline"
+    );
+}
+
+/// The clause that protects quiet conversations, and the reason the rule is a conjunction.
+///
+/// Two years old, and untouched: age alone would empty a thread of a few hundred messages that
+/// cost the server nothing to keep, and the people in it would experience that as data loss for
+/// no gain.
+#[tokio::test]
+async fn a_group_shorter_than_the_minimum_tail_is_never_purged_however_old_it_is() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+
+    // 499: one short of the tail, which is the interesting side of the boundary.
+    plant_group(&server.pool, &group_id, 499, &alice).await;
+    for seq in 1..=5 {
+        plant_envelope(&server.pool, &group_id, seq, 730).await;
+    }
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    assert_eq!(
+        surviving_seqs(&server.pool, &group_id).await,
+        vec![1, 2, 3, 4, 5],
+        "a conversation that never reached five hundred envelopes was emptied by age alone"
+    );
+}
+
+/// Exactly five hundred remain, and they are the last five hundred.
+///
+/// The off-by-one is what this pins down: sequences start at 1, so a group at `next_seq = 1000`
+/// must keep 501..=1000. Keeping 500..=1000 would be one envelope more than promised — harmless
+/// — and keeping 502..=1000 would be one less than promised, which is a broken ratchet.
+#[tokio::test]
+async fn the_last_five_hundred_envelopes_of_a_busy_group_survive_a_purge() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+
+    plant_group(&server.pool, &group_id, 1_000, &alice).await;
+    sqlx::query(
+        "INSERT INTO envelopes (group_id, seq, payload, created_at)
+         SELECT $1, s, $2, now() - interval '60 days' FROM generate_series(1, 1000) AS s",
+    )
+    .bind(&group_id)
+    .bind(b"opaque".as_slice())
+    .execute(&server.pool)
+    .await
+    .unwrap();
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let survivors = surviving_seqs(&server.pool, &group_id).await;
+    assert_eq!(
+        survivors.len(),
+        500,
+        "the tail the purge promises to keep is not five hundred envelopes long"
+    );
+    assert_eq!(
+        (survivors[0], survivors[499]),
+        (501, 1_000),
+        "the survivors are not the last five hundred, so the purge deleted from the wrong end"
+    );
+}
+
+/// The field without which the purge is a silent corruption.
+///
+/// A client whose cursor sits under the hole must be able to tell "everything you missed is
+/// gone" from "nothing new". Both answers carry the same empty page; only `oldest` separates
+/// them.
+#[tokio::test]
+async fn fetching_from_a_purged_cursor_reports_the_oldest_surviving_sequence() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+
+    // Through the route, because the fetch checks membership: an SQL-planted group would return
+    // 403 and the test would pass for the wrong reason.
+    alice
+        .post(&group_path(&group_id, "/members"), serde_json::json!({ "device_ids": [alice.id] }))
+        .await;
+
+    sqlx::query("UPDATE groups SET next_seq = 1000 WHERE id = $1")
+        .bind(&group_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    for seq in [1_i64, 600] {
+        plant_envelope(&server.pool, &group_id, seq, 60).await;
+    }
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let page: serde_json::Value =
+        alice.get(&group_path(&group_id, "/envelopes?after=0")).await.json().await.unwrap();
+
+    assert_eq!(
+        page["oldest"], 600,
+        "the response does not say where the mailbox now begins, so a client cannot see the hole"
+    );
+
+    let cursor = 0_i64;
+    let oldest = page["oldest"].as_i64().unwrap();
+    assert!(
+        cursor < oldest - 1,
+        "a cursor under the hole must compute a gap, or the client will wait forever on a ratchet that cannot advance"
+    );
+}
+
+/// The same field, on a conversation nothing has happened to.
+///
+/// It must be inert. An `oldest` that reported a gap on an intact group would be worse than none:
+/// clients would learn to ignore it.
+#[tokio::test]
+async fn fetching_from_a_live_cursor_reports_an_oldest_the_client_can_ignore() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+
+    alice
+        .post(&group_path(&group_id, "/members"), serde_json::json!({ "device_ids": [alice.id] }))
+        .await;
+
+    for byte in 0..3u8 {
+        alice
+            .post(
+                &group_path(&group_id, "/envelopes"),
+                serde_json::json!({ "payload": BASE64_STANDARD.encode([byte]) }),
+            )
+            .await;
+    }
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let page: serde_json::Value =
+        alice.get(&group_path(&group_id, "/envelopes?after=3")).await.json().await.unwrap();
+
+    assert!(
+        page["envelopes"].as_array().unwrap().is_empty(),
+        "a cursor at the head was served envelopes it had already read"
+    );
+    assert!(
+        3 >= page["oldest"].as_i64().unwrap() - 1,
+        "an intact conversation reported a gap, which teaches clients to ignore the field"
+    );
+}
+
+/// A group with no envelope at all reports an `oldest` a fresh client does not read as a gap.
+///
+/// The fallback is `next_seq + 1`, which is 1 for a new group — so a client at cursor 0, the
+/// value meaning "I know nothing", computes `0 < 0` and concludes correctly that it has missed
+/// nothing. Returning 0 here would have made every new conversation a false alarm.
+#[tokio::test]
+async fn an_empty_mailbox_reports_the_sequence_it_has_yet_to_hand_out() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+
+    alice
+        .post(&group_path(&group_id, "/members"), serde_json::json!({ "device_ids": [alice.id] }))
+        .await;
+
+    let page: serde_json::Value =
+        alice.get(&group_path(&group_id, "/envelopes?after=0")).await.json().await.unwrap();
+
+    assert_eq!(page["oldest"], 1, "a brand new group does not begin at sequence one");
+    assert!(
+        0 >= page["oldest"].as_i64().unwrap() - 1,
+        "a conversation nobody has written in yet was reported as interrupted"
+    );
+}
+
+#[tokio::test]
+async fn an_attachment_older_than_its_own_longer_retention_is_purged() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+    plant_group(&server.pool, &group_id, 0, &alice).await;
+
+    let (id,): (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO attachments (group_id, payload, created_at)
+         VALUES ($1, $2, now() - interval '91 days') RETURNING id",
+    )
+    .bind(&group_id)
+    .bind(b"ciphertext".as_slice())
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let found: Option<(uuid::Uuid,)> = sqlx::query_as("SELECT id FROM attachments WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&server.pool)
+        .await
+        .unwrap();
+
+    assert!(
+        found.is_none(),
+        "an attachment past three months is still on disk, so the ninety-day retention is a claim and not a rule"
+    );
+}
+
+/// Sixty days: past the envelope retention, well inside the attachment one.
+///
+/// That gap is the whole reason attachments have a retention of their own. A message restored
+/// from the vault carries its attachment descriptor, so the descriptor outlives the envelope that
+/// delivered it — and it has to stay resolvable for a while afterwards or the restoration hands
+/// back a message pointing at nothing.
+#[tokio::test]
+async fn an_attachment_still_within_retention_survives_the_envelope_purge() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+    plant_group(&server.pool, &group_id, 1_000, &alice).await;
+
+    let (id,): (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO attachments (group_id, payload, created_at)
+         VALUES ($1, $2, now() - interval '60 days') RETURNING id",
+    )
+    .bind(&group_id)
+    .bind(b"ciphertext".as_slice())
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+
+    // The envelope that carried it goes in the same pass, and must not take the file with it.
+    plant_envelope(&server.pool, &group_id, 1, 60).await;
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let found: Option<(uuid::Uuid,)> = sqlx::query_as("SELECT id FROM attachments WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&server.pool)
+        .await
+        .unwrap();
+
+    assert!(
+        found.is_some(),
+        "the attachment went with its envelope, so a message restored from the vault points at nothing"
+    );
+    assert!(
+        surviving_seqs(&server.pool, &group_id).await.is_empty(),
+        "the envelope was supposed to be purged in this very pass"
+    );
+}
+
+/// `remove_members` empties the distribution list and nothing ever deleted the group.
+///
+/// Its envelopes then sat there forever, unreachable by every human being including the ones who
+/// wrote them, since every read path starts with a membership check. Deleting the row is what
+/// finally lets the `ON DELETE CASCADE` collect them.
+#[tokio::test]
+async fn a_group_left_by_every_member_is_removed_with_its_envelopes() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let group_id = unique("group").into_bytes();
+
+    alice
+        .post(&group_path(&group_id, "/members"), serde_json::json!({ "device_ids": [alice.id] }))
+        .await;
+    alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([7u8]) }),
+        )
+        .await;
+
+    // Older than the retention, so the group counts as silent. The envelope itself survives the
+    // envelope rule — one sequence is nowhere near five hundred behind — which is precisely what
+    // makes this a test of the cascade rather than of the age clause.
+    sqlx::query("UPDATE envelopes SET created_at = now() - interval '60 days' WHERE group_id = $1")
+        .bind(&group_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    let removal = alice
+        .post(
+            &group_path(&group_id, "/members/remove"),
+            serde_json::json!({ "device_ids": [alice.id] }),
+        )
+        .await;
+    assert_eq!(removal.status(), 200, "the removal itself failed");
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let group: Option<(Vec<u8>,)> = sqlx::query_as("SELECT id FROM groups WHERE id = $1")
+        .bind(&group_id)
+        .fetch_optional(&server.pool)
+        .await
+        .unwrap();
+
+    assert!(group.is_none(), "a group nobody belongs to any more is kept forever");
+    assert!(
+        surviving_seqs(&server.pool, &group_id).await.is_empty(),
+        "the cascade did not take the mailbox, which is the only reason to delete the row"
+    );
+}
+
+/// The clause that stops the abandoned-group rule from racing group creation.
+///
+/// `add_members` creates the row and inserts its first member in one transaction, so no reader
+/// ever sees one without the other — but this test does not rely on that. It checks the
+/// observable outcome: a group created a moment ago, with members and a recent envelope, is
+/// still there after a pass.
+#[tokio::test]
+async fn a_group_created_moments_ago_is_not_mistaken_for_an_abandoned_one() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let bob = Device::register(&server, &unique("bob")).await;
+    let group_id = unique("group").into_bytes();
+
+    alice
+        .post(
+            &group_path(&group_id, "/members"),
+            serde_json::json!({ "device_ids": [alice.id, bob.id] }),
+        )
+        .await;
+    alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([1u8]) }),
+        )
+        .await;
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let members: Vec<(String,)> =
+        sqlx::query_as("SELECT device_id FROM group_members WHERE group_id = $1")
+            .bind(&group_id)
+            .fetch_all(&server.pool)
+            .await
+            .unwrap();
+
+    assert_eq!(members.len(), 2, "the purge dismantled a conversation that had just been created");
+    assert_eq!(
+        surviving_seqs(&server.pool, &group_id).await,
+        vec![1],
+        "the first envelope of a new conversation was purged"
+    );
 }

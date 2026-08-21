@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { DeviceSettings } from "@/components/Devices";
 import { LockSettings } from "@/components/Lock";
+import { NoticeSettings } from "@/components/Notices";
 import { PairDevice } from "@/components/Pairing";
 import { VaultSettings } from "@/components/Vault";
 import { PresenceDot } from "@/components/Presence";
@@ -48,6 +49,7 @@ export function ConversationList({
   const [vaultPanel, setVaultPanel] = useState(false);
   const [devicePanel, setDevicePanel] = useState(false);
   const [signalPanel, setSignalPanel] = useState(false);
+  const [noticePanel, setNoticePanel] = useState(false);
 
   const start = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -122,6 +124,10 @@ export function ConversationList({
         </div>
       )}
 
+      {noticePanel && (
+        <NoticeSettings session={session} onError={onError} onClose={() => setNoticePanel(false)} />
+      )}
+
       {devicePanel && (
         <DeviceSettings
           session={session}
@@ -133,7 +139,7 @@ export function ConversationList({
         />
       )}
 
-      {!pairing && !lockPanel && !vaultPanel && !devicePanel && !signalPanel && (
+      {!pairing && !lockPanel && !vaultPanel && !devicePanel && !signalPanel && !noticePanel && (
         <div className="flex flex-col gap-1 border-b border-(--color-border-subtle) px-3 py-2 text-left text-xs text-(--color-ink-muted)">
           <button type="button" onClick={() => setPairing(true)} className="text-left underline">
             Add a device
@@ -150,6 +156,9 @@ export function ConversationList({
           </button>
           <button type="button" onClick={() => setSignalPanel(true)} className="text-left underline">
             Receipts and indicators
+          </button>
+          <button type="button" onClick={() => setNoticePanel(true)} className="text-left underline">
+            Notifications
           </button>
         </div>
       )}

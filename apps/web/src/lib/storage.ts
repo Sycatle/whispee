@@ -145,6 +145,14 @@ interface StoredSession {
    * there is nothing to read at all.
    */
   history?: Uint8Array;
+  /**
+   * May a notification name the conversation it came from?
+   *
+   * **Absent means no**, unlike `vaultEnabled` a few fields up, and the asymmetry is deliberate:
+   * this one discloses something to whoever picks the device up, so the default is the quiet one
+   * and the flag only records a decision to say more.
+   */
+  discloseConversationName?: boolean;
 }
 
 /** What the user agrees to emit. */

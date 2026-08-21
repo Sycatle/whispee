@@ -7,6 +7,7 @@ import { MigrationBanner } from "@/components/Migration";
 import { type ConversationView, type ProposedMigration, Session, start } from "@/lib/session";
 import { useDuo } from "@/lib/duo";
 import { RELOCK_MS, observeIdle, observeLifecycle, networkReported } from "@/lib/lifecycle";
+import { countUnreadInTitle, createNotifier } from "@/lib/notifications";
 
 /**
  * Polling interval, now a safety net rather than an engine.
@@ -46,6 +47,24 @@ export function App() {
   const [, forceRender] = useState(0);
   const duo = useDuo();
   const refresh = useCallback(() => forceRender((n) => n + 1), []);
+
+  /**
+   * Notices for messages that arrived while the user was elsewhere.
+   *
+   * Built once and kept in a ref: it holds the standing notices, so rebuilding it on a render
+   * would lose the handles and stop a conversation being able to retract its own notice when it
+   * is opened.
+   */
+  const notifier = useRef<ReturnType<typeof createNotifier>>(undefined);
+  const title = useRef<ReturnType<typeof countUnreadInTitle>>(undefined);
+  /**
+   * The content cursor of each conversation at the previous render.
+   *
+   * An arrival is a cursor that moved, which is the one signal available here that does not
+   * depend on guessing what the poll did. Only messages move it — receipts do not, by design —
+   * so a quiet exchange of acknowledgements raises nothing.
+   */
+  const seen = useRef(new Map<string, number>());
 
   /**
    * Closing a locked session again.
@@ -250,6 +269,62 @@ export function App() {
       session.stopStream();
     };
   }, [session, refresh, duo]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    notifier.current ??= createNotifier({
+      select: (key: string) => {
+        const view = session.conversations.get(key);
+        if (view) setActive(view);
+      },
+    });
+    title.current ??= countUnreadInTitle();
+
+    const notices = notifier.current;
+    const counter = title.current;
+
+    return () => {
+      // Leaving the session — a re-lock, a migration, the tab closing — must not leave a notice
+      // standing for a thread nobody can open any more, nor a counted title on a page that no
+      // longer knows the count.
+      notices.dismissAll();
+      counter.restore();
+    };
+  }, [session]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    let unread = 0;
+    for (const [key, view] of session.conversations) {
+      unread += session.unreadIn(view);
+
+      const before = seen.current.get(key);
+      seen.current.set(key, view.contentCursor);
+
+      // `before === undefined` is the first sight of a conversation, not an arrival: a device
+      // that has just paired discovers a hundred threads at once and would raise a hundred
+      // notices for messages nobody is newly receiving.
+      if (before !== undefined && view.contentCursor > before) {
+        // The name only travels if the user asked for it: it is the one thing here that ends up
+        // legible on a locked screen.
+        const name = session.discloseConversationName
+          ? view.accounts.map((account) => `@${account.handle}`).join(", ")
+          : undefined;
+
+        notifier.current?.arrived({ conversation: key, ...(name ? { name } : {}) });
+      }
+    }
+
+    // Opening a thread retracts its notice. `markRead` has already run by the time this render
+    // happens, so an unread count of zero is the same fact seen from here.
+    for (const [key, view] of session.conversations) {
+      if (session.unreadIn(view) === 0) notifier.current?.dismiss(key);
+    }
+
+    title.current?.show(unread);
+  });
 
   if (busy) return <Centered>Loading…</Centered>;
 

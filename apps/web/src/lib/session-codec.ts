@@ -59,6 +59,7 @@ export function encodeSession(session: StoredSession): Uint8Array {
     postingKeys: session.postingKeys,
     logHead: session.logHead,
     history: session.history === undefined ? undefined : toBase64(session.history),
+    discloseConversationName: session.discloseConversationName,
   };
 
   return new TextEncoder().encode(JSON.stringify(raw));
@@ -115,6 +116,9 @@ export function decodeSession(bytes: Uint8Array): StoredSession {
     ...(field.history === undefined
       ? {}
       : { history: fromBase64(requireString(field.history, "history")) }),
+    ...(field.discloseConversationName === undefined
+      ? {}
+      : { discloseConversationName: field.discloseConversationName as boolean }),
   };
 }
 

@@ -323,6 +323,21 @@ export class Session {
     private signals: SignalSettings = { readReceipts: true, typingIndicator: true, presence: true },
   ) {}
 
+  /**
+   * May a notification name the conversation?
+   *
+   * Off unless the user turned it on. Held here rather than in `SignalSettings`, which is about
+   * what this device **emits** to others: this discloses nothing to anyone on the network, only
+   * to whoever is standing in front of the screen.
+   */
+  discloseConversationName = false;
+
+  /** Records the choice, so a reload does not quietly return to the quiet default. */
+  async setDiscloseConversationName(value: boolean): Promise<void> {
+    this.discloseConversationName = value;
+    await this.persist();
+  }
+
   /** Real-time session, when it is open. Its failure removes no feature. */
   private gateway?: Gateway;
 
@@ -700,6 +715,8 @@ export class Session {
     // Assigned after construction rather than passed in: the other entry points build a session
     // for an account that has never resolved anyone, so they have no anchor to hand over, and a
     // parameter they would all pass as `undefined` teaches nothing.
+    session.discloseConversationName = stored.discloseConversationName === true;
+
     if (stored.logHead) {
       session.seenHead = {
         size: stored.logHead.size,
@@ -984,6 +1001,7 @@ export class Session {
           .filter((view) => view.postingKey)
           .map((view) => [view.key, toBase64(view.postingKey as Uint8Array)]),
       ),
+      discloseConversationName: this.discloseConversationName,
       history: await this.atRest.seal(
         encodeHistory(
           new Map(

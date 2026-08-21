@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { decodeHistory } from "./history.ts";
 import { fromBase64 } from "./keys.ts";
 import { composeStored, type PersistInput } from "./session-persist.ts";
-import { freshPreferences, freshSignalState, type ConversationView } from "./session-types.ts";
+import { freshSignalState, type ConversationView } from "./session-types.ts";
 
 const seal = (bytes: Uint8Array): Promise<Uint8Array> => Promise.resolve(bytes);
 
@@ -48,8 +48,7 @@ function input(over: Partial<PersistInput> = {}): PersistInput {
     verified: {},
     knownDevices: {},
     signals: { readReceipts: true, typingIndicator: true, presence: true },
-    discloseConversationName: false,
-    preferences: freshPreferences(),
+    preferences: {},
     displayName: undefined,
     profiles: {},
     petnames: {},
@@ -131,9 +130,6 @@ test("a name nobody has given is absent, not undefined", async () => {
   assert.equal("displayName" in stored, false);
   assert.equal("profiles" in stored, false);
   assert.equal("petnames" in stored, false);
-  assert.equal("locale" in stored, false);
-  assert.equal("contactPolicy" in stored, false);
-  assert.equal("skinTone" in stored, false);
   assert.equal("logHead" in stored, false);
 });
 
@@ -143,43 +139,28 @@ test("a name somebody has given is written", async () => {
       displayName: "Alice",
       profiles: { bob: { name: "Bob", at: 3 } },
       petnames: { bob: "the neighbour" },
-      preferences: {
-        ...freshPreferences(),
-        locale: "fr",
-        contactPolicy: "known",
-        skinTone: 0,
-      },
     }),
   );
 
   assert.equal(stored.displayName, "Alice");
   assert.deepEqual(stored.profiles, { bob: { name: "Bob", at: 3 } });
   assert.deepEqual(stored.petnames, { bob: "the neighbour" });
-  assert.equal(stored.locale, "fr");
-  assert.equal(stored.contactPolicy, "known");
-  // Zero is a choice — the yellow glyph — not the absence of one. A falsiness test here would
-  // drop it and silently reinstate whatever the default becomes later.
-  assert.equal(stored.skinTone, 0);
 });
 
-test("the preferences that are always present are copied across", async () => {
+test("the preferences slice is spread in exactly as given", async () => {
+  // `composeStored` no longer knows what a preference is: `PreferencesStore` owns that mapping in
+  // both directions, and `session-preferences.test.ts` is where the round trip is asserted. What
+  // is checked here is only that the slice arrives whole and overrides nothing else.
   const stored = await composeStored(
     input({
-      discloseConversationName: true,
-      preferences: {
-        conversations: { aa: { muted: true } },
-        searchCoverage: { aa: { from: 1, to: 9 } },
-        blocked: ["mallory"],
-        recentEmojis: ["1f600"],
-      },
+      preferences: { discloseConversationName: true, locale: "fr", blocked: ["mallory"] },
     }),
   );
 
   assert.equal(stored.discloseConversationName, true);
-  assert.deepEqual(stored.conversationFlags, { aa: { muted: true } });
-  assert.deepEqual(stored.searchCoverage, { aa: { from: 1, to: 9 } });
+  assert.equal(stored.locale, "fr");
   assert.deepEqual(stored.blocked, ["mallory"]);
-  assert.deepEqual(stored.recentEmojis, ["1f600"]);
+  assert.equal(stored.handle, "alice");
 });
 
 test("a seen log head is written as base64, and only when there is one", async () => {

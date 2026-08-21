@@ -35,7 +35,7 @@
 import { encodeHistory, type Cached } from "./history.ts";
 import { toBase64 } from "./keys.ts";
 import type { LockEnvelope } from "./lock";
-import type { ConversationView, Preferences } from "./session-types";
+import type { ConversationView } from "./session-types";
 import type { SignalSettings, StoredSession } from "./storage";
 import type { SeenHead } from "./transparency";
 
@@ -73,8 +73,14 @@ export interface PersistInput {
   verified: Record<string, string>;
   knownDevices: Record<string, string[]>;
   signals: SignalSettings;
-  discloseConversationName: boolean;
-  preferences: Preferences;
+  /**
+   * What `PreferencesStore` contributes, already mapped.
+   *
+   * A slice rather than a `Preferences`, because the preferences own both directions of their own
+   * mapping — `snapshot` here and `hydrate` in `Session.open` — and keeping the two together is
+   * the only arrangement in which a test can assert they agree. See `session-preferences.ts`.
+   */
+  preferences: Partial<StoredSession>;
   displayName: string | undefined;
   profiles: Record<string, { name: string; at: number }>;
   petnames: Record<string, string>;
@@ -119,21 +125,12 @@ export async function composeStored(input: PersistInput): Promise<StoredSession>
         .filter((view) => view.postingKey)
         .map((view) => [view.key, toBase64(view.postingKey as Uint8Array)]),
     ),
-    discloseConversationName: input.discloseConversationName,
-    conversationFlags: input.preferences.conversations,
-    searchCoverage: input.preferences.searchCoverage,
-    blocked: input.preferences.blocked,
-    recentEmojis: input.preferences.recentEmojis,
+    ...input.preferences,
     // Written only when there is something to write. An account that never named itself and never
     // received a name keeps the exact on-disk shape it had before this feature existed.
     ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
     ...(Object.keys(input.profiles).length === 0 ? {} : { profiles: input.profiles }),
     ...(Object.keys(input.petnames).length === 0 ? {} : { petnames: input.petnames }),
-    ...(input.preferences.locale === undefined ? {} : { locale: input.preferences.locale }),
-    ...(input.preferences.contactPolicy === undefined
-      ? {}
-      : { contactPolicy: input.preferences.contactPolicy }),
-    ...(input.preferences.skinTone === undefined ? {} : { skinTone: input.preferences.skinTone }),
     history: await input.seal(
       encodeHistory(
         new Map<string, Cached>(

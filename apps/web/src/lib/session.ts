@@ -12,13 +12,13 @@ import { deviceNameCandidates, detectDeviceKind } from "./device";
 import { type PairingCode, decodePairingCode } from "./pairing";
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
-import { withoutTone } from "./emoji";
 import { sanitize, validate } from "./display-name";
 import * as envelope from "./envelope";
 import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
 import * as derive from "./conversation-view.ts";
 import { PresenceTracker } from "./session-presence.ts";
+import { PreferencesStore } from "./session-preferences.ts";
 import { composeStored } from "./session-persist.ts";
 import { fromBase64, toHex } from "./keys";
 import { type LockEnvelope, changePassword, createLock, exportMaster, openLock } from "./lock";
@@ -86,7 +86,6 @@ export {
 
 import {
   LogProofRefused,
-  freshPreferences,
   freshSignalState,
   touch,
   type Preferences,
@@ -150,24 +149,26 @@ export class Session {
    * what this device **emits** to others: this discloses nothing to anyone on the network, only
    * to whoever is standing in front of the screen.
    */
-  discloseConversationName = false;
+  get discloseConversationName(): boolean {
+    return this.settings.discloseConversationName;
+  }
 
   /** Records the choice, so a reload does not quietly return to the quiet default. */
   async setDiscloseConversationName(value: boolean): Promise<void> {
-    this.discloseConversationName = value;
+    this.settings.setDisclose(value);
     await this.persist();
   }
 
   /**
    * Everything else the user has chosen and expects to find again.
    *
-   * Public and mutable, which is unusual here and deliberate: the alternative is a getter and a
-   * setter per preference on a class that is already the largest file in the client, and a merge
-   * conflict for every feature that adds one. `Preferences` explains the trade in full.
-   *
-   * Read it freely; to change it, go through `updatePreferences` so the change reaches disk.
+   * Read it freely; to change it, go through `updatePreferences` so the change reaches disk. The
+   * value is the store's own and mutable, which is unusual here and deliberate — `Preferences`
+   * explains the trade in full.
    */
-  preferences: Preferences = freshPreferences();
+  get preferences(): Preferences {
+    return this.settings.value;
+  }
 
   /**
    * Applies a change and writes it down.
@@ -175,9 +176,12 @@ export class Session {
    * Takes a mutator rather than a whole object so that two callers changing different preferences
    * cannot overwrite each other by handing back a stale copy — the mutation happens on the
    * current value, at the moment it is applied.
+   *
+   * The store does not write: persisting is ordered against the MLS state, and that decision
+   * stays here.
    */
   async updatePreferences(change: (preferences: Preferences) => void): Promise<void> {
-    change(this.preferences);
+    this.settings.update(change);
     await this.persist();
   }
 
@@ -577,20 +581,7 @@ export class Session {
     // Assigned after construction rather than passed in: the other entry points build a session
     // for an account that has never resolved anyone, so they have no anchor to hand over, and a
     // parameter they would all pass as `undefined` teaches nothing.
-    session.discloseConversationName = stored.discloseConversationName === true;
-    session.preferences = {
-      conversations: stored.conversationFlags ?? {},
-      searchCoverage: stored.searchCoverage ?? {},
-      blocked: stored.blocked ?? [],
-      recentEmojis: stored.recentEmojis ?? [],
-      // The two that mean something by their absence keep it. Spread conditionally for the reason
-      // `session-codec.ts` gives: a property present and holding `undefined` is not an absent one,
-      // and the difference is exactly what "follow the system" is made of.
-      ...(stored.locale === undefined ? {} : { locale: stored.locale }),
-      ...(stored.contactPolicy === undefined ? {} : { contactPolicy: stored.contactPolicy }),
-      ...(stored.skinTone === undefined ? {} : { skinTone: stored.skinTone }),
-    };
-
+    session.settings = PreferencesStore.hydrate(stored);
     session.profiles = stored.profiles ?? {};
     session.petnames = stored.petnames ?? {};
     // Conditional, unlike the two above: absent is what makes the interface fall back to
@@ -616,6 +607,15 @@ export class Session {
    * at the first poll — which is why it could leave without `persist` changing at all.
    */
   private readonly presence = new PresenceTracker();
+
+  /**
+   * What the user has chosen, and both directions of how it reaches the disk.
+   *
+   * Replaced wholesale by `open`, hence not `readonly`: `hydrate` is a constructor in all but
+   * name, and rebuilding is what keeps the absent-versus-`undefined` rule in one place instead of
+   * spread between a default here and a read there.
+   */
+  private settings = new PreferencesStore();
 
   /** Last activity of an account, or `undefined` if the server has nothing to say about it. */
   presenceOf(handle: string): number | undefined {
@@ -875,8 +875,7 @@ export class Session {
         verified: this.verified,
         knownDevices: this.knownDevices,
         signals: this.signals,
-        discloseConversationName: this.discloseConversationName,
-        preferences: this.preferences,
+        preferences: this.settings.snapshot(),
         displayName: this.displayName,
         profiles: this.profiles,
         petnames: this.petnames,
@@ -2083,15 +2082,7 @@ export class Session {
    * memory, it is a second grid nobody scrolls.
    */
   async noteEmojiUse(emoji: string): Promise<void> {
-    const base = withoutTone(emoji);
-    if (!base) return;
-
-    await this.updatePreferences((preferences) => {
-      preferences.recentEmojis = [
-        base,
-        ...preferences.recentEmojis.filter((known) => known !== base),
-      ].slice(0, 24);
-    });
+    if (this.settings.noteEmoji(emoji)) await this.persist();
   }
 
   /** Signalling settings, as they apply right now. */

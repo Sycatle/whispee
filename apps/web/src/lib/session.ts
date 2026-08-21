@@ -5,6 +5,8 @@
  * settle: when to replenish KeyPackages, how a guest discovers the group waiting for it, when
  * to persist state.
  */
+import { normalize as normalizeHandle, validate as validateHandle } from "./handle";
+import * as mention from "./mention";
 import { type ResolvedAccount, resolveAccount } from "./account";
 import { Api, ApiError, type PostMac } from "./api";
 import type { MembershipEvent } from "./content";
@@ -1948,7 +1950,7 @@ export class Session {
       // `randomUUID` rather than a counter: the outbox survives a reload, and a counter restarting
       // at zero would collide with what is already in it.
       localId: crypto.randomUUID(),
-      text,
+      text: this.address(view, text),
       sentAt: Date.now(),
       state: "sending",
     };
@@ -2145,7 +2147,43 @@ export class Session {
 
   /** Replies by quoting an earlier message. */
   replyTo(view: ConversationView, target: number, text: string): Promise<void> {
-    return this.sendContent(view, { kind: "reply", target, text });
+    return this.sendContent(view, { kind: "reply", target, text: this.address(view, text) });
+  }
+
+  /**
+   * Turns the handles a writer typed into the accounts they meant.
+   *
+   * # Why here and not in the composer
+   *
+   * The field holds a handle because that is what a person can read: an id is thirty-two
+   * hexadecimal characters, and a `<textarea>` has no way to draw one as anything else. The wire
+   * has to hold the id, because a handle can be renamed and a mention carrying a renameable thing
+   * is orphaned by the next rename — the same argument `lib/mention.ts` makes against carrying a
+   * display name, one level down. So the substitution happens once, at the boundary between the
+   * two, which is this line.
+   *
+   * The directory is **this conversation's members**, never the server's. A handle naming nobody
+   * in the room stays exactly as typed: it addresses somebody who will never read it, and
+   * inventing an id for them would be worse than leaving prose.
+   *
+   * It runs on the queued text rather than at flush, so the pending bubble already shows the
+   * mention resolved. A message that looked different before and after the server acknowledged it
+   * would read as the app having second thoughts.
+   */
+  private address(view: ConversationView, text: string): string {
+    const members = new Set([...view.accounts.map((a) => a.handle), ...view.peers.map((p) => p.name)]);
+    const claimed = this.names.handles;
+
+    const directory = new Map<string, string>();
+    for (const account of members) {
+      const handle = claimed[account];
+      if (handle !== undefined) directory.set(handle, account);
+    }
+    // Our own handle is in the directory too. Addressing yourself is ordinary — a note, a
+    // correction — and leaving it out would make one name in every room behave unlike the others.
+    directory.set(this.handle, this.accountId);
+
+    return mention.resolve(text, directory);
   }
 
   /**
@@ -2714,6 +2752,56 @@ export class Session {
    * for as long as their session lives, which is the one outcome somebody removing their name is
    * trying to avoid.
    */
+  /**
+   * Takes a new handle, and gives up the old one.
+   *
+   * # What moves, and what conspicuously does not
+   *
+   * The name, and nothing else. Not the account, not its key, not its devices, not their ids, not
+   * their attestations, not a single thing in any conversation. That is the whole point of
+   * anchoring identity on a key: before `0014_account_identity.sql` this operation did not exist,
+   * because it would have meant a new MLS credential everywhere and a "the fingerprint changed"
+   * banner on every correspondent's screen — MLS doing exactly its job, over a cosmetic edit.
+   *
+   * # The old name does not come back
+   *
+   * The server tombstones it. Every stale reference to it — a bookmark, a screenshot, a mention
+   * in a message written last year — would otherwise name whoever claimed it next, and that is an
+   * impersonation nobody has to mount: it arrives on its own, on a schedule the attacker picks by
+   * waiting.
+   *
+   * # Correspondents hear it from us
+   *
+   * Not from the directory. Re-announced into every conversation, as a claim, the way a display
+   * name is — see `TYPE_HANDLE` in `lib/content.ts`. Reading it back from the server at render
+   * time would hand it the one power this design took away, on every screen, forever.
+   *
+   * A conversation whose announcement fails keeps showing the old name until the next epoch
+   * re-announces it. That is a stale label, not a lost rename: the server has already recorded
+   * it, and it is what the next device to sign in will read.
+   */
+  async renameHandle(handle: string): Promise<void> {
+    const wanted = normalizeHandle(handle);
+    const problem = validateHandle(wanted);
+    if (problem !== null) throw new Error(problem);
+    if (wanted === this.handle) return;
+
+    await this.api.renameAccount(this.accountId, wanted);
+
+    // `handle` is `readonly` on the instance and this is the one operation that changes it. The
+    // cast is confined here rather than the field being widened: every other site in this file
+    // reads it, and a mutable one would invite a second writer.
+    (this as { handle: string }).handle = wanted;
+    await this.persist();
+
+    for (const view of this.conversations.values()) {
+      touch(view);
+      await this.emitProfile(view).catch((error: unknown) => {
+        console.warn(`handle not announced in ${view.key}`, error);
+      });
+    }
+  }
+
   async setDisplayName(name: string): Promise<void> {
     this.names.setMine(name);
     await this.persist();

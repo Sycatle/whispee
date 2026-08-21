@@ -3,7 +3,9 @@ import { useCallback, useState } from "react";
 import { LeaveGroupDialog } from "@/components/Group";
 import { PresenceBadge } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
-import { type NameSources, handleOf, nameMatches, nameOf, titleOf } from "@/lib/naming";
+import { type NameSources, compactNameOf, handleOf, nameMatches, nameOf, titleOf } from "@/lib/naming";
+import * as mention from "@/lib/mention";
+import { membersOf } from "@/components/Conversation";
 import { useBinding, useRunBinding } from "@/app/Shortcuts";
 import { say } from "@/lib/i18n";
 import { ContextMenu } from "@/ui/ContextMenu";
@@ -64,19 +66,43 @@ const FILTER_FIELD_ID = "rail-filter";
  */
 function preview(
   view: ConversationView,
-  // Threaded in rather than read from a hook: this is a plain function, and the one line it needs
-  // the sources for is the membership sentence, which names an account and must not print an id.
+  // Threaded in rather than read from a hook: this is a plain function, and every line below that
+  // names somebody needs them — a row that printed an account id where a name belongs would be
+  // the one place in the interface still speaking the protocol's language.
   sources: NameSources,
+  /** Our own account, so that a message addressing *us* draws our name like anybody else's. */
+  self: string,
 ): { text: string; mine: boolean } {
+  const members = membersOf(view, self);
+  /**
+   * Draws the people a message addresses, the way the thread would.
+   *
+   * Without this the row shows `@a577c8c7d52c15beb77ff1bd33ba58ad` — the text as it travels, which
+   * is correct on the wire and unreadable in a list. `MentionText` does the same resolution in the
+   * thread; here there is no room for a component, so the substitution happens on the string.
+   */
+  const spell = (text: string): string =>
+    mention
+      .runs(text, members)
+      .map((run) => {
+        if ("text" in run) return run.text;
+        // The sigil is kept even though the name reads as prose without it. A preview is a
+        // shortened copy of what was written, and dropping it would quietly turn somebody's
+        // mention into an ordinary word — the row would say the writer addressed nobody.
+        const name = compactNameOf(run.handle, sources, members);
+        return name.startsWith("@") ? name : `@${name}`;
+      })
+      .join("");
+
   // Anything still in the outbox is ours by definition — that is what the outbox is.
   const queued = view.outbox.at(-1);
-  if (queued) return { text: queued.text, mine: true };
+  if (queued) return { text: spell(queued.text), mine: true };
 
   for (let i = view.messages.length - 1; i >= 0; i -= 1) {
     const message = view.messages[i];
     const { content } = message;
     if (content.kind === "text" || content.kind === "reply")
-      return { text: content.text, mine: message.mine };
+      return { text: spell(content.text), mine: message.mine };
     if (content.kind === "attachment") return { text: content.ref.name, mine: message.mine };
 
     // A membership change is the latest news of a conversation as much as a message is, and
@@ -232,7 +258,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
     .filter((account) => session.verificationOf(account).status === "verified")
     .map((account) => account.handle);
 
-  const contacts = roster({ conversations, verified, self: session.handle }).filter((handle) =>
+  const contacts = roster({ conversations, verified, self: session.accountId }).filter((handle) =>
     nameMatches(handle, names, filter),
   );
 
@@ -299,7 +325,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
 
   // Our own row goes through the same function as everybody else's: `useNames` folds this
   // account's display name into `profiles` under its own handle, so there is no self case here.
-  const self = nameOf(session.handle, names);
+  const self = nameOf(session.accountId, names);
 
   const open = async (handle: string) => {
     try {
@@ -416,7 +442,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
           >
             {listed.map((view) => {
               const unread = session.unreadIn(view);
-              const line = preview(view, names);
+              const line = preview(view, names, session.accountId);
               const last = session.lastActivityIn(view);
               const selected = currentKey === view.key;
               // The single other person, when there is exactly one *and* this is not a group.
@@ -431,7 +457,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                 looks at this list. So the name shown here has to be able to stand alone, which
                 is precisely what `compactNameOf` refuses to let it do when it cannot.
               */
-              const title = titleOf(view, names, rendered, group ? session.handle : undefined);
+              const title = titleOf(view, names, rendered, group ? session.accountId : undefined);
 
               return (
                 <li key={view.key}>
@@ -669,7 +695,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
               type="button"
               className="flex w-full items-center gap-snug rounded-control p-snug text-left hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
             >
-              <PresenceBadge session={session} handle={session.handle}>
+              <PresenceBadge session={session} handle={session.accountId}>
                 <Avatar
                   seed={session.accountFingerprint()}
                   label={self.primary}
@@ -691,7 +717,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                   </span>
                 )}
                 <span className="block truncate font-evidence text-caption text-(--color-ink-muted)">
-                  {session.deviceId.slice(session.handle.length + 1)}
+                  {session.deviceId.slice(session.accountId.length + 1)}
                 </span>
               </span>
               <Icon name="settings" className="shrink-0 text-(--color-ink-muted)" />

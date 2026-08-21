@@ -60,6 +60,7 @@ import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
 import { cn } from "@/ui/cn";
+import { membersOf } from "@/components/Conversation";
 import { MentionText } from "@/components/MentionText";
 import { MiniProfile } from "@/components/MiniProfile";
 import { ContextMenu } from "@/ui/ContextMenu";
@@ -147,7 +148,7 @@ export function Messages({
   const reactions = new Map<number, Map<string, string>>();
   for (const message of messages) {
     if (message.content.kind !== "reaction") continue;
-    const author = message.mine ? session.handle : (message.sender ?? "unknown");
+    const author = message.mine ? session.accountId : (message.sender ?? "unknown");
     const target = reactions.get(message.content.target) ?? new Map<string, string>();
     if (message.content.emoji) target.set(author, message.content.emoji);
     else target.delete(author);
@@ -164,7 +165,7 @@ export function Messages({
    * distinction is available in the receipts anyway.
    */
   const authorOf = (message: (typeof visible)[number]) =>
-    message.mine ? session.handle : message.sender;
+    message.mine ? session.accountId : message.sender;
 
   /**
    * Everybody a line in this thread can be attributed to.
@@ -174,9 +175,7 @@ export function Messages({
    * said. This is the `among` every compact name below is checked against, and a rival missing
    * from it is an ambiguity that goes unnoticed.
    */
-  const members = [
-    ...new Set([...view.accounts.map((a) => a.handle), ...view.peers.map((p) => p.name)]),
-  ];
+  const members = membersOf(view, session.accountId);
 
   /**
    * What to call the author of a line, on the one line a turn gives it.
@@ -205,7 +204,7 @@ export function Messages({
     // the lookup below would miss it and every message we sent would draw the neutral
     // placeholder. It went unnoticed while bubbles put our messages on the right with no avatar
     // at all; one column per author is what made the gap visible.
-    if (handle === session.handle) return session.accountFingerprint();
+    if (handle === session.accountId) return session.accountFingerprint();
     return view.accounts.find((a) => a.handle === handle)?.fingerprint;
   };
 
@@ -570,11 +569,11 @@ export function Messages({
           const quoted = cite === null ? null : messages.find((m) => m.seq === cite);
           const forMe =
             !message.mine &&
-            ((spoken !== null && addresses(spoken, session.handle, members)) ||
+            ((spoken !== null && addresses(spoken, session.accountId, members)) ||
               quoted?.mine === true);
 
           const emojis = [...(reactions.get(message.seq)?.values() ?? [])];
-          const mineAlready = reactions.get(message.seq)?.get(session.handle);
+          const mineAlready = reactions.get(message.seq)?.get(session.accountId);
 
           return (
             <Fragment key={key}>
@@ -723,7 +722,7 @@ export function Messages({
                       something the keyboard already reaches, which is a different thing from a
                       target the keyboard cannot reach at all.
                     */
-                    <MiniProfile handle={authorOf(message) ?? session.handle} view={view}>
+                    <MiniProfile handle={authorOf(message) ?? session.accountId} view={view}>
                       <button
                         type="button"
                         tabIndex={-1}
@@ -756,7 +755,7 @@ export function Messages({
                         {/* A real button, because the underline promises one. It is the only tab
                             stop the pair adds, and it lands once per turn rather than once per
                             message — the name is drawn only when the speaker changes. */}
-                        <MiniProfile handle={authorOf(message) ?? session.handle} view={view}>
+                        <MiniProfile handle={authorOf(message) ?? session.accountId} view={view}>
                           <button
                             type="button"
                             data-author

@@ -49,7 +49,7 @@ export function DeviceSettings({ onClose }: { onClose: () => void }) {
 
   const reload = () => {
     session
-      .resolve(session.handle)
+      .resolve(session.accountId)
       .then(setAccount)
       .catch((e: unknown) => report.error(e instanceof Error ? e.message : String(e)));
   };

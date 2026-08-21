@@ -491,13 +491,13 @@ export function DetailPanel({ view }: { view: ConversationView }) {
           */}
           {(() => {
             const self = {
-              handle: session.handle,
+              handle: session.accountId,
               fingerprint: session.accountFingerprint(),
               mine: true as const,
             };
             const others = view.accounts.map((account) => ({ account, mine: false as const }));
             const online = (handle: string) =>
-              handle === session.handle || isOnline(session.presenceOf(handle), session.presenceClock);
+              handle === session.accountId || isOnline(session.presenceOf(handle), session.presenceClock);
 
             const rows = [{ account: self, mine: true as const }, ...others];
             const groups: [string, typeof rows][] = [

@@ -51,7 +51,7 @@ export function MiniProfile({
   const [open, setOpen] = useState(false);
 
   const name = nameOf(handle, names);
-  const mine = handle === session.handle;
+  const mine = handle === session.accountId;
   const seed = mine
     ? session.accountFingerprint()
     : view.accounts.find((account) => account.handle === handle)?.fingerprint;

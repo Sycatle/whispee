@@ -37,9 +37,19 @@ export { COMPOSER_ID };
  * what the ambiguity check in `compactNameOf` has to compare against — a rival left out of it is
  * a fallback that does not happen.
  */
-export function membersOf(view: ConversationView): string[] {
+export function membersOf(view: ConversationView, self: string): string[] {
+  // **Ourselves included**, and the omission was a real defect rather than a nicety. Neither
+  // source holds us: `accounts` is the people on the other side, and `peerFingerprints` filters
+  // our own device out of the tree by construction. So this list said "everybody a line can be
+  // attributed to" while leaving out the author of half of them — `compactNameOf` was comparing
+  // our name against a set that could not contain us, and a mention addressed to us matched
+  // nothing at all and rendered as a bare identifier.
   return [
-    ...new Set([...view.accounts.map((a) => a.handle), ...view.peers.map((p) => p.name)]),
+    ...new Set([
+      ...view.accounts.map((a) => a.handle),
+      ...view.peers.map((p) => p.name),
+      self,
+    ]),
   ];
 }
 
@@ -50,7 +60,7 @@ export function membersOf(view: ConversationView): string[] {
  * on its own says nothing, and a busy thread would read a string of them over whatever the user
  * was doing.
  */
-function spoken(view: ConversationView, names: NameSources): string | null {
+function spoken(view: ConversationView, names: NameSources, self: string): string | null {
   const last = view.messages.at(-1);
   if (!last || last.mine) return null;
 
@@ -58,7 +68,7 @@ function spoken(view: ConversationView, names: NameSources): string | null {
   // every arrival would double the length of the one announcement people are trying to hear
   // over whatever else they are doing.
   const who =
-    last.sender === null ? "Someone" : compactNameOf(last.sender, names, membersOf(view));
+    last.sender === null ? "Someone" : compactNameOf(last.sender, names, membersOf(view, self));
   const { content } = last;
   if (content.kind === "text" || content.kind === "reply") return `${who}: ${content.text}`;
   if (content.kind === "attachment") return `${who} sent ${content.ref.name}`;
@@ -138,7 +148,7 @@ export function Conversation({ view }: { view: ConversationView }) {
     if (last.seq <= announced.current) return;
     announced.current = last.seq;
 
-    const line = spoken(view, names);
+    const line = spoken(view, names, session.accountId);
     if (line !== null) setAnnouncement(line);
   });
 
@@ -294,10 +304,10 @@ export function Conversation({ view }: { view: ConversationView }) {
    * never receive the message, and the renderer, which resolves against the same set, would draw
    * the result as plain text anyway.
    */
-  const mentionable = membersOf(view);
+  const mentionable = membersOf(view, session.accountId);
 
   const seedOf = (handle: string) =>
-    handle === session.handle
+    handle === session.accountId
       ? session.accountFingerprint()
       : view.accounts.find((account) => account.handle === handle)?.fingerprint;
 
@@ -365,7 +375,7 @@ export function Conversation({ view }: { view: ConversationView }) {
 
   // The same list the bar above the thread names people against. See `membersOf`: two lists would
   // let the two halves of one screen disagree about who "Charlie" is.
-  const members = membersOf(view);
+  const members = membersOf(view, session.accountId);
 
   /*
     Who is being answered, and what they said.
@@ -381,7 +391,7 @@ export function Conversation({ view }: { view: ConversationView }) {
     list as the title, so the bar and the header call the same person the same thing.
   */
   const cited = replyTo === null ? undefined : view.messages.find((m) => m.seq === replyTo);
-  const citedAuthor = cited === undefined ? null : cited.mine ? session.handle : cited.sender;
+  const citedAuthor = cited === undefined ? null : cited.mine ? session.accountId : cited.sender;
   const citedName = citedAuthor === null ? "Someone" : compactNameOf(citedAuthor, names, members);
 
   // Nothing to send is not a state the button should look available in. `send` has always

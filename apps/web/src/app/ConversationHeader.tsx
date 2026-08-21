@@ -107,8 +107,8 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
   const group = session.isGroup(view);
 
   // Still needed below: the typing line names people against the same set the title does.
-  const members = membersOf(view);
-  const title = titleOf(view, names, members, group ? session.handle : undefined);
+  const members = membersOf(view, session.accountId);
+  const title = titleOf(view, names, members, group ? session.accountId : undefined);
 
   const isTyping = session.typingIn(view);
 
@@ -129,7 +129,7 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
     view.accounts.length > 0
       ? [...new Set(view.accounts.map((account) => account.handle))]
       : [...new Set(view.peers.map((peer) => peer.name))].filter(
-          (handle) => handle !== session.handle,
+          (account) => account !== session.accountId,
         );
   const [adding, setAdding] = useState(false);
 
@@ -138,7 +138,7 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
   const roles = session.roles(view);
   const iModerate =
     roles !== null &&
-    (roles.admin === session.handle || roles.moderators.includes(session.handle));
+    (roles.admin === session.accountId || roles.moderators.includes(session.accountId));
   const [invitees, setInvitees] = useState("");
   const [busy, setBusy] = useState(false);
 

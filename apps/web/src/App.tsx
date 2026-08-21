@@ -456,9 +456,9 @@ function Frame({
         // decide whether a name is ambiguous, a question we are never the subject of — and a
         // mention scanner given that set would refuse to recognise the one handle it is looking
         // for. This is the bug that would have made the feature silently do nothing.
-        const address = addressedIn(view.messages, before, session.handle, [
+        const address = addressedIn(view.messages, before, session.accountId, [
           ...among,
-          session.handle,
+          session.accountId,
         ]);
 
         notifier.current?.arrived({

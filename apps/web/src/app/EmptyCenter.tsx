@@ -37,12 +37,12 @@ export function EmptyCenter() {
   // The same function every other person on screen goes through: `useNames` folds this account's
   // display name into `profiles` under its own handle, so there is no self case to keep in step.
   const names = useNames();
-  const self = nameOf(session.handle, names);
+  const self = nameOf(session.accountId, names);
 
   return (
     <div className="safe-bottom flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-pane">
       <div className="flex w-full max-w-md flex-col items-center gap-pane py-section text-center">
-        <PresenceBadge session={session} handle={session.handle}>
+        <PresenceBadge session={session} handle={session.accountId}>
           <Avatar seed={fingerprint} label={self.primary} size="lg" />
         </PresenceBadge>
 
@@ -61,7 +61,7 @@ export function EmptyCenter() {
               against what another device shows during pairing. Hence the monospace token, whose
               whole reason for existing is that a shared metric makes that comparison possible. */}
           <p className="mt-tight font-evidence text-caption text-(--color-ink-muted)">
-            {session.deviceId.slice(session.handle.length + 1)}
+            {session.deviceId.slice(session.accountId.length + 1)}
           </p>
         </div>
 

@@ -66,9 +66,9 @@ export function useGroupAdmin({
   );
 
   const roles = session.roles(view);
-  const iAmAdmin = roles === null || roles.admin === session.handle;
-  const iModerate = roles === null || roles.admin === session.handle
-    || roles.moderators.includes(session.handle);
+  const iAmAdmin = roles === null || roles.admin === session.accountId;
+  const iModerate = roles === null || roles.admin === session.accountId
+    || roles.moderators.includes(session.accountId);
 
   const action = async (run: () => Promise<void>) => {
     setBusy(true);
@@ -103,7 +103,7 @@ export function useGroupAdmin({
     // Ourselves: the group has nothing to do *to* us, but leaving is ours to do, so the menu
     // says that rather than "no actions". Excluding our own row would make one name in every
     // group behave unlike the others for a reason the reader cannot see.
-    if (handle === session.handle) {
+    if (handle === session.accountId) {
       // Nothing the group does *to* us. Leaving is ours to do and lives on the conversation's own
       // menu, where the decision is actually made.
       return (
@@ -290,8 +290,8 @@ export function LeaveGroupDialog({
   // before leaving rather than discovered after: bequeathing a group without knowing to whom
   // would be the worst way to leave it.
   const heir = (() => {
-    if (roles === null || roles.admin !== session.handle) return null;
-    const members = view.peers.map((peer) => peer.name).filter((name) => name !== session.handle);
+    if (roles === null || roles.admin !== session.accountId) return null;
+    const members = view.peers.map((peer) => peer.name).filter((name) => name !== session.accountId);
     return members.find((name) => roles.moderators.includes(name)) ?? members[0] ?? null;
   })();
 
@@ -352,7 +352,7 @@ export function LeaveGroupDialog({
             . A group with no administrator would be frozen for good.
           </p>
         )}
-        {roles?.admin === session.handle && heir === null && (
+        {roles?.admin === session.accountId && heir === null && (
           <p className="text-(--color-danger)">
             You are the last member: leaving amounts to deleting the conversation.
           </p>

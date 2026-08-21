@@ -76,7 +76,7 @@ export function MentionText({
                 tabIndex={-1}
                 className={cn(
                   "rounded-[0.25rem] px-[0.15em] font-medium hover:underline",
-                  run.handle === session.handle
+                  run.handle === session.accountId
                     ? // Addressed to us: a fill, so it can be found by scanning rather than by
                       // reading. The row carries its own mark as well — see `Messages.tsx` — and
                       // the two say different things: the row says this message is for you, the

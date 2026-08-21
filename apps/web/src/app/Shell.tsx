@@ -192,7 +192,7 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
       case "conversation":
         return view === null
           ? "Conversation"
-          : titleOf(view, names, membersOf(view), session.handle);
+          : titleOf(view, names, membersOf(view, session.accountId), session.accountId);
     }
   };
 

@@ -52,7 +52,7 @@ export function PresenceBadge({
   // back to itself, so `presenceOf` returns `undefined` for us and the badge would be missing on
   // the one face that is certainly here. Somebody looking at their own avatar is, by the fact of
   // looking at it, online.
-  const self = handle === session.handle;
+  const self = handle === session.accountId;
   const lastSeen = session.presenceOf(handle);
   const online = self || isOnline(lastSeen, session.presenceClock);
   const known = self || lastSeen !== undefined;

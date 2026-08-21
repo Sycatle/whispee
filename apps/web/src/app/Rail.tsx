@@ -401,14 +401,19 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
               const line = preview(view);
               const last = session.lastActivityIn(view);
               const selected = currentKey === view.key;
-              const only = view.accounts.length === 1 ? view.accounts[0] : undefined;
+              // The single other person, when there is exactly one *and* this is not a group.
+              // A group reduced to two by a removal still has a roster, and treating it as a
+              // one-to-one would put one member's face and presence on a row that is not about
+              // them alone.
+              const group = session.isGroup(view);
+              const only = !group && view.accounts.length === 1 ? view.accounts[0] : undefined;
               /*
                 The compact form, because this row has no second line to move the handle onto:
                 the one under the title is the message preview, and the preview is why anybody
                 looks at this list. So the name shown here has to be able to stand alone, which
                 is precisely what `compactNameOf` refuses to let it do when it cannot.
               */
-              const title = titleOf(view, names, rendered, session.handle);
+              const title = titleOf(view, names, rendered, group ? session.handle : undefined);
 
               return (
                 <li key={view.key}>
@@ -541,7 +546,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                         mounted by the rail, outside this menu: a confirmation rendered inside one
                         is unmounted the moment an item is chosen, and a confirmation that flashes
                         past is not one. */}
-                    {view.accounts.length > 1 && (
+                    {group && (
                       <ContextMenu.Item
                         icon="revoke"
                         tone="danger"

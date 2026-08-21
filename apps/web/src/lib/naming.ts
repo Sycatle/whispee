@@ -219,7 +219,10 @@ export function titleOf(
    * to the output would have produced "Sam, @me1234" — one of the two colliding names still
    * claiming the word, which is exactly the confusion `compactNameOf` exists to prevent.
    */
-  const group = self !== undefined && view.accounts.length > 1;
+  // `self` is given only for a group — the caller decides what a group is, because it is a
+  // property of the MLS context and not of the length of this array. Passing it for a one-to-one
+  // would produce "Alice, you", which is two words for what one says.
+  const group = self !== undefined;
   const listed = group ? [...among, self] : [...among];
   const named = view.accounts.map((account) => compactNameOf(account.handle, sources, listed));
 

@@ -5,7 +5,7 @@ import { membersOf } from "@/components/Conversation";
 import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
 import { useDuo, useTrio } from "@/lib/duo";
 import { normalize, validate } from "@/lib/handle";
-import { compactNameOf, titleOf } from "@/lib/naming";
+import { compactNameOf, formatHandle, titleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { Button } from "@/ui/Button";
 import { cn } from "@/ui/cn";
@@ -101,21 +101,29 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
     member's. The full two-line form is in the detail column, which is where somebody goes when
     they want to know exactly who is in the room.
   */
+  // What makes this a group is its MLS roster, not how many people are left in it: removing the
+  // third member of a group of three leaves two, and counting would have called that a
+  // one-to-one — no roles, no way out, and an "add" button that started a different conversation.
+  const group = session.isGroup(view);
+
   // Still needed below: the typing line names people against the same set the title does.
   const members = membersOf(view);
-  const title = titleOf(view, names, members, session.handle);
+  const title = titleOf(view, names, members, group ? session.handle : undefined);
 
   const isTyping = session.typingIn(view);
 
   /**
-   * Everybody in this conversation except us, and the answer to "is this a group".
+   * Everybody in this conversation except us.
    *
    * `accounts` first, because that is the resolved list and the one the rest of the interface
    * counts. When it is empty the conversation has been restored but not yet polled, and the MLS
    * tree is the fallback — the same fallback, and the same `!== session.handle` filter, that
    * `Session.findConversation` applies to decide whether two conversations have the same members.
-   * Reading the count from `accounts` alone would call a cold-restored group a one-to-one and
-   * offer to add people to it.
+   *
+   * It no longer answers "is this a group": that is `session.isGroup`, which reads the MLS
+   * roster. This list was standing in for it, and the fallback above exists because of exactly
+   * the failure that substitution caused — a cold-restored group being offered the one-to-one
+   * treatment. The roster does not need the fallback.
    */
   const others =
     view.accounts.length > 0
@@ -123,9 +131,14 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
       : [...new Set(view.peers.map((peer) => peer.name))].filter(
           (handle) => handle !== session.handle,
         );
-  const group = others.length > 1;
-
   const [adding, setAdding] = useState(false);
+
+  // Moderators and the admin. `roles` is null in a one-to-one, where the question does not arise
+  // and the button starts a new conversation instead.
+  const roles = session.roles(view);
+  const iModerate =
+    roles !== null &&
+    (roles.admin === session.handle || roles.moderators.includes(session.handle));
   const [invitees, setInvitees] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -165,6 +178,24 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
       if (malformed?.problem) {
         report.error(
           `"${malformed.handle}" is not a usable handle. ${handleMessage(malformed.problem)}`,
+        );
+        return;
+      }
+
+      // A group takes them in; a one-to-one cannot and starts a new conversation instead. The
+      // difference is not a preference: a two-person conversation is flat, with no admin, and
+      // growing it in place would leave a group nobody administers — which the policy treats as
+      // frozen for good.
+      if (group) {
+        for (const handle of wanted) await session.addAccount(view, handle);
+
+        setInvitees("");
+        setAdding(false);
+        bump();
+        report.done(
+          wanted.length === 1
+            ? `${formatHandle(wanted[0])} joined the conversation.`
+            : `${wanted.length} people joined the conversation.`,
         );
         return;
       }
@@ -239,6 +270,10 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
             {isTyping.length > 1 ? "are typing" : "is typing"}…
           </span>
         ) : (
+          // One person's presence under the title, and only where the title is that person. In a
+          // group — including one that removals have brought down to two — "last seen an hour
+          // ago" under a name that stands for several people says nothing the reader can use.
+          !group &&
           view.accounts.length === 1 && (
             <PresenceLine session={session} handle={view.accounts[0].handle} />
           )
@@ -257,9 +292,18 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
         a finger. The accessible name carries the whole sentence instead, which is what a screen
         reader reads out when it lands on the button.
       */}
-      {group ? (
+      {group && !iModerate ? (
+        /* Adding is a moderator's act, like removing. A member who could add somebody they
+           cannot then remove would be able to change the room for everybody with no way to undo
+           it — and `removeAccount` is already a moderator's to call.
+
+           A disabled button cannot carry its own explanation: `IconButton` sets
+           `pointer-events: none` when disabled, so a tooltip on it never opens for anybody, and a
+           reason that exists only on hover has no existence at all for a finger. The accessible
+           name carries the whole sentence, which is what a screen reader reads when it lands
+           here. */
         <IconButton
-          label="Adding people to an existing group is not possible. The details panel explains why."
+          label="Only a moderator can add people to this group."
           icon={<Icon name="add" size={18} />}
           disabled
           className="shrink-0"
@@ -309,8 +353,12 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
         onOpenChange={(next) => {
           if (!busy) setAdding(next);
         }}
-        title="Add people"
-        description="This does not change the conversation you are in. Nobody can be added to a group that already exists, so this starts a new conversation with everybody currently here plus whoever you name."
+        title={group ? "Add people to this group" : "Add people"}
+        description={
+          group
+            ? "They join from this moment. Nothing said before they arrive is readable to them — the group key moves forward with their arrival and does not reach back, whatever the server still holds."
+            : "This does not change the conversation you are in. A two-person conversation cannot grow, so this starts a new one with everybody currently here plus whoever you name."
+        }
       >
         {/* The submit sits inside the form rather than in the sheet's `actions` slot: a button in
             that slot is outside the `<form>` element and would have to be reconnected to it by id,
@@ -319,7 +367,11 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
         <form onSubmit={add} className="space-y-pane">
           <Field
             label="Handles"
-            hint="One handle, or several separated by commas. Everybody already in this conversation comes along."
+            hint={
+              group
+                ? "One handle, or several separated by commas."
+                : "One handle, or several separated by commas. Everybody already in this conversation comes along."
+            }
           >
             {(control) => (
               <Input
@@ -342,11 +394,11 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
             type="submit"
             variant="primary"
             busy={busy}
-            // Nothing typed is nothing to do, and the sentence on the button promises a new
-            // conversation that would in that case be this one.
+            // Nothing typed is nothing to do, and in a one-to-one the sentence on the button
+            // promises a new conversation that would in that case be this one.
             disabled={invitees.trim() === ""}
           >
-            Start the new conversation
+            {group ? "Add to the group" : "Start the new conversation"}
           </Button>
         </form>
       </Sheet>

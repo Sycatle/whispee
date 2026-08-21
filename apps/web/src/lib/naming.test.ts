@@ -144,10 +144,24 @@ test("a group is named by everybody in it, ourselves last", () => {
 
 test("a one-to-one is named after the other person alone", () => {
   // "Alice, you" would be two words to say what one says, and the reader knows they are there.
+  //
+  // The caller decides by omitting `self`, and that is deliberate: whether a conversation is a
+  // group is a property of its MLS roster, not of how many people are currently in it. Deciding
+  // it here, from the length of `accounts`, is what made a group of three renamed itself a
+  // one-to-one the moment somebody was removed from it.
   const claims = sources({}, { charlie8295: "Charlie", me1234: "Me" });
   const view = { accounts: [{ handle: "charlie8295" }], peers: [] };
 
-  assert.equal(titleOf(view, claims, ["charlie8295"], "me1234"), "Charlie");
+  assert.equal(titleOf(view, claims, ["charlie8295"]), "Charlie");
+});
+
+test("a group of two still names both, because a group is not a headcount", () => {
+  // The regression this guards: removing the third member of a group of three leaves two, and
+  // nothing about the conversation has changed except its size.
+  const claims = sources({}, { charlie8295: "Charlie", me1234: "Me" });
+  const view = { accounts: [{ handle: "charlie8295" }], peers: [] };
+
+  assert.equal(titleOf(view, claims, ["charlie8295"], "me1234"), "Charlie, Me");
 });
 
 test("our own name is disambiguated against the group like everybody else's", () => {

@@ -1309,6 +1309,23 @@ export class Session {
   }
 
   /** A conversation's roles, or `null` if it is flat (the 1-to-1 case). */
+  /**
+   * Whether this conversation is an administered group, as opposed to a flat one-to-one.
+   *
+   * **Not the number of people in it**, which is what five call sites used to ask and is the bug
+   * that produced this method: a group of three whose third member is removed still has two, and
+   * counting made the interface reclassify it as a one-to-one — no roles, no way to leave, and an
+   * "add" button that would have started a *new* conversation instead of growing this one. The
+   * group had not become anything; only its size had changed.
+   *
+   * The distinction is decided once, at creation, and lives in the MLS group context: a group has
+   * a roster, a one-to-one does not. That is authenticated state, so it cannot drift with the
+   * membership — which is exactly the property the count lacked.
+   */
+  isGroup(view: ConversationView): boolean {
+    return this.roles(view) !== null;
+  }
+
   roles(view: ConversationView): Roles | null {
     return this.client.roster(view.groupId) as Roles | null;
   }
@@ -1347,6 +1364,98 @@ export class Session {
    * Parity forces the "all": leaving one device of an evicted account would keep giving it
    * access, and the interface would have lied.
    */
+  /**
+   * Adds an account, and all of its devices, to a group that already exists.
+   *
+   * # Why this is short
+   *
+   * Every cryptographic step here was already being taken on every poll. `addMissingDevices`
+   * claims a KeyPackage, builds an `Invitation`, tells the server, publishes the commit and posts
+   * the Welcome — it does that whenever a member of an existing conversation appears with a new
+   * device, which is the same operation as this one with a different reason for running. What was
+   * missing was never the protocol work; it was a caller, the guards, and the two consequences
+   * below.
+   *
+   * # What a new member can read, which is the part to be honest about
+   *
+   * MLS gives them the group secret from **their own commit onward and nothing before it**. They
+   * see what is said after they arrive and cannot decrypt a line of what came before, no matter
+   * what the server still holds. That is a property of the ratchet rather than a policy this
+   * client enforces, so it cannot be softened by a setting — and it is why the confirmation says
+   * it plainly rather than leaving the reader to assume either way.
+   *
+   * # The posting key, which is the part that would have broken quietly
+   *
+   * A group's posting key is what lets a member write without identifying themselves to the
+   * server. It is distributed *through* MLS, in a message sent once per session by whoever holds
+   * it — so a member who joins afterwards never sees that message: it predates their commit, and
+   * the paragraph above is exactly why they cannot read it.
+   *
+   * Left alone, the new member would post in signed mode: working, and a silent downgrade of the
+   * one property sealed sender exists to provide. Clearing `postingKeyShared` makes the next poll
+   * re-share the key, and this time the new member is in the tree to receive it. The window
+   * between the two is the same one a member always has before the key arrives, which the client
+   * already handles by falling back to signed posts.
+   *
+   * # What this does not do
+   *
+   * It does not ask the person being added. There is no invitation to accept: they are in the
+   * group from the commit, and the first they know of it is the conversation appearing. Nothing
+   * in the protocol carries a request, and adding one would be a feature of its own.
+   */
+  async addAccount(view: ConversationView, handle: string): Promise<void> {
+    if (handle === this.handle) throw new Error("You are already in this conversation.");
+    if (view.accounts.some((account) => account.handle === handle)) {
+      throw new Error(`@${handle} is already in this conversation.`);
+    }
+
+    // A one-to-one has no roles and no admin: turning one into a group by adding a third person
+    // would leave a conversation nobody administers, which the policy treats as frozen. Starting
+    // a new conversation with all three is the operation that exists for that.
+    if (this.roles(view) === null) {
+      throw new Error("This conversation cannot take new members. Start a new one instead.");
+    }
+
+    const peer = await this.resolve(handle);
+
+    // The same refusal `startConversation` makes, for the same reason: the server served a device
+    // it could not have produced. Quietly dropping the intruder and adding the rest would cancel
+    // out the machinery that caught it.
+    if (peer.rejected.length > 0) {
+      throw new Error(
+        `The server presented ${peer.rejected.length} unattested device(s) for @${handle}. ` +
+          "Not added.",
+      );
+    }
+    if (peer.devices.length === 0) throw new Error(`@${handle} has no reachable device.`);
+
+    for (const device of peer.devices) {
+      const claimed = await this.api.claimKeyPackage(device.id);
+      const invitation = this.client.invite(view.groupId, claimed.package) as Invitation;
+
+      await this.api.addMembers(view.groupId, [device.id]);
+
+      // Publish before applying, as everywhere else: a commit that exists nowhere while we have
+      // already moved epoch would leave the group behind us with no way to catch up.
+      const tree = await this.publishAndApply(view, invitation.commit);
+
+      const welcomed = await this.api.postEnvelope(
+        view.groupId,
+        envelope.encodeWelcome(invitation.welcome, tree),
+      );
+      view.mine.add(welcomed.seq);
+    }
+
+    // See the note above: without this the new member writes in signed mode for as long as this
+    // session lasts, and nothing anywhere says so.
+    view.postingKeyShared = false;
+
+    this.knownDevices[peer.handle] = peer.devices.map((device) => device.id);
+    view.accounts = [...view.accounts, peer];
+    this.refreshView(view);
+    await this.persist();
+  }
+
   async removeAccount(view: ConversationView, handle: string): Promise<void> {
     const account = view.accounts.find((candidate) => candidate.handle === handle);
     if (!account) throw new Error(`@${handle} is not in this conversation.`);

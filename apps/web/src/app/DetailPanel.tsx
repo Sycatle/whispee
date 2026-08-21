@@ -348,7 +348,10 @@ export function DetailPanel({ view }: { view: ConversationView }) {
   // show and asking the user to pick them would be a click that means nothing.
   const focused =
     view.accounts.find((account) => account.handle === wanted) ??
-    (view.accounts.length === 1 ? view.accounts[0] : undefined);
+    // Only outside a group. A group of two is still a group: it has a member list to show, and
+    // opening straight onto the one other person's card would hide the roster and the actions
+    // that go with it.
+    (!session.isGroup(view) && view.accounts.length === 1 ? view.accounts[0] : undefined);
 
   const close = () => {
     navigate({ kind: "conversation", key: view.key });

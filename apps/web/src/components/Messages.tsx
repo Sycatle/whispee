@@ -5,9 +5,10 @@
  * bubble, it is an annotation on another bubble, and the same goes for the quote in a reply.
  * Keeping that logic in the page render mixed the app layout with the shape of a conversation.
  */
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
+import { continues, dayLabel, opensDay, timeOf } from "@/lib/datetime";
 import type { ConversationView, Session } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
 
@@ -53,6 +54,20 @@ export function Messages({
   };
 
   const visible = messages.filter((message) => message.content.kind !== "reaction");
+
+  /**
+   * The author, as grouping understands it.
+   *
+   * Our own messages all share one identity whatever device sent them: seeing your own phone and
+   * your own laptop announce themselves to each other in your own thread is noise, and the
+   * distinction is available in the receipts anyway.
+   */
+  const authorOf = (message: (typeof visible)[number]) =>
+    message.mine ? session.handle : message.sender;
+
+  // Read once for the whole render: `dayLabel` compares calendar days, and asking the clock again
+  // per message would let a thread rendered across midnight label two neighbours inconsistently.
+  const now = Date.now();
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
@@ -107,7 +122,13 @@ export function Messages({
   return (
     <>
       <ol className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4">
-        {visible.map((message) => {
+        {visible.map((message, index) => {
+          const before = index === 0 ? undefined : visible[index - 1];
+          const heading = opensDay(message.sentAt, before?.sentAt) ? message.sentAt : undefined;
+          const grouped =
+            before !== undefined &&
+            continues(authorOf(message), message.sentAt, authorOf(before), before.sentAt);
+
           // Extracted before the JSX: type narrowing is lost inside a closure, and working
           // around it inline made the render unreadable.
           const attachment = message.content.kind === "attachment" ? message.content.ref : null;
@@ -115,7 +136,23 @@ export function Messages({
           const emojis = [...(reactions.get(message.seq)?.values() ?? [])];
 
           return (
-            <li key={message.seq} className={`group ${message.mine ? "text-right" : ""}`}>
+            <Fragment key={message.seq}>
+              {/*
+                One heading per day, and none at all for a thread nobody stamped: a date on
+                screen that no message carries would be an invention.
+
+                `role="separator"` rather than a heading level: it divides the list, it does not
+                introduce a section a reader would want to navigate to.
+              */}
+              {heading !== undefined && (
+                <li role="separator" className="py-2 text-center">
+                  <span className="rounded-full bg-(--color-surface-raised) px-3 py-1 text-xs text-(--color-ink-muted)">
+                    {dayLabel(heading, now)}
+                  </span>
+                </li>
+              )}
+
+              <li className={`group ${message.mine ? "text-right" : ""} ${grouped ? "-mt-1" : ""}`}>
               <div
                 className={`inline-block max-w-[75%] wrap-anywhere rounded-lg px-3 py-2 text-left text-sm ${
                   message.mine
@@ -123,7 +160,9 @@ export function Messages({
                     : "bg-(--color-surface-raised) border border-(--color-border-subtle)"
                 }`}
               >
-                {!message.mine && view.peers.length > 1 && (
+                {/* The name is announced once per turn, not once per line: a burst of three
+                    sentences is one person speaking, not three announcements. */}
+                {!message.mine && view.peers.length > 1 && !grouped && (
                   <span className="block text-xs opacity-70">{message.sender ?? "unknown"}</span>
                 )}
 
@@ -144,7 +183,24 @@ export function Messages({
                   message.content.text
                 ) : null}
 
-                {message.mine && <Status state={session.statusOf(view, message.seq)} />}
+                {/*
+                  Time and receipt on one line under the text.
+
+                  `<time>` with a machine-readable `dateTime`, so a screen reader announces the
+                  full date rather than reading "14:02" as two numbers, and the tooltip carries
+                  the day a bubble in the middle of a thread does not repeat.
+
+                  Nothing is shown when the sender did not stamp. An empty slot is honest; a
+                  guessed hour is not.
+                */}
+                <span className="mt-0.5 flex items-center justify-end gap-1 text-xs opacity-60">
+                  {message.sentAt !== undefined && (
+                    <time dateTime={new Date(message.sentAt).toISOString()} title={new Date(message.sentAt).toLocaleString()}>
+                      {timeOf(message.sentAt)}
+                    </time>
+                  )}
+                  {message.mine && <Status state={session.statusOf(view, message.seq)} />}
+                </span>
               </div>
 
               {emojis.length > 0 && (
@@ -173,7 +229,8 @@ export function Messages({
                   Reply
                 </button>
               </div>
-            </li>
+              </li>
+            </Fragment>
           );
         })}
         <div ref={bottom} />
@@ -210,7 +267,8 @@ function Status({ state }: { state: "sent" | "delivered" | "read" }) {
 
   return (
     <span
-      className={`ml-2 align-bottom text-xs ${state === "read" ? "opacity-100" : "opacity-60"}`}
+      // No margin of its own: it now sits in the flex row that carries the time, which spaces it.
+      className={state === "read" ? "opacity-100" : "opacity-60"}
       title={label}
       aria-label={label}
       data-receipt={state}

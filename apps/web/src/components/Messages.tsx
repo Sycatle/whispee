@@ -31,6 +31,7 @@ import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
 import { Button } from "@/ui/Button";
 import { cn } from "@/ui/cn";
+import { Emoji, EmojiText } from "@/ui/Emoji";
 import { IconButton } from "@/ui/IconButton";
 import { Spinner } from "@/ui/Spinner";
 import { Tooltip } from "@/ui/Tooltip";
@@ -346,7 +347,7 @@ export function Messages({
                           secondary,
                         )}
                       >
-                        {textOf(cite)}
+                        <EmojiText text={textOf(cite)} />
                       </span>
                     )}
 
@@ -356,9 +357,9 @@ export function Messages({
                         onOpen={() => session.openAttachment(view, attachment)}
                       />
                     ) : message.content.kind === "text" ? (
-                      message.content.text
+                      <EmojiText text={message.content.text} big />
                     ) : message.content.kind === "reply" ? (
-                      message.content.text
+                      <EmojiText text={message.content.text} big />
                     ) : null}
 
                     {/*
@@ -401,7 +402,7 @@ export function Messages({
                           key={at}
                           className="rounded-(--radius-pill) border border-(--color-border-subtle) bg-(--color-surface-raised) px-tight"
                         >
-                          {emoji}
+                          <Emoji char={emoji} />
                         </span>
                       ))}
                     </div>
@@ -467,7 +468,7 @@ export function Messages({
                     "bg-(--color-accent) text-(--color-accent-ink) opacity-60",
               )}
             >
-              {entry.text}
+              <EmojiText text={entry.text} big />
               <span className="mt-tight flex items-center justify-end gap-snug text-caption">
                 <time dateTime={new Date(entry.sentAt).toISOString()}>{timeOf(entry.sentAt)}</time>
                 {entry.state === "sending" ? (

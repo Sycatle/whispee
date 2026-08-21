@@ -293,6 +293,43 @@ interrupted IndexedDB transaction leaves the database intact, while an interrupt
 copy**: a stale MLS state restored silently rewinds epochs and replays used keys. That is a
 cryptographic fault, not a safety net.
 
+## Emoji are artwork, not glyphs
+
+Every emoji in the interface is an SVG served from `public/emoji`, substituted into the text at
+render time by `ui/Emoji.tsx`. This is the same thing Discord, Slack and X do, and it is worth
+writing down why, because the obvious alternative looks better on paper and does not work here.
+
+**The system font was the previous answer and it fails our own targets.** A Linux distribution
+that ships no colour emoji font draws tofu, and the three platforms that do ship one draw three
+different pictures for the same message. "The sender and the receiver see the same thing" is not
+a nicety in a messenger.
+
+**A self-hosted colour font would be the tidy fix, and no format delivers it.** The glyphs would
+stay text: selection, copy, the composer's `<textarea>` and the system notification would all
+work with no code at all. But the artwork is Microsoft's Fluent Emoji, which is drawn with
+gradients, and:
+
+- **COLRv1** carries gradients and **WebKit does not implement it**.
+- **OT-SVG** carries gradients and **WebKitGTK leaves it switched off by default**.
+- **COLRv0** is supported everywhere and **has no gradients**.
+
+WebKitGTK is the engine behind the Tauri build on Linux, and WKWebView behind the iOS one. There
+is no format that renders this artwork on all four engines, so the font route is closed — not
+inconvenient, closed.
+
+**Flat rather than Color.** Measured on the pinned upstream tree: `Color` is 41 kB per file and
+132 MB in total, `Flat` is 5.4 kB and 17 MB, for the same 3,145 files. A picker grid of 1,595
+cells cannot be made of 41 kB files whatever the loading strategy, and Flat is the variant that
+survives being displayed at 16 to 20 pixels, which is the size of a reaction pill.
+
+`scripts/emoji-assets.mjs` regenerates the tree from a pinned commit of `microsoft/fluentui-emoji`
+(MIT) and records its digest in `public/emoji/MANIFEST.json`. The output is committed for the
+reason the WebAssembly module is: the build must work offline, and an application whose argument
+is that you can verify what you run should not fetch a third of its interface at build time.
+
+What this does not solve: **Microsoft ships no country flags at all.** `🇫🇷` has no artwork, is
+absent from the picker, and falls back to the platform font when it arrives from a peer.
+
 ## Why the desktop application exists
 
 Not for the native window. On the web, the server ships the JavaScript on every load and can

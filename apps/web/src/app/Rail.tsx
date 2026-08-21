@@ -7,6 +7,7 @@ import type { ConversationView } from "@/lib/session";
 import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
 import { Dialog } from "@/ui/Dialog";
+import { EmojiText } from "@/ui/Emoji";
 import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
 import { Input } from "@/ui/Input";
@@ -327,7 +328,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                           </span>
                         )}
                         <span className="min-w-0 flex-1 truncate text-caption font-normal text-(--color-ink-muted)">
-                          {line}
+                          <EmojiText text={line} />
                         </span>
                         {unread > 0 && (
                           <span

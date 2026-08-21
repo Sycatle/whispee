@@ -15,6 +15,7 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Area | State |
 |---|---|
 | MLS messaging (RFC 9420, OpenMLS 0.8.1) | 1-to-1 and groups, one primitive for both |
+| Account identity | An account is the fingerprint of its genesis key; the handle is a renameable alias, retired rather than freed |
 | Multi-device accounts | Every device is a group member; account-signed attestations stop the server adding a device |
 | Groups, roles, removal | Admin and moderators in a group-context extension (`0xF100`); post-compromise security on removal |
 | Device revocation, account rotation | Signed certificates other members can check without trusting us |
@@ -25,7 +26,9 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Gateway | WebSocket, one connection for every group, dynamic subscription, catch-up by cursor |
 | Multi-instance fan-out | Postgres `LISTEN/NOTIFY` |
 | Receipts, typing, presence, reactions, replies | All four signals, with their settings |
+| Mentions | `@handle` in the composer, the account on the wire, the current name on screen |
 | Attachments | Per-file AES-256-GCM key carried inside the MLS message, padded into doubling buckets |
+| One tab per account | An exclusive Web Lock, taken before anything is read — two tabs consume each other's message keys |
 | Local lock | Argon2id 64 MiB / 3 passes, unlock key → master key indirection, re-locking after five minutes without the user |
 | History vault | On by default, revocable in settings |
 | Desktop application | Tauri 2, interface packaged in the binary |
@@ -139,6 +142,18 @@ Three things it settles, recorded because each was a way it could have gone wron
 
 What it does not do: there is no invitation to accept. The added member is in the group from the
 commit, and the first they know of it is the conversation appearing.
+
+## What the identity change left open
+
+The account model moved from "a handle *is* the account" to "an account is its key, and a handle
+is a name it answers to". `docs/specs/2026-08-21-account-identity.md` carries the design and a
+section on what it did not foresee. Three things it deliberately did not close:
+
+| Gap | Why it is still there |
+|---|---|
+| First contact is a leap of faith | A lying directory hands you a stranger's id, and only an out-of-band fingerprint comparison catches it. The change made sure renaming does not make this worse; it did not make it better |
+| A handle claim is not verifiable by a client | A member can claim a handle they do not hold. Checking means asking the directory at render time, which is the one power this design took away from the server. The account id underneath is authenticated and is what every comparison uses |
+| A stolen seed still wins the rotation race | The thief holds the same key and can rotate first. Anchoring on the genesis key does not change that — the chain is valid either way |
 
 ## What will not be resolved
 

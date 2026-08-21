@@ -2,8 +2,9 @@ import { useCallback, useState } from "react";
 
 import { PresenceBadge } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
-import { nameMatches, nameOf, titleOf } from "@/lib/naming";
+import { formatHandle, nameMatches, nameOf, titleOf } from "@/lib/naming";
 import { useBinding, useRunBinding } from "@/app/Shortcuts";
+import { ContextMenu } from "@/ui/ContextMenu";
 import { roster } from "@/lib/roster";
 import { useRoving } from "@/lib/useRoving";
 import type { ConversationView } from "@/lib/session";
@@ -407,6 +408,11 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
 
               return (
                 <li key={view.key}>
+                  {/* The rail's menu is short because the protocol is: there is no archive, no
+                      mute and no delete to offer, and a menu padded with actions that do not exist
+                      would be worse than none. What is here is what the row can honestly do. */}
+                  <ContextMenu
+                    trigger={
                   <button
                     type="button"
                     // The ring is addressed by identity, and a conversation's identity is its key.
@@ -516,6 +522,31 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                       </span>
                     </span>
                   </button>
+                    }
+                  >
+                    <ContextMenu.Item
+                      icon="info"
+                      onSelect={() =>
+                        navigate({ kind: "conversation", key: view.key, detail: {} })
+                      }
+                    >
+                      Conversation details
+                    </ContextMenu.Item>
+                    <ContextMenu.Item
+                      icon="copy"
+                      // Only where there is one handle to mean. In a group, "copy the handle"
+                      // would have to pick one of several and would pick silently.
+                      disabled={only === undefined}
+                      onSelect={() => {
+                        if (only === undefined) return;
+                        void navigator.clipboard
+                          .writeText(formatHandle(only.handle))
+                          .then(() => report.done("Handle copied"));
+                      }}
+                    >
+                      Copy handle
+                    </ContextMenu.Item>
+                  </ContextMenu>
                 </li>
               );
             })}

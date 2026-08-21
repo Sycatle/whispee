@@ -57,6 +57,7 @@ import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
 import { cn } from "@/ui/cn";
+import { ContextMenu } from "@/ui/ContextMenu";
 import { Emoji, EmojiText } from "@/ui/Emoji";
 import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
@@ -540,6 +541,8 @@ export function Messages({
                 </li>
               )}
 
+              <ContextMenu
+                trigger={
               <li
                 data-row={key}
                 // The roving tabindex: one row of the thread is reachable with Tab, and which one
@@ -848,6 +851,46 @@ export function Messages({
                   </Menu>
                 </div>
               </li>
+                }
+              >
+                {/* Everything here is also on the hover bar above the row. A context menu that is
+                    the only way to reach something is a feature hidden behind a gesture — absent
+                    on touch, unknown to whoever has not tried right-clicking, and invisible to a
+                    screen reader reading in order. This is a shortcut to what is already there. */}
+                <ContextMenu.Row>
+                  {quick.map((emoji) => (
+                    <ContextMenu.Choice
+                      key={emoji}
+                      label={`React with ${emoji}`}
+                      onSelect={() => react(message.seq, emoji)}
+                    >
+                      <Emoji char={emoji} />
+                    </ContextMenu.Choice>
+                  ))}
+                </ContextMenu.Row>
+
+                <ContextMenu.Separator />
+
+                <ContextMenu.Item icon="reply" onSelect={() => onReplyTo(message.seq)}>
+                  Reply
+                </ContextMenu.Item>
+                <ContextMenu.Item
+                  icon="copy"
+                  // An attachment has a name and no words. Copying the file name under a label
+                  // promising the message would be the wrong thing quietly.
+                  disabled={spoken === null}
+                  onSelect={() => copy(spoken ?? "")}
+                >
+                  Copy text
+                </ContextMenu.Item>
+                <ContextMenu.Item
+                  icon="close"
+                  disabled={mineAlready === undefined}
+                  onSelect={() => react(message.seq, "")}
+                >
+                  Remove my reaction
+                </ContextMenu.Item>
+              </ContextMenu>
             </Fragment>
           );
         })}

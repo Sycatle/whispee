@@ -3,6 +3,7 @@ import * as RadixMenu from "@radix-ui/react-dropdown-menu";
 import { type BindingId, bindingOf } from "../lib/keymap.ts";
 import { formatShortcut } from "../lib/shortcuts.ts";
 import { cn } from "./cn.ts";
+import { item, surface } from "./menuSurface.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 import { useOverlayContainer } from "./Overlays.tsx";
 
@@ -68,7 +69,14 @@ export function Menu({
           sideOffset={6}
           // The gutter Radix keeps between the menu and the window edge when it shifts.
           collisionPadding={8}
-          className={cn(surface, "min-w-48")}
+          className={cn(
+            surface,
+            "min-w-48",
+            // Named per primitive by Radix, so these belong to the dropdown and cannot live in
+            // the shared surface: they are measured after it has decided which way to flip.
+            "max-w-(--radix-dropdown-menu-content-available-width)",
+            "max-h-(--radix-dropdown-menu-content-available-height)",
+          )}
         >
           {children}
         </RadixMenu.Content>
@@ -76,42 +84,6 @@ export function Menu({
     </RadixMenu.Root>
   );
 }
-
-/**
- * Shared by the menu and its submenus, which are the same surface at two depths.
- *
- * The hairline is `border-strong` rather than `border-subtle` and it is not a style choice: in
- * the dark palette a black shadow over an L=0.22 ground does nothing, so the edge is the only
- * thing separating the menu from what is behind it. `index.css` says so in the elevation note.
- */
-const surface = cn(
-  "z-(--z-index-overlay) overflow-y-auto rounded-control border border-(--color-border-strong)",
-  "bg-(--color-surface-raised) p-tight shadow-menu",
-  // Radix measures these after it has decided which way to flip. Anything absolute here would
-  // override the measurement and reintroduce the overflow it just avoided.
-  "max-w-(--radix-dropdown-menu-content-available-width)",
-  "max-h-(--radix-dropdown-menu-content-available-height)",
-  // The portal sits outside the layout: in landscape on a notched phone the menu can otherwise
-  // open under the notch.
-  "safe-sides safe-bottom",
-);
-
-const item = cn(
-  "group flex cursor-default select-none items-center gap-gutter rounded-control px-gutter py-snug text-body",
-  // Radix moves the highlight with the pointer *and* with the arrow keys, so styling
-  // `data-highlighted` covers both; a `hover:` rule would leave keyboard users with no cursor.
-  //
-  // The fill is the accent and not a half-tone of the surface. `outline-none` above removes the
-  // focus ring, which makes this fill the *only* thing telling a keyboard user which item the
-  // arrows have reached — and `surface-sunken` on `surface-raised` measures 1.14:1 in light and
-  // 1.16:1 in dark. That is not a faint highlight, it is no highlight: the item under the
-  // cursor and the item beside it were the same colour to anyone not looking for the
-  // difference. An indicator carrying that much meaning owes 3:1; this one is at 4.93:1 and
-  // 6.95:1.
-  "outline-none data-[highlighted]:bg-(--color-accent) data-[highlighted]:text-(--color-accent-ink)",
-  "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-  "touch:min-h-11",
-);
 
 /**
  * A heading over a group of items. Not focusable and not selectable — Radix skips it with the
@@ -222,7 +194,16 @@ function MenuSub({
       </RadixMenu.SubTrigger>
 
       <RadixMenu.Portal container={container ?? undefined}>
-        <RadixMenu.SubContent sideOffset={4} collisionPadding={8} className={cn(surface, "min-w-44")}>
+        <RadixMenu.SubContent
+          sideOffset={4}
+          collisionPadding={8}
+          className={cn(
+            surface,
+            "min-w-44",
+            "max-w-(--radix-dropdown-menu-content-available-width)",
+            "max-h-(--radix-dropdown-menu-content-available-height)",
+          )}
+        >
           {children}
         </RadixMenu.SubContent>
       </RadixMenu.Portal>

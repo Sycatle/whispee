@@ -2,8 +2,35 @@ import { useEffect, useState } from "react";
 import { MIN_LENGTH, type Verdict, check } from "@/lib/password";
 import { biometricEnabled, biometricAvailable } from "@/lib/biometrics";
 import type { ProposedMigration, Session } from "@/lib/session";
+import { useBump, useSession } from "@/state/SessionProvider";
+import { useReport } from "@/state/report";
+import { Banner } from "@/ui/Banner";
+import { Button } from "@/ui/Button";
+import { Field } from "@/ui/Field";
+import { Icon } from "@/ui/Icon";
+import { Input } from "@/ui/Input";
+import { Panel } from "@/ui/Panel";
+import { Switch } from "@/ui/Switch";
 
-/** Password prompt at startup, when a lock is set. */
+/**
+ * Password prompt at startup, when a lock is set.
+ *
+ * # Why this one screen still takes props, when nothing else does
+ *
+ * Everywhere else in the tree the session arrives through `useSession()` and failures through
+ * `useReport()`, and passing either as a prop is a mistake. This component is the single
+ * exception, and it is a structural one rather than an oversight: `App.tsx` renders it when
+ * `locked && !session`, which is to say **before a session exists at all**. There is no
+ * `<SessionProvider>` above it to read from, and `onUnlocked` is precisely the call that creates
+ * the session the provider will later hold. A hook here would throw on first paint.
+ *
+ * The signature is therefore frozen as it is, and this note exists so that the next person to
+ * run the "no session in props" rule down the file list stops here instead of "fixing" it.
+ *
+ * What this does not solve: it says nothing about `onError`, which is kept for the same reason —
+ * there is no `<ReportProvider>` guarantee this early in startup either, so the caller owns the
+ * message. It is the caller's error channel, not a second one.
+ */
 export function Unlock({
   onUnlocked,
   onError,
@@ -71,80 +98,97 @@ export function Unlock({
   };
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 p-6">
-      <div>
-        <h1 className="text-xl font-medium">Unlock</h1>
-        <p className="mt-2 text-sm text-(--color-ink-muted)">
+    <main className="safe-top safe-bottom safe-sides mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center gap-section p-pane">
+      <div className="flex flex-col gap-snug">
+        {/* The padlock is the one piece of decoration on this screen, and it earns its place: it
+            is the only thing a returning reader can recognise before reading a word, and it
+            tells them the app did not lose their account, it is holding it shut. */}
+        <span
+          aria-hidden="true"
+          className="flex size-10 items-center justify-center rounded-control bg-(--color-surface-sunken) text-(--color-ink-muted)"
+        >
+          <Icon name="lock" size={20} />
+        </span>
+        <h1 className="text-title font-medium text-(--color-ink)">Unlock</h1>
+        <p className="text-body text-(--color-ink-muted)">
           Your conversations are encrypted on this device. The password unlocks them here and
           nowhere else: it is never sent to the server.
         </p>
       </div>
 
+      {refused && <Banner tone="danger">Wrong password.</Banner>}
+
       {canUseBiometric && (
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          busy={busy}
+          icon={<Icon name="lock" />}
           onClick={() => void unlockByPrompt()}
-          disabled={busy}
-          className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50 touch:min-h-11"
+          className="w-full"
         >
           Unlock with fingerprint or face
-        </button>
+        </Button>
       )}
 
-      <form onSubmit={submit} className="space-y-3">
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          placeholder="password"
-          required
-          autoFocus
-          className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface-raised) px-3 py-2"
-        />
-        <button
+      <form onSubmit={submit} className="flex flex-col gap-gutter">
+        <Field label="Password">
+          {({ id, describedBy, invalid }) => (
+            <Input
+              id={id}
+              describedBy={describedBy}
+              invalid={invalid}
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              required
+              autoFocus
+            />
+          )}
+        </Field>
+        {/* `busy` rather than swapping the label for "Unlocking…": the derivation takes about a
+            second, and a button whose text changes width mid-press moves under the finger. */}
+        <Button
           type="submit"
-          disabled={busy || !password}
-          className="w-full rounded-md bg-(--color-accent) px-3 py-2 font-medium text-white disabled:opacity-50"
+          variant="primary"
+          busy={busy}
+          disabled={!password}
+          className="w-full"
         >
-          {busy ? "Unlocking…" : "Unlock"}
-        </button>
+          Unlock
+        </Button>
       </form>
 
       {busy && (
-        <p className="text-xs text-(--color-ink-muted)">
+        <p className="text-caption text-(--color-ink-muted)">
           Deriving the key takes about a second and 64 MiB of memory. The slowness is deliberate:
           it costs the same on every attempt by someone who has taken a copy of your data.
         </p>
       )}
 
-      {refused && (
-        <p role="alert" className="text-sm text-(--color-danger)">
-          Wrong password.
+      <div className="flex flex-col gap-snug border-t border-(--color-border-subtle) pt-pane">
+        <Button
+          variant="quiet"
+          size="sm"
+          onClick={() => {
+            void import("@/lib/session").then(({ Session }) =>
+              Session.forget().then(() => window.location.reload()),
+            );
+          }}
+          className="self-start"
+        >
+          I forgot this password
+        </Button>
+        <p className="text-caption text-(--color-ink-muted)">
+          Forgetting it loses nothing for good: erase this device, then recover the account with
+          your twelve-word phrase. Conversations in progress will not follow, though — a device
+          already in place will have to add you back.
         </p>
-      )}
-
-      <button
-        type="button"
-        onClick={() => {
-          void import("@/lib/session").then(({ Session }) =>
-            Session.forget().then(() => window.location.reload()),
-          );
-        }}
-        className="text-sm text-(--color-ink-muted) underline"
-      >
-        I forgot this password
-      </button>
-
-      <p className="text-xs text-(--color-ink-muted)">
-        Forgetting it loses nothing for good: erase this device, then recover the account with your
-        twelve-word phrase. Conversations in progress will not follow, though — a device already in
-        place will have to add you back.
-      </p>
+      </div>
     </main>
   );
 }
 
-/** Lock settings, from inside the app. */
 /**
  * Switch for biometric unlocking.
  *
@@ -159,8 +203,18 @@ export function Unlock({
  * The trade is not intuitive: a password is stored nowhere, the key stashed for biometrics is.
  * Convenience is paid for in attack surface, and someone who does not know that will believe they
  * are hardening their security by turning the option on.
+ *
+ * # Why a switch and not a button
+ *
+ * The control used to be a link reading "Turn on" / "Turn off", which states the *action* and
+ * leaves the reader to infer the current state from it — backwards, and the inference goes wrong
+ * about as often as it goes right. A switch states the state and is operated by the same tap.
+ *
+ * What this does not solve: the switch shows the setting on **this** device only. Biometrics are
+ * per-device by construction, and nothing here reveals whether another device has them on.
  */
-function BiometricToggle({ session }: { session: Session }) {
+export function BiometricToggle() {
+  const session = useSession();
   const [available, setAvailable] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -196,31 +250,45 @@ function BiometricToggle({ session }: { session: Session }) {
   };
 
   return (
-    <div className="mt-4 border-t border-(--color-border-subtle) pt-3">
-      <h3 className="font-medium">Open with fingerprint or face</h3>
-      <p className="mt-1 text-(--color-ink-muted)">
-        {enabled
-          ? "Your lock's key is held by the system, behind its prompt. Your password still works."
-          : "Your password is stored nowhere. Turning this on stores your lock's key on this device instead, protected by the system: more convenient, and more exposed if someone extracts the phone's storage."}
-      </p>
-      <button
-        type="button"
-        onClick={() => void toggle()}
-        disabled={busy}
-        className="mt-2 underline disabled:opacity-50 touch:min-h-11"
-      >
-        {busy ? "…" : enabled ? "Turn off" : "Turn on"}
-      </button>
-      {error && (
-        <p role="alert" className="mt-2 text-(--color-danger)">
-          {error}
-        </p>
-      )}
+    <div className="mt-pane flex flex-col gap-snug border-t border-(--color-border-subtle) pt-gutter">
+      <div className="flex items-start justify-between gap-gutter">
+        <div className="min-w-0">
+          <h3 className="text-body font-medium text-(--color-ink)">
+            Open with fingerprint or face
+          </h3>
+          <p className="mt-tight text-caption text-(--color-ink-muted)">
+            {enabled
+              ? "Your lock's key is held by the system, behind its prompt. Your password still works."
+              : "Your password is stored nowhere. Turning this on stores your lock's key on this device instead, protected by the system: more convenient, and more exposed if someone extracts the phone's storage."}
+          </p>
+        </div>
+        <Switch
+          label="Open with fingerprint or face"
+          checked={enabled}
+          disabled={busy}
+          onCheckedChange={() => void toggle()}
+        />
+      </div>
+      {error && <Banner tone="danger">{error}</Banner>}
     </div>
   );
 }
 
-export function LockSettings({ session, onDone }: { session: Session; onDone: () => void }) {
+/**
+ * Lock settings, from inside the app.
+ *
+ * The two states are two different panels rather than one panel with a branch in its copy:
+ * turning a lock on asks for a new password and judges it, removing one asks for the password
+ * already set and destroys a protection. `tone="danger"` marks the second, because the edge is
+ * what a reader takes in before the sentence.
+ *
+ * What this does not solve: it does not confirm the removal. Removing a lock is recoverable —
+ * set one again — so a second step would cost every reader something to protect none of them.
+ */
+export function LockSettings({ onDone }: { onDone: () => void }) {
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
@@ -262,9 +330,15 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
     try {
       if (session.locked) {
         await session.disableLock(password);
+        report.done("Lock removed");
       } else {
         await session.enableLock(password);
+        report.done("Lock turned on");
       }
+      // The lock lives on the session, and the rail shows its state: whoever reads the session
+      // has to be told it moved. This replaces the `onChanged` the caller used to fire on close,
+      // which fired whether or not anything had actually changed.
+      bump();
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -275,85 +349,110 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
 
   if (session.locked) {
     return (
-      <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-        <div className="flex items-baseline justify-between gap-4">
-          <h2 className="font-medium">Remove the lock</h2>
-          <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
+      <Panel
+        tone="danger"
+        title="Remove the lock"
+        description="Without a lock, your conversations stay encrypted on disk, but anyone who opens this browser can read them."
+        actions={
+          <Button variant="quiet" size="sm" onClick={onDone}>
             Close
-          </button>
-        </div>
-        <p className="mt-2 text-(--color-ink-muted)">
-          Without a lock, your conversations stay encrypted on disk, but anyone who opens this
-          browser can read them.
-        </p>
-        <form onSubmit={submit} className="mt-3 flex gap-2">
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="current password"
-            required
-            className="flex-1 rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5"
-          />
-          <button
-            type="submit"
-            disabled={busy || !password}
-            className="rounded-md bg-(--color-danger) px-3 py-1.5 font-medium text-white disabled:opacity-50"
+          </Button>
+        }
+      >
+        <form onSubmit={submit} className="flex flex-col gap-gutter">
+          <Field
+            label="Current password"
+            // Every failure here is reported as a wrong password for the same reason as the
+            // unlock screen: distinguishing a bad password from unreadable data tells an
+            // attacker when they are close.
+            error={error === null ? undefined : "Wrong password."}
           >
-            {busy ? "…" : "Remove"}
-          </button>
+            {({ id, describedBy, invalid }) => (
+              <Input
+                id={id}
+                describedBy={describedBy}
+                invalid={invalid}
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            )}
+          </Field>
+          <Button
+            type="submit"
+            variant="destructive"
+            busy={busy}
+            disabled={!password}
+            className="self-start"
+          >
+            Remove
+          </Button>
         </form>
-        {error && (
-          <p role="alert" className="mt-2 text-(--color-danger)">
-            Wrong password.
-          </p>
-        )}
 
-        <BiometricToggle session={session} />
-      </div>
+        <BiometricToggle />
+      </Panel>
     );
   }
 
   return (
-    <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-      <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Lock this device</h2>
-        <button type="button" onClick={onDone} className="text-(--color-ink-muted) underline">
+    <Panel
+      title="Lock this device"
+      description="Your conversations will be encrypted with this password, which never leaves this device. It is not a recovery method: forgetting it loses nothing, your twelve-word phrase remains the only way back in."
+      actions={
+        <Button variant="quiet" size="sm" onClick={onDone}>
           Close
-        </button>
-      </div>
+        </Button>
+      }
+    >
+      <form onSubmit={submit} className="flex flex-col gap-gutter">
+        <Field
+          label="New password"
+          hint={`${MIN_LENGTH} characters minimum.`}
+          error={
+            verdict && !verdict.ok ? (
+              <>
+                {verdict.reason}
+                {verdict.advice && <span className="block opacity-80">{verdict.advice}</span>}
+              </>
+            ) : undefined
+          }
+        >
+          {({ id, describedBy, invalid }) => (
+            <Input
+              id={id}
+              describedBy={describedBy}
+              invalid={invalid}
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+              required
+            />
+          )}
+        </Field>
 
-      <p className="mt-2 text-(--color-ink-muted)">
-        Your conversations will be encrypted with this password, which never leaves this device. It
-        is not a recovery method: forgetting it loses nothing, your twelve-word phrase remains the
-        only way back in.
-      </p>
+        <Field
+          label="Confirm password"
+          error={confirmation && !match ? "The two entries do not match." : undefined}
+        >
+          {({ id, describedBy, invalid }) => (
+            <Input
+              id={id}
+              describedBy={describedBy}
+              invalid={invalid}
+              type="password"
+              value={confirmation}
+              onChange={(e) => setConfirmation(e.target.value)}
+              autoComplete="new-password"
+              required
+            />
+          )}
+        </Field>
 
-      <form onSubmit={submit} className="mt-3 space-y-2">
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          placeholder={`password (${MIN_LENGTH} characters minimum)`}
-          required
-          className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5"
-        />
-        <input
-          type="password"
-          value={confirmation}
-          onChange={(e) => setConfirmation(e.target.value)}
-          placeholder="confirmation"
-          required
-          className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5"
-        />
-
-        {password && !verdict && <p className="text-xs text-(--color-ink-muted)">Measuring…</p>}
-
-        {verdict && !verdict.ok && (
-          <p className="text-(--color-danger)">
-            {verdict.reason}
-            {verdict.advice && <span className="block opacity-80">{verdict.advice}</span>}
-          </p>
+        {password && !verdict && (
+          <p className="text-caption text-(--color-ink-muted)">Measuring…</p>
         )}
 
         {/*
@@ -364,7 +463,7 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
           short of implying otherwise.
         */}
         {verdict?.ok && verdict.guessesLog10 !== null && (
-          <p className="text-xs text-(--color-ink-muted)">
+          <p className="text-caption text-(--color-ink-muted)">
             Around 10^{Math.round(verdict.guessesLog10)} tries for someone working through known
             passwords, words, names and the usual substitutions. Someone who knows you is not
             working through a list, and this number says nothing about them.
@@ -372,29 +471,24 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
         )}
 
         {verdict?.ok && verdict.guessesLog10 === null && (
-          <p className="text-xs text-(--color-warn)">
+          <Banner tone="warn">
             The strength checker did not load, so only the length was checked. This password may
             still be one of the ones everybody uses.
-          </p>
-        )}
-        {confirmation && !match && (
-          <p className="text-(--color-danger)">The two entries do not match.</p>
+          </Banner>
         )}
 
-        <button
+        {error && <Banner tone="danger">{error}</Banner>}
+
+        <Button
           type="submit"
-          disabled={busy || !verdict?.ok || !match}
-          className="rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
+          variant="primary"
+          busy={busy}
+          disabled={!verdict?.ok || !match}
+          className="self-start"
         >
-          {busy ? "Encrypting…" : "Turn on the lock"}
-        </button>
+          Turn on the lock
+        </Button>
       </form>
-
-      {error && (
-        <p role="alert" className="mt-2 text-(--color-danger)">
-          {error}
-        </p>
-      )}
-    </div>
+    </Panel>
   );
 }

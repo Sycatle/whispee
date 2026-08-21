@@ -122,18 +122,36 @@ impl Account {
         attest::fingerprint(&self.identity_key())
     }
 
+    /// The account id: what names this account everywhere a handle used to.
+    ///
+    /// # Why this is the key derived from the seed and not the current one
+    ///
+    /// [`Account::rotate`] moves the identity key, and an id that moved with it would put this
+    /// design back where it started — an identifier that changes under people, in a rarer and
+    /// therefore more confusing form. The anchor is the key the recovery phrase produces, which
+    /// is the one thing about an account that cannot change without the account becoming a
+    /// different account.
+    ///
+    /// This type only ever holds that key: it is derived from the seed at construction and
+    /// `rotate` signs a *successor* rather than replacing it. A rotated account is a second
+    /// `Account` whose genesis is elsewhere, and the chain is what ties the two together — see
+    /// `docs/specs/2026-08-21-account-identity.md`.
+    pub fn id(&self) -> String {
+        attest::account_id(&self.identity_key())
+    }
+
     /// Signs a device's membership of this account.
     ///
     /// The result is what stops the server inventing a device: it does not hold the AIK and so
     /// cannot produce this signature.
     pub fn attest(
         &self,
-        handle: &str,
+        account: &str,
         device_id: &str,
         auth_key: &[u8],
         mls_key: &[u8],
     ) -> Result<[u8; 64]> {
-        let claim = attest::DeviceClaim { handle, device_id, auth_key, mls_key };
+        let claim = attest::DeviceClaim { account, device_id, auth_key, mls_key };
         let message = attest::message(&claim).map_err(|_| CryptoError::Malformed("field too long"))?;
         Ok(self.signing.sign(&message).to_bytes())
     }
@@ -148,8 +166,8 @@ impl Account {
     /// `revoked_at` is in Unix seconds and enters the signed message. The caller must put the
     /// current time there: the server uses it to reject certificates forged ahead of time, and
     /// other clients use it to order successive revocations of the same device.
-    pub fn revoke(&self, handle: &str, device_id: &str, revoked_at: u64) -> Result<[u8; 64]> {
-        let claim = attest::RevocationClaim { handle, device_id, revoked_at };
+    pub fn revoke(&self, account: &str, device_id: &str, revoked_at: u64) -> Result<[u8; 64]> {
+        let claim = attest::RevocationClaim { account, device_id, revoked_at };
         let message =
             attest::revocation_message(&claim).map_err(|_| CryptoError::Malformed("field too long"))?;
         Ok(self.signing.sign(&message).to_bytes())
@@ -162,11 +180,11 @@ impl Account {
     /// not.
     pub fn rotate(
         &self,
-        handle: &str,
+        account: &str,
         new_identity_key: &[u8],
         rotated_at: u64,
     ) -> Result<[u8; 64]> {
-        let claim = attest::RotationClaim { handle, new_identity_key, rotated_at };
+        let claim = attest::RotationClaim { account, new_identity_key, rotated_at };
         let message =
             attest::rotation_message(&claim).map_err(|_| CryptoError::Malformed("field too long"))?;
         Ok(self.signing.sign(&message).to_bytes())

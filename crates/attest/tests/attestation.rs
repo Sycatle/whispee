@@ -6,7 +6,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 
 fn claim<'a>(handle: &'a str, device_id: &'a str) -> DeviceClaim<'a> {
-    DeviceClaim { handle, device_id, auth_key: &[7u8; 32], mls_key: &[9u8; 32] }
+    DeviceClaim { account: handle, device_id, auth_key: &[7u8; 32], mls_key: &[9u8; 32] }
 }
 
 fn account() -> SigningKey {
@@ -128,7 +128,7 @@ fn the_fingerprint_depends_only_on_the_account_key() {
 use attest::{RevocationClaim, revocation_message, verify_revocation};
 
 fn revocation<'a>(handle: &'a str, device_id: &'a str, revoked_at: u64) -> RevocationClaim<'a> {
-    RevocationClaim { handle, device_id, revoked_at }
+    RevocationClaim { account: handle, device_id, revoked_at }
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn two_different_splits_do_not_collide_in_revocation() {
 use attest::{RotationClaim, rotation_message, verify_rotation};
 
 fn rotation<'a>(handle: &'a str, new_key: &'a [u8], at: u64) -> RotationClaim<'a> {
-    RotationClaim { handle, new_identity_key: new_key, rotated_at: at }
+    RotationClaim { account: handle, new_identity_key: new_key, rotated_at: at }
 }
 
 /// A rotation is verified against the **old** key: it is the one designating the new one.
@@ -383,4 +383,80 @@ fn a_challenge_only_holds_for_its_own_device() {
 #[test]
 fn two_different_splits_do_not_collide_in_gateway() {
     assert_ne!(gateway_message("ab", b"cd").unwrap(), gateway_message("abc", b"d").unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// Account ids
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_id_is_thirty_two_lowercase_hex_characters() {
+    let id = attest::account_id(&[3u8; 32]);
+    assert_eq!(id.len(), attest::ID_HEX_LEN);
+    assert!(attest::is_account_id(&id));
+    assert_eq!(id, id.to_lowercase());
+}
+
+#[test]
+fn an_id_follows_the_key_it_was_derived_from() {
+    assert_ne!(attest::account_id(&[3u8; 32]), attest::account_id(&[4u8; 32]));
+    // Stable across calls: it keys database rows and lives in credentials.
+    assert_eq!(attest::account_id(&[3u8; 32]), attest::account_id(&[3u8; 32]));
+}
+
+#[test]
+fn a_handle_shaped_string_is_not_an_id() {
+    // The confusion the v2 domain bump exists for. `bob` is a legal handle and not an id; a
+    // thirty-two character hex string is both, which is why the shape check alone was never
+    // going to be the defence.
+    assert!(!attest::is_account_id("bob"));
+    assert!(!attest::is_account_id(""));
+    // Uppercase is refused rather than folded: one representation, so two rows cannot disagree.
+    assert!(!attest::is_account_id(&"AB".repeat(16)));
+    // A hex string of the right length is accepted, and that is the point of the domain bump.
+    assert!(attest::is_account_id(&"ab".repeat(16)));
+}
+
+#[test]
+fn the_short_form_is_half_the_id_grouped_in_fours() {
+    let id = attest::account_id(&[3u8; 32]);
+    let short = attest::short_id(&id);
+
+    assert_eq!(short.replace(' ', ""), id[..attest::ID_SHORT_HEX_LEN]);
+    assert_eq!(short.split(' ').count(), attest::ID_SHORT_HEX_LEN / 4);
+    // 64 bits inline. The number is a decision, not an accident — see the constant.
+    assert_eq!(attest::ID_SHORT_HEX_LEN * 4, 64);
+}
+
+#[test]
+fn shortening_something_that_is_not_an_id_changes_nothing() {
+    // A caller must not be able to launder a malformed value into a plausible-looking one.
+    assert_eq!(attest::short_id("bob"), "bob");
+}
+
+#[test]
+fn the_claims_carry_the_second_version_of_their_domain() {
+    // Field zero used to be a handle and is now an account id, and the two are not
+    // distinguishable by shape — a thirty-two character handle is legal and reads as an id. The
+    // label is therefore the only thing standing between an old signature and a new meaning, so
+    // it is pinned here rather than left to a reviewer to notice.
+    let device = attest::message(&claim("bob", "bob:desktop")).unwrap();
+    assert!(device.starts_with(b"wac-attest-v2"));
+
+    let revocation =
+        attest::revocation_message(&attest::RevocationClaim {
+            account: "bob",
+            device_id: "bob:desktop",
+            revoked_at: 1,
+        })
+        .unwrap();
+    assert!(revocation.starts_with(b"wac-revoke-v2"));
+
+    let rotation = attest::rotation_message(&attest::RotationClaim {
+        account: "bob",
+        new_identity_key: &[1u8; 32],
+        rotated_at: 1,
+    })
+    .unwrap();
+    assert!(rotation.starts_with(b"wac-rotate-v2"));
 }

@@ -34,21 +34,28 @@ use sha2::{Digest, Sha256};
 /// It guarantees a signature produced here cannot be replayed as a valid signature in another
 /// context of the project, and vice versa. The version in the label is what will allow the
 /// format to evolve without an old signature staying acceptable under the new rules.
-const DOMAIN: &[u8] = b"wac-attest-v1";
+///
+/// **v2 is that mechanism being used.** The first field of every claim used to be a handle and is
+/// now an account id, and the two are not distinguishable by shape: `abcdef0123456789abcdef0123456789`
+/// satisfies the handle rule in `server::handle` and looks exactly like an id. Without the bump,
+/// an attestation signed over the handle `bob` would verify as an attestation over the account
+/// whose id happens to be `bob` — a field confusion between two versions of the same protocol,
+/// which is the failure this label exists to make impossible.
+const DOMAIN: &[u8] = b"wac-attest-v2";
 
 /// Revocation domain, distinct from the attestation one.
 ///
 /// This distinction is what stops a legitimately obtained attestation from being presented as a
 /// revocation certificate for the same device — which would let anyone get any already attested
 /// device evicted.
-const DOMAIN_REVOKE: &[u8] = b"wac-revoke-v1";
+const DOMAIN_REVOKE: &[u8] = b"wac-revoke-v2";
 
 /// Account rotation domain.
 ///
 /// Another distinct domain, for the same reason as the previous two: a signature produced to
 /// revoke a device must not be usable to change the account key, which would amount to taking
 /// the account over.
-const DOMAIN_ROTATE: &[u8] = b"wac-rotate-v1";
+const DOMAIN_ROTATE: &[u8] = b"wac-rotate-v2";
 
 /// Domain of the anonymous envelope post.
 ///
@@ -103,14 +110,18 @@ impl std::fmt::Display for AttestError {
 
 impl std::error::Error for AttestError {}
 
-/// What a device claims: belonging to `handle`, with these two public keys.
+/// What a device claims: belonging to `account`, with these two public keys.
 ///
 /// Both keys are attested together, not separately. Separating them would allow recombining the
 /// attestation of one authentication key with the MLS key of another device.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceClaim<'a> {
-    /// Account handle. Carried in the clear, as the MLS credential already is.
-    pub handle: &'a str,
+    /// The account id — see [`account_id`]. Carried in the clear, as the credential already is.
+    ///
+    /// It used to be the handle, and the change is the point of the whole batch: a handle is a
+    /// name and a name has to be able to move. Binding an attestation to one meant every
+    /// attestation an account ever made was tied to whatever it was called at the time.
+    pub account: &'a str,
     pub device_id: &'a str,
     /// Ed25519 HTTP authentication key (32 bytes).
     pub auth_key: &'a [u8],
@@ -121,13 +132,13 @@ pub struct DeviceClaim<'a> {
 /// Serialises the claim into the exact form that is signed.
 ///
 /// Every variable-length field is preceded by its length. Without those prefixes,
-/// `handle="ab", device_id="c"` and `handle="a", device_id="bc"` would produce identical bytes:
+/// `account="ab", device_id="c"` and `account="a", device_id="bc"` would produce identical bytes:
 /// an attestation obtained for one would hold for the other. That is exactly the kind of flaw
 /// that review does not catch, and that the `two_different_splits_do_not_collide` test pins down.
 pub fn message(claim: &DeviceClaim<'_>) -> Result<Vec<u8>, AttestError> {
     encode(
         DOMAIN,
-        &[claim.handle.as_bytes(), claim.device_id.as_bytes(), claim.auth_key, claim.mls_key],
+        &[claim.account.as_bytes(), claim.device_id.as_bytes(), claim.auth_key, claim.mls_key],
     )
 }
 
@@ -197,7 +208,7 @@ pub fn verify(
 /// still *withhold* a revocation; it can no longer *invent* one.
 #[derive(Debug, Clone, Copy)]
 pub struct RevocationClaim<'a> {
-    pub handle: &'a str,
+    pub account: &'a str,
     pub device_id: &'a str,
     /// Revocation instant, in Unix seconds.
     ///
@@ -213,7 +224,7 @@ pub struct RevocationClaim<'a> {
 pub fn revocation_message(claim: &RevocationClaim<'_>) -> Result<Vec<u8>, AttestError> {
     encode(
         DOMAIN_REVOKE,
-        &[claim.handle.as_bytes(), claim.device_id.as_bytes(), &claim.revoked_at.to_be_bytes()],
+        &[claim.account.as_bytes(), claim.device_id.as_bytes(), &claim.revoked_at.to_be_bytes()],
     )
 }
 
@@ -252,7 +263,7 @@ pub fn verify_revocation(
 /// only recourse here.
 #[derive(Debug, Clone, Copy)]
 pub struct RotationClaim<'a> {
-    pub handle: &'a str,
+    pub account: &'a str,
     /// New account public key (32 bytes).
     pub new_identity_key: &'a [u8],
     /// Rotation instant, in Unix seconds.
@@ -262,7 +273,7 @@ pub struct RotationClaim<'a> {
 pub fn rotation_message(claim: &RotationClaim<'_>) -> Result<Vec<u8>, AttestError> {
     encode(
         DOMAIN_ROTATE,
-        &[claim.handle.as_bytes(), claim.new_identity_key, &claim.rotated_at.to_be_bytes()],
+        &[claim.account.as_bytes(), claim.new_identity_key, &claim.rotated_at.to_be_bytes()],
     )
 }
 
@@ -325,6 +336,84 @@ pub fn signal_message(
 /// returned along with Bob's signature captured elsewhere.
 pub fn gateway_message(device_id: &str, nonce: &[u8]) -> Result<Vec<u8>, AttestError> {
     encode(DOMAIN_GATEWAY, &[device_id.as_bytes(), nonce])
+}
+
+/// Length of an account id, in hexadecimal characters. 128 bits.
+pub const ID_HEX_LEN: usize = 32;
+
+/// How much of an id is shown inline, in hexadecimal characters. 64 bits.
+///
+/// # This number is the only real trade-off in the identity design
+///
+/// A truncated fingerprint is **grindable**: an attacker generates account keys until the first
+/// *n* characters of theirs match their target's, then presents an account that reads as the
+/// right one anywhere the short form is shown alone. The work is `2^(4n/2)` by the birthday
+/// bound for a collision and `2^(4n)` to hit a chosen target, and it is the second one that
+/// matters here — the attacker has somebody specific in mind.
+///
+/// At 32 bits that is minutes on a laptop. At 64 bits it is roughly `2^64` key generations,
+/// which is out of reach of anyone who would be attacking a chat handle. At 128 there is nothing
+/// to grind and also nothing that fits beside a name.
+///
+/// So: 64 inline, 128 in the verification panel, and the panel is the proof. The inline form is a
+/// convenience and `docs/THREAT-MODEL.md` says so.
+pub const ID_SHORT_HEX_LEN: usize = 16;
+
+/// The canonical account id: the fingerprint of the account's **genesis** identity key.
+///
+/// # Why derived and not assigned
+///
+/// A server that mints ids can forge one, reassign one, or serve two people two different
+/// answers about the same name. A server that merely lists them can do none of those, because
+/// the id is checkable against key material the verifier already holds — it is `sha256` of a key
+/// that is in the credential being verified. That single property is what makes a renameable
+/// handle safe: the directory may lie, and lying gains it nothing that an out-of-band
+/// fingerprint comparison does not already catch.
+///
+/// # Genesis, not current
+///
+/// [`RotationClaim`] exists, so the identity key moves. An id derived from the *current* key
+/// would move with it, which is the problem this design removes, reappearing in a rarer and more
+/// confusing form. The anchor is the first key the account ever had; the rotation chain is the
+/// evidence tying it to whatever key is current, and each of its links is already checkable with
+/// [`verify_rotation`].
+///
+/// # Why lowercase hex and not the spaced form
+///
+/// [`fingerprint`] groups in blocks of four because a human is going to compare it by eye. An id
+/// is compared by machine, travels in a credential and keys a database row: it gets one
+/// representation with no whitespace to normalise away. The two are the same 128 bits.
+pub fn account_id(genesis_identity_key: &[u8]) -> String {
+    let digest = Sha256::digest(genesis_identity_key);
+    digest[..ID_HEX_LEN / 2].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Whether a string is shaped like an account id.
+///
+/// Shape only — it says nothing about whether such an account exists, and nothing about whether
+/// the id matches the key it is presented with. Both of those are the caller's job. This exists
+/// so that a malformed id is refused at a boundary rather than becoming a row nobody can ever
+/// match.
+pub fn is_account_id(value: &str) -> bool {
+    value.len() == ID_HEX_LEN && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The inline form: the first [`ID_SHORT_HEX_LEN`] characters, grouped in fours.
+///
+/// Grouped for the same reason [`fingerprint`] is — comparing two continuous hex strings by eye
+/// is unreliable, and the attack consists precisely of producing something that *looks like* the
+/// right value. Returns the input untouched if it is not an id, so a caller cannot silently turn
+/// a malformed value into a plausible-looking one.
+pub fn short_id(id: &str) -> String {
+    if !is_account_id(id) {
+        return id.to_owned();
+    }
+    id[..ID_SHORT_HEX_LEN]
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Account fingerprint, to be compared out of band with the other party.

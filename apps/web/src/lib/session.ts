@@ -2400,8 +2400,6 @@ export class Session {
       view.epoch = this.client.epoch(view.groupId);
       view.peers = this.client.peerFingerprints(view.groupId) as Peer[];
 
-      await this.archive.store(this.api, view.groupId, view.messages.slice(before));
-
       // Persist HERE, before any further network call.
       //
       // `process` moves the ratchet forward even when it ends up failing. If a later error — an
@@ -2412,6 +2410,21 @@ export class Session {
       // The cursor belongs to the cryptographic state, not to the display. The two advance together
       // or not at all.
       await this.persist();
+
+      // The archive upload used to sit **above** that write, which put a network call on the wrong
+      // side of the rule the comment states — and not a hypothetical one: a dropped connection
+      // mid-upload is exactly the "later error" it names. It throws out of the poll, so the write
+      // that was supposed to be unconditional never happened.
+      //
+      // Below it, and caught. A backup that failed to upload is a backup to retry; it is not a
+      // reason to leave the ratchet ahead of what is on disk, and it is not a reason to abandon
+      // the rest of the poll. `store` is idempotent — the vault refuses a sequence it already
+      // holds — so the next pass picks the same range up again.
+      await this.archive
+        .store(this.api, view.groupId, view.messages.slice(before))
+        .catch((error: unknown) => {
+          console.warn(`history not archived for ${view.key}`, error);
+        });
 
       // Resolving accounts is cosmetic and goes over the network: it comes after, and its failure
       // must undo nothing.

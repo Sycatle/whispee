@@ -249,6 +249,22 @@ the loss surface for no gain against a server that never sees it.
   which is out of reach of anybody attacking a chat handle. The full 128 bits are in the
   verification panel, and **that panel is the proof** — the inline form is a convenience.
 
+- **Two tabs of one account.** Not an attack, and worth a row anyway, because the loss it caused
+  was silent and permanent. Each tab holds its own copy of the MLS ratchet in memory and persists
+  over the other; decrypting an application message *consumes* the key for its generation, so once
+  the surviving state has passed an envelope the other tab read, that envelope can never be read
+  again. The client logs a skip and the message is gone.
+
+  A tab now claims an exclusive Web Lock before reading anything, and the second one is stopped at
+  a screen rather than allowed to run behind a warning. The lock is released by the browser when
+  the tab dies, which is why it was preferred to an election or a heartbeat — both of which answer
+  "what if the holder vanished" with a timeout that is either too short to be safe or too long to
+  be usable.
+
+  It **fails open**: a browser with no lock manager runs unguarded. Refusing to start a messenger
+  because a lock could not be taken is a worse failure than the one being prevented, and it would
+  be triggered by the environment rather than by anything the user did.
+
 - **Legal compulsion of the operator.** It changes what the operator does, not what it can do; the
   "malicious server" row already covers the capability.
 - **Supply chain below the source.** Reproducible builds cover the binary against the published

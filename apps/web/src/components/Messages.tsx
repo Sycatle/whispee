@@ -189,7 +189,11 @@ export function Messages({
 
               <li className={`group ${message.mine ? "text-right" : ""} ${grouped ? "-mt-1" : ""}`}>
               <div
-                className={`inline-block max-w-[75%] wrap-anywhere rounded-lg px-3 py-2 text-left text-sm ${
+                // `whitespace-pre-wrap`: the composer accepts line breaks, and HTML collapses
+                // them. Without this a message written as a list arrives as one run-on sentence —
+                // the text is intact on the wire and mangled only on screen, which is the kind of
+                // loss nobody thinks to check.
+                className={`inline-block max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-lg px-3 py-2 text-left text-sm ${
                   message.mine
                     ? "bg-(--color-accent) text-white"
                     : "bg-(--color-surface-raised) border border-(--color-border-subtle)"
@@ -293,7 +297,7 @@ export function Messages({
         {view.outbox.map((entry) => (
           <li key={entry.localId} className="text-right">
             <div
-              className={`inline-block max-w-[75%] wrap-anywhere rounded-lg px-3 py-2 text-left text-sm text-white ${
+              className={`inline-block max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-lg px-3 py-2 text-left text-sm text-white ${
                 entry.state === "failed" ? "bg-(--color-danger)" : "bg-(--color-accent) opacity-60"
               }`}
             >

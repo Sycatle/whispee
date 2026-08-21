@@ -13,13 +13,13 @@ import { PresenceTracker, type PresenceSource } from "./session-presence.ts";
 
 /** Records what was asked, answers what it was told to. */
 function source(
-  answer: { now: number; accounts: { handle: string; last_seen: number }[] },
+  answer: { now: number; accounts: { account: string; last_seen: number }[] },
 ): PresenceSource & { asked: string[][] } {
   const asked: string[][] = [];
   return {
     asked,
-    presence(handles) {
-      asked.push(handles);
+    presence(accounts) {
+      asked.push(accounts);
       return Promise.resolve(answer);
     },
   };
@@ -37,7 +37,7 @@ test("the server's clock is kept, and seconds become milliseconds", async () => 
 
   // Both sides converted, and both from the server. Freshness is judged by comparing the two, so
   // taking either one from the browser would make the comparison meaningless on a skewed clock.
-  await tracker.refresh(source({ now: 1_700, accounts: [{ handle: "bob", last_seen: 1_640 }] }), [
+  await tracker.refresh(source({ now: 1_700, accounts: [{ account: "bob", last_seen: 1_640 }] }), [
     "bob",
   ]);
 
@@ -52,8 +52,8 @@ test("an account the server stops answering about is forgotten", async () => {
     source({
       now: 10,
       accounts: [
-        { handle: "bob", last_seen: 9 },
-        { handle: "carol", last_seen: 8 },
+        { account: "bob", last_seen: 9 },
+        { account: "carol", last_seen: 8 },
       ],
     }),
     ["bob", "carol"],
@@ -62,7 +62,7 @@ test("an account the server stops answering about is forgotten", async () => {
 
   // Carol opted out. Merging would leave her last known position on screen for good — the one
   // state the setting exists to remove.
-  await tracker.refresh(source({ now: 20, accounts: [{ handle: "bob", last_seen: 19 }] }), [
+  await tracker.refresh(source({ now: 20, accounts: [{ account: "bob", last_seen: 19 }] }), [
     "bob",
     "carol",
   ]);
@@ -97,7 +97,7 @@ test("asking about nobody makes no request at all", async () => {
 
 test("clearing forgets the peers but keeps the clock", async () => {
   const tracker = new PresenceTracker();
-  await tracker.refresh(source({ now: 30, accounts: [{ handle: "bob", last_seen: 29 }] }), ["bob"]);
+  await tracker.refresh(source({ now: 30, accounts: [{ account: "bob", last_seen: 29 }] }), ["bob"]);
 
   tracker.clear();
 

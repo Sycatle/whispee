@@ -78,8 +78,14 @@ export class Api {
    *
    * Trust on first use: nothing proves that the first to claim a handle is its legitimate owner.
    * Only key transparency would answer that; see the README.
+   *
+   * Returns the **account id**, which the server derives from the key in this very request
+   * rather than accepting from us. It is a hash of `identityKey`, so nothing here has to be
+   * taken on trust: a caller that cares recomputes it. Everything downstream — device ids,
+   * attestations, the roster — names the account by this string and not by the handle, which is
+   * a name it merely answers to.
    */
-  static async createAccount(handle: string, identityKey: Uint8Array): Promise<void> {
+  static async createAccount(handle: string, identityKey: Uint8Array): Promise<string> {
     const response = await fetch(`${BASE_URL}/v1/accounts`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -94,6 +100,9 @@ export class Api {
           : await response.text(),
       );
     }
+
+    const body = (await response.json()) as { account: string };
+    return body.account;
   }
 
   /**
@@ -104,7 +113,8 @@ export class Api {
    */
   static async register(
     deviceId: string,
-    handle: string,
+    /** The account id. The device id must be prefixed with it, and the server checks that. */
+    account: string,
     /**
      * The public authentication key, as bytes.
      *
@@ -120,7 +130,7 @@ export class Api {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         id: deviceId,
-        handle,
+        account,
         auth_key: toBase64(authKey),
         mls_key: toBase64(mlsKey),
         attestation: toBase64(attestation),
@@ -202,7 +212,7 @@ export class Api {
    * would slip in a device it controls. Always go through `resolveAccount` in `account.ts`, which
    * re-checks every attestation.
    */
-  async listAccountDevices(handle: string): Promise<{
+  async listAccountDevices(account: string): Promise<{
     identityKey: Uint8Array;
     devices: AttestedDevice[];
   }> {
@@ -217,7 +227,7 @@ export class Api {
         revocation?: string;
         last_seen?: number;
       }[];
-    }>("GET", `/v1/accounts/${encodeURIComponent(handle)}/devices`);
+    }>("GET", `/v1/accounts/${encodeURIComponent(account)}/devices`);
 
     return {
       identityKey: fromBase64(body.identity_key),
@@ -259,12 +269,12 @@ export class Api {
    * other hand, makes **every** existing attestation unverifiable at once.
    */
   rotateAccount(
-    handle: string,
+    account: string,
     newIdentityKey: Uint8Array,
     rotation: Uint8Array,
     rotatedAt: number,
-  ): Promise<{ handle: string }> {
-    return this.request("POST", `/v1/accounts/${encodeURIComponent(handle)}/rotate`, {
+  ): Promise<{ account: string }> {
+    return this.request("POST", `/v1/accounts/${encodeURIComponent(account)}/rotate`, {
       new_identity_key: toBase64(newIdentityKey),
       rotation: toBase64(rotation),
       rotated_at: rotatedAt,
@@ -277,7 +287,7 @@ export class Api {
   }
 
   /** Proof that the key served for this account appears in the log. */
-  async logProof(handle: string): Promise<{
+  async logProof(account: string): Promise<{
     identityKey: Uint8Array;
     index: number;
     proof: Uint8Array[];
@@ -288,7 +298,7 @@ export class Api {
       index: number;
       proof: string[];
       head: RawHead;
-    }>("GET", `/v1/log/proof/${encodeURIComponent(handle)}`);
+    }>("GET", `/v1/log/proof/${encodeURIComponent(account)}`);
 
     return {
       identityKey: fromBase64(body.identity_key),
@@ -361,18 +371,71 @@ export class Api {
   /**
    * Last activity of the requested accounts.
    *
-   * `POST` and not `GET`: handles stay out of the URL, hence out of the access logs of any proxy
+   * `POST` and not `GET`: the accounts stay out of the URL, hence out of the access logs of any proxy
    * along the way. Same argument that ruled out `EventSource` for the stream — and the body is
    * covered by the signature anyway.
    *
    * The server returns its own clock with the response: freshness is judged by comparing two
    * timestamps, and the browser's can be anything.
    */
-  presence(handles: string[]): Promise<{
+  presence(accounts: string[]): Promise<{
     now: number;
-    accounts: { handle: string; last_seen: number }[];
+    accounts: { account: string; last_seen: number }[];
   }> {
-    return this.request("POST", "/v1/presence", { handles });
+    return this.request("POST", "/v1/presence", { accounts });
+  }
+
+  /**
+   * The account a handle currently names.
+   *
+   * # The server is allowed to lie here, and that is survivable
+   *
+   * This is the directory and nothing more. It can answer late, refuse, or hand back somebody
+   * else's id — and none of that produces a *verifying* answer, because the id is a hash of a key
+   * that will be inside the credential we are about to check. The worst it achieves is sending us
+   * to the wrong account, which is the failure first contact already has and already answers,
+   * with an out-of-band fingerprint comparison.
+   *
+   * That property is the whole reason ids are derived rather than assigned. A server that minted
+   * them could tell two people two different things about one name and leave nothing to compare.
+   *
+   * `410` means the name was given up and is never coming back — a different fact from `404`,
+   * which means nobody has taken it yet, and the caller should be able to say which it met.
+   *
+   * Unsigned: a name has to be resolvable before there is an account to resolve it with.
+   */
+  static async resolveHandle(handle: string): Promise<string> {
+    const response = await fetch(`${BASE_URL}/v1/handles/${encodeURIComponent(handle)}`);
+
+    if (!response.ok) {
+      throw new ApiError(
+        response.status,
+        response.status === 410
+          ? "that handle has been retired and cannot be used again"
+          : response.status === 404
+            ? "nobody goes by that handle"
+            : await response.text(),
+      );
+    }
+
+    const body = (await response.json()) as { account: string };
+    return body.account;
+  }
+
+  /**
+   * Gives this account a new handle, and retires the old one.
+   *
+   * Nothing else moves: not the account, not its key, not its devices, not their ids, not their
+   * attestations, and nothing in any conversation. That is the point of anchoring identity on a
+   * key — a handle is a name, and moving a name moves a name.
+   *
+   * Correspondents do **not** learn the new one from here. They learn it from its owner, inside
+   * the encrypted conversation, for the reason `lib/naming.ts` gives about every other
+   * self-asserted name: a label read back from the server at render time hands it the power this
+   * whole design took away, at the one moment nobody is checking.
+   */
+  renameAccount(account: string, handle: string): Promise<{ handle: string; retired: string | null }> {
+    return this.request("POST", `/v1/accounts/${encodeURIComponent(account)}/handle`, { handle });
   }
 
   /** Stops or resumes broadcasting presence. Reciprocal: opting out means ceasing to see. */

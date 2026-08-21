@@ -36,9 +36,9 @@
  * cannot reach for a route it was not given. Seconds, as the server sends them.
  */
 export interface PresenceSource {
-  presence(handles: string[]): Promise<{
+  presence(accounts: string[]): Promise<{
     now: number;
-    accounts: { handle: string; last_seen: number }[];
+    accounts: { account: string; last_seen: number }[];
   }>;
 }
 
@@ -71,8 +71,8 @@ export class PresenceTracker {
   private now = 0;
 
   /** Last activity of an account, or `undefined` if the server has nothing to say about it. */
-  lastSeen(handle: string): number | undefined {
-    return this.seen.get(handle);
+  lastSeen(account: string): number | undefined {
+    return this.seen.get(account);
   }
 
   /** Server clock at the last poll: the reference for judging freshness. */
@@ -87,13 +87,13 @@ export class PresenceTracker {
    * merging would leave its last known position on screen for good — the one state the setting
    * exists to remove.
    */
-  async refresh(source: PresenceSource, handles: string[]): Promise<void> {
-    if (handles.length === 0) return;
+  async refresh(source: PresenceSource, of: string[]): Promise<void> {
+    if (of.length === 0) return;
 
-    const { now, accounts } = await source.presence(handles.slice(0, MAX_PER_REQUEST));
+    const { now, accounts } = await source.presence(of.slice(0, MAX_PER_REQUEST));
 
     this.now = now * MS;
-    this.seen = new Map(accounts.map((entry) => [entry.handle, entry.last_seen * MS]));
+    this.seen = new Map(accounts.map((entry) => [entry.account, entry.last_seen * MS]));
   }
 
   /**

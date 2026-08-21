@@ -80,9 +80,9 @@ test("an uncontested display name survives the compact form", () => {
   assert.equal(compactNameOf("charlie8295", claims, among), "Charlie");
 });
 
-test("a display name equal to one's own handle is shown with its sigil", () => {
-  const claims = sources({}, { charlie8295: "charlie8295" });
-  assert.equal(compactNameOf("charlie8295", claims, ["charlie8295"]), "@charlie8295");
+test("a display name equal to one's own handle is kept as its owner wrote it", () => {
+  const claims = sources({}, { charlie8295: "Charlie8295" });
+  assert.equal(compactNameOf("charlie8295", claims, ["charlie8295"]), "Charlie8295");
 });
 
 test("a search term matches the handle, the display name and the petname alike", () => {

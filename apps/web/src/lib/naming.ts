@@ -152,10 +152,10 @@ export function compactNameOf(handle: string, sources: NameSources, among: Itera
     if (fold(other) === bare) return formatHandle(handle);
   }
 
-  // Somebody whose asserted name is their own handle gets the handle, sigil and all, rather than
-  // a bare copy of it that would read as a display name.
-  if (bare === fold(handle)) return formatHandle(handle);
-
+  // Somebody whose asserted name is their own handle keeps it as they wrote it: `Charlie8295`
+  // stays `Charlie8295` rather than being replaced by `@charlie8295`. There is no impersonation
+  // to guard against — the name and the anchor are the same string, and the only thing the
+  // substitution changed was the casing its owner chose and the sigil they did not.
   return asserted;
 }
 

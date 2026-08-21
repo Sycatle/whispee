@@ -2,6 +2,7 @@ import { useState } from "react";
 import { formatHandle, nameOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { Button } from "@/ui/Button";
+import { ContextMenu } from "@/ui/ContextMenu";
 import { Dialog } from "@/ui/Dialog";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { useNames } from "@/state/names";
@@ -154,7 +155,15 @@ export function GroupPanel({
           const isAdmin = roles?.admin === account.handle;
 
           return (
-            <li key={account.handle} className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
+            /* The same three actions the buttons below carry, on the row itself. They go through
+               `setPending` exactly as the buttons do, so "Hand over" and "Remove" still raise the
+               confirmation that explains what removal costs — a context menu must not be the door
+               that skips the warning. "Make moderator" acts directly here too, for the reason
+               given below: it is reversible in one click. */
+            <ContextMenu
+              key={account.handle}
+              trigger={
+            <li className="flex flex-wrap items-baseline gap-x-snug gap-y-tight text-body">
               <Member name={nameOf(account.handle, names)} />
               <Role handle={account.handle} />
               <span className="text-caption text-(--color-ink-muted)">
@@ -205,6 +214,49 @@ export function GroupPanel({
                 </span>
               )}
             </li>
+              }
+            >
+              {roles === null || isAdmin ? (
+                // Nothing to offer: the admin's own row has no actions, and a conversation with
+                // no roles at all is a one-to-one wearing a group's clothes.
+                <ContextMenu.Item disabled onSelect={() => undefined}>
+                  No actions
+                </ContextMenu.Item>
+              ) : (
+                <>
+                  {iAmAdmin && (
+                    <>
+                      <ContextMenu.Item
+                        disabled={busy}
+                        onSelect={() =>
+                          void action(() =>
+                            session.setModerator(view, account.handle, !isModerator),
+                          )
+                        }
+                      >
+                        {isModerator ? "Remove moderator" : "Make moderator"}
+                      </ContextMenu.Item>
+                      <ContextMenu.Item
+                        disabled={busy}
+                        onSelect={() => setPending({ kind: "handover", handle: account.handle })}
+                      >
+                        Hand over
+                      </ContextMenu.Item>
+                    </>
+                  )}
+                  {iModerate && (!isModerator || iAmAdmin) && (
+                    <ContextMenu.Item
+                      icon="revoke"
+                      tone="danger"
+                      disabled={busy}
+                      onSelect={() => setPending({ kind: "remove", handle: account.handle })}
+                    >
+                      Remove from group
+                    </ContextMenu.Item>
+                  )}
+                </>
+              )}
+            </ContextMenu>
           );
         })}
       </ul>

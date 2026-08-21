@@ -40,17 +40,18 @@
  * whole list before anything is drawn, so a window that renders a slice would still get them
  * right. What is left is the scrolling.
  */
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
 import { EmojiDrawer } from "@/components/EmojiPicker";
 import { dayLabel, timeOf } from "@/lib/datetime";
 import { COMPOSER_ID } from "@/components/ids";
-import { compactNameOf } from "@/lib/naming";
+import { compactNameOf, formatHandle } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
 import { layout, textOf } from "@/lib/thread";
 import { useRoving } from "@/lib/useRoving";
+import { useNavigate } from "@/routes/Router";
 import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
@@ -580,6 +581,13 @@ export function Messages({
                   // it compiles to a selector nothing satisfies — no error, no warning, just a
                   // row that never lights up.
                   "rounded-control hover:bg-(--color-ink)/5",
+                  // The face and the name are two halves of one thing, in two different columns.
+                  // Hovering either underlines the name, which is what says they belong together
+                  // and that there is something behind them. `:has()` because the two are in
+                  // disjoint subtrees, so no ancestor of one is an ancestor of only the other —
+                  // a `group` on the row would fire from anywhere in it, including the text.
+                  "[&:has([data-author]:hover)_[data-author-name]]:underline",
+                  "[&_[data-author-name]]:underline-offset-2",
                 )}
               >
                 {/*
@@ -596,7 +604,21 @@ export function Messages({
                   verification pattern on every message would turn evidence into wallpaper. It
                   belongs in the detail column, once.
                 */}
-                <div className={cn(LANE, "flex flex-col items-start")}>
+                {/* A menu about the person rather than about the message, on the two things that
+                    are the person: the face and the name. Nested inside the row's own menu, and
+                    Radix gives the innermost trigger the event — right-clicking the avatar asks
+                    about whoever spoke, right-clicking the sentence asks about the sentence.
+
+                    Nothing here for our own turns: the card it would open is a verification
+                    panel, and there is nothing to verify about the key this device holds. */}
+                <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
+                {/* Marked only where the mark leads somewhere. `AuthorMenu` renders nothing of
+                    its own for our own turns, so underlining our name on hover would promise a
+                    menu that is not there — an affordance for an action that does not exist. */}
+                <div
+                  data-author={message.mine ? undefined : ""}
+                  className={cn(LANE, "flex flex-col items-start")}
+                >
                   {continues ? (
                     /*
                       The hour of a continuation line, in the lane, on hover.
@@ -623,6 +645,7 @@ export function Messages({
                     />
                   )}
                 </div>
+                </AuthorMenu>
 
                 {/* `max-w-measure`: the lane holds the text, and text has a width past which it
                     stops being comfortable to read. See `--container-measure` in `index.css`.
@@ -634,9 +657,18 @@ export function Messages({
                       sentences is one person speaking, not three announcements. */}
                   {!continues && (
                     <div className="flex items-baseline gap-snug">
-                      <span className="truncate text-body font-medium">
-                        {nameOfAuthor(authorOf(message))}
-                      </span>
+                      <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
+                        <span
+                          data-author={message.mine ? undefined : ""}
+                          data-author-name={message.mine ? undefined : ""}
+                          className={cn(
+                            "truncate text-body font-medium",
+                            !message.mine && "hover:underline",
+                          )}
+                        >
+                          {nameOfAuthor(authorOf(message))}
+                        </span>
+                      </AuthorMenu>
                       {/*
                         `<time>` with a machine-readable `dateTime`, so a screen reader announces
                         the full date rather than reading "14:02" as two numbers, and the tooltip
@@ -994,6 +1026,60 @@ export function Messages({
  * no colour to spend on it — the accent is rationed elsewhere and a receipt is not a state the
  * reader has to act on.
  */
+/**
+ * What can be asked about the person who spoke, from their face or their name.
+ *
+ * Separate from the row's own menu because the two answer different questions: the row is about
+ * the message — react to it, reply to it, copy it — and this is about whoever sent it. Nesting
+ * them is what lets both exist without a submenu, since Radix hands the event to the innermost
+ * trigger.
+ *
+ * Renders its children untouched for our own turns and for a sender we cannot name. There is no
+ * verification card for the key this device is holding, and an unattributed message has nobody
+ * to open one for; a menu whose every item is disabled is a menu that should not open.
+ */
+function AuthorMenu({
+  handle,
+  view,
+  mine,
+  children,
+}: {
+  handle: string | null;
+  view: ConversationView;
+  mine: boolean;
+  children: ReactNode;
+}) {
+  const navigate = useNavigate();
+  const report = useReport();
+
+  if (mine || handle === null) return <>{children}</>;
+
+  return (
+    <ContextMenu trigger={<span className="contents">{children}</span>}>
+      <ContextMenu.Label>{formatHandle(handle)}</ContextMenu.Label>
+      <ContextMenu.Separator />
+      <ContextMenu.Item
+        icon="info"
+        onSelect={() =>
+          navigate({ kind: "conversation", key: view.key, detail: { handle } })
+        }
+      >
+        View profile
+      </ContextMenu.Item>
+      <ContextMenu.Item
+        icon="copy"
+        onSelect={() => {
+          void navigator.clipboard
+            .writeText(formatHandle(handle))
+            .then(() => report.done("Handle copied"));
+        }}
+      >
+        Copy handle
+      </ContextMenu.Item>
+    </ContextMenu>
+  );
+}
+
 function Status({ state }: { state: "sent" | "delivered" | "read" }) {
   const label = { sent: "sent", delivered: "delivered", read: "read" }[state];
   const mark = { sent: "✓", delivered: "✓✓", read: "✓✓" }[state];

@@ -244,14 +244,31 @@ export function Messages({
                 </div>
               )}
 
-              <div className="mt-0.5 hidden gap-1 text-xs group-hover:flex" data-actions>
+              {/*
+                Reactions and Reply used to be `hidden group-hover:flex`, which put them out of
+                reach of everyone without a mouse: `display: none` takes an element out of the tab
+                order, and a finger has no hover to give. They were, in practice, features only
+                some people had.
+
+                Faded rather than hidden, so the buttons stay focusable and the row keeps its
+                height — revealing them by reflow made the thread jump under the pointer. They
+                come back on hover, on keyboard focus anywhere inside the row, and unconditionally
+                on a touch device, where there is no other way to ask for them.
+              */}
+              <div
+                className={`mt-0.5 flex gap-1 text-xs opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 touch:opacity-100 ${
+                  message.mine ? "justify-end" : ""
+                }`}
+                data-actions
+              >
                 {EMOJIS.map((emoji) => (
                   <button
                     key={emoji}
                     type="button"
                     onClick={() => react(message.seq, emoji)}
-                    className="rounded px-1 hover:bg-(--color-surface-raised)"
+                    className="rounded px-1 hover:bg-(--color-surface-raised) touch:min-h-11 touch:min-w-11"
                     title={`React ${emoji}`}
+                    aria-label={`React with ${emoji}`}
                   >
                     {emoji}
                   </button>
@@ -259,7 +276,7 @@ export function Messages({
                 <button
                   type="button"
                   onClick={() => onReplyTo(message.seq)}
-                  className="rounded px-1 opacity-70 hover:bg-(--color-surface-raised)"
+                  className="rounded px-1 opacity-70 hover:bg-(--color-surface-raised) touch:min-h-11"
                 >
                   Reply
                 </button>

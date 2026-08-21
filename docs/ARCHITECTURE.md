@@ -59,9 +59,9 @@ apps/
     src/routes/    A hash router in fifty lines. The open conversation lives in the URL.
     src/app/       The shell: three columns, the rail, the detail column, the settings screen.
     src/components/  React components. Screens, not logic.
-    src/lib/generated/  wasm-bindgen glue, committed, patched by scripts/patch-wasm-glue.mjs.
-    public/        crypto_wasm_bg.wasm — the compiled module, committed as a build artefact.
-    scripts/       patch-wasm-glue.mjs.
+    src/lib/generated/  wasm-bindgen glue and emoji-index.json, committed build artefacts.
+    public/        crypto_wasm_bg.wasm, the fonts, and emoji/ — 3,145 Fluent SVGs, committed.
+    scripts/       patch-wasm-glue.mjs, emoji-assets.mjs.
   desktop/         Tauri 2. One crate serving desktop, Android and iOS.
     src/           store.rs (atomic session files), cipher.rs (device secrets), commands.rs
                    (the IPC surface), lib.rs (the entry point mobile needs).

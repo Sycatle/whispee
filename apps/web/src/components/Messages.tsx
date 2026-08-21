@@ -86,8 +86,14 @@ export function Messages({
 
   // The outbox counts: a message the user just wrote appears there first, and not scrolling to it
   // would hide the very thing they are waiting to see.
+  //
+  // The smooth scroll asks the system first. `prefers-reduced-motion` is set by people for whom
+  // motion is a symptom, not a preference, and a thread that slides on every arrival is the most
+  // frequent motion in the whole application. Jumping is not a degraded version of it — for them
+  // it is the correct one.
   useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth" });
+    const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    bottom.current?.scrollIntoView({ behavior: still ? "auto" : "smooth" });
   }, [visible.length, view.outbox.length]);
 
   // "Read" means **shown to someone**. So it is decided here, in the component that renders the
@@ -260,7 +266,7 @@ export function Messages({
                 on a touch device, where there is no other way to ask for them.
               */}
               <div
-                className={`mt-0.5 flex gap-1 text-xs opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 touch:opacity-100 ${
+                className={`mt-0.5 flex gap-1 text-xs opacity-0 transition-opacity motion-reduce:transition-none focus-within:opacity-100 group-hover:opacity-100 touch:opacity-100 ${
                   message.mine ? "justify-end" : ""
                 }`}
                 data-actions

@@ -50,6 +50,15 @@ export function ConversationList({
   const [devicePanel, setDevicePanel] = useState(false);
   const [signalPanel, setSignalPanel] = useState(false);
   const [noticePanel, setNoticePanel] = useState(false);
+  /**
+   * Filters the list, and nothing else.
+   *
+   * Deliberately not a message search. Searching bodies would mean either scanning what happens
+   * to be in the local window — answering "not found" for a message that exists, which is worse
+   * than not offering it — or asking the server, which holds only ciphertext. A real one needs an
+   * encrypted local index, and that is a feature, not a text box.
+   */
+  const [filter, setFilter] = useState("");
 
   const start = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -167,6 +176,18 @@ export function ConversationList({
         Neither epoch nor prekey stock. The epoch is a debugging detail, and the stock refills
         itself on every poll — exposing it would turn automatic upkeep into user worry.
       */}
+      {/* Shown from a handful of conversations up. Below that it is one more thing on screen
+          between the reader and a list they can already see all of. */}
+      {conversations.length > 5 && (
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter by handle"
+          aria-label="Filter conversations by handle"
+          className="border-b border-(--color-border-subtle) bg-transparent px-3 py-2 text-sm"
+        />
+      )}
+
       {/*
         Most recent first. The list used to be in whatever order the `Map` happened to hold, which
         is insertion order — so the conversation someone just wrote in could sit at the bottom
@@ -178,7 +199,13 @@ export function ConversationList({
       */}
       <ul className="min-h-0 flex-1 overflow-y-auto">
         {conversations
-          .slice()
+          .filter((view) =>
+            filter === ""
+              ? true
+              : view.accounts.some((account) =>
+                  account.handle.toLowerCase().includes(filter.toLowerCase().replace(/^@/, "")),
+                ),
+          )
           .sort((a, b) => session.lastActivityIn(b) - session.lastActivityIn(a))
           .map((view) => {
             const unread = session.unreadIn(view);

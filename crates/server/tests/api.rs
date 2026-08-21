@@ -115,6 +115,64 @@ async fn a_handle_cannot_be_taken_over_by_another_account() {
     assert_eq!(response.status(), 409);
 }
 
+/// The format is enforced where a handle is created, and it is a hard refusal.
+///
+/// Each of these used to be accepted. `Alice` gave a second account indistinguishable from the
+/// first in every list, while `crypto_core::roles` compared the two strings to decide who
+/// administers a group; `alice:phone` made the device-id prefix ambiguous; the rest are the
+/// classes — whitespace, bidi, homoglyphs — that make two different accounts render the same.
+#[tokio::test]
+async fn a_handle_outside_the_canonical_format_is_refused_at_creation() {
+    let server = start().await;
+    let (account, _) = crypto_core::Account::generate().unwrap();
+
+    for handle in [
+        "Alice",
+        "alice:phone",
+        "alice smith",
+        " alice",
+        "al",
+        "",
+        &"a".repeat(33),
+        "alice-smith",
+        "\u{0430}lice",
+        "alice\u{202e}bob",
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/accounts", server.base_url))
+            .json(&serde_json::json!({
+                "handle": handle,
+                "identity_key": BASE64_STANDARD.encode(account.identity_key()),
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 400, "{handle:?} should have been refused");
+    }
+}
+
+/// The prefix check is a split, and the split is only unambiguous because `:` is out of the
+/// alphabet.
+///
+/// The device id `<alice>:phone:laptop` is prefixed by Alice's handle under `starts_with`, and
+/// registering it would have let a second account — one whose handle was itself `<alice>:phone`
+/// — collide inside Alice's namespace. The colon-bearing handle can no longer exist, and the
+/// left of the first `:` is now compared for equality rather than for prefix, so the id is
+/// refused outright rather than silently accepted under the wrong owner.
+#[tokio::test]
+async fn a_device_id_whose_first_segment_is_not_exactly_the_handle_is_refused() {
+    let server = start().await;
+    let account = TestAccount::create(&server, &unique("alice")).await;
+
+    let device = Device::new(&server, &format!("{}x:phone", account.handle));
+    assert_eq!(device.register_under(&account).await.status(), 400);
+
+    // A trailing segment is fine: only the first one names the account.
+    let device = Device::new(&server, &format!("{}:phone:laptop", account.handle));
+    assert!(device.register_under(&account).await.status().is_success());
+}
+
 /// Without this barrier, anyone declares a device in someone else's account and gets invited
 /// into their conversations. This is the "online" version of the ghost device attack; the
 /// "complicit server" version is covered further down.
@@ -784,7 +842,7 @@ async fn concurrent_consumptions_never_share_a_key_package() {
     let claim = format!("/v1/key-packages/{}/claim", bob.id);
     let mut handles = Vec::new();
     for i in 0..STOCK {
-        let alice = Device::register(&server, &unique(&format!("alice-{i}"))).await;
+        let alice = Device::register(&server, &unique(&format!("alice{i}"))).await;
         let claim = claim.clone();
         handles.push(tokio::spawn(async move {
             let response = alice.post(&claim, serde_json::json!({})).await;

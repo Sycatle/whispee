@@ -19,10 +19,14 @@ use sqlx::PgPool;
 
 /// Keeps each test's data apart.
 ///
-/// The counter alone is not enough: the database **persists between runs**, so `alice-0`
+/// The counter alone is not enough: the database **persists between runs**, so `alice_0`
 /// would already exist on the second `cargo test`, with a different key — and registration
 /// would rightly be refused (409). The per-process random prefix isolates each run without
 /// having to purge the database.
+///
+/// The separator is `_` and not `-` because these strings are used as handles, and
+/// `server::handle` admits no hyphen. `prefix_ffffffff_999` stays well inside the
+/// thirty-two-character ceiling, so a test can keep naming its accounts after people.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 static RUN_ID: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     use rand_core::RngCore;
@@ -30,7 +34,7 @@ static RUN_ID: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
 });
 
 pub fn unique(prefix: &str) -> String {
-    format!("{prefix}-{}-{}", *RUN_ID, COUNTER.fetch_add(1, Ordering::Relaxed))
+    format!("{prefix}_{}_{}", *RUN_ID, COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 pub struct TestServer {

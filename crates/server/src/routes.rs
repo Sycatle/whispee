@@ -66,6 +66,25 @@ pub fn public_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// The authenticated routes.
+///
+/// # Why the handle-taking read routes do not call `crate::handle::validate`
+///
+/// `list_account_devices`, `log_proof`, `rotate_account` and `read_presence` all take a handle
+/// and all of them only ever *look one up*. Validating there would be free to write and would be
+/// a small mistake: it splits one outcome into two. Today a handle that is not an account —
+/// malformed or merely unknown — comes back as a single 404, and `read_presence` simply omits it
+/// from the list. Adding a 400 would let an unauthenticated-adjacent caller separate "this string
+/// could never be an account" from "this string could be one and is not", which is a distinction
+/// the reader has no use for and a prober does.
+///
+/// It would also buy nothing on the storage side. Since `create_account` is the only way a
+/// handle enters `accounts`, and `migrations/0013_handle_format.sql` holds the same rule as a
+/// CHECK, a malformed handle cannot match a row — the query is a guaranteed miss, and a
+/// guaranteed miss is exactly the behaviour wanted.
+///
+/// The write path is the opposite case and does validate: `create_account` and `register_device`
+/// *create* the value, and a value created out of shape stays out of shape forever.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/gateway", get(crate::gateway::handler))
@@ -307,9 +326,10 @@ async fn create_account(
     State(pool): State<PgPool>,
     Json(payload): Json<CreateAccount>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if payload.handle.is_empty() || payload.handle.len() > 64 {
-        return Err(ApiError::BadRequest("invalid handle"));
-    }
+    // The one place a handle enters the system. Every other route reads a handle that got in
+    // through here, so this is where the format is imposed rather than merely hoped for — see
+    // `crate::handle` for what `^[a-z0-9_]{3,32}$` buys and what it explicitly does not.
+    crate::handle::validate(&payload.handle).map_err(ApiError::BadRequest)?;
 
     let identity_key = decode_b64(&payload.identity_key)?;
     if identity_key.len() != 32 {
@@ -385,7 +405,25 @@ async fn register_device(
     // user who wants to call their phone "phone" is refused registration, despite holding a
     // perfectly legitimate account. The prefix makes the namespace local to the account; the
     // attestation guarantees nobody can claim someone else's prefix.
-    if !payload.id.starts_with(&format!("{}:", payload.handle)) {
+    //
+    // This is a **split**, not a `starts_with`, and that only became correct with
+    // `crate::handle`. A handle can no longer contain `:`, so the first `:` in a device id is
+    // unambiguously the separator and the left-hand side is the whole handle and nothing else.
+    // Before the format existed, `alice:phone` was itself a legal handle, so the device id
+    // `alice:phone:laptop` started with the prefix of *two* different accounts and the check
+    // handed the second one a foothold in the first one's namespace. Validating the handle here
+    // as well as splitting is what closes the other half: a prefix comparison against an
+    // unvalidated handle would still let a colon-bearing string through if this route were ever
+    // reached before `create_account` — which it can be, since a device may be registered
+    // against an account that does not exist and the lookup below is what refuses it.
+    crate::handle::validate(&payload.handle).map_err(ApiError::BadRequest)?;
+
+    let Some((prefix, _name)) = payload.id.split_once(':') else {
+        return Err(ApiError::BadRequest(
+            "device id must be prefixed with the account handle",
+        ));
+    };
+    if prefix != payload.handle {
         return Err(ApiError::BadRequest(
             "device id must be prefixed with the account handle",
         ));

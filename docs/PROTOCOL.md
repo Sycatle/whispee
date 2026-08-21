@@ -407,6 +407,17 @@ excluded from. Another member must pick it up.
 An account is an Ed25519 identity key (AIK) derived from a twelve-word BIP-39 phrase, plus a
 handle. No phone number and no email address anywhere.
 
+The handle matches `^[a-z0-9_]{3,32}$`, enforced by the server at creation and by a CHECK on the
+column. The format is not cosmetic. Handles are compared as strings in places where the comparison
+decides something: the roster extension names the admin and the moderators by handle, so `Alice`
+and `alice` being two accounts that look identical would be an authorisation question and not a
+display one. And because a handle can no longer contain `:`, the first colon of a device id is
+unambiguously its separator — the check that a device id begins with its account's handle used to
+be a prefix test that `a:b` could slip past.
+
+What the format does not fix: `rn` still reads as `m`, and `_` is still a separator the eye skips.
+It removes the wide classes of confusion, not the narrow ones.
+
 Each device carries a signature by the account over `(handle, device_id, auth_key, mls_key)`,
 length-prefixed, under domain `wac-attest-v1`. Both keys are attested **together**, not
 separately: separating them would let someone recombine one device's attested authentication key

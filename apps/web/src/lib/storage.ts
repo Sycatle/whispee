@@ -209,6 +209,46 @@ interface StoredSession {
    * courtesy to oneself rather than a barrier.
    */
   blocked?: string[];
+  /**
+   * The name this account shows to the people it talks to.
+   *
+   * Not the handle, which is immutable in practice — it is the identity bytes of the MLS
+   * credential, the prefix of every `device_id`, and a key in half the records here. This one is
+   * free text and changes as often as its owner likes, which is precisely why it could not be
+   * either of those things.
+   *
+   * Absent means the account has never set one, and the display falls back to `@handle`. It never
+   * reaches the server: it is broadcast inside MLS, see `content.ts`.
+   */
+  displayName?: string;
+  /**
+   * The names other people have declared for themselves, by handle.
+   *
+   * **This is a list of human names on disk**, and the first thing here that would read as an
+   * address book to whoever opened the file. It gets exactly the protection everything else gets
+   * and no less: under a lock it sits beneath the master key, without one beneath the
+   * non-extractable key held by IndexedDB. Nothing about it is stored more loosely because it is
+   * only cosmetic.
+   *
+   * Indexed by handle like `verified` and `knownDevices`, for the same reason those are: the
+   * handle is the identity MLS authenticates, and it is the only key that survives a peer adding
+   * or losing a device.
+   *
+   * `at` is the sender's clamped self-declared time, kept so that last-writer-wins survives a
+   * reload — without it, the first rename received after a restart would beat one made later.
+   */
+  profiles?: Record<string, { name: string; at: number }>;
+  /**
+   * Names **this** device has given other people, by handle.
+   *
+   * A petname outranks whatever its subject calls themselves, and that is the whole point: a name
+   * chosen by the person reading it cannot be changed by the person being read. It is the only
+   * defence in this feature against somebody renaming themselves to look like somebody else,
+   * since no amount of string cleaning tells two legitimate spellings apart.
+   *
+   * Local and never emitted. Sending one would hand a peer the note taken about them.
+   */
+  petnames?: Record<string, string>;
 }
 
 /** What the user agrees to emit. */

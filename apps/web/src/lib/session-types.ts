@@ -149,6 +149,20 @@ export interface ConversationView {
   /** Has the key already been shared in this conversation, this session? */
   postingKeyShared?: boolean;
   /**
+   * The epoch at which we last announced our display name here.
+   *
+   * The guard rail, and the field exists only to be one. A name has to reach a group once when we
+   * join it, once when we change the name, and once more whenever somebody new arrives — and a
+   * new arrival is precisely what moves the epoch, so one comparison covers all three. Without
+   * it, the announcement would sit in the poll loop and go out on every pass: an envelope every
+   * few seconds, per conversation, saying what everyone already knows. That is traffic the server
+   * counts even though it cannot read it, and a message rate is a fact about a conversation.
+   *
+   * Deliberately not persisted, like `gossiped` and `postingKeyShared`: re-announcing once per
+   * session costs one envelope and repairs anything a peer missed while it was away.
+   */
+  profileEpoch?: bigint;
+  /**
    * Sequence numbers we posted ourselves.
    *
    * They are already applied locally and MLS refuses to read them again. So we skip them when

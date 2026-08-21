@@ -181,3 +181,31 @@ test("a blocked handle that is not a string is refused rather than stored", () =
 test("the contact policy is a cache of the server's answer and round trips as one", () => {
   assert.equal(roundTrip(session({ contactPolicy: "known" })).contactPolicy, "known");
 });
+
+/**
+ * The three fields the display name feature adds, and the reason they are tested together: none
+ * of them bumped `VERSION`, so the only thing standing between them and a silently dropped name
+ * is that both halves of the codec name them.
+ */
+test("a display name, the profiles of others and local petnames survive the round trip", () => {
+  const named = session({
+    displayName: "Charlie",
+    profiles: { bob: { name: "Bob", at: 1_700_000_000_000 } },
+    petnames: { bob: "Bob from work" },
+  });
+
+  assert.deepEqual(roundTrip(named), named);
+});
+
+/**
+ * Absence has to stay absence. A session that never set a name must not read back holding an
+ * empty one — the display falls back to `@handle` on absence, and a present-but-empty value is a
+ * different question the rest of the client would have to answer separately.
+ */
+test("a session that never set a display name reads back without one", () => {
+  const fresh = roundTrip(session());
+
+  assert.ok(!("displayName" in fresh));
+  assert.ok(!("profiles" in fresh));
+  assert.ok(!("petnames" in fresh));
+});

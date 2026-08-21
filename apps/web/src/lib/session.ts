@@ -24,6 +24,7 @@ import { Names, type Profile } from "./session-naming.ts";
 import { TrustStore } from "./session-trust.ts";
 import { Archive } from "./session-vault.ts";
 import { Lockbox, type LockKit } from "./session-lock.ts";
+import { LogWitness, type LogChecks } from "./session-log.ts";
 import { composeStored } from "./session-persist.ts";
 import { fromBase64, toHex } from "./keys";
 import { changePassword, createLock, exportMaster, openLock } from "./lock";
@@ -71,6 +72,15 @@ import {
  * WASM module and the biometric prompt is Tauri IPC — a module importing either cannot be loaded
  * by `node --test`. This object is the seam, and it belongs here, where the platform already is.
  */
+const logChecks = (api: Api, crypto: Crypto): LogChecks => ({
+  account: (account, identityKey, seen) =>
+    log.verifyAccount(api, crypto, account, identityKey, seen, PINNED_LOG_KEY),
+  extendsView: async (peer) => {
+    const current = await api.logHead();
+    return log.verifyExtends(api, crypto, { ...peer, logKey: current.logKey }, current);
+  },
+});
+
 const deviceLock: LockKit = {
   create: createLock,
   open: openLock,
@@ -108,7 +118,6 @@ export {
 
 import { isAccountId } from "./chain";
 import {
-  LogProofRefused,
   StoredSessionTooOld,
   freshSignalState,
   touch,
@@ -262,7 +271,12 @@ export class Session {
    * Acts as an anchor: the server must prove its log extends it. With no memory, it could
    * rewrite an already published key and serve an equally consistent log.
    */
-  private seenHead: log.SeenHead | undefined;
+  private witness = new LogWitness();
+
+  /** What this session's log checks are asked through. Built once: it closes over api and crypto. */
+  private get checks(): LogChecks {
+    return logChecks(this.api, this.crypto);
+  }
 
   /**
    * Log anomalies seen since startup.
@@ -270,7 +284,9 @@ export class Session {
    * Kept and displayed rather than discarded: a proof that does not verify is not a network
    * error to retry, it is exactly the signal this whole apparatus exists to produce.
    */
-  readonly logAlerts: string[] = [];
+  get logAlerts(): string[] {
+    return this.witness.alerts;
+  }
 
   /**
    * The poll in flight, if any.
@@ -676,13 +692,7 @@ export class Session {
     // Conditional, unlike the two above: absent is what makes the interface fall back to
     // `@handle`, and an empty string present on the field would be a third state nobody handles.
 
-    if (stored.logHead) {
-      session.seenHead = {
-        size: stored.logHead.size,
-        root: fromBase64(stored.logHead.root),
-        logKey: fromBase64(stored.logHead.logKey),
-      };
-    }
+    session.witness = LogWitness.hydrate(stored);
 
     return session;
   }
@@ -931,7 +941,7 @@ export class Session {
         signals: this.signals,
         preferences: this.settings.snapshot(),
         names: this.names.snapshot(),
-        seenHead: this.seenHead,
+        log: this.witness.snapshot(),
         seal: (bytes) => this.lockbox.cipher.seal(bytes),
       }),
     );
@@ -968,43 +978,9 @@ export class Session {
 
     // Attestations prove a device belongs to the account. They say nothing about the ACCOUNT
     // key, which we are discovering here for the first time — that is the hole the log closes.
-    try {
-      const { verdict, head } = await log.verifyAccount(
-        this.api,
-        this.crypto,
-        account,
-        resolved.identityKey,
-        this.seenHead,
-        PINNED_LOG_KEY,
-      );
-
-      if (verdict.ok) {
-        // The head is remembered only on success: endorsing a head we just rejected would amount
-        // to validating what we reject.
-        //
-        // Written to disk when it actually moves, and not on every resolve: `persist` re-seals
-        // the whole MLS state, which is far too much work to repeat for a head that is already
-        // the one on disk. A log only grows when an account is created or a key rotated, so the
-        // write is rare — and it is the write that makes the anchor mean anything after a
-        // reload.
-        const advanced = head !== undefined && this.seenHead?.size !== head.size;
-        this.seenHead = head;
-        if (advanced) await this.persist();
-      } else {
-        this.raiseLogAlert(verdict.reason);
-        throw new LogProofRefused(account, verdict.reason);
-      }
-    } catch (error) {
-      // A refusal is not a deferral. It has already been recorded and it must reach the caller:
-      // swallowing it here is what let a conversation open on a key the server had just failed
-      // to prove.
-      if (error instanceof LogProofRefused) throw error;
-
-      // Log unreachable: we do not invent a security alert for a network failure. But we remember
-      // nothing either, so the check will be redone.
-      console.warn("log verification deferred", error);
+    if (await this.witness.check(this.checks, account, resolved.identityKey)) {
+      await this.persist();
     }
-
     return resolved;
   }
 
@@ -1027,12 +1003,13 @@ export class Session {
    * not its timing. Emitting one per message would add traffic and detect nothing more.
    */
   private async gossip(view: ConversationView): Promise<void> {
-    if (!this.seenHead || view.gossiped) return;
+    const seen = this.witness.gossip();
+    if (!seen || view.gossiped) return;
     view.gossiped = true;
 
     await this.sendContent(view, {
       kind: "gossip",
-      head: { size: this.seenHead.size, root: this.seenHead.root },
+      head: seen,
     });
   }
 
@@ -1046,26 +1023,8 @@ export class Session {
    * If it served two distinct logs, it cannot: no consistency proof links two trees that have
    * forked. This is the only check that catches that case.
    */
-  private async checkGossip(head: content.GossipHead): Promise<void> {
-    try {
-      const current = await this.api.logHead();
-
-      const verdict = await log.verifyExtends(
-        this.api,
-        this.crypto,
-        { size: head.size, root: head.root, logKey: current.logKey },
-        current,
-      );
-
-      if (!verdict.ok) {
-        this.raiseLogAlert(
-          "Someone you are talking to sees a different key log than you do. " +
-            "The server is presenting two versions of it: that is an attack, not a glitch.",
-        );
-      }
-    } catch (error) {
-      console.warn("log comparison deferred", error);
-    }
+  private checkGossip(head: content.GossipHead): Promise<void> {
+    return this.witness.compare(this.checks, head);
   }
 
   /**
@@ -1129,11 +1088,6 @@ export class Session {
     view.postingKeyShared = true;
 
     await this.sendContent(view, { kind: "posting-key", key: view.postingKey });
-  }
-
-  /** Records a log anomaly, without duplicates. */
-  private raiseLogAlert(reason: string): void {
-    if (!this.logAlerts.includes(reason)) this.logAlerts.push(reason);
   }
 
   /**

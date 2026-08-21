@@ -50,7 +50,7 @@ function input(over: Partial<PersistInput> = {}): PersistInput {
     signals: { readReceipts: true, typingIndicator: true, presence: true },
     preferences: {},
     names: {},
-    seenHead: undefined,
+    log: {},
     seal,
     ...over,
   };
@@ -167,16 +167,15 @@ test("the preferences slice is spread in exactly as given", async () => {
   assert.equal(stored.handle, "alice");
 });
 
-test("a seen log head is written as base64, and only when there is one", async () => {
-  const stored = await composeStored(
-    input({
-      seenHead: { size: 42, root: new Uint8Array([1, 2]), logKey: new Uint8Array([3, 4]) },
-    }),
-  );
+test("the log slice is spread in exactly as given", async () => {
+  // `composeStored` no longer knows what a log head is: `LogWitness` owns that mapping in both
+  // directions, and `session-log.test.ts` is where the round trip is asserted.
+  assert.equal("logHead" in (await composeStored(input())), false);
 
+  const stored = await composeStored(
+    input({ log: { logHead: { size: 42, root: "AQ==", logKey: "CQ==" } } }),
+  );
   assert.equal(stored.logHead?.size, 42);
-  assert.deepEqual(fromBase64(stored.logHead?.root ?? ""), new Uint8Array([1, 2]));
-  assert.deepEqual(fromBase64(stored.logHead?.logKey ?? ""), new Uint8Array([3, 4]));
 });
 
 test("turning the vault off is recorded as a decision", async () => {

@@ -36,7 +36,6 @@ import { encodeHistory, type Cached } from "./history.ts";
 import { toBase64 } from "./keys.ts";
 import type { ConversationView } from "./session-types";
 import type { SignalSettings, StoredSession } from "./storage";
-import type { SeenHead } from "./transparency";
 
 /**
  * Everything the stored shape is made of.
@@ -106,7 +105,8 @@ export interface PersistInput {
    * change to how an account is identified has to travel through. See `session-naming.ts`.
    */
   names: Partial<StoredSession>;
-  seenHead: SeenHead | undefined;
+  /** What `LogWitness` contributes, already mapped. */
+  log: Pick<StoredSession, "logHead">;
   /**
    * What encrypts the three things that must never touch the disk in the clear.
    *
@@ -159,14 +159,6 @@ export async function composeStored(input: PersistInput): Promise<StoredSession>
         ),
       ),
     ),
-    ...(input.seenHead
-      ? {
-          logHead: {
-            size: input.seenHead.size,
-            root: toBase64(input.seenHead.root),
-            logKey: toBase64(input.seenHead.logKey),
-          },
-        }
-      : {}),
+    ...input.log,
   };
 }

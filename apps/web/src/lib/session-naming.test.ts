@@ -138,3 +138,43 @@ test("forgetting drops every name, ours included", () => {
 
   assert.deepEqual(names.snapshot(), {});
 });
+
+test("a claimed handle survives the round trip", () => {
+  // The property this class exists for, applied to the record the rekey added. A handle written
+  // under one key and read under another does not throw — it comes back empty, and every
+  // correspondent shows as a hexadecimal string.
+  const names = new Names();
+  names.absorbHandle("a".repeat(32), "bob5194", 10);
+
+  const back = Names.hydrate(stored(names.snapshot()));
+  assert.deepEqual(back.handles, { ["a".repeat(32)]: "bob5194" });
+});
+
+test("a later claim replaces an earlier one, and an earlier one is ignored", () => {
+  const names = new Names();
+  assert.equal(names.absorbHandle("a".repeat(32), "bob5194", 10), true);
+  assert.equal(names.absorbHandle("a".repeat(32), "robert", 5), false);
+  assert.equal(names.handles["a".repeat(32)], "bob5194");
+  assert.equal(names.absorbHandle("a".repeat(32), "robert", 20), true);
+  assert.equal(names.handles["a".repeat(32)], "robert");
+});
+
+test("a claim that is not a handle is refused rather than repaired", () => {
+  // It arrives from a peer we did not write. A string outside the format is one the interface
+  // must not draw with an `@` in front of it.
+  const names = new Names();
+  assert.equal(names.absorbHandle("a".repeat(32), "Not A Handle", 10), false);
+  assert.equal(names.absorbHandle("a".repeat(32), "ab", 10), false);
+  assert.deepEqual(names.handles, {});
+});
+
+test("a claim is normalised the way a typed handle is", () => {
+  // `@Bob5194` and `bob5194` are the same claim, and only one of them is a handle.
+  const names = new Names();
+  assert.equal(names.absorbHandle("a".repeat(32), "@Bob5194", 10), true);
+  assert.equal(names.handles["a".repeat(32)], "bob5194");
+});
+
+test("an account with no claim contributes nothing to the stored shape", () => {
+  assert.equal(new Names().snapshot().handles, undefined);
+});

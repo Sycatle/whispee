@@ -102,3 +102,20 @@ export function walk(account: string, links: readonly Link[], verifier: Verifier
 
   return { ok: true, current: previous };
 }
+
+/**
+ * Whether a string is shaped like an account id: thirty-two lowercase hexadecimal characters.
+ *
+ * Shape only. It says nothing about whether such an account exists, and nothing about whether
+ * the id matches the key it is presented with — `walk` answers the second, and only the server
+ * can answer the first. This exists so a malformed id is refused at a boundary rather than
+ * becoming a record key nobody can ever match.
+ *
+ * Duplicated from `attest::is_account_id` rather than crossing the wasm boundary, and the reason
+ * is where it is used: `Session.open` calls it **before** the crypto module has loaded, to decide
+ * whether the stored state is from before accounts had ids. A check that needed wasm could not
+ * run at the one moment it is needed.
+ */
+export function isAccountId(value: string): boolean {
+  return /^[0-9a-f]{32}$/.test(value);
+}

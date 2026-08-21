@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { completions, typed } from "@/lib/mention";
-import { compactNameOf, formatHandle } from "@/lib/naming";
+import { compactNameOf, handleOf } from "@/lib/naming";
 import { useNames } from "@/state/names";
 import { Avatar } from "@/ui/Avatar";
 import { Completions, completionId } from "@/ui/Completions";
@@ -103,7 +103,11 @@ export function useMentions({
     if (hit === undefined || !token) return;
     // The trailing space is not a nicety: without it the caret sits at the end of a live token,
     // the menu reopens on the handle that was just accepted, and the next keystroke edits it.
-    replace(token.from, token.to, `${formatHandle(hit)} `);
+    // The handle if we have heard them claim one, the id otherwise — and the id is a correct
+    // mention, not a degraded one: `mention.resolve` leaves it untouched because it is already
+    // resolved, and the thread reads it back to the same person. What it costs is legibility in
+    // the field, which is exactly what a claim we have not received yet cannot buy back.
+    replace(token.from, token.to, `@${names.handles?.[hit] ?? hit} `);
     setDismissed(null);
   };
 
@@ -175,8 +179,8 @@ export function MentionMenu({
           <>
             <Avatar seed={seedOf(handle)} label={name} size="sm" />
             <span className="truncate text-(--color-ink)">{name}</span>
-            {name !== formatHandle(handle) && (
-              <span className="truncate text-(--color-ink-muted)">{formatHandle(handle)}</span>
+            {name !== handleOf(handle, names) && (
+              <span className="truncate text-(--color-ink-muted)">{handleOf(handle, names)}</span>
             )}
           </>
         );

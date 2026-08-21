@@ -59,6 +59,14 @@
 
 /** The two records `Session` holds, narrowed to what naming needs. */
 export interface NameSources {
+  /**
+   * The handle each account claims for itself, keyed by account id.
+   *
+   * Arrives over MLS, never from the server's directory — see `TYPE_HANDLE` in `lib/content.ts`
+   * for why that distinction is the whole point. Optional because an account we have not heard
+   * from yet has none, and `handleOf` falls back to the short id rather than inventing one.
+   */
+  readonly handles?: Readonly<Record<string, string>>;
   /** Locally chosen nicknames, keyed by handle. Never leaves the device. */
   readonly petnames: Readonly<Record<string, string>>;
   /** Names people asserted about themselves over MLS, keyed by handle. */
@@ -82,6 +90,39 @@ export interface Name {
  */
 export function formatHandle(handle: string): string {
   return `@${handle}`;
+}
+
+/**
+ * What to print for an account: the handle it claims, or a short form of its id.
+ *
+ * # Why there is a fallback at all
+ *
+ * The handle no longer travels in the MLS credential — the credential names the account, and an
+ * account is a key. So there is a real window in which a member of a room is known by id and
+ * nothing else: before their first claim arrives, or if it never does. Printing nothing would
+ * leave a blank where a person is; printing the whole id would put thirty-two hexadecimal
+ * characters in a line of prose.
+ *
+ * So the fallback is the first 64 bits, grouped in fours, matching `attest::short_id`. It is
+ * legible, it is comparable at a glance, and it is honest about being an identifier rather than
+ * a name.
+ *
+ * # What 64 bits is worth, stated where somebody will read it
+ *
+ * A truncated fingerprint is grindable: an attacker generates account keys until the leading
+ * characters of theirs match their target's. At 32 bits that is minutes; at 64 it is out of reach
+ * of anybody attacking a chat handle. The full 128 bits live in the verification panel, and that
+ * panel — not this string — is the proof. See `crates/attest/src/lib.rs::ID_SHORT_HEX_LEN`.
+ */
+export function handleOf(account: string, sources: NameSources): string {
+  const claimed = sources.handles?.[account];
+  if (claimed) return formatHandle(claimed);
+
+  // Not an id either — a caller passing something else gets it back with the sigil, which is what
+  // every pre-existing call site did and is still the least surprising answer.
+  if (!/^[0-9a-f]{32}$/.test(account)) return formatHandle(account);
+
+  return (account.slice(0, 16).match(/.{4}/g) ?? []).join(" ");
 }
 
 /**
@@ -110,15 +151,15 @@ function assertedName(handle: string, sources: NameSources): string | null {
 export function nameOf(handle: string, sources: NameSources): Name {
   const petname = sources.petnames[handle]?.trim();
   if (petname) {
-    return { primary: petname, secondary: formatHandle(handle), isHandle: false };
+    return { primary: petname, secondary: handleOf(handle, sources), isHandle: false };
   }
 
   const asserted = assertedName(handle, sources);
   if (asserted) {
-    return { primary: asserted, secondary: formatHandle(handle), isHandle: false };
+    return { primary: asserted, secondary: handleOf(handle, sources), isHandle: false };
   }
 
-  return { primary: formatHandle(handle), secondary: null, isHandle: true };
+  return { primary: handleOf(handle, sources), secondary: null, isHandle: true };
 }
 
 /**
@@ -133,7 +174,7 @@ export function compactNameOf(handle: string, sources: NameSources, among: Itera
   if (petname) return petname;
 
   const asserted = assertedName(handle, sources);
-  if (!asserted) return formatHandle(handle);
+  if (!asserted) return handleOf(handle, sources);
 
   const claim = fold(asserted);
   // A claim is compared with and without a leading sigil, because `@charlie8295` and
@@ -145,11 +186,15 @@ export function compactNameOf(handle: string, sources: NameSources, among: Itera
     // Somebody else wearing the same name. Both of them lose it: showing the handle for one and
     // the name for the other would still leave a reader unable to tell which is which.
     const rival = assertedName(other, sources);
-    if (rival !== null && fold(rival).replace(/^@/, "") === bare) return formatHandle(handle);
+    if (rival !== null && fold(rival).replace(/^@/, "") === bare) return handleOf(handle, sources);
 
     // A name that *is* another member's handle. Cheap to claim, and it reads as the anchor rather
     // than as the convenience laid over it, which is the whole trick.
-    if (fold(other) === bare) return formatHandle(handle);
+    // Compared against what `other` is *shown* as, not against their id: the impersonation this
+    // catches is a display name that reads as somebody else's anchor, and since the credential
+    // stopped carrying the handle, the anchor on screen is what they claim rather than what
+    // names them.
+    if (fold(handleOf(other, sources)).replace(/^@/, "") === bare) return handleOf(handle, sources);
   }
 
   // Somebody whose asserted name is their own handle keeps it as they wrote it: `Charlie8295`
@@ -170,7 +215,11 @@ export function nameMatches(handle: string, sources: NameSources, term: string):
   const needle = fold(term).replace(/^@/, "");
   if (!needle) return true;
 
-  const candidates = [handle, sources.petnames[handle], sources.profiles[handle]?.name];
+  const candidates = [
+    sources.handles?.[handle] ?? handle,
+    sources.petnames[handle],
+    sources.profiles[handle]?.name,
+  ];
   return candidates.some((candidate) => candidate !== undefined && fold(candidate).includes(needle));
 }
 

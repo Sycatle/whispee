@@ -107,6 +107,44 @@ const TYPE_PROFILE = 8;
  */
 const TYPE_MEMBERSHIP = 10;
 
+/**
+ * The handle an account currently answers to: `u8 11 ‖ u64 BE milliseconds ‖ UTF-8 handle`.
+ *
+ * # Why a handle has to travel at all now
+ *
+ * It did not use to. The handle *was* the account — it was the subject of the MLS credential, so
+ * every member of a group already had it, authenticated, without anybody sending anything. Since
+ * accounts are named by the fingerprint of their genesis key, the credential carries an id and
+ * the handle is a label nobody in the room would otherwise know.
+ *
+ * # Why not simply ask the server
+ *
+ * Because that is the one power this whole change took away. The server holds the directory and
+ * may lie in it; what stops the lie from mattering is that the id is checkable against the key
+ * inside the credential. Reading the *handle* back from the server at render time would hand it
+ * a fresh chance to say who somebody is, at the one moment nobody is checking — and it would do
+ * so on every screen, forever.
+ *
+ * So the handle travels the way the display name does: a claim by its owner, through the
+ * encrypted channel, believed exactly as much as a display name is. Which is to say: it is what
+ * this person says they are called, and `lib/naming.ts` already knows what to do with a claim
+ * that collides with somebody else's.
+ *
+ * # The uniqueness the server enforces is not carried by this
+ *
+ * A member can claim `@alice` here without holding it. That buys them nothing the display name
+ * did not already offer, and `compactNameOf` collapses two members claiming one string back to
+ * something unambiguous. The account id is what is authenticated, and it is what every
+ * comparison in the protocol uses.
+ *
+ * # Same shape as `TYPE_PROFILE`, for the same reasons
+ *
+ * Control — no bubble, nothing archived, no receipt cursor moved — and therefore never stamped,
+ * so it carries its own timestamp for last-writer-wins. Clamped on receipt exactly as a profile
+ * is: a peer dating their claim to the year 2400 would otherwise pin it forever.
+ */
+const TYPE_HANDLE = 11;
+
 /** What happened to somebody's membership. The subject is `handle`; the actor is the sender. */
 export type MembershipEvent = "joined" | "removed" | "left";
 
@@ -121,7 +159,8 @@ export type Content =
   | { kind: "reaction"; target: number; emoji: string }
   | { kind: "reply"; target: number; text: string }
   | { kind: "profile"; name: string; at: number }
-  | { kind: "membership"; event: MembershipEvent; handle: string };
+  | { kind: "membership"; event: MembershipEvent; handle: string }
+  | { kind: "handle"; handle: string; at: number };
 
 /**
  * What a receipt attests.
@@ -225,7 +264,11 @@ export function isControl(body: Content): boolean {
     // the vault has no business archiving a name that will be replaced, and the receipt cursor
     // must not advance on it or two clients renaming each other would acknowledge forever. What
     // it gives up in exchange is the stamp, which is why it carries its own.
-    body.kind === "profile"
+    body.kind === "profile" ||
+    // A handle claim is control for all three of the same reasons, and carries its own timestamp
+    // for the same one: `seq` is per conversation, a handle is per account, so two groups would
+    // disagree about which claim came last.
+    body.kind === "handle"
   );
 }
 
@@ -267,6 +310,8 @@ function encodeBody(body: Content): Uint8Array {
       return encodeProfile(body.name, body.at);
     case "membership":
       return encodeMembership(body.event, body.handle);
+    case "handle":
+      return encodeHandle(body.handle, body.at);
   }
 }
 
@@ -363,6 +408,34 @@ const PROFILE_NAME_MAX_BYTES = 64;
  */
 const PROFILE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
+/**
+ * Encodes a handle claim and the moment its owner says they took it.
+ *
+ * The ceiling is the handle format's own — `^[a-z0-9_]{3,32}$` — checked here because this is the
+ * last place that sees the bytes. A claim longer than that is one every recipient is required to
+ * refuse, so failing on our own side is the one failure the sender can actually see.
+ */
+export function encodeHandle(handle: string, at: number): Uint8Array {
+  const body = new TextEncoder().encode(handle);
+  if (body.length > HANDLE_MAX_BYTES) throw new Error("handle too long");
+
+  const out = new Uint8Array(1 + 8 + body.length);
+  out[0] = TYPE_HANDLE;
+  new DataView(out.buffer).setBigUint64(1, BigInt(Math.max(0, Math.trunc(at))), false);
+  out.set(body, 9);
+  return out;
+}
+
+/**
+ * The wire ceiling on a handle, in bytes.
+ *
+ * Duplicated from `handle.ts` rather than imported, for the reason `PROFILE_NAME_MAX_BYTES` gives
+ * next to it: this module is the format, and a format that read its limits out of a validation
+ * module would change shape the day somebody relaxed the user-facing rule. Here it is a hard
+ * bound on bytes anybody may put on the wire, a peer we did not write included.
+ */
+const HANDLE_MAX_BYTES = 32;
+
 export function encodeAttachment(ref: AttachmentRef): Uint8Array {
   const body = new TextEncoder().encode(JSON.stringify(ref));
   const out = new Uint8Array(1 + body.length);
@@ -456,6 +529,24 @@ function decodeBody(bytes: Uint8Array): Content {
         event,
         handle: new TextDecoder().decode(body.subarray(1)),
       };
+    }
+
+    case TYPE_HANDLE: {
+      if (body.length < 8) throw new Error("truncated handle timestamp");
+      const handle = body.subarray(8);
+      if (handle.length > HANDLE_MAX_BYTES) throw new Error("badly sized handle");
+
+      const declared = Number(new DataView(body.buffer, body.byteOffset).getBigUint64(0, false));
+      const now = Date.now();
+      // Clamped, never rejected — the argument is the one on `TYPE_PROFILE`, and it applies
+      // unchanged: a date far in the future is a pin, and taking the receipt time defeats it
+      // without needing to tell a pin from a skewed clock.
+      const at = declared > now + PROFILE_CLOCK_SKEW_MS ? now : declared;
+
+      // Not validated against the handle format here. `content.ts` decodes bytes and does not
+      // know what a screen is; the receiving end in `session.ts` is what decides whether a claim
+      // is well-formed enough to show.
+      return { kind: "handle", handle: new TextDecoder().decode(handle), at };
     }
 
     case TYPE_PROFILE: {

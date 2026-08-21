@@ -3,7 +3,7 @@ import { useCallback, useState } from "react";
 import { LeaveGroupDialog } from "@/components/Group";
 import { PresenceBadge } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
-import { formatHandle, nameMatches, nameOf, titleOf } from "@/lib/naming";
+import { type NameSources, handleOf, nameMatches, nameOf, titleOf } from "@/lib/naming";
 import { useBinding, useRunBinding } from "@/app/Shortcuts";
 import { say } from "@/lib/i18n";
 import { ContextMenu } from "@/ui/ContextMenu";
@@ -62,7 +62,12 @@ const FILTER_FIELD_ID = "rail-filter";
  * as the latest news of a conversation says nothing about it. An attachment shows its name — the
  * name is content, encrypted like the rest, and it is what the person would recognise.
  */
-function preview(view: ConversationView): { text: string; mine: boolean } {
+function preview(
+  view: ConversationView,
+  // Threaded in rather than read from a hook: this is a plain function, and the one line it needs
+  // the sources for is the membership sentence, which names an account and must not print an id.
+  sources: NameSources,
+): { text: string; mine: boolean } {
   // Anything still in the outbox is ours by definition — that is what the outbox is.
   const queued = view.outbox.at(-1);
   if (queued) return { text: queued.text, mine: true };
@@ -81,7 +86,7 @@ function preview(view: ConversationView): { text: string; mine: boolean } {
       return {
         mine: false,
         text: say(`membership.preview.${content.event}`, {
-          subject: formatHandle(content.handle),
+          subject: handleOf(content.handle, sources),
         }),
       };
     }
@@ -411,7 +416,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
           >
             {listed.map((view) => {
               const unread = session.unreadIn(view);
-              const line = preview(view);
+              const line = preview(view, names);
               const last = session.lastActivityIn(view);
               const selected = currentKey === view.key;
               // The single other person, when there is exactly one *and* this is not a group.
@@ -576,7 +581,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                       onSelect={() => {
                         if (only === undefined) return;
                         void navigator.clipboard
-                          .writeText(formatHandle(only.handle))
+                          .writeText(handleOf(only.handle, names))
                           .then(() => report.done("Handle copied"));
                       }}
                     >

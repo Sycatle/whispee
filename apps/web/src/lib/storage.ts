@@ -27,8 +27,27 @@ const STORE = "device";
 
 interface StoredSession {
   deviceId: string;
-  /** The account's handle. Plaintext server-side, like the MLS credential. */
+  /**
+   * What identifies the account: the fingerprint of its genesis key. Plaintext server-side, like
+   * the MLS credential, which now carries this rather than the handle.
+   *
+   * Optional, and that is the migration door rather than an oversight. A state written before
+   * accounts stopped being named by their handle has no such field, and **absent has to mean
+   * old** — see `Session.open`, which refuses those instead of reinterpreting them under a key
+   * they were never written with.
+   */
+  account?: string;
+  /** What the account answers to. A label, releasable and renameable. */
   handle: string;
+  /**
+   * What other accounts say they are called, keyed by account id.
+   *
+   * The counterpart of `profiles`, and it exists for the same reason one level down: the MLS
+   * credential carries an id now, so a handle is no longer something every member of a room
+   * already has. It is a claim, believed as much as a display name is — never read back from the
+   * server, which is where the directory lives and where the lying would be free.
+   */
+  handles?: Record<string, { handle: string; at: number }>;
   /**
    * The account seed, **encrypted** with the same key as the MLS state.
    *

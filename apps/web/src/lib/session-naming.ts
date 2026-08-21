@@ -34,6 +34,7 @@
  * decide what happens to a state written under the old key — see `session-codec.ts`, which is the
  * only version gate that exists, and note that it guards the native file only.
  */
+import { normalize, validate as validateHandle } from "./handle.ts";
 import { sanitize, validate } from "./display-name.ts";
 import type { StoredSession } from "./storage";
 
@@ -46,6 +47,15 @@ export interface Profile {
 export class Names {
   private own: string | undefined;
   private declared: Record<string, Profile> = {};
+  /**
+   * The handle each account says it answers to, keyed by account id.
+   *
+   * A separate record from `declared` rather than a field on `Profile`, because the two arrive
+   * separately and either can exist without the other: somebody may set a display name and never
+   * have their handle claim reach us, or the reverse. Folding them together would make a missing
+   * half look like a rename to the empty string.
+   */
+  private claimed: Record<string, Profile> = {};
   private given: Record<string, string> = {};
 
   /**
@@ -62,6 +72,7 @@ export class Names {
 
     names.own = stored.displayName;
     names.declared = stored.profiles ?? {};
+    names.claimed = mapHandles(stored.handles);
     names.given = stored.petnames ?? {};
 
     return names;
@@ -78,6 +89,16 @@ export class Names {
     return {
       ...(this.own === undefined ? {} : { displayName: this.own }),
       ...(Object.keys(this.declared).length === 0 ? {} : { profiles: this.declared }),
+      ...(Object.keys(this.claimed).length === 0
+        ? {}
+        : {
+            handles: Object.fromEntries(
+              Object.entries(this.claimed).map(([account, { name, at }]) => [
+                account,
+                { handle: name, at },
+              ]),
+            ),
+          }),
       ...(Object.keys(this.given).length === 0 ? {} : { petnames: this.given }),
     };
   }
@@ -164,11 +185,42 @@ export class Names {
     return true;
   }
 
+  /** The handles peers claim for themselves, keyed by account id. */
+  get handles(): Readonly<Record<string, string>> {
+    return Object.fromEntries(
+      Object.entries(this.claimed).map(([account, { name }]) => [account, name]),
+    );
+  }
+
+  /**
+   * Records the handle a peer claims.
+   *
+   * Last-writer-wins on the declared instant, exactly like `absorb`, and refused rather than
+   * repaired when it is not a handle: this is a claim from a peer we did not write, and a string
+   * outside `^[a-z0-9_]{3,32}$` is one the interface must not draw with an `@` in front of it.
+   *
+   * What it deliberately does **not** check is whether the claim is *true*. The server enforces
+   * uniqueness and this client cannot see that enforcement without asking — which is the one
+   * thing the identity design refuses to do at render time. Two members claiming one handle is a
+   * collision `compactNameOf` already knows how to collapse.
+   */
+  absorbHandle(account: string, declared: string, at: number): boolean {
+    const known = this.claimed[account];
+    if (known && known.at >= at) return false;
+
+    const handle = normalize(declared);
+    if (validateHandle(handle) !== null) return false;
+
+    this.claimed[account] = { name: handle, at };
+    return true;
+  }
+
   /** Drops everything. Called when the local identity is erased. */
   forget(): void {
     this.own = undefined;
     this.declared = {};
     this.given = {};
+    this.claimed = {};
   }
 }
 
@@ -186,4 +238,18 @@ function clean(name: string): string | undefined {
   if (error !== null) throw new Error(error);
 
   return cleaned;
+}
+
+/**
+ * Reads the stored handle claims back into the shape this class holds them in.
+ *
+ * The disk field is `{ handle, at }` and the in-memory one is `{ name, at }` — the same `Profile`
+ * as a display name, because a handle claim behaves identically: last writer wins on a declared
+ * instant, and nothing about it is evidence. The disk keeps the truthful field name; sharing one
+ * shape in memory is what lets both go through the same comparison.
+ */
+function mapHandles(stored: Record<string, { handle: string; at: number }> | undefined): Record<string, Profile> {
+  return Object.fromEntries(
+    Object.entries(stored ?? {}).map(([account, { handle, at }]) => [account, { name: handle, at }]),
+  );
 }

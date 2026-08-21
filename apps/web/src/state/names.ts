@@ -28,5 +28,5 @@ export function useNames(): NameSources {
       ? session.profiles
       : { ...session.profiles, [session.handle]: { name: session.displayName, at: 0 } };
 
-  return { petnames: session.petnames, profiles };
+  return { petnames: session.petnames, profiles, handles: session.handles };
 }

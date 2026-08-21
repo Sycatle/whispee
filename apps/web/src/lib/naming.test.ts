@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type NameSources, compactNameOf, nameMatches, nameOf, titleOf } from "./naming.ts";
+import { compactNameOf, handleOf, nameMatches, nameOf, titleOf, type NameSources } from "./naming.ts";
 
 /** Builds the two records `Session` holds, from a terser description. */
 function sources(
@@ -172,5 +172,61 @@ test("our own name is disambiguated against the group like everybody else's", ()
   assert.equal(
     titleOf(view, claims, ["charlie8295", "dana4417"], "me1234"),
     "@charlie8295, Dana, @me1234",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// handleOf: an account is a key, and a handle is a claim about it
+// ---------------------------------------------------------------------------
+
+const ID = "d52c15beb77ff1bd33ba58ad12345678";
+
+test("an account shows the handle it claims", () => {
+  assert.equal(handleOf(ID, { petnames: {}, profiles: {}, handles: { [ID]: "bob5194" } }), "@bob5194");
+});
+
+test("an account nobody has heard from shows a short form of its id", () => {
+  // Not a blank and not thirty-two hexadecimal characters in a line of prose. 64 bits, grouped in
+  // fours, matching `attest::short_id` — legible, comparable at a glance, and honest about being
+  // an identifier rather than a name.
+  assert.equal(handleOf(ID, { petnames: {}, profiles: {} }), "d52c 15be b77f f1bd");
+});
+
+test("something that is not an id comes back with the sigil", () => {
+  // The least surprising answer, and what every call site did before ids existed.
+  assert.equal(handleOf("bob", { petnames: {}, profiles: {} }), "@bob");
+});
+
+test("a name is shown over a claimed handle, and the handle stays beside it", () => {
+  const sources = { petnames: {}, profiles: { [ID]: { name: "Bob" } }, handles: { [ID]: "bob5194" } };
+  assert.deepEqual(nameOf(ID, sources), {
+    primary: "Bob",
+    secondary: "@bob5194",
+    isHandle: false,
+  });
+});
+
+test("an unnamed account falls back to the short id rather than to its raw one", () => {
+  const shown = nameOf(ID, { petnames: {}, profiles: {} });
+  assert.equal(shown.primary, "d52c 15be b77f f1bd");
+  assert.equal(shown.isHandle, true);
+});
+
+test("a display name that reads as another member's claimed handle loses", () => {
+  // The impersonation `compactNameOf` has always caught, moved to where the anchor now lives:
+  // since the credential stopped carrying the handle, what is on screen is what people claim.
+  const other = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const sources = {
+    petnames: {},
+    profiles: { [ID]: { name: "bob5194" } },
+    handles: { [other]: "bob5194" },
+  };
+  assert.equal(compactNameOf(ID, sources, [ID, other]), "d52c 15be b77f f1bd");
+});
+
+test("a search term finds an account by the handle it claims", () => {
+  assert.equal(
+    nameMatches(ID, { petnames: {}, profiles: {}, handles: { [ID]: "bob5194" } }, "bob"),
+    true,
   );
 });

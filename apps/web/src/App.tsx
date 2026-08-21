@@ -1,3 +1,4 @@
+import { StoredSessionTooOld } from "@/lib/session-types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/app/Shell";
@@ -149,7 +150,22 @@ function Boot() {
         // Unreadable state must not block the startup screen: better to offer a fresh identity
         // than to leave an eternal "Loading…".
         console.error("could not restore session", e);
-        report.error("Could not restore the previous session. Erase the identity to start over.");
+
+        /*
+          A state that is merely unreadable and a state that is *out of date* are different
+          things to be told.
+
+          The generic sentence is right for a corrupted or wrongly-keyed blob: nobody can say what
+          was in it. `StoredSessionTooOld` can — the accounts were rekeyed, and what did not
+          survive is the nicknames and the verifications. Somebody whose verifications are gone
+          has to know it, or they will go on believing they have checked a key they have not, and
+          that is the one misunderstanding this application cannot afford to leave standing.
+        */
+        report.error(
+          e instanceof StoredSessionTooOld
+            ? e.message
+            : "Could not restore the previous session. Erase the identity to start over.",
+        );
       })
       .finally(() => setBusy(false));
   }, [report]);

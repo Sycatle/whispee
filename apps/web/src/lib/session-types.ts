@@ -314,6 +314,31 @@ export function freshSignalState(): Pick<
  * shrugged at a shrinking log would not be checking anything — but it is a real change in what
  * a local reset costs, and it should not be found out the hard way.
  */
+/**
+ * The stored state predates account ids, and is refused rather than reinterpreted.
+ *
+ * # Why this is an error and not a silent reset
+ *
+ * `profiles`, `petnames`, `verified` and `knownDevices` were `Record<handle, …>` on disk and are
+ * keyed by account id now. Reading the old shape under the new key raises nothing — it simply
+ * comes back empty. Petnames disappear, which is an annoyance; `verified` comes back empty, which
+ * is a **false alarm**: every correspondent reads as never verified, and the banner that exists
+ * to report a key substitution goes up on accounts that are entirely legitimate.
+ *
+ * A person whose verifications are gone has to be told, or they will believe they have checked
+ * something they have not. So the failure is loud, and the interface says what was lost.
+ */
+export class StoredSessionTooOld extends Error {
+  constructor() {
+    super(
+      "This device's saved session was written before accounts had identifiers of their own, " +
+        "and cannot be read under the new one. Signing in again rebuilds it — nicknames and " +
+        "verifications will have to be redone.",
+    );
+    this.name = "StoredSessionTooOld";
+  }
+}
+
 export class LogProofRefused extends Error {
   /**
    * Declared and assigned rather than written as a constructor parameter property.

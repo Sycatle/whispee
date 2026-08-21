@@ -85,8 +85,10 @@ export {
   type VerificationState,
 } from "./session-types";
 
+import { isAccountId } from "./chain";
 import {
   LogProofRefused,
+  StoredSessionTooOld,
   freshSignalState,
   touch,
   type Preferences,
@@ -100,6 +102,30 @@ import {
 export class Session {
   private constructor(
     readonly deviceId: string,
+    /**
+     * What identifies this account, everywhere the protocol has to be sure.
+     *
+     * The fingerprint of the account's genesis key — see `crates/attest/src/lib.rs::account_id`.
+     * It is the subject of the MLS credential, the prefix of the device id, the subject of every
+     * attestation, the key of the roster and of the roles, and the key of every record below that
+     * used to be keyed by handle.
+     *
+     * **Persisted, never recomputed.** A rotation generates a fresh seed, so `account.id()` on the
+     * account we hold after one returns a *different* id: it is a new genesis. What ties the two
+     * together is the signed chain, not arithmetic on the key in hand — so the id is state, and
+     * deriving it would silently rename the account on its first rotation.
+     *
+     * Named `accountId` and not `account` because `account` is already the *key*, a few lines
+     * down. The two are not interchangeable and the collision would be the kind that type-checks.
+     */
+    readonly accountId: string,
+    /**
+     * The name this account answers to.
+     *
+     * A label, and only that, since `0014_account_identity.sql`: unique among the living, but
+     * releasable and renameable. Nothing in the protocol is allowed to depend on it — it is here
+     * so the interface has something to show, and so the account can say what it now goes by.
+     */
     readonly handle: string,
     private readonly client: Client,
     private account: AccountKey,
@@ -272,10 +298,21 @@ export class Session {
     const crypto = await loadCrypto();
     const created = crypto.AccountKey.generate() as CreatedAccount;
 
-    await Api.createAccount(handle, created.identityKey);
+    // The id comes back from the server, which derives it from the key in this very request
+    // rather than accepting one from us. Nothing is taken on trust by that: it is a hash of
+    // `created.identityKey`, and the assertion below is what says so out loud.
+    const id = await Api.createAccount(handle, created.identityKey);
 
     const account = crypto.AccountKey.restore(created.phrase);
-    const session = await Session.attach(crypto, account, handle);
+    if (crypto.accountId(created.identityKey) !== id) {
+      // Not a defensive flourish. If this ever fires, the server has named our account something
+      // other than our key — which is the one substitution the whole identity design exists to
+      // make impossible, and continuing would mean registering a device under somebody else's
+      // name.
+      throw new Error("The server named this account something other than its own key.");
+    }
+
+    const session = await Session.attach(crypto, account, id, handle);
     return [session, created.phrase];
   }
 
@@ -297,19 +334,32 @@ export class Session {
    */
   static async fromSeed(handle: string, seed: Uint8Array, anchor?: Anchor): Promise<Session> {
     const crypto = await loadCrypto();
-    return Session.attach(crypto, crypto.AccountKey.fromSeed(seed), handle, anchor);
+    return Session.attach(
+      crypto,
+      crypto.AccountKey.fromSeed(seed),
+      await Api.resolveHandle(handle),
+      handle,
+      anchor,
+    );
   }
 
   static async restoreFromPhrase(handle: string, phrase: string): Promise<Session> {
     const crypto = await loadCrypto();
     const account = crypto.AccountKey.restore(phrase.trim());
-    return Session.attach(crypto, account, handle);
+    // The directory, and the one moment this path has to consult it.
+    //
+    // The id cannot be derived from the phrase: after a rotation the phrase is the *new* one,
+    // whose genesis is not the one the account is named after. So it is asked for — and the
+    // answer needs no trust, because a wrong id makes the registration below fail: the server
+    // verifies our attestation against that account's key, which we would not hold.
+    return Session.attach(crypto, account, await Api.resolveHandle(handle), handle);
   }
 
   /** Registers a device under an account whose key we already hold. */
   private static async attach(
     crypto: Crypto,
     account: AccountKey,
+    id: string,
     handle: string,
     /**
      * Anchor forced from outside, for migration: it registers a native device from a web device,
@@ -323,9 +373,13 @@ export class Session {
     const anchor = imposed ?? (await newAnchor());
     const authKey = await anchor.cipher.authPublicKey();
 
-    // The id is qualified by the handle: without that the namespace would be global and the
-    // first comer would grab "desktop" and "mobile" for everyone. The server enforces this
-    // prefix, it is not a client-side convention.
+    // The device id is qualified by the **account id**: without that the namespace would be
+    // global and the first comer would grab "desktop" and "mobile" for everyone. The server
+    // enforces this prefix, it is not a client-side convention.
+    //
+    // It used to be the handle, which meant every device id an account ever issued was tied to
+    // whatever it was called at the time — and that was one of the reasons a handle could not be
+    // renamed. An id never moves, so a rename now leaves every one of them intact.
     //
     // The name is detected, never asked for, and varied on collision: an account may legitimately
     // own two computers, and that is not the user's problem to solve.
@@ -333,20 +387,22 @@ export class Session {
     let deviceId = "";
 
     for (const name of deviceNameCandidates(detectDeviceKind())) {
-      deviceId = `${handle}:${name}`;
+      deviceId = `${id}:${name}`;
 
-      // The MLS credential carries the **handle**, not the device id: the peer is what we
-      // display, and it is in the public tree in the clear anyway. A device is told apart by its
-      // signature key, and names itself in the attestation.
-      const candidate = crypto.Client.create(handle);
+      // The MLS credential carries the **account id**, not the device id and no longer the
+      // handle: it is the account that a peer is, and a credential naming something renameable
+      // would report an identity change on every rename — MLS doing exactly its job, over a
+      // cosmetic edit. A device is told apart by its signature key, and names itself in the
+      // attestation.
+      const candidate = crypto.Client.create(id);
       const mlsKey = candidate.signatureKey();
 
       // Both keys are attested together. Attesting them separately would allow recombining a
       // legitimate device's attestation with a hostile device's MLS key.
-      const attestation = account.attest(handle, deviceId, authKey, mlsKey);
+      const attestation = account.attest(id, deviceId, authKey, mlsKey);
 
       try {
-        await Api.register(deviceId, handle, authKey, mlsKey, attestation);
+        await Api.register(deviceId, id, authKey, mlsKey, attestation);
         client = candidate;
         break;
       } catch (error) {
@@ -364,6 +420,7 @@ export class Session {
     const api = new Api(deviceId, anchor.cipher);
     const session = new Session(
       deviceId,
+      id,
       handle,
       client,
       account,
@@ -500,6 +557,32 @@ export class Session {
     const stored = await anchor.store.load();
     if (!stored?.state) return null;
 
+    /*
+      The migration door, and it is deliberately shaped rather than versioned.
+
+      Accounts used to be named by their handle: the MLS credential carried it, the device id was
+      prefixed with it, and `profiles`, `petnames`, `verified` and `knownDevices` were all
+      `Record<handle, …>` on disk. They are keyed by account id now, and a state written under the
+      old key **does not fail to load** — it loads and comes back empty. Petnames vanish. Worse,
+      `verified` comes back empty, which is not a missing feature but a false alarm: every
+      correspondent shows as never verified, and the banner that exists to report a substitution
+      goes up on accounts that are perfectly legitimate. Once people have learnt to click through
+      that banner, it protects nobody.
+
+      So the state is refused rather than reinterpreted, and refused loudly: the caller shows what
+      was lost. Somebody whose verifications are gone has to know it in order to redo them.
+
+      **Why the shape and not `VERSION`.** `VERSION` guards the native path only — `storage.ts`
+      reads IndexedDB with a plain `get` and compares nothing, and `DB_VERSION` is the schema's,
+      not the content's. A version field would work for the *next* migration and does nothing for
+      this one, because the states that must be refused are precisely those that have no version
+      to read. Absent has to mean old, not unknown. The field is written from now on so the next
+      door can be a cheaper one.
+    */
+    if (stored.account === undefined || !isAccountId(stored.account)) {
+      throw new StoredSessionTooOld();
+    }
+
     if (stored.lock && opener === undefined) {
       throw new Error("This session is locked: a password is required.");
     }
@@ -557,6 +640,7 @@ export class Session {
 
     const session = new Session(
       stored.deviceId,
+      stored.account,
       stored.handle,
       client,
       account,
@@ -846,6 +930,7 @@ export class Session {
     await this.anchor.store.save(
       await composeStored({
         deviceId: this.deviceId,
+        account: this.accountId,
         handle: this.handle,
         accountSeed: this.account.exportSeed(),
         mlsState: this.client.exportState(),
@@ -889,8 +974,8 @@ export class Session {
    * the server: without that check, it would only have to slip in a device it controls to read
    * every conversation of the account.
    */
-  async resolve(handle: string): Promise<ResolvedAccount> {
-    const account = await resolveAccount(this.api, this.crypto, handle);
+  async resolve(account: string): Promise<ResolvedAccount> {
+    const resolved = await resolveAccount(this.api, this.crypto, account);
 
     // Attestations prove a device belongs to the account. They say nothing about the ACCOUNT
     // key, which we are discovering here for the first time — that is the hole the log closes.
@@ -898,8 +983,8 @@ export class Session {
       const { verdict, head } = await log.verifyAccount(
         this.api,
         this.crypto,
-        handle,
-        account.identityKey,
+        account,
+        resolved.identityKey,
         this.seenHead,
         PINNED_LOG_KEY,
       );
@@ -918,7 +1003,7 @@ export class Session {
         if (advanced) await this.persist();
       } else {
         this.raiseLogAlert(verdict.reason);
-        throw new LogProofRefused(handle, verdict.reason);
+        throw new LogProofRefused(account, verdict.reason);
       }
     } catch (error) {
       // A refusal is not a deferral. It has already been recorded and it must reach the caller:
@@ -931,7 +1016,7 @@ export class Session {
       console.warn("log verification deferred", error);
     }
 
-    return account;
+    return resolved;
   }
 
   /**
@@ -1089,8 +1174,13 @@ export class Session {
    * admin.
    */
   async startConversation(handles: string | string[]): Promise<ConversationView> {
-    const wanted = [...new Set(typeof handles === "string" ? [handles] : handles)].filter(
-      (handle) => handle !== this.handle,
+    // The one boundary where a **handle** enters this class, and the only place the directory is
+    // consulted. Everything downstream is an account id: a name is resolved once, here, rather
+    // than carried through the protocol where it would have to be re-resolved — and re-resolving
+    // is what would let the server change its mind about who somebody is between two calls.
+    const named = [...new Set(typeof handles === "string" ? [handles] : handles)];
+    const wanted = (await Promise.all(named.map((handle) => Api.resolveHandle(handle)))).filter(
+      (account) => account !== this.accountId,
     );
     if (wanted.length === 0) throw new Error("no recipient given.");
 
@@ -1100,24 +1190,24 @@ export class Session {
     // members: messages spread across the two depending on which one was selected, and the user
     // concludes messages are being lost. Nothing in the protocol forbids it — it is up to the
     // app to decide that a conversation is identified by its participants.
-    const existing = derive.matchingConversation(this.conversations.values(), wanted, this.handle);
+    const existing = derive.matchingConversation(this.conversations.values(), wanted, this.accountId);
     if (existing) return existing;
 
     const peers: ResolvedAccount[] = [];
-    for (const handle of wanted) {
-      const peer = await this.resolve(handle);
+    for (const account of wanted) {
+      const peer = await this.resolve(account);
 
       if (peer.rejected.length > 0) {
         // We refuse to open the conversation rather than quietly drop the intruder. The server
         // served a device it could not have produced: that is the signal we were looking for, and
         // keeping quiet about it would cancel out the whole point of the machinery.
         throw new Error(
-          `The server presented ${peer.rejected.length} unattested device(s) for @${handle}. ` +
+          `The server presented ${peer.rejected.length} unattested device(s) for that account. ` +
             "Conversation refused.",
         );
       }
       if (peer.devices.length === 0) {
-        throw new Error(`@${handle} has no reachable device.`);
+        throw new Error("That account has no reachable device.");
       }
       peers.push(peer);
     }
@@ -1127,7 +1217,7 @@ export class Session {
     // which would freeze it for good.
     const groupId =
       peers.length > 1
-        ? this.client.createGroup(this.handle)
+        ? this.client.createGroup(this.accountId)
         : this.client.createConversation();
 
     const invited: string[] = [];
@@ -1211,7 +1301,7 @@ export class Session {
    */
   private async resolvePeers(view: ConversationView): Promise<ResolvedAccount[]> {
     const handles = [...new Set(view.peers.map((peer) => peer.name))].filter(
-      (handle) => handle !== this.handle,
+      (account) => account !== this.accountId,
     );
 
     const resolved: ResolvedAccount[] = [];
@@ -1344,8 +1434,12 @@ export class Session {
    * in the protocol carries a request, and adding one would be a feature of its own.
    */
   async addAccount(view: ConversationView, handle: string): Promise<void> {
-    if (handle === this.handle) throw new Error("You are already in this conversation.");
-    if (view.accounts.some((account) => account.handle === handle)) {
+    // The second and last boundary where a handle enters this class — `startConversation` is the
+    // other. Resolved once, here, and everything past this line is an account id.
+    const account = await Api.resolveHandle(handle);
+
+    if (account === this.accountId) throw new Error("You are already in this conversation.");
+    if (view.accounts.some((member) => member.handle === account)) {
       throw new Error(`@${handle} is already in this conversation.`);
     }
 
@@ -1356,7 +1450,7 @@ export class Session {
       throw new Error("This conversation cannot take new members. Start a new one instead.");
     }
 
-    const peer = await this.resolve(handle);
+    const peer = await this.resolve(account);
 
     // The same refusal `startConversation` makes, for the same reason: the server served a device
     // it could not have produced. Quietly dropping the intruder and adding the rest would cancel
@@ -1488,8 +1582,8 @@ export class Session {
   async requestLeave(view: ConversationView): Promise<void> {
     const roles = this.roles(view);
 
-    if (roles !== null && roles.admin === this.handle) {
-      const heir = derive.successorOf(view, roles, this.handle);
+    if (roles !== null && roles.admin === this.accountId) {
+      const heir = derive.successorOf(view, roles, this.accountId);
       if (heir === null) {
         throw new Error(
           "You are the admin and the last member: leaving means deleting the conversation.",
@@ -1509,7 +1603,7 @@ export class Session {
     // request another member commits, so between the proposal and the commit we are still in the
     // group — but only just, and a client that committed quickly would take our ability to write
     // with it. Said first, the line is always sent by somebody who is still a member.
-    await this.announce(view, "left", this.handle);
+    await this.announce(view, "left", this.accountId);
 
     const proposal = this.client.leaveGroup(view.groupId);
     const posted = await this.api.postEnvelope(view.groupId, envelope.encodeMls(proposal));
@@ -1563,7 +1657,7 @@ export class Session {
     }
 
     const revokedAt = Math.floor(Date.now() / 1000);
-    const certificate = this.account.revoke(this.handle, deviceId, BigInt(revokedAt));
+    const certificate = this.account.revoke(this.accountId, deviceId, BigInt(revokedAt));
 
     await this.api.revokeDevice(deviceId, certificate, revokedAt);
 
@@ -1608,9 +1702,9 @@ export class Session {
 
     // Signed by the OLD key: it is the one that names its replacement. Without that continuity,
     // anyone could take over someone else's handle.
-    const signature = this.account.rotate(this.handle, created.identityKey, BigInt(rotatedAt));
+    const signature = this.account.rotate(this.accountId, created.identityKey, BigInt(rotatedAt));
 
-    await this.api.rotateAccount(this.handle, created.identityKey, signature, rotatedAt);
+    await this.api.rotateAccount(this.accountId, created.identityKey, signature, rotatedAt);
 
     this.account = this.crypto.AccountKey.restore(created.phrase);
 
@@ -1621,10 +1715,10 @@ export class Session {
     const mlsKey = this.client.signatureKey();
     await Api.register(
       this.deviceId,
-      this.handle,
+      this.accountId,
       authKey,
       mlsKey,
-      this.account.attest(this.handle, this.deviceId, authKey, mlsKey),
+      this.account.attest(this.accountId, this.deviceId, authKey, mlsKey),
     );
 
     // The vault is encrypted under a key derived from the old seed: the entries already stored
@@ -1671,7 +1765,7 @@ export class Session {
   private async propagateOwnDevices(): Promise<void> {
     if (this.conversations.size === 0) return;
 
-    const mine = await this.resolve(this.handle);
+    const mine = await this.resolve(this.accountId);
     const others = mine.devices.filter((device) => device.id !== this.deviceId);
     if (others.length === 0) return;
 
@@ -1754,7 +1848,7 @@ export class Session {
     for (const view of this.conversations.values()) {
       // Every verified revocation, across all accounts — ours included.
       const revoked = new Map<string, string>();
-      for (const account of [...view.accounts, await this.resolve(this.handle)]) {
+      for (const account of [...view.accounts, await this.resolve(this.accountId)]) {
         for (const device of account.revoked) {
           revoked.set(this.crypto.accountFingerprint(device.mlsKey), device.id);
         }
@@ -1976,7 +2070,7 @@ export class Session {
 
   /** State to show on a message we sent: sent, delivered, read. */
   statusOf(view: ConversationView, seq: number): "sent" | "delivered" | "read" {
-    return derive.deliveryStatus(view, seq, this.handle, this.signals.readReceipts);
+    return derive.deliveryStatus(view, seq, this.accountId, this.signals.readReceipts);
   }
 
   /** Peers currently typing, expired ones excluded. */
@@ -2018,7 +2112,7 @@ export class Session {
     view.typingSentAt = now;
 
     const key = this.client.signalKey(view.groupId);
-    const payload = await sealTyping(key, this.handle);
+    const payload = await sealTyping(key, this.accountId);
     await this.emitSignal(view.groupId, payload, posting);
   }
 
@@ -2033,7 +2127,7 @@ export class Session {
     if (!view) return;
 
     const handle = await openTyping(this.client.signalKey(view.groupId), payload);
-    if (handle === undefined || handle === this.handle) return;
+    if (handle === undefined || handle === this.accountId) return;
 
     const now = Date.now();
     view.typing = [...without(fresh(view.typing, now), handle), { handle, at: now }];
@@ -2379,7 +2473,7 @@ export class Session {
       ...new Set(
         [...this.conversations.values()]
           .flatMap((view) => view.accounts.map((account) => account.handle))
-          .filter((handle) => handle !== this.handle),
+          .filter((account) => account !== this.accountId),
       ),
     ];
     await this.presence.refresh(this.api, handles);
@@ -2396,9 +2490,9 @@ export class Session {
    * indefinitely.
    */
   private async acknowledge(view: ConversationView): Promise<void> {
-    const delivered = pending(view.receipts, this.handle, "delivered", view.contentCursor);
+    const delivered = pending(view.receipts, this.accountId, "delivered", view.contentCursor);
     if (delivered !== undefined) {
-      record(view.receipts, this.handle, "delivered", delivered);
+      record(view.receipts, this.accountId, "delivered", delivered);
       await this.sendContent(view, { kind: "receipt", state: "delivered", seq: delivered });
     }
 
@@ -2406,9 +2500,9 @@ export class Session {
     // reciprocity must hold even if one of the two places is forgotten.
     if (!this.signals.readReceipts) return;
 
-    const read = pending(view.receipts, this.handle, "read", view.readCursor);
+    const read = pending(view.receipts, this.accountId, "read", view.readCursor);
     if (read !== undefined) {
-      record(view.receipts, this.handle, "read", read);
+      record(view.receipts, this.accountId, "read", read);
       await this.sendContent(view, { kind: "receipt", state: "read", seq: read });
     }
   }
@@ -2447,6 +2541,15 @@ export class Session {
       // is *true* — it is self-declared, and a petname is the only answer to that.
       if (decode.kind === "profile" && incoming.sender) {
         this.absorbProfile(incoming.sender, decode.name, decode.at);
+      }
+      // The same authentication and the same limit: the *account* comes from the credential, so
+      // nobody can claim a handle on somebody else's behalf; whether they actually hold the one
+      // they claim is a question only the server's directory answers, and asking it at render
+      // time is precisely what this design refuses.
+      if (decode.kind === "handle" && incoming.sender) {
+        if (this.names.absorbHandle(incoming.sender, decode.handle, decode.at)) {
+          for (const view of this.conversations.values()) touch(view);
+        }
       }
       return;
     }
@@ -2561,6 +2664,17 @@ export class Session {
   }
 
   /**
+   * The handle each account claims for itself, keyed by account id.
+   *
+   * What the interface draws where it used to draw the credential's subject. It is a claim, not
+   * evidence — see `TYPE_HANDLE` in `lib/content.ts` — and `naming.ts` falls back to a short form
+   * of the id for anybody whose claim has not arrived.
+   */
+  get handles(): Readonly<Record<string, string>> {
+    return this.names.handles;
+  }
+
+  /**
    * Sets — or clears — the name this device gives somebody else.
    *
    * The counterpart to `setDisplayName`, and its opposite in every way that matters. A display
@@ -2630,7 +2744,7 @@ export class Session {
    * would be pure traffic.
    */
   private async announceProfile(view: ConversationView): Promise<void> {
-    if (this.displayName === undefined || view.profileEpoch === view.epoch) return;
+    if (view.profileEpoch === view.epoch) return;
 
     await this.emitProfile(view);
   }
@@ -2650,11 +2764,22 @@ export class Session {
 
     view.profileEpoch = view.epoch;
 
-    await this.sendContent(view, {
-      kind: "profile",
-      name: this.displayName ?? "",
-      at: Date.now(),
-    });
+    const at = Date.now();
+
+    /*
+      The handle goes out unconditionally; the display name only if there is one.
+
+      They are not the same kind of absence. Having no display name is a choice — the interface
+      falls back to the handle, which is exactly what someone who set none is asking for. Having
+      no handle is not a state an account can be in, and a member who never hears ours is left
+      showing a thirty-two character hexadecimal string where a name belongs. Since the credential
+      stopped carrying it, this message is the only way it reaches the room at all.
+    */
+    await this.sendContent(view, { kind: "handle", handle: this.handle, at });
+
+    if (this.displayName !== undefined) {
+      await this.sendContent(view, { kind: "profile", name: this.displayName, at });
+    }
   }
 
   /**

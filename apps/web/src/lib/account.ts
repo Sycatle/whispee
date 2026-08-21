@@ -30,6 +30,12 @@ import type { Api } from "./api";
 import type { AttestedDevice, Crypto } from "./wasm";
 
 export interface ResolvedAccount {
+  /**
+   * What identifies the account: the fingerprint of its genesis key.
+   *
+   * Was the handle, and the rename is not cosmetic — the attestations below are signed over this
+   * string, so a value that could move would make every one of them expire on a rename.
+   */
   handle: string;
   /** The account's public key. This is what gets compared out of band, via its fingerprint. */
   identityKey: Uint8Array;
@@ -73,9 +79,9 @@ export interface ResolvedAccount {
 export async function resolveAccount(
   api: Api,
   crypto: Crypto,
-  handle: string,
+  account: string,
 ): Promise<ResolvedAccount> {
-  const { identityKey, devices } = await api.listAccountDevices(handle);
+  const { identityKey, devices } = await api.listAccountDevices(account);
 
   const verified: AttestedDevice[] = [];
   const revoked: AttestedDevice[] = [];
@@ -84,7 +90,7 @@ export async function resolveAccount(
   for (const device of devices) {
     const attested = crypto.verifyAttestation(
       identityKey,
-      handle,
+      account,
       device.id,
       device.authKey,
       device.mlsKey,
@@ -106,7 +112,7 @@ export async function resolveAccount(
     // treating it as revoked would mean carrying out the censorship we are trying to detect.
     const certified = crypto.verifyRevocation(
       identityKey,
-      handle,
+      account,
       device.id,
       BigInt(device.revokedAt),
       device.revocation,
@@ -120,7 +126,7 @@ export async function resolveAccount(
   }
 
   return {
-    handle,
+    handle: account,
     identityKey,
     fingerprint: crypto.accountFingerprint(identityKey),
     devices: verified,

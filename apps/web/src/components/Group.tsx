@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { formatHandle } from "@/lib/naming";
+import { handleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { Button } from "@/ui/Button";
 import { ContextMenu } from "@/ui/ContextMenu";
 import { Dialog } from "@/ui/Dialog";
+import { useNames } from "@/state/names";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { useReport } from "@/state/report";
 
@@ -54,6 +55,7 @@ export function useGroupAdmin({
   view: ConversationView;
 }) {
   const session = useSession();
+  const names = useNames();
   const bump = useBump();
   const report = useReport();
 
@@ -189,7 +191,7 @@ export function useGroupAdmin({
         open={pending?.kind === "remove"}
         onOpenChange={(open) => !open && setPending(null)}
         tone="danger"
-        title={pending === null ? "Remove member" : `Remove ${formatHandle(pending.handle)}?`}
+        title={pending === null ? "Remove member" : `Remove ${handleOf(pending.handle, names)}?`}
         description="Removing someone removes all of their devices: the unit is the account, never the device. From the commit onward they decrypt nothing that follows, and re-adding them later does not give the window back."
         actions={
           <>
@@ -205,7 +207,7 @@ export function useGroupAdmin({
                 void action(async () => {
                   await session.removeAccount(view, handle);
                   setPending(null);
-                  report.done(`Removed ${formatHandle(handle)} from the group.`);
+                  report.done(`Removed ${handleOf(handle, names)} from the group.`);
                 });
               }}
             >
@@ -222,7 +224,7 @@ export function useGroupAdmin({
         title={
           pending === null
             ? "Hand the group over"
-            : `Hand the group over to ${formatHandle(pending.handle)}?`
+            : `Hand the group over to ${handleOf(pending.handle, names)}?`
         }
         description="They become the administrator and you do not. There is no way to take it back from this side: only the new administrator can hand it to anybody, including back to you."
         actions={
@@ -239,7 +241,7 @@ export function useGroupAdmin({
                 void action(async () => {
                   await session.setRoles(view, handle, roles.moderators);
                   setPending(null);
-                  report.done(`${formatHandle(handle)} now administers this group.`);
+                  report.done(`${handleOf(handle, names)} now administers this group.`);
                 });
               }}
             >
@@ -276,6 +278,7 @@ export function LeaveGroupDialog({
   onLeft?: () => void;
 }) {
   const session = useSession();
+  const names = useNames();
   const bump = useBump();
   const report = useReport();
   const [busy, setBusy] = useState(false);
@@ -328,7 +331,7 @@ export function LeaveGroupDialog({
             }
           >
             {heir !== null
-              ? `Hand over to ${formatHandle(heir)} and leave`
+              ? `Hand over to ${handleOf(heir, names)} and leave`
               : "Request to leave"}
           </Button>
         </>
@@ -342,7 +345,7 @@ export function LeaveGroupDialog({
         </p>
         {heir !== null && (
           <p>
-            You administer this group: <strong>{formatHandle(heir)}</strong> will succeed you
+            You administer this group: <strong>{handleOf(heir, names)}</strong> will succeed you
             {roles !== null && roles.moderators.includes(heir)
               ? " (moderator, the rank below)"
               : " (longest-standing member)"}

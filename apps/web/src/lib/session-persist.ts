@@ -48,6 +48,15 @@ import type { SeenHead } from "./transparency";
  */
 export interface PersistInput {
   deviceId: string;
+  /**
+   * What identifies the account: the fingerprint of its genesis key.
+   *
+   * Optional in the type, and that is the migration door rather than an oversight. A state
+   * written before `0014_account_identity.sql` has no such field, and **absent has to mean old**,
+   * not unknown — see `Session.open`, which refuses those rather than reinterpreting them.
+   */
+  account?: string;
+  /** What the account answers to. A label since accounts stopped being named by it. */
   handle: string;
   /**
    * The account seed and the MLS state, **in the clear**, as their owners export them.
@@ -123,6 +132,7 @@ export async function composeStored(input: PersistInput): Promise<StoredSession>
   return {
     cursors: Object.fromEntries(views.map((view) => [view.key, view.cursor])),
     deviceId: input.deviceId,
+    account: input.account,
     handle: input.handle,
     // The seed is encrypted like the MLS state: it is worth the whole account.
     accountSeed: await input.seal(input.accountSeed),

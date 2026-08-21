@@ -1,7 +1,7 @@
 import { type ReactNode, useState } from "react";
 
 import { PresenceBadge, PresenceLine } from "@/components/Presence";
-import { formatHandle, nameOf } from "@/lib/naming";
+import { handleOf, nameOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { useNavigate } from "@/routes/Router";
 import { useNames } from "@/state/names";
@@ -60,7 +60,7 @@ export function MiniProfile({
     <Popover
       open={open}
       onOpenChange={setOpen}
-      label={`Profile of ${formatHandle(handle)}`}
+      label={`Profile of ${handleOf(handle, names)}`}
       side="top"
       trigger={children}
     >
@@ -74,7 +74,7 @@ export function MiniProfile({
             {/* The handle always, even when it is what the name already shows. It is the anchor
                 the display name is not, and a card about identity that omits it is decoration. */}
             <span className="truncate font-evidence text-caption text-(--color-ink-muted)">
-              {formatHandle(handle)}
+              {handleOf(handle, names)}
             </span>
             <PresenceLine session={session} handle={handle} />
           </div>

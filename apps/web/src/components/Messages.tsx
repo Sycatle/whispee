@@ -48,7 +48,7 @@ import { dayLabel, timeOf } from "@/lib/datetime";
 import { COMPOSER_ID } from "@/components/ids";
 import { say } from "@/lib/i18n";
 import { addresses } from "@/lib/mention";
-import { compactNameOf, formatHandle } from "@/lib/naming";
+import { compactNameOf, handleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
 import { layout, textOf } from "@/lib/thread";
@@ -1149,6 +1149,7 @@ function AuthorMenu({
 }) {
   const navigate = useNavigate();
   const report = useReport();
+  const names = useNames();
 
   // An unattributed message has nobody to open anything for. Our own turns are *not* excluded:
   // the menu simply says what concerns us, because one face behaving unlike every other for a
@@ -1157,7 +1158,7 @@ function AuthorMenu({
 
   return (
     <ContextMenu trigger={<span className="contents">{children}</span>}>
-      <ContextMenu.Label>{formatHandle(handle)}</ContextMenu.Label>
+      <ContextMenu.Label>{handleOf(handle, names)}</ContextMenu.Label>
       <ContextMenu.Separator />
       {mine ? (
         <ContextMenu.Item
@@ -1178,7 +1179,7 @@ function AuthorMenu({
         icon="copy"
         onSelect={() => {
           void navigator.clipboard
-            .writeText(formatHandle(handle))
+            .writeText(handleOf(handle, names))
             .then(() => report.done("Handle copied"));
         }}
       >

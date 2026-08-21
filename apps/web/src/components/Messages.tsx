@@ -464,7 +464,21 @@ export function Messages({
 
           thread.onKeyDown(event);
         }}
-        className="min-h-0 flex-1 overflow-y-auto py-pane"
+        // Anchored to the bottom, the way every thread anybody has used is: a conversation grows
+        // downwards, so a short one belongs against the composer rather than stranded at the top
+        // of a screen of empty ground.
+        //
+        // `mt-auto` on the first child rather than `justify-end` on the list. They look identical
+        // when the content is short, and they differ in the case that matters: with
+        // `justify-content: flex-end` on a scrolling box, content that overflows runs off the top
+        // and several engines refuse to scroll back to it, so the oldest messages become
+        // unreachable. An automatic margin absorbs the free space when there is some and resolves
+        // to zero when there is none, which is exactly the behaviour wanted and needs no special
+        // case.
+        //
+        // `shrink-0` on the rows because a flex column will otherwise compress its items to fit
+        // rather than overflow, which would squash the messages instead of scrolling them.
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto py-pane [&>*:first-child]:mt-auto [&>li]:shrink-0"
       >
         {rows.map(({ key, message, opensDay, continues, opensUnread }) => {
           // Extracted before the JSX: type narrowing is lost inside a closure, and working

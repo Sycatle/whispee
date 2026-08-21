@@ -6,6 +6,8 @@ import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
 import { Input } from "@/ui/Input";
 import { useDuo } from "@/lib/duo";
+import { normalize, validate } from "@/lib/handle";
+import { handleMessage } from "@/ui/handleMessage";
 import { useOcclusion } from "@/lib/viewport";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
@@ -44,10 +46,29 @@ export function NewConversation() {
     try {
       // Several handles separated by commas open a group. Past one peer, the creator becomes
       // its first administrator.
+      //
+      // `normalize` rather than the `trim().replace(/^@/, "")` that used to be here: that pair
+      // handled the two cases someone thought of, and let through everything else the format
+      // forbids — a capital, a stray colon, a fullwidth character pasted from a phone. The
+      // server refuses those with a 404 on lookup, which reads to the user as "that person does
+      // not exist" when the truth is "you typed it in a shape this system does not use".
       const handles = peer
         .split(",")
-        .map((handle) => handle.trim().replace(/^@/, ""))
+        .map(normalize)
         .filter((handle) => handle.length > 0);
+
+      // Refused here rather than sent. A malformed handle can never match an account — the
+      // server's own CHECK constraint guarantees it — so the round trip is a guaranteed miss,
+      // and the miss comes back as a message about the person instead of a message about the
+      // typing. Naming the first bad one: listing all of them would be a paragraph, and the
+      // person is going to fix them one at a time anyway.
+      const malformed = handles
+        .map((handle) => ({ handle, problem: validate(handle) }))
+        .find((entry) => entry.problem !== null);
+      if (malformed?.problem) {
+        report.error(`"${malformed.handle}" is not a usable handle. ${handleMessage(malformed.problem)}`);
+        return;
+      }
 
       const view = await session.startConversation(handles);
       setPeer("");

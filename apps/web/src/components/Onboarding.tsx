@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { ShowPairingCode, usePairingOffer } from "@/components/Pairing";
+import { ApiError } from "@/lib/api";
+import { MAX_LENGTH as MAX_HANDLE_LENGTH, normalize, suggest, validate } from "@/lib/handle";
 import { Session } from "@/lib/session";
 import { supportsEd25519 } from "@/lib/keys";
 import { Banner } from "@/ui/Banner";
@@ -9,8 +11,34 @@ import { Field } from "@/ui/Field";
 import { Input } from "@/ui/Input";
 import { Textarea } from "@/ui/Textarea";
 import { cn } from "@/ui/cn";
+import { handleMessage } from "@/ui/handleMessage";
 
 type Mode = "create" | "restore" | "pair";
+
+/**
+ * How many alternatives the screen offers before it stops offering.
+ *
+ * Three, and the number is about when to stop rather than when to help. A screen that keeps
+ * producing names as long as they keep colliding is a slot machine: the person stops reading the
+ * suggestions and starts pressing the button, and the handle they end up with is one nobody
+ * chose. After three the field is theirs again — the collision message stays, and the next move
+ * is a name they thought of.
+ */
+const MAX_SUGGESTIONS = 3;
+
+/**
+ * Four random digits, drawn from the CSPRNG rather than from `Math.random`.
+ *
+ * `lib/handle.ts` explains why the suggestion must not be a counter: `charlie2` would tell its
+ * reader that `charlie1` exists. This is the other half — `Math.random` is seeded per context,
+ * so two tabs opened at the same moment would propose the same name and turn a
+ * collision-avoidance mechanism into a collision generator.
+ */
+function draw(): number {
+  const bits = new Uint32Array(1);
+  crypto.getRandomValues(bits);
+  return bits[0] / 2 ** 32;
+}
 
 /**
  * The three ways in, each stated as what it does rather than as what it is called.
@@ -78,28 +106,64 @@ export function Onboarding({
   const [ed25519, setEd25519] = useState<boolean | null>(null);
   /** The phrase produced at creation. Shown once, never shown again afterwards. */
   const [recovery, setRecovery] = useState<{ phrase: string; session: Session } | null>(null);
+  /** An alternative offered after a collision, and how many have been offered so far. */
+  const [alternative, setAlternative] = useState<string | null>(null);
+  const [offered, setOffered] = useState(0);
 
   useEffect(() => {
     void supportsEd25519().then(setEd25519);
   }, []);
 
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
+  // The field keeps whatever was typed and the canonical form is derived, rather than the field
+  // rewriting itself on every keystroke. A field that silently drops the character just typed is
+  // a field that appears broken, and the person never learns which characters this system takes.
+  const canonical = normalize(handle);
+  // Nothing is red before anything is typed: an empty required field is not a mistake, it is a
+  // field waiting its turn.
+  const problem = handle === "" ? null : validate(canonical);
+
+  const enrol = async (chosen: string) => {
     setBusy(true);
+    setAlternative(null);
     try {
       if (mode === "create") {
-        const [session, generated] = await Session.create(handle.trim());
+        const [session, generated] = await Session.create(chosen);
         // The session is not handed over yet: the user has to see the phrase first. Going
         // straight to the conversation would lose it for good.
         setRecovery({ phrase: generated, session });
       } else {
-        onReady(await Session.restoreFromPhrase(handle.trim(), phrase));
+        onReady(await Session.restoreFromPhrase(chosen, phrase));
       }
     } catch (e) {
+      // A 409 here means the handle belongs to a different account key, and only in creation.
+      //
+      // Not to be confused with the reinstall case: claiming a handle again **with the same
+      // key** is idempotent and comes back 200 — that is `routes::create_account`, and it is how
+      // a device that lost its storage gets its account back. `Session.create` generates a fresh
+      // account key every time, so a 409 on this path is never a reinstall, it is somebody
+      // else's name. Recovery goes through `restoreFromPhrase`, which registers a device and
+      // never touches this route, so its 409s are about device ids and get no suggestion.
+      //
+      // Using the 409 as the collision signal creates no leak. The status is already returned by
+      // an open, unauthenticated route and has been since `create_account` was written: anyone
+      // can enumerate taken handles with a POST and a throwaway key, with or without this
+      // screen. That oracle is real and it is **not** fixed here — fixing it means proof of work
+      // or an authenticated creation path, which is a change to the account model rather than to
+      // a form. What this code does is read a signal that already exists.
+      const collision = mode === "create" && e instanceof ApiError && e.status === 409;
+      if (collision && offered < MAX_SUGGESTIONS) {
+        setAlternative(suggest(chosen, draw));
+        setOffered(offered + 1);
+      }
       onError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    await enrol(canonical);
   };
 
   if (recovery) {
@@ -135,21 +199,58 @@ export function Onboarding({
       <form onSubmit={submit} className="flex flex-col gap-pane">
         <Field
           label="Handle"
-          hint="It travels in the clear and is visible to the server and to everyone you talk to. Don't put anything sensitive in it, and above all no phone number and no email address — this system asks for neither."
+          hint="Lowercase letters, digits and underscores, 3 to 32 characters. It travels in the clear and is visible to the server and to everyone you talk to. Don't put anything sensitive in it, and above all no phone number and no email address — this system asks for neither."
+          error={problem === null ? undefined : handleMessage(problem)}
         >
           {(control) => (
             <Input
               id={control.id}
               describedBy={control.describedBy}
+              invalid={control.invalid}
               value={handle}
-              onChange={(e) => setHandle(e.target.value)}
+              onChange={(e) => {
+                setHandle(e.target.value);
+                // A suggestion is about the handle that collided. Once the field says something
+                // else it is an answer to a question nobody is asking any more.
+                setAlternative(null);
+              }}
               placeholder="alice"
               required
-              maxLength={64}
+              // The format's own ceiling, not a round number. The field used to stop at 64,
+              // which let someone type thirty characters that could never be accepted before
+              // anything told them so.
+              maxLength={MAX_HANDLE_LENGTH}
               autoComplete="username"
             />
           )}
         </Field>
+
+        {/*
+          The alternative offered after a collision, adopted in one press.
+
+          A suggestion the user has to retype is not a suggestion, it is a hint — and a hint that
+          costs thirty keystrokes will be ignored in favour of adding a digit by hand, which is
+          the counter this whole mechanism exists to avoid.
+        */}
+        {mode === "create" && alternative !== null && (
+          <div className="flex flex-col gap-snug rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-gutter">
+            <p className="text-caption text-(--color-ink-muted)">
+              That handle is taken. <span className="font-evidence text-(--color-ink)">@{alternative}</span> is
+              free to try.
+            </p>
+            <Button
+              type="button"
+              variant="secondary"
+              busy={busy}
+              onClick={() => {
+                setHandle(alternative);
+                void enrol(alternative);
+              }}
+            >
+              Use @{alternative}
+            </Button>
+          </div>
+        )}
 
         {mode === "restore" && (
           <Field label="Recovery phrase" hint="The twelve words, in order, separated by spaces.">
@@ -173,12 +274,17 @@ export function Onboarding({
           to know what they pressed, and a button whose text changes under a finger is a button
           that appears to have become a different button. Declaring `busy` also reserves the
           spinner's width permanently, so the control does not resize when the wait starts.
+
+          Disabled on the format and not only on emptiness. The server would refuse a malformed
+          handle with a 400, and letting the press through would spend a round trip to say what
+          the field already knows — and say it as a banner at the bottom of the screen rather
+          than under the control that caused it.
         */}
         <Button
           type="submit"
           variant="primary"
           busy={busy}
-          disabled={!handle.trim() || ed25519 !== true}
+          disabled={validate(canonical) !== null || ed25519 !== true}
           className="w-full"
         >
           {mode === "create" ? "Create the account" : "Recover the account"}
@@ -286,12 +392,20 @@ function PairThisDevice({
   const [started, setStarted] = useState(false);
   const { code, seed, confirmation, error } = usePairingOffer(started);
 
+  // Same derivation as the creation form above, and it has to be the same: this field names an
+  // account that already exists, so a handle shaped differently from the one that was created
+  // matches nothing. The two fields used to disagree — this one had no validation at all — and
+  // the failure that produced was a pairing code shown, scanned, and then a registration
+  // refused for a reason that appeared nowhere near the field that caused it.
+  const canonical = normalize(handle);
+  const problem = handle === "" ? null : validate(canonical);
+
   useEffect(() => {
     if (!seed) return;
-    Session.fromSeed(handle.trim(), seed)
+    Session.fromSeed(canonical, seed)
       .then(onReady)
       .catch((e: unknown) => onError(e instanceof Error ? e.message : String(e)));
-  }, [seed, handle, onReady, onError]);
+  }, [seed, canonical, onReady, onError]);
 
   useEffect(() => {
     if (error) onError(error);
@@ -311,15 +425,19 @@ function PairThisDevice({
         </p>
       </div>
 
-      <Field label="Account handle">
+      <Field
+        label="Account handle"
+        error={problem === null ? undefined : handleMessage(problem)}
+      >
         {(control) => (
           <Input
             id={control.id}
             describedBy={control.describedBy}
+            invalid={control.invalid}
             value={handle}
             onChange={(e) => setHandle(e.target.value)}
             placeholder="alice"
-            maxLength={64}
+            maxLength={MAX_HANDLE_LENGTH}
             autoComplete="username"
           />
         )}
@@ -328,7 +446,7 @@ function PairThisDevice({
       <div className="flex flex-col gap-snug">
         <Button
           variant="primary"
-          disabled={!handle.trim()}
+          disabled={validate(canonical) !== null}
           onClick={() => setStarted(true)}
           className="w-full"
         >

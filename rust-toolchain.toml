@@ -1,0 +1,20 @@
+# Pinned toolchain.
+#
+# # Why pin at all
+#
+# The workspace uses edition 2024 and `resolver = "3"`, so it needs a recent compiler — but
+# "recent" is not a version. Without this file, every contributor and both CI workflows build
+# with whatever `stable` happens to be that day, which sits badly next to a project that
+# publishes reproducible, signed releases: a release built from the same source on two different
+# days is not guaranteed to produce the same bytes.
+#
+# It also makes the WebAssembly check in `.github/workflows/test.yml` meaningful. That job
+# rebuilds `crypto-wasm` and compares it to the artefact committed under `apps/web/`; a moving
+# compiler would make it fail for reasons that have nothing to do with the source.
+#
+# Raising this version is a deliberate act: regenerate the WebAssembly module in the same commit,
+# or the check will say so.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

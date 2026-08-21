@@ -162,7 +162,6 @@ function Boot() {
           if (proposed) setMigration(proposed);
           setLocked(false);
         }}
-        onError={report.error}
       />
     );
   }

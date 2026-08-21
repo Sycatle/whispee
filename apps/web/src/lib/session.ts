@@ -8,7 +8,7 @@
 import { type ResolvedAccount, resolveAccount } from "./account";
 import { Api, ApiError, type PostMac } from "./api";
 import { deviceNameCandidates, detectDeviceKind } from "./device";
-import { type PairingCode, awaitPairing, decodePairingCode, encodePairingCode } from "./pairing";
+import { type PairingCode, decodePairingCode } from "./pairing";
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
 import { withoutTone } from "./emoji";
@@ -30,9 +30,8 @@ import {
   clearAll,
 } from "./persistence";
 import { isTauri } from "./platform";
-import { type ReceiptBook, pending, record, statusOf } from "./receipts";
+import { pending, record, statusOf } from "./receipts";
 import {
-  type Typing,
   TYPING_DEBOUNCE_MS,
   fresh,
   openTyping,

@@ -323,6 +323,11 @@ export function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
         </div>
       )}
 
+      {/* The rule wants the grid itself focusable. This one carries a roving tabindex instead
+          (see the cells below): exactly one cell is a tab stop and the arrows move it, which is
+          the pattern the grid role is defined around. Focusing the container as well would add a
+          second tab stop that lands nowhere in particular. */}
+      {/* eslint-disable-next-line jsx-a11y/interactive-supports-focus */}
       <div
         ref={grid}
         role="grid"

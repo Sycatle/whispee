@@ -114,6 +114,14 @@ jobs:
         working-directory: apps/web
         run: pnpm run typecheck
 
+      # Its failure means something different from a broken test: not "this does not work" but
+      # "this does not hold the invariants" — an unnamed control, a role promised and not
+      # implemented, an element made interactive that cannot be reached. The kind of defect that
+      # ships happily and is only met by whoever depends on it.
+      - name: Lint
+        working-directory: apps/web
+        run: pnpm run lint
+
       - name: Tests
         working-directory: apps/web
         run: pnpm test

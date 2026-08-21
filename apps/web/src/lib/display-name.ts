@@ -54,6 +54,9 @@ export const MAX_BYTES = 64;
  * wrote, which is a different name rather than a cleaner one. The collapse below then absorbs the
  * space if there was already one.
  */
+// Control characters are the subject here, not an accident: this is the expression that strips
+// them out of a name somebody else chose.
+// eslint-disable-next-line no-control-regex
 const CONTROLS = /[\u0000-\u001F\u007F-\u009F]/gu;
 
 /**

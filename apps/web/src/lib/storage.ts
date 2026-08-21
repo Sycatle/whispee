@@ -17,7 +17,6 @@
  *
  * The MLS state is encrypted before it gets here (see `wrapState`).
  */
-import { isTauri } from "./platform";
 import type { DeviceKeys } from "./keys";
 import type { LockEnvelope } from "./lock";
 import type { ConversationFlags } from "./session-types";

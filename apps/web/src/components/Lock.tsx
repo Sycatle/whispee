@@ -28,19 +28,20 @@ import { Switch } from "@/ui/Switch";
  * The signature is therefore frozen as it is, and this note exists so that the next person to
  * run the "no session in props" rule down the file list stops here instead of "fixing" it.
  *
- * What this does not solve: it says nothing about `onError`, which is kept for the same reason —
- * there is no `<ReportProvider>` guarantee this early in startup either, so the caller owns the
- * message. It is the caller's error channel, not a second one.
+ * What this does not solve: the screen has no error channel out of it at all, and that is the
+ * point rather than an omission. `submit` presents every failure as a wrong password on purpose —
+ * telling "bad password" apart from "corrupted data" would tell an attacker when they are getting
+ * close — so there is nothing left to report upwards. An `onError` prop used to be threaded in
+ * here from `App.tsx` and was never once called; it promised a channel the security decision
+ * forbids using, so it is gone.
  */
 export function Unlock({
   onUnlocked,
-  onError,
 }: {
   // The migration proposal travels with the session: it comes out of the same startup, and
   // dropping it here would lose it for locked installs — precisely the ones whose state only
   // becomes readable at this moment.
   onUnlocked: (session: Session, migration?: ProposedMigration) => void;
-  onError: (message: string) => void;
 }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -143,6 +144,10 @@ export function Unlock({
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               required
+              // This screen exists to receive a password and holds nothing else to read: it is
+              // rendered when `locked && !session`, so there is no content the focus could be
+              // taken away from. A returning user types straight away.
+              // eslint-disable-next-line jsx-a11y/no-autofocus
               autoFocus
             />
           )}

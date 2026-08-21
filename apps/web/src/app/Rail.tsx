@@ -284,6 +284,11 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             onChange={(e) => setFilter(e.target.value)}
             placeholder="Filter by name or handle"
             aria-label="Filter conversations by name or handle"
+            // The field does not exist until the user presses the search button, so the focus
+            // follows an explicit request rather than stealing it on page load — which is the
+            // case the rule is written against. Not focusing it would make the button take two
+            // actions to do one thing.
+            // eslint-disable-next-line jsx-a11y/no-autofocus
             autoFocus
             className="w-full text-base"
           />

@@ -20,6 +20,7 @@
 import { isTauri } from "./platform";
 import type { DeviceKeys } from "./keys";
 import type { LockEnvelope } from "./lock";
+import type { ConversationFlags } from "./session-types";
 
 const DB_NAME = "whispee";
 const DB_VERSION = 1;
@@ -153,6 +154,61 @@ interface StoredSession {
    * and the flag only records a decision to say more.
    */
   discloseConversationName?: boolean;
+  /**
+   * Per-conversation preferences, indexed by hex group id.
+   *
+   * Same shape as `cursors` and `postingKeys` a few fields up, and for the same reason: the group
+   * id is the only identifier that survives a reload, and a `Map` does not round-trip through
+   * JSON. `session-types.ts` explains why one record holds every flag instead of one record per
+   * flag, and why absence has to be the harmless answer for each of them.
+   *
+   * These never reach the server, exactly like `signals`: which conversations someone pinned or
+   * muted is a ranking of the people they care about, and it would be a new fact about them
+   * rather than one the server already holds.
+   */
+  conversationFlags?: Record<string, ConversationFlags>;
+  /**
+   * The language the interface was last shown in.
+   *
+   * Absent means "follow the system", which is the default and stays the default: a stored value
+   * only ever records a decision to contradict the platform. That is the same three-state shape
+   * as `discloseConversationName`, for the same reason — "not chosen" and "chosen to be the same
+   * as the default" have to stay distinguishable, or changing the default silently overrides a
+   * choice somebody made.
+   */
+  locale?: string;
+  /**
+   * How much of each conversation the local search index actually covers.
+   *
+   * **The coverage, not the index.** The index itself is far too large to live here: `persist()`
+   * re-serialises this whole object on every send, so a field that grows with the history would
+   * make each message cost a re-encryption of everything ever written. The index is stored per
+   * conversation, elsewhere; this is the small map that says which slice of each thread was fed
+   * to it.
+   *
+   * It exists so the interface can be honest. A search that answers "not found" for a message
+   * that exists is worse than no search at all, so the only acceptable behaviour is to state what
+   * was looked at — and that needs a record of what was looked at.
+   */
+  searchCoverage?: Record<string, { from: number; to: number }>;
+  /**
+   * Who is allowed to start a conversation with this account.
+   *
+   * Mirrors the column the server holds, so the interface can show the current setting without a
+   * round trip. **The server is the enforcement point**, not this field: a copy kept locally is a
+   * cache of a decision, never the decision itself.
+   */
+  contactPolicy?: "open" | "known" | "closed";
+  /**
+   * Handles this device refuses to display.
+   *
+   * Local, and therefore weak on purpose — it hides, it does not prevent. Anyone registered can
+   * still add anyone to a group and have envelopes delivered to them; blocking on this side means
+   * declining to read something that exists and is stored. That is why the screen offering it has
+   * to offer `contactPolicy` in the same breath: without the server-side half, a block is a
+   * courtesy to oneself rather than a barrier.
+   */
+  blocked?: string[];
 }
 
 /** What the user agrees to emit. */

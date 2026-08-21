@@ -19,7 +19,7 @@
  * than on a timer of its own, which would hand the server back the second-by-second activity log
  * the stream had taken away from it, for one coloured dot. **Whether** to refresh, which is the
  * user's setting. And **who** to ask about, which means reading `conversations`, and this file
- * does not know what a conversation is. It is given a list of handles.
+ * does not know what a conversation is. It is given a list of account ids.
  *
  * # What it does not solve
  *

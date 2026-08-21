@@ -30,6 +30,22 @@
 //! memory — but a deployment set to `log_statement = all` would see them go by in its logs. The
 //! "nothing reaches the disk" property therefore now depends on a database setting, which is not
 //! the same as being true by construction.
+//!
+//! # Poisoning is ignored, deliberately
+//!
+//! Every `Mutex` here is taken with `unwrap_or_else(|error| error.into_inner())`, the way
+//! [`crate::throttle`] and [`crate::presence`] already do. Propagating the poison instead — the
+//! `expect` that used to sit on each of these locks — turns a single panic anywhere in the
+//! process into a permanent failure of every request that follows: the first thread to unwind
+//! while holding the lock bricks the hub for the lifetime of the process. That amplification is
+//! a denial of service an attacker only has to trigger once.
+//!
+//! What ignoring it does not solve: the state behind the lock may have been left half-written by
+//! the thread that unwound. That is tolerable **here**, and the reason is specific rather than
+//! general — the state is a table of broadcast channels, so the worst inconsistency it can hold
+//! is a channel nobody listens to, which `publish_local` removes on the next publish, or a
+//! missing one, which `subscribe` recreates. A lock guarding an invariant instead of a cache
+//! would deserve the opposite answer.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -150,7 +166,7 @@ impl Hub {
     /// **Must be called from a tokio runtime**, from which it detaches two tasks.
     pub fn attach(self: &Arc<Self>, pool: PgPool) {
         let (sender, mut receiver) = mpsc::channel::<Notice>(RELAY_CAPACITY);
-        *self.relay.lock().expect("poisoned hub") = Some(sender);
+        *self.relay.lock().unwrap_or_else(|error| error.into_inner()) = Some(sender);
 
         // Outbound: what this instance publishes goes to the others.
         let outbound = pool.clone();
@@ -216,7 +232,7 @@ impl Hub {
 
     /// Opens a listener on a group, creating the channel if it did not exist.
     pub fn subscribe(&self, group_id: &[u8]) -> broadcast::Receiver<Notice> {
-        let mut channels = self.channels.lock().expect("poisoned hub");
+        let mut channels = self.channels.lock().unwrap_or_else(|error| error.into_inner());
         channels
             .entry(group_id.to_vec())
             .or_insert_with(|| broadcast::channel(CAPACITY).0)
@@ -229,7 +245,7 @@ impl Hub {
     /// event stays local. Blocking here would make an envelope post pay for the delay of a
     /// fanout that `crate::stream` already documents as negligible.
     pub fn publish(&self, notice: Notice) {
-        if let Some(relay) = self.relay.lock().expect("poisoned hub").as_ref()
+        if let Some(relay) = self.relay.lock().unwrap_or_else(|error| error.into_inner()).as_ref()
             && relay.try_send(notice.clone()).is_err()
         {
             tracing::debug!("inter-instance relay saturated");
@@ -252,7 +268,7 @@ impl Hub {
             Notice::Envelope { group_id, .. } | Notice::Signal { group_id, .. } => group_id.clone(),
         };
 
-        let mut channels = self.channels.lock().expect("poisoned hub");
+        let mut channels = self.channels.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(sender) = channels.get(&group_id)
             && sender.send(notice).is_err()
         {
@@ -263,7 +279,7 @@ impl Hub {
     /// Number of groups currently listened to. Serves the tests, not the runtime.
     #[cfg(test)]
     fn tracked(&self) -> usize {
-        self.channels.lock().expect("poisoned hub").len()
+        self.channels.lock().unwrap_or_else(|error| error.into_inner()).len()
     }
 }
 
@@ -358,6 +374,43 @@ mod tests {
                 }
                 (before, after) => panic!("the type changed: {before:?} became {after:?}"),
             }
+        }
+    }
+
+
+    /// **The test that pins down what a panic under the lock costs.**
+    ///
+    /// `std::sync::Mutex` poisons on unwind. With the `expect` that used to be here, one panic
+    /// anywhere in the process turned every later `subscribe` and `publish` into a panic of its
+    /// own — a self-amplifying denial of service from a single accident.
+    #[tokio::test]
+    async fn a_poisoned_hub_keeps_serving_its_subscribers() {
+        let hub = Hub::new();
+
+        // The panic below is provoked, so its trace is noise rather than a signal. The hook is
+        // put back immediately: swallowing the panics of the tests that follow would hide real
+        // failures behind a silence this test installed.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let poisoner = Arc::clone(&hub);
+        let unwound = std::thread::spawn(move || {
+            let _held = poisoner.channels.lock().expect("the lock is clean at this point");
+            panic!("a thread unwinding while it holds the hub");
+        })
+        .join();
+
+        std::panic::set_hook(hook);
+
+        assert!(unwound.is_err(), "nothing panicked, so nothing is being tested");
+        assert!(hub.channels.is_poisoned(), "the test no longer reproduces what it describes");
+
+        let mut alice = hub.subscribe(b"group-a");
+        hub.publish(Notice::Envelope { group_id: b"group-a".to_vec(), seq: 3 });
+
+        match alice.recv().await.expect("the channel stays open") {
+            Notice::Envelope { seq, .. } => assert_eq!(seq, 3),
+            other => panic!("expected an envelope, received {other:?}"),
         }
     }
 

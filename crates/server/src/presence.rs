@@ -30,12 +30,53 @@ pub const PRESENCE_REFRESH: Duration = Duration::from_secs(60);
 
 /// In-memory damping, in front of the SQL guard.
 ///
-/// Kept in a `static` rather than in the application state: the attachment router only has
-/// `PgPool` as state, and the `Signed` extractor is generic over `S`. In any case the real
-/// protection is the `WHERE` clause below — it stays correct across several instances, this cache
-/// does not.
+/// Kept in a `static` rather than in the application state: the `Signed` extractor is generic
+/// over `S`, and threading a cache through it would constrain every router that wants to touch
+/// presence. In any case the real protection is the `WHERE` clause below — it stays correct
+/// across several instances, this cache does not.
 static LAST_TOUCH: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Past this many tracked devices, stale entries are swept.
+///
+/// Without it this map holds one entry per device id ever seen, for the lifetime of the process,
+/// and never gives one back: a cache that exists to spare the database a write would have become
+/// a way to fill memory instead. Same reasoning and same number as `throttle::SWEEP_THRESHOLD`,
+/// deliberately — two caches with the same shape and two different ceilings would only invite
+/// the question of which one is right.
+///
+/// The sweep runs on insertion rather than on a timer: a process that has stopped touching
+/// presence has stopped growing the map, so there is nothing to collect and no task worth waking
+/// to discover it.
+///
+/// What it does not do is bound the map at the threshold. An entry younger than
+/// [`PRESENCE_REFRESH`] is still doing its job and is kept, so a burst of more than
+/// `SWEEP_THRESHOLD` distinct devices inside one minute leaves the map above the threshold until
+/// they age out. That is the correct trade — evicting a live entry costs a database write, which
+/// is the only thing this cache exists to avoid.
+const SWEEP_THRESHOLD: usize = 4096;
+
+/// Decides whether this device is due a presence write, and records the decision.
+///
+/// Split out of [`touch`] so it can be tested without a database: what is worth pinning down here
+/// is the damping and the sweep, neither of which involves SQL. Synchronous on purpose — the lock
+/// is never held across an `await`, which is what makes a `std::sync::Mutex` the right one.
+fn is_due(device_id: &str) -> bool {
+    let mut cache = LAST_TOUCH.lock().unwrap_or_else(|e| e.into_inner());
+
+    if cache.len() > SWEEP_THRESHOLD {
+        cache.retain(|_, last| last.elapsed() < PRESENCE_REFRESH);
+    }
+
+    if let Some(last) = cache.get(device_id)
+        && last.elapsed() < PRESENCE_REFRESH
+    {
+        return false;
+    }
+
+    cache.insert(device_id.to_owned(), Instant::now());
+    true
+}
 
 /// Notes that a device is awake, at most once per `PRESENCE_REFRESH`.
 ///
@@ -47,14 +88,8 @@ static LAST_TOUCH: LazyLock<Mutex<HashMap<String, Instant>>> =
 /// account that opted out of presence is never written: the opt-out is honoured here, at the
 /// source, and not by filtering on read.
 pub async fn touch(pool: &PgPool, device_id: &str) -> sqlx::Result<()> {
-    {
-        let mut cache = LAST_TOUCH.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(last) = cache.get(device_id)
-            && last.elapsed() < PRESENCE_REFRESH
-        {
-            return Ok(());
-        }
-        cache.insert(device_id.to_owned(), Instant::now());
+    if !is_due(device_id) {
+        return Ok(());
     }
 
     sqlx::query(
@@ -141,4 +176,92 @@ pub async fn read(pool: &PgPool, device_id: &str, handles: &[String]) -> sqlx::R
     .await?;
 
     Ok(rows.into_iter().map(|(handle, last_seen)| Seen { handle, last_seen }).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`LAST_TOUCH`] is process-wide, so two of these tests running at once would read each
+    /// other's entries. Serialising them is cheaper and clearer than making each one tolerant of
+    /// a map it does not control.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    fn reset() -> std::sync::MutexGuard<'static, ()> {
+        let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        LAST_TOUCH.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        guard
+    }
+
+    fn tracked() -> usize {
+        LAST_TOUCH.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// An entry aged past the refresh window, without waiting for it.
+    fn stale() -> Instant {
+        Instant::now()
+            .checked_sub(PRESENCE_REFRESH * 2)
+            .expect("the process clock is younger than two refresh windows")
+    }
+
+    #[test]
+    fn a_device_is_written_once_per_refresh_window() {
+        let _guard = reset();
+
+        assert!(is_due("alice:laptop"), "the first heartbeat must reach the database");
+        assert!(!is_due("alice:laptop"), "the second would rewrite an unchanged value");
+    }
+
+    #[test]
+    fn one_device_does_not_damp_another() {
+        let _guard = reset();
+
+        assert!(is_due("alice:laptop"));
+        assert!(is_due("bob:phone"), "the damping is per device, not global");
+    }
+
+    /// **The test that pins down the sweep.**
+    ///
+    /// Without it this map grows by one entry per device id ever seen and never shrinks — for the
+    /// whole life of the process. `throttle::Throttle` has carried a threshold for exactly this
+    /// reason since it was written; this cache did not, and the difference was an oversight
+    /// rather than a decision.
+    #[test]
+    fn the_cache_gives_back_what_it_no_longer_needs() {
+        let _guard = reset();
+
+        {
+            let mut cache = LAST_TOUCH.lock().unwrap_or_else(|e| e.into_inner());
+            for device in 0..=SWEEP_THRESHOLD {
+                cache.insert(format!("ghost:{device}"), stale());
+            }
+        }
+
+        assert!(tracked() > SWEEP_THRESHOLD, "the sweep has nothing to trigger it yet");
+
+        assert!(is_due("alice:laptop"), "a device unknown to the cache is always due");
+
+        assert_eq!(tracked(), 1, "only the device that just touched should remain");
+    }
+
+    /// The sweep keeps what is still doing its job.
+    ///
+    /// Evicting an entry younger than [`PRESENCE_REFRESH`] would cost exactly the database write
+    /// the cache exists to avoid — the map would stay small by being useless.
+    #[test]
+    fn the_sweep_spares_the_entries_that_are_still_damping() {
+        let _guard = reset();
+
+        {
+            let mut cache = LAST_TOUCH.lock().unwrap_or_else(|e| e.into_inner());
+            for device in 0..SWEEP_THRESHOLD {
+                cache.insert(format!("ghost:{device}"), stale());
+            }
+            cache.insert("alice:laptop".to_owned(), Instant::now());
+        }
+
+        assert!(is_due("bob:phone"), "an unknown device is due");
+
+        assert!(!is_due("alice:laptop"), "a fresh entry was swept and cost a needless write");
+    }
 }

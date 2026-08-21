@@ -14,6 +14,7 @@ use base64::prelude::BASE64_STANDARD;
 use crypto_core::Account;
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
+use server::throttle::{Claims, Limits, Throttle, Writes};
 use sqlx::PgPool;
 
 /// Keeps each test's data apart.
@@ -46,20 +47,27 @@ pub async fn start() -> TestServer {
         panic!("database unreachable ({e}) — run `docker compose up -d`");
     });
 
-    // Rate limit disabled: the suite creates dozens of accounts within seconds from the
-    // loopback, which no realistic quota would let through. The test that checks the limit
-    // bites builds its own application, with a low quota.
-    start_with(pool, server::throttle::Throttle::per_minute(0), server::throttle::Claims::per_minute(0)).await
+    // Every limit disabled: the suite creates dozens of accounts, publishes KeyPackages and
+    // posts envelopes within seconds from the loopback, which no realistic quota would let
+    // through. Each test that checks one limit bites turns exactly that one back on.
+    start_with(pool, Limits::off()).await
 }
 
-/// Test server with an enforced rate limit.
-pub async fn start_with_throttle(quota: u32) -> TestServer {
+/// Opens the pool the whole harness uses.
+async fn pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
     });
 
-    let pool = server::connect(&database_url).await.unwrap();
-    start_with(pool, server::throttle::Throttle::per_minute(quota), server::throttle::Claims::per_minute(0)).await
+    server::connect(&database_url).await.unwrap_or_else(|e| {
+        panic!("database unreachable ({e}) — run `docker compose up -d`");
+    })
+}
+
+/// Test server with an enforced rate limit.
+pub async fn start_with_throttle(quota: u32) -> TestServer {
+    start_with(pool().await, Limits { throttle: Throttle::per_minute(quota), ..Limits::off() })
+        .await
 }
 
 /// Test server with an enforced KeyPackage claim quota.
@@ -67,12 +75,15 @@ pub async fn start_with_throttle(quota: u32) -> TestServer {
 /// The open-route limit stays disabled: setting up a test's devices consumes several of
 /// them, and the two bounds have nothing to do with each other.
 pub async fn start_with_claim_quota(quota: u32) -> TestServer {
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
-    });
+    start_with(pool().await, Limits { claims: Claims::per_minute(quota), ..Limits::off() }).await
+}
 
-    let pool = server::connect(&database_url).await.unwrap();
-    start_with(pool, server::throttle::Throttle::per_minute(0), server::throttle::Claims::per_minute(quota)).await
+/// Test server with enforced per-device write quotas, every table at the same value.
+///
+/// The other limits stay disabled for the reason above: preparing a device costs open requests,
+/// and mixing the two bounds would make a refusal impossible to attribute.
+pub async fn start_with_write_quota(quota: u32) -> TestServer {
+    start_with(pool().await, Limits { writes: Writes::per_minute(quota), ..Limits::off() }).await
 }
 
 /// A wake emitter that keeps whatever it is handed.
@@ -119,12 +130,7 @@ pub async fn start_with_waker() -> (TestServer, std::sync::Arc<WakerSpy>) {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = server::app_with_waker(
-        pool.clone(),
-        server::throttle::Throttle::per_minute(0),
-        server::throttle::Claims::per_minute(0),
-        spy.clone(),
-    )
+    let app = server::app_with_waker(pool.clone(), Limits::off(), spy.clone())
     .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     tokio::spawn(async move {
@@ -134,18 +140,14 @@ pub async fn start_with_waker() -> (TestServer, std::sync::Arc<WakerSpy>) {
     (TestServer { base_url: format!("http://{addr}"), pool }, spy)
 }
 
-async fn start_with(
-    pool: PgPool,
-    throttle: server::throttle::Throttle,
-    claims: server::throttle::Claims,
-) -> TestServer {
+async fn start_with(pool: PgPool, limits: Limits) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     // `into_make_service_with_connect_info` as in production: without it, the limit's
     // `ConnectInfo` extractor fails and the open routes return an internal error. A harness
     // that served differently from the binary would test its own mock-up.
-    let app = server::app_with(pool.clone(), throttle, claims)
+    let app = server::app_with(pool.clone(), limits)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     tokio::spawn(async move {

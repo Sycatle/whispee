@@ -2655,3 +2655,287 @@ async fn a_removed_token_no_longer_wakes() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(wakes.0.lock().unwrap().is_empty(), "a removed token was used");
 }
+
+// ---------------------------------------------------------------- purge
+
+/// Sixteen random bytes, the length both nonce tables and `pairings.id` require.
+///
+/// Random rather than derived from `unique`: these tests share a database with whatever else is
+/// running against it, and a collision on a primary key would fail the insert for a reason that
+/// has nothing to do with what is being checked.
+fn random_id() -> Vec<u8> {
+    use rand_core::RngCore;
+
+    let mut bytes = vec![0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    bytes
+}
+
+/// **The test that pins down the purge.**
+///
+/// `posting_nonces` and `pairings` had no `DELETE` anywhere in the tree. Every sealed-sender
+/// post added a row plus an index entry, for the lifetime of the deployment — migration 0007
+/// even creates `posting_nonces_used_at_idx`, an index built for a cleanup nobody had written.
+///
+/// The assertions look at named rows and never at the counts the purge returns: the database is
+/// shared, and another test posting an envelope at the same moment would move any total.
+#[tokio::test]
+async fn the_purge_erases_what_has_expired_and_keeps_what_has_not() {
+    let server = start().await;
+
+    let group_id = random_id();
+    let (stale_nonce, fresh_nonce) = (random_id(), random_id());
+
+    for (nonce, age) in [(&stale_nonce, "30 days"), (&fresh_nonce, "1 second")] {
+        sqlx::query(&format!(
+            "INSERT INTO posting_nonces (group_id, nonce, used_at)
+             VALUES ($1, $2, now() - interval '{age}')"
+        ))
+        .bind(&group_id)
+        .bind(nonce)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    }
+
+    let (expired_pairing, live_pairing) = (random_id(), random_id());
+
+    for (id, expiry) in [(&expired_pairing, "-1 minute"), (&live_pairing, "5 minutes")] {
+        sqlx::query(&format!(
+            "INSERT INTO pairings (id, payload, expires_at)
+             VALUES ($1, $2, now() + interval '{expiry}')"
+        ))
+        .bind(id)
+        .bind(b"sealed".as_slice())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    }
+
+    server::purge_once(&server.pool).await.expect("the purge ran");
+
+    let survives = async |table: &str, column: &str, id: &Vec<u8>| -> bool {
+        let found: Option<(i32,)> =
+            sqlx::query_as(&format!("SELECT 1 FROM {table} WHERE {column} = $1"))
+                .bind(id)
+                .fetch_optional(&server.pool)
+                .await
+                .unwrap();
+        found.is_some()
+    };
+
+    assert!(
+        !survives("posting_nonces", "nonce", &stale_nonce).await,
+        "a nonce older than the retention keeps the table growing forever"
+    );
+    assert!(
+        survives("posting_nonces", "nonce", &fresh_nonce).await,
+        "erasing a recent nonce reopens the replay it exists to refuse"
+    );
+
+    assert!(
+        !survives("pairings", "id", &expired_pairing).await,
+        "an expired drop box no reader can see is dead weight"
+    );
+    assert!(
+        survives("pairings", "id", &live_pairing).await,
+        "a pairing still inside its window was destroyed under the user's QR code"
+    );
+}
+
+/// A pairing survives the purge until it expires, and no longer.
+///
+/// Deleting exactly at expiry needs no safety margin, unlike the nonce windows: `claim_pairing`
+/// already filters on `expires_at > now()`, so the row is invisible to every reader before the
+/// purge touches it. The test pins that equivalence — a margin added later would be a
+/// misunderstanding of why there is none.
+#[tokio::test]
+async fn an_expired_pairing_is_already_unreadable_before_it_is_purged() {
+    let server = start().await;
+    let id = random_id();
+
+    sqlx::query(
+        "INSERT INTO pairings (id, payload, expires_at) VALUES ($1, $2, now() - interval '1 second')",
+    )
+    .bind(&id)
+    .bind(b"sealed".as_slice())
+    .execute(&server.pool)
+    .await
+    .unwrap();
+
+    let refused = reqwest::Client::new()
+        .get(format!("{}/v1/pairings/{}", server.base_url, hex::encode(&id)))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(refused.status(), 404, "an expired packet was served");
+}
+
+// ---------------------------------------------------------------- write quotas
+
+/// **The test that pins down the bound on authenticated writes.**
+///
+/// A signature identifies the caller; it does not bound it. One registered device — two open
+/// requests to obtain — could append a hundred KeyPackages per call for as long as it liked, and
+/// the stock is drained one package at a time by people opening conversations, so what is
+/// published mostly stays.
+#[tokio::test]
+async fn a_device_cannot_publish_key_packages_without_end() {
+    let server = common::start_with_write_quota(2).await;
+    let alice = Device::register(&server, &unique("alice")).await;
+
+    let batch = serde_json::json!({ "packages": [BASE64_STANDARD.encode([1u8; 32])] });
+
+    for round in 1..=2 {
+        let response = alice.post("/v1/key-packages", batch.clone()).await;
+        assert!(response.status().is_success(), "top-up {round} should have passed");
+    }
+
+    let refused = alice.post("/v1/key-packages", batch).await;
+    assert_eq!(refused.status(), 429, "the stock could be grown without limit");
+}
+
+/// The same, on the route that matters most to a user.
+///
+/// Note what this does **not** claim to fix: `envelopes` still never shrinks. An envelope
+/// consumes a generation of the MLS application ratchet and the server has no notion of
+/// "delivered", so there is no moment at which deleting one is safe. The quota bounds the rate
+/// at which one device adds to that table, and nothing else.
+#[tokio::test]
+async fn a_device_cannot_post_envelopes_without_end() {
+    let server = common::start_with_write_quota(2).await;
+    let (alice, _bob, group_id) = group_with_two_members(&server).await;
+
+    for round in 1..=2 {
+        let response = alice
+            .post(
+                &group_path(&group_id, "/envelopes"),
+                serde_json::json!({ "payload": BASE64_STANDARD.encode([round as u8]) }),
+            )
+            .await;
+        assert!(response.status().is_success(), "envelope {round} should have passed");
+    }
+
+    let refused = alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([3u8]) }),
+        )
+        .await;
+    assert_eq!(refused.status(), 429, "a single device could fill the table");
+}
+
+/// A quota is per device, so one abuser does not answer for their whole account's peers.
+#[tokio::test]
+async fn one_device_does_not_consume_another_devices_write_quota() {
+    let server = common::start_with_write_quota(1).await;
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+
+    let laptop = alice.device(&server, "laptop").await;
+    let phone = alice.device(&server, "phone").await;
+
+    let batch = serde_json::json!({ "packages": [BASE64_STANDARD.encode([1u8; 32])] });
+
+    assert!(laptop.post("/v1/key-packages", batch.clone()).await.status().is_success());
+    assert_eq!(laptop.post("/v1/key-packages", batch.clone()).await.status(), 429);
+
+    assert!(
+        phone.post("/v1/key-packages", batch).await.status().is_success(),
+        "a second device of the same account was punished for the first"
+    );
+}
+
+/// Each written table carries its own counter.
+///
+/// Sharing one would mean the server silencing an account's conversations because it sent too
+/// many photographs — a failure mode nobody asked for and which no attacker needs to be spared.
+#[tokio::test]
+async fn a_full_attachment_quota_does_not_stop_a_message() {
+    let server = common::start_with_write_quota(1).await;
+    let (alice, _bob, group_id) = group_with_two_members(&server).await;
+
+    const ENCRYPTED: &[u8] = b"already-encrypted";
+    let path = group_path(&group_id, "/attachments");
+    let upload = async || {
+        alice.forge("POST", &path, ENCRYPTED.to_vec(), ENCRYPTED.to_vec(), now(), &path).await
+    };
+
+    assert!(upload().await.status().is_success(), "the first upload was refused");
+    assert_eq!(upload().await.status(), 429, "attachments are not bounded");
+
+    let message = alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([1u8]) }),
+        )
+        .await;
+
+    assert!(message.status().is_success(), "a full attachment quota silenced the account");
+}
+
+// ---------------------------------------------------------------- log head cache
+
+/// **The test that pins down the head cache.**
+///
+/// `/v1/log/sth`, `/v1/log/proof/{handle}` and `/v1/log/consistency` used to read every row of
+/// `log_entries` and re-hash the whole tree, on every call, with no quota in front of them. The
+/// cache they now share is only allowed to exist if it is invisible: the head served after an
+/// append has to be the head a fresh recomputation gives.
+///
+/// The recomputation reads exactly the first `size` leaves in `seq` order rather than all of
+/// them. The database is shared with whatever else is running, and a head of size N covers the
+/// first N leaves of an append-only log — comparing against the whole table would make the test
+/// fail on somebody else's account creation.
+#[tokio::test]
+async fn the_cached_head_matches_a_recomputation_after_an_append() {
+    let server = start().await;
+    let reader = Device::register(&server, &unique("reader")).await;
+
+    // Warms the cache, so that what follows is served from it or not at all.
+    let before: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+    let size_before = before["size"].as_u64().unwrap();
+
+    // An account creation appends a leaf, inside the transaction that writes the account.
+    TestAccount::create(&server, &unique("newcomer")).await;
+
+    let after: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+    let size_after = after["size"].as_u64().unwrap();
+
+    assert!(size_after > size_before, "the cache survived an append it should have noticed");
+
+    let rows: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT leaf FROM log_entries ORDER BY seq LIMIT $1")
+            .bind(size_after as i64)
+            .fetch_all(&server.pool)
+            .await
+            .unwrap();
+
+    let leaves: Vec<transparency::Hash> =
+        rows.into_iter().map(|(leaf,)| leaf.try_into().unwrap()).collect();
+    assert_eq!(leaves.len() as u64, size_after, "the log lost rows under the test");
+
+    let served = BASE64_STANDARD.decode(after["root"].as_str().unwrap()).unwrap();
+    assert_eq!(served, transparency::root(&leaves), "the served root is not the log's root");
+}
+
+/// The head served twice in a row without an append is the same head.
+///
+/// Not a performance assertion — the timestamp changes, so the two responses differ — but the
+/// property that makes the cache safe to reuse: an unchanged table must not produce a moving
+/// root, or every client watching for a fork would find one.
+#[tokio::test]
+async fn an_unchanged_log_keeps_serving_the_same_root() {
+    let server = start().await;
+    let reader = Device::register(&server, &unique("reader")).await;
+
+    let first: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+    let second: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+
+    // Only when nothing was appended in between. The database is shared, so the assertion is
+    // conditional rather than unconditional — a size that moved means another test created an
+    // account, which is not a failure of anything here.
+    if first["size"] == second["size"] {
+        assert_eq!(first["root"], second["root"], "the same log produced two roots");
+    }
+}

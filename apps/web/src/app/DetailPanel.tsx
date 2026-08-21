@@ -6,6 +6,7 @@ import { VerificationPanel } from "@/components/Verification";
 import { Fingerprint } from "@/components/Fingerprint";
 import type { ResolvedAccount } from "@/lib/account";
 import { useDuo, useTrio } from "@/lib/duo";
+import { isOnline } from "@/lib/presence";
 import type { ConversationView, VerificationState } from "@/lib/session";
 import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
@@ -462,12 +463,79 @@ export function DetailPanel({ view }: { view: ConversationView }) {
           so the back gesture collapses the card and leaves the column open. */}
       {focused === undefined && (
         <section className="space-y-snug p-pane">
-          <SectionTitle>Members</SectionTitle>
-          <ul className="space-y-tight">
-            {view.accounts.map((account) => {
-              const name = nameOf(account.handle, names);
+          {/*
+            Split by presence, and our own row first.
+            
+            A member list is read to answer "who can I reach right now", and a single alphabet of
+            names makes that a scan rather than a look. Two headings turn it into one glance.
+            
+            We are in the list because we are in the group. Leaving ourselves out made the count
+            disagree with the group panel below, which has always said "@you (admin)" — and a
+            member list that quietly omits the reader is a list they have to do arithmetic on.
+            
+            What this does not solve: accounts nobody has ever reported on sit under "Offline",
+            which is a claim we cannot fully back — it may only mean the server has never had a
+            signal for them. They are distinguishable on the row itself, where the badge and the
+            "last seen" line are both absent rather than wrong, but the heading above them is
+            more definite than the knowledge under it.
+          */}
+          {(() => {
+            const self = {
+              handle: session.handle,
+              fingerprint: session.accountFingerprint(),
+              mine: true as const,
+            };
+            const others = view.accounts.map((account) => ({ account, mine: false as const }));
+            const online = (handle: string) =>
+              handle === session.handle || isOnline(session.presenceOf(handle), session.presenceClock);
 
-              return (
+            const rows = [{ account: self, mine: true as const }, ...others];
+            const groups: [string, typeof rows][] = [
+              ["Online", rows.filter((row) => online(row.account.handle))],
+              ["Offline", rows.filter((row) => !online(row.account.handle))],
+            ];
+
+            return groups
+              .filter(([, members]) => members.length > 0)
+              .map(([heading, members]) => (
+                <div key={heading} className="space-y-snug">
+                  <SectionTitle>{heading}</SectionTitle>
+                  <ul className="space-y-tight">
+                    {members.map(({ account, mine }) => {
+                      const name = nameOf(account.handle, names);
+
+                      // Our own row is not a link: the card it would open is a verification panel,
+                      // and there is nothing to verify about the key this device is holding.
+                      if (mine) {
+                        return (
+                          <li
+                            key={account.handle}
+                            className="flex w-full items-center gap-snug p-snug text-left text-body"
+                          >
+                            <PresenceBadge session={session} handle={account.handle}>
+                              <Avatar
+                                seed={account.fingerprint}
+                                label={name.primary}
+                                size="md"
+                                className="shrink-0"
+                              />
+                            </PresenceBadge>
+                            <span className="flex min-w-0 flex-1 flex-col">
+                              <span className="truncate">
+                                {name.primary}{" "}
+                                <span className="text-(--color-ink-muted)">(you)</span>
+                              </span>
+                              {name.secondary !== null && (
+                                <span className="truncate font-evidence text-caption text-(--color-ink-muted)">
+                                  {name.secondary}
+                                </span>
+                              )}
+                            </span>
+                          </li>
+                        );
+                      }
+
+                      return (
               <li key={account.handle}>
                 <button
                   type="button"
@@ -497,17 +565,26 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                         {name.secondary}
                       </span>
                     )}
+                    {/* The badge on the face says *whether*, this says *when* — and the second is
+                        the question somebody opens this column to answer. It renders nothing at
+                        all for an account nobody has reported on, which is the same silence the
+                        badge keeps: "we have never been told" has no honest wording here. */}
+                    <PresenceLine session={session} handle={account.handle} />
                   </span>
                 </button>
               </li>
-              );
-            })}
-            {view.accounts.length === 0 && (
-              <li className="text-caption text-(--color-ink-muted)">
-                Nobody has been resolved yet. The next poll fills this in.
-              </li>
-            )}
-          </ul>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ));
+          })()}
+
+          {view.accounts.length === 0 && (
+            <p className="text-caption text-(--color-ink-muted)">
+              Nobody else has been resolved yet. The next poll fills this in.
+            </p>
+          )}
         </section>
       )}
 

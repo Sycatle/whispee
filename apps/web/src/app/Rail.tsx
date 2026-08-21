@@ -5,6 +5,7 @@ import { PresenceBadge } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
 import { formatHandle, nameMatches, nameOf, titleOf } from "@/lib/naming";
 import { useBinding, useRunBinding } from "@/app/Shortcuts";
+import { say } from "@/lib/i18n";
 import { ContextMenu } from "@/ui/ContextMenu";
 import { roster } from "@/lib/roster";
 import { useRoving } from "@/lib/useRoving";
@@ -77,13 +78,11 @@ function preview(view: ConversationView): { text: string; mine: boolean } {
     // skipping it would leave the row showing something older than the reason it just moved to
     // the top. Never prefixed with "You:": the sentence already names who did what.
     if (content.kind === "membership") {
-      const subject = formatHandle(content.handle);
       return {
         mine: false,
-        text:
-          content.event === "left"
-            ? `${subject} left`
-            : `${subject} ${content.event === "joined" ? "joined" : "was removed"}`,
+        text: say(`membership.preview.${content.event}`, {
+          subject: formatHandle(content.handle),
+        }),
       };
     }
   }

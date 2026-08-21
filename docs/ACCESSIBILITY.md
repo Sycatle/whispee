@@ -167,6 +167,9 @@ from `read` is carried in full by the accessible name.
   it is the only thing mounted, and it is still marked as the margin.
 - **The new-message live region drops rapid arrivals.** A region reports its contents, not a
   queue, so two messages inside one announcement window announce as one.
-- **Skin tones, day separators and the emoji grid are English-only**, as is every string in the
-  interface. There is no localisation, so there is no way to read this application in another
-  language.
+- **The interface is English**, with one exception: the membership notices in the thread go
+  through `lib/i18n.ts` and exist in French. That module is a floor rather than a localisation —
+  a place for strings to move to one key at a time. Everything else, including every explanation
+  of what a security decision costs, is English written where it is used. Those paragraphs commit
+  as much as the code does, so translating them is a piece of work with its own review rather
+  than a mechanical pass.

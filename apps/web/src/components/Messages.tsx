@@ -46,6 +46,7 @@ import { Attachment } from "@/components/Attachment";
 import { EmojiDrawer } from "@/components/EmojiPicker";
 import { dayLabel, timeOf } from "@/lib/datetime";
 import { COMPOSER_ID } from "@/components/ids";
+import { say } from "@/lib/i18n";
 import { compactNameOf, formatHandle } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
@@ -522,12 +523,13 @@ export function Messages({
             const actor = authorOf(message);
             const subject = nameOfAuthor(handle);
 
-            // The sender is the actor, so "left" needs no attribution: the subject is the actor.
-            // The other two do, and the sentence reads better with the actor first.
-            const said =
-              event === "left"
-                ? `${subject} left`
-                : `${nameOfAuthor(actor)} ${event === "joined" ? "added" : "removed"} ${subject}`;
+            // Whole sentences from the catalogue, not verbs glued between two names: word order
+            // is one of the things that changes between languages, and `${a} added ${b}` cannot
+            // be reordered by a translator.
+            const said = say(`membership.${event}`, {
+              actor: nameOfAuthor(actor),
+              subject,
+            });
 
             return (
               <li

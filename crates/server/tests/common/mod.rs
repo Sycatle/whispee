@@ -111,7 +111,9 @@ impl ReveilEspion {
 
 /// Un serveur dont on observe les réveils.
 pub async fn start_avec_reveil() -> (TestServer, std::sync::Arc<ReveilEspion>) {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL requis pour les tests");
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://whatsapp_clone:dev_only_not_a_secret@localhost:55432/whatsapp_clone".into()
+    });
     let pool = server::connect(&database_url).await.unwrap();
     let espion = std::sync::Arc::new(ReveilEspion::default());
 

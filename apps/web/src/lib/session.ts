@@ -2477,6 +2477,41 @@ export class Session {
   petnames: Record<string, string> = {};
 
   /**
+   * Sets — or clears — the name this device gives somebody else.
+   *
+   * The counterpart to `setDisplayName`, and its opposite in every way that matters. A display
+   * name is asserted by its subject and broadcast; a petname is asserted by the reader and goes
+   * nowhere. That is exactly why it outranks the display name on screen: it is the one string in
+   * the naming chain that no peer, and no server, can influence.
+   *
+   * Cleaned and bounded by the same rules as a display name, because it lands in the same slots
+   * of the same layouts — a petname that overflowed a bubble author would be a petname that broke
+   * a thread. It is **not** broadcast, and there is deliberately no code path that could: handing
+   * somebody the note you took about them is a disclosure nobody asked for.
+   *
+   * An empty result removes the entry rather than storing an empty string, so that "no petname"
+   * has one representation and `naming.ts` has one thing to test for.
+   */
+  async setPetname(handle: string, name: string): Promise<void> {
+    const cleaned = sanitize(name);
+
+    if (cleaned !== "") {
+      const error = validate(cleaned);
+      if (error !== null) throw new Error(error);
+    }
+
+    if (cleaned === "") delete this.petnames[handle];
+    else this.petnames[handle] = cleaned;
+
+    await this.persist();
+
+    // Every view, for the same reason `absorbProfile` touches every view: the person is drawn in
+    // the thread, the conversation list and the member roster, and the revision counter is per
+    // view. Renaming somebody in one pane and not the others is the bug this avoids.
+    for (const view of this.conversations.values()) touch(view);
+  }
+
+  /**
    * Sets — or clears — the name this account shows, and tells everyone it talks to.
    *
    * Cleaned before it is judged, because a name is refused for what it means and not for what the

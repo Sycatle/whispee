@@ -15,18 +15,19 @@ import {
   SunMoon,
   Trash2,
   TriangleAlert,
+  UserRound,
   Vault,
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 /**
- * The icon inventory. Eighteen, named by role, and closed.
+ * The icon inventory. Nineteen, named by role, and closed.
  *
  * # Named imports only, never `import * as icons`
  *
  * A star import defeats tree-shaking: the bundler cannot prove which of the fifteen hundred
- * modules in `lucide-react` are unreachable, so it keeps them. Eighteen named imports are a few
+ * modules in `lucide-react` are unreachable, so it keeps them. Nineteen named imports are a few
  * kilobytes; the star import is the whole set. This is not a style preference, it is the
  * difference between the budget the plan allowed for icons and roughly three hundred times it.
  *
@@ -57,6 +58,7 @@ export type IconName =
   | "lock"
   | "notifications"
   | "pair"
+  | "profile"
   | "revoke"
   | "search"
   | "send"
@@ -89,6 +91,8 @@ const ICONS: Record<IconName, LucideIcon> = {
   notifications: Bell,
   /** Pairing, which is a QR code in practice. */
   pair: QrCode,
+  /** Your own account: the name you show and the handle you cannot change. */
+  profile: UserRound,
   /** Revoke a device, delete a vault entry. Destructive, and drawn as such. */
   revoke: Trash2,
   search: Search,

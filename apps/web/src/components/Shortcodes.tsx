@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { type Catalogue, type Tone, applyTone, catalogue } from "@/lib/emoji";
 import { type Completion, closed, completions, typed } from "@/lib/shortcode";
 import { useSession } from "@/state/SessionProvider";
-import { cn } from "@/ui/cn";
+import { Completions, completionId } from "@/ui/Completions";
 import { Emoji } from "@/ui/Emoji";
 
 /**
@@ -168,7 +168,7 @@ export function useShortcodes({
   return {
     rows,
     active: at,
-    activeId: open ? optionId(at) : undefined,
+    activeId: open ? completionId(LISTBOX_ID, at) : undefined,
     open,
     onKeyDown,
     accept,
@@ -179,16 +179,11 @@ export function useShortcodes({
 
 export const LISTBOX_ID = "shortcode-suggestions";
 
-function optionId(index: number): string {
-  return `${LISTBOX_ID}-${index}`;
-}
-
 /**
- * The rows themselves.
+ * The rows themselves: an emoji, the name it matched under, and what it is called.
  *
- * Positioned by its caller — it sits above the composer, which is at the bottom of the pane — and
- * deliberately not a `Popover`: a Radix popover moves focus, and focus has to stay in the field
- * being typed into.
+ * The list, its ARIA and its picking live in `ui/Completions.tsx`, shared with the mention menu —
+ * see the argument there. What is left here is what is specific to an emoji.
  */
 export function ShortcodeMenu({
   rows,
@@ -199,40 +194,21 @@ export function ShortcodeMenu({
   active: number;
   onPick: (at: number) => void;
 }) {
-  if (rows.length === 0) return null;
-
   return (
-    <ul
+    <Completions
       id={LISTBOX_ID}
-      role="listbox"
-      aria-label="Emoji suggestions"
-      className={cn(
-        "absolute bottom-full left-0 z-(--z-index-overlay) mb-tight w-full max-w-sm overflow-hidden",
-        "rounded-control border border-(--color-border-strong) bg-(--color-surface-raised) shadow-menu",
-      )}
+      label="Emoji suggestions"
+      rows={rows}
+      active={active}
+      onPick={onPick}
     >
-      {rows.map((hit, index) => (
-        <li
-          key={hit.entry.char}
-          id={optionId(index)}
-          role="option"
-          aria-selected={index === active}
-          // `onMouseDown` and not `onClick`: a click would blur the textarea first, and a blur is
-          // what closes the menu, so the click would land on nothing.
-          onMouseDown={(event) => {
-            event.preventDefault();
-            onPick(index);
-          }}
-          className={cn(
-            "flex cursor-pointer items-center gap-snug px-snug py-tight text-caption",
-            index === active ? "bg-(--color-surface-sunken)" : "hover:bg-(--color-surface-sunken)",
-          )}
-        >
+      {(hit) => (
+        <>
           <Emoji char={hit.entry.char} className="h-[1.5em] w-[1.5em]" />
           <span className="text-(--color-ink)">:{hit.code}:</span>
           <span className="truncate text-(--color-ink-muted)">{hit.entry.label}</span>
-        </li>
-      ))}
-    </ul>
+        </>
+      )}
+    </Completions>
   );
 }

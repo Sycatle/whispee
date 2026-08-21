@@ -47,6 +47,7 @@ import { EmojiDrawer } from "@/components/EmojiPicker";
 import { dayLabel, timeOf } from "@/lib/datetime";
 import { COMPOSER_ID } from "@/components/ids";
 import { say } from "@/lib/i18n";
+import { addresses } from "@/lib/mention";
 import { compactNameOf, formatHandle } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
@@ -59,9 +60,10 @@ import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
 import { cn } from "@/ui/cn";
+import { MentionText } from "@/components/MentionText";
 import { MiniProfile } from "@/components/MiniProfile";
 import { ContextMenu } from "@/ui/ContextMenu";
-import { Emoji, EmojiText } from "@/ui/Emoji";
+import { Emoji } from "@/ui/Emoji";
 import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
 import { Menu } from "@/ui/Menu";
@@ -551,6 +553,26 @@ export function Messages({
             message.content.kind === "text" || message.content.kind === "reply"
               ? message.content.text
               : null;
+          /**
+           * Is this line addressed to us?
+           *
+           * Two ways, and they are the same gesture: somebody wrote our handle in it, or somebody
+           * replied to something we said. A reply is an answer to a person as much as to a
+           * sentence, and treating it as less would mean the one message most likely to be
+           * waiting on us is the one that looks like every other.
+           *
+           * Never our own line. Quoting yourself and naming yourself are both ordinary, and
+           * neither is somebody wanting your attention.
+           *
+           * This is a property of the *reader*, not of the message: the same bytes are an
+           * ordinary line for everybody else in the group, and nothing about it travels.
+           */
+          const quoted = cite === null ? null : messages.find((m) => m.seq === cite);
+          const forMe =
+            !message.mine &&
+            ((spoken !== null && addresses(spoken, session.handle, members)) ||
+              quoted?.mine === true);
+
           const emojis = [...(reactions.get(message.seq)?.values() ?? [])];
           const mineAlready = reactions.get(message.seq)?.get(session.handle);
 
@@ -601,6 +623,20 @@ export function Messages({
                   // The air goes above the first line of a turn, so a burst of three sentences
                   // reads as one paragraph and the next speaker is visibly a new one.
                   !continues && "mt-snug",
+                  // Addressed to us: a bar down the left edge and the faintest ground behind it.
+                  //
+                  // Drawn with `before:` rather than a real border, because the row's horizontal
+                  // padding is what aligns every line of the thread into one column — a border
+                  // would push this one three pixels out of it, and a message that arrives while
+                  // you are reading would shuffle the whole column sideways.
+                  //
+                  // Faint on purpose. This is a signpost for a reader scanning a thread they are
+                  // behind on, not an alarm; the fill has to survive being on ten rows at once
+                  // without turning the conversation into a striped page. The mention itself
+                  // carries the stronger mark — see `MentionText` — because that one is a single
+                  // word and can afford it.
+                  forMe &&
+                    "bg-(--color-accent)/8 before:absolute before:inset-y-0 before:left-0 before:w-[3px] before:bg-(--color-accent)",
                   // No fill at rest, on any row. A thread is a column of text and every band of
                   // tint laid under it is one more edge the eye has to sort out before it can
                   // read; a tint on every one of our own turns striped the whole conversation.
@@ -759,7 +795,7 @@ export function Messages({
                       // the same surface, the border colour can say what it means.
                       className="mb-tight block border-l-2 border-(--color-border-strong) pl-snug text-caption text-(--color-ink-muted)"
                     >
-                      <EmojiText text={textOf(messages, cite)} />
+                      <MentionText text={textOf(messages, cite)} among={members} view={view} />
                     </span>
                   )}
 
@@ -777,7 +813,7 @@ export function Messages({
                           onOpen={() => session.openAttachment(view, attachment)}
                         />
                       ) : spoken !== null ? (
-                        <EmojiText text={spoken} big />
+                        <MentionText text={spoken} among={members} view={view} big />
                       ) : null}
 
                       {/*
@@ -1021,7 +1057,7 @@ export function Messages({
                     "opacity-60",
               )}
             >
-              <EmojiText text={entry.text} big />
+              <MentionText text={entry.text} among={members} view={view} big />
               <span className="mt-tight flex items-center gap-snug text-caption">
                 {entry.state === "sending" ? (
                   <Spinner size="sm" label="sending" />

@@ -1309,7 +1309,6 @@ export class Session {
     return resolved;
   }
 
-  /** A conversation's roles, or `null` if it is flat (the 1-to-1 case). */
   /**
    * Whether this conversation is an administered group, as opposed to a flat one-to-one.
    *
@@ -1327,8 +1326,24 @@ export class Session {
     return this.roles(view) !== null;
   }
 
+  /**
+   * A conversation's roles, or `null` if it is flat (the one-to-one case).
+   *
+   * The `?? null` is the whole point of this method existing rather than the call being inlined.
+   * The binding returns **`undefined`** for a conversation with no roster, and the cast here used
+   * to claim it returned `null` — a lie about a boundary, and the kind that costs nothing until
+   * somebody writes the obvious guard against it.
+   *
+   * Two of them did. `isGroup` compares with `!== null` and therefore called every one-to-one a
+   * group; `ConversationHeader` guarded `roles !== null` and then read `roles.admin`, which threw
+   * and took the whole screen with it. Every other caller happens to write `if (!roles)`, which
+   * is why this survived: the two shapes are indistinguishable to a truthiness test and the type
+   * said only one of them was possible.
+   *
+   * Normalised here, once, so that the type is true at the one place that can make it true.
+   */
   roles(view: ConversationView): Roles | null {
-    return this.client.roster(view.groupId) as Roles | null;
+    return (this.client.roster(view.groupId) as Roles | undefined) ?? null;
   }
 
   /**

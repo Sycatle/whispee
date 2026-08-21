@@ -42,6 +42,7 @@ export type Permission = "unsupported" | "default" | "granted" | "denied";
 export interface NoticeOptions {
   body?: string;
   tag?: string;
+  renotify?: boolean;
 }
 
 /** What a raised notification has to offer us: a click, and a way to take it back. */
@@ -146,6 +147,28 @@ export const NOTICE_BODY_ONE = "New message";
 export const NOTICE_BODY_MANY = "New messages";
 
 /**
+ * What an arrival addressed to this reader says instead.
+ *
+ * # This discloses more than the line above, and it is worth saying so
+ *
+ * "New message" says that somebody wrote to this device. "You were mentioned" says that somebody
+ * addressed *this person* by name — which is a fact about a relationship, not only about traffic,
+ * and it is legible to whoever picks the device up without unlocking it.
+ *
+ * It ships anyway, and the reason is that the alternative is not a quieter notification but no
+ * feature at all: a mention that arrives saying exactly what every other message says has not
+ * been signalled. A reader who wants the smaller disclosure has the setting that governs the
+ * whole feature, and it is off until they turn it on.
+ *
+ * Still absent, and not by omission: **who** mentioned them, and **what** was said. Those remain
+ * unavailable at any setting, for the reason `NOTICE_BODY_ONE` gives.
+ */
+export const NOTICE_BODY_MENTION = "You were mentioned";
+
+/** A reply to something this reader wrote. Addressed to them as surely as their name would be. */
+export const NOTICE_BODY_REPLY = "You were replied to";
+
+/**
  * Copy for a settings screen offering the disclosure, stated before the choice as `Signals.tsx`
  * does — and exported from here so the sentence and the behaviour cannot drift apart.
  */
@@ -163,6 +186,17 @@ export interface Arrival {
    * hashing it first.
    */
   conversation: string;
+  /**
+   * Why this arrival is for this reader in particular, when it is.
+   *
+   * Replaces the body rather than adding to it: a notification is one line, and "New message —
+   * you were mentioned" spends the line saying twice what the second half already says.
+   *
+   * It also **defeats the collapse**, and that is the point of carrying it at all. Forty
+   * messages and one mention share a tag, so without this the mention would be replaced by the
+   * next ordinary arrival and the reader would never learn it happened.
+   */
+  address?: "mention" | "reply";
   /**
    * The conversation's display name, and **the only thing a user can opt into disclosing**.
    *
@@ -221,7 +255,7 @@ export function createNotifier({
   };
 
   return {
-    arrived({ conversation, name }) {
+    arrived({ conversation, name, address }) {
       if (!api || readPermission(api.permission) !== "granted") return;
 
       // Nothing while the user is already looking at it.
@@ -234,8 +268,18 @@ export function createNotifier({
       if (attention.visibilityState === "visible" && attention.hasFocus()) return;
 
       const count = (standing.get(conversation)?.count ?? 0) + 1;
-      const plural = count > 1 ? NOTICE_BODY_MANY : NOTICE_BODY_ONE;
-      const body = name ? `${plural} — ${name}` : plural;
+      // An address outranks the count. Being mentioned once among forty arrivals is the fact
+      // worth carrying, and "New messages" would bury it under the thing that is true of every
+      // other line in the batch.
+      const lead =
+        address === "mention"
+          ? NOTICE_BODY_MENTION
+          : address === "reply"
+            ? NOTICE_BODY_REPLY
+            : count > 1
+              ? NOTICE_BODY_MANY
+              : NOTICE_BODY_ONE;
+      const body = name ? `${lead} — ${name}` : lead;
 
       let handle: NotificationHandle;
       try {
@@ -247,6 +291,12 @@ export function createNotifier({
           // people turn the whole feature off over.
           tag: conversation,
           body,
+          // Silence is the default and the right one — see `tag` above — but a replacement that
+          // says something new has to be heard, or it is a line of text nobody was told to look
+          // at. This is the one case: being addressed is rare, which is exactly what makes it
+          // affordable to ping for and worth pinging for. Forty ordinary arrivals still make one
+          // sound between them.
+          ...(address ? { renotify: true } : {}),
         });
       } catch {
         // `new Notification()` throws `TypeError: Illegal constructor` in the Android Chrome tab,

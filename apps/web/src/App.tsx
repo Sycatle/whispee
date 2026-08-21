@@ -8,6 +8,7 @@ import { MigrationBanner } from "@/components/Migration";
 import { Onboarding } from "@/components/Onboarding";
 import { RELOCK_MS, networkReported, observeIdle, observeLifecycle } from "@/lib/lifecycle";
 import { compactNameOf } from "@/lib/naming";
+import { addressedIn } from "@/lib/mention";
 import { countUnreadInTitle, createNotifier } from "@/lib/notifications";
 import { type ProposedMigration, Session, start } from "@/lib/session";
 import { RouterProvider, useNavigate } from "@/routes/Router";
@@ -425,7 +426,30 @@ function Frame({
           ? view.accounts.map((account) => compactNameOf(account.handle, names, among)).join(", ")
           : undefined;
 
-        notifier.current?.arrived({ conversation: key, ...(name ? { name } : {}) });
+        /*
+          Whether any of what just landed was aimed at us, decided by the same module the thread
+          renders mentions with. One rule, so a notification cannot fire for a mention the reader
+          will not find highlighted when they arrive — nor stay silent for one they will.
+
+          `before` is the cursor as it stood, so this asks about the arrival and not about the
+          thread; `among` is this conversation's members, which is what makes an `@handle` naming
+          somebody who is not here stay prose here too.
+        */
+        //
+        // Our own handle is added to the set. `among` above is the *other* side — it exists to
+        // decide whether a name is ambiguous, a question we are never the subject of — and a
+        // mention scanner given that set would refuse to recognise the one handle it is looking
+        // for. This is the bug that would have made the feature silently do nothing.
+        const address = addressedIn(view.messages, before, session.handle, [
+          ...among,
+          session.handle,
+        ]);
+
+        notifier.current?.arrived({
+          conversation: key,
+          ...(name ? { name } : {}),
+          ...(address ? { address } : {}),
+        });
       }
     }
 

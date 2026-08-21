@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { EmojiDrawer } from "@/components/EmojiPicker";
 import { COMPOSER_ID } from "@/components/ids";
-import { ShortcodeMenu, LISTBOX_ID, useShortcodes } from "@/components/Shortcodes";
+import { MentionMenu, LISTBOX_ID as MENTION_LISTBOX_ID, useMentions } from "@/components/Mentions";
+import { ShortcodeMenu, LISTBOX_ID as SHORTCODE_LISTBOX_ID, useShortcodes } from "@/components/Shortcodes";
 import { Messages } from "@/components/Messages";
 import { Verification } from "@/components/Verification";
 import { compactNameOf, type NameSources } from "@/lib/naming";
@@ -286,6 +287,37 @@ export function Conversation({ view }: { view: ConversationView }) {
   const shortcodes = useShortcodes({ text, caret, replace });
 
   /**
+   * Everybody this thread can address, and the face to draw beside each of them.
+   *
+   * The same list the thread attributes lines to — `membersOf` is exported for exactly this kind
+   * of agreement. Offering somebody outside it would let the writer address a person who will
+   * never receive the message, and the renderer, which resolves against the same set, would draw
+   * the result as plain text anyway.
+   */
+  const mentionable = membersOf(view);
+
+  const seedOf = (handle: string) =>
+    handle === session.handle
+      ? session.accountFingerprint()
+      : view.accounts.find((account) => account.handle === handle)?.fingerprint;
+
+  const mentions = useMentions({ among: mentionable, text, caret, replace });
+
+  /**
+   * Which completion is open, if either.
+   *
+   * They cannot both be: a caret inside a `:token` is not inside an `@token`, since neither
+   * sigil is admitted by the other's character class. But `aria-expanded` and `aria-controls`
+   * still have to name **one** list, and a field pointing at a listbox that is not in the
+   * document is the defect this consolidates away.
+   */
+  const listbox = mentions.open
+    ? MENTION_LISTBOX_ID
+    : shortcodes.open
+      ? SHORTCODE_LISTBOX_ID
+      : undefined;
+
+  /**
    * Takes the chosen file and stops there.
    *
    * Choosing is not sending any more — see `pending` above. One file at a time, because
@@ -427,6 +459,13 @@ export function Conversation({ view }: { view: ConversationView }) {
           {/* Opens upwards, from the top of the surface: the composer is at the bottom of the
               pane and there is nothing below it but the software keyboard. */}
           <ShortcodeMenu rows={shortcodes.rows} active={shortcodes.active} onPick={shortcodes.accept} />
+          <MentionMenu
+            rows={mentions.rows}
+            active={mentions.active}
+            among={mentionable}
+            seedOf={seedOf}
+            onPick={mentions.accept}
+          />
           {/*
             The reply bar and the attachment chip share one strip welded to the top of the field:
             same width, radius on the top corners only, no gap. Both describe what pressing send
@@ -518,11 +557,17 @@ export function Conversation({ view }: { view: ConversationView }) {
               // carry it out of the `:word` the menu is completing. Without this the menu would
               // keep offering suggestions for a token the caret has left.
               onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-              onBlur={shortcodes.dismiss}
+              onBlur={() => {
+                shortcodes.dismiss();
+                mentions.dismiss();
+              }}
               onKeyDown={(e) => {
-                // The menu takes Up, Down, Enter, Tab and Escape while it is open — Enter above
-                // all, which would otherwise send a message the writer was still naming an emoji
-                // in.
+                // Either menu takes Up, Down, Enter, Tab and Escape while it is open — Enter
+                // above all, which would otherwise send a message the writer was still naming
+                // somebody in. Only one can be open at a time, so the order between the two is a
+                // formality; it is written down anyway, because a reader should not have to
+                // reconstruct that argument to know which wins.
+                if (mentions.onKeyDown(e)) return;
                 if (shortcodes.onKeyDown(e)) return;
                 if (e.key !== "Enter" || e.shiftKey) return;
                 if (matchMedia("(pointer: coarse)").matches) return;
@@ -531,10 +576,10 @@ export function Conversation({ view }: { view: ConversationView }) {
               }}
               rows={1}
               role="combobox"
-              aria-expanded={shortcodes.open}
-              aria-controls={LISTBOX_ID}
+              aria-expanded={listbox !== undefined}
+              aria-controls={listbox}
               aria-autocomplete="list"
-              aria-activedescendant={shortcodes.activeId}
+              aria-activedescendant={mentions.activeId ?? shortcodes.activeId}
               aria-label={replyTo === null ? "Message" : "Reply"}
               placeholder={replyTo === null ? "Message" : "Reply"}
               // `text-base` on purpose: below 16 pixels, iOS zooms into the field on focus and

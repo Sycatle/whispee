@@ -2216,8 +2216,10 @@ export class Session {
     const message: Message = { seq, sender: this.deviceId, content: body, mine: true, sentAt };
     view.messages.push(message);
     touch(view);
-    await this.archive.store(this.api, view.groupId, [message]);
+    // Same order as the poll, for the same reason: the write goes first, and the upload after.
+    // See `pollOnce`.
     await this.persist();
+    await this.archive.store(this.api, view.groupId, [message]);
   }
 
   /**
@@ -2411,20 +2413,12 @@ export class Session {
       // or not at all.
       await this.persist();
 
-      // The archive upload used to sit **above** that write, which put a network call on the wrong
-      // side of the rule the comment states — and not a hypothetical one: a dropped connection
-      // mid-upload is exactly the "later error" it names. It throws out of the poll, so the write
-      // that was supposed to be unconditional never happened.
-      //
-      // Below it, and caught. A backup that failed to upload is a backup to retry; it is not a
-      // reason to leave the ratchet ahead of what is on disk, and it is not a reason to abandon
-      // the rest of the poll. `store` is idempotent — the vault refuses a sequence it already
-      // holds — so the next pass picks the same range up again.
-      await this.archive
-        .store(this.api, view.groupId, view.messages.slice(before))
-        .catch((error: unknown) => {
-          console.warn(`history not archived for ${view.key}`, error);
-        });
+      // The archive upload sits below that write, and the order is a principle rather than a
+      // reaction to a failure anybody observed. `Archive.store` swallows its own errors today, so
+      // nothing here can skip the persist — but that is a property of the archive, not of this
+      // loop, and a caller that persists after a network call depends on a guarantee it does
+      // not hold. The ratchet and the cursor reach the disk before anything else can fail.
+      await this.archive.store(this.api, view.groupId, view.messages.slice(before));
 
       // Resolving accounts is cosmetic and goes over the network: it comes after, and its failure
       // must undo nothing.

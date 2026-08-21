@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 
 import type { AttachmentRef } from "@/lib/attachments";
 import { type Preview, decodePreview, looksLikeImage, mayAnimate, release } from "@/lib/preview";
+import { Icon } from "@/ui/Icon";
+import { Spinner } from "@/ui/Spinner";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -47,6 +49,11 @@ export function Attachment({
   // Set when a decode was attempted and refused. It hides the button rather than letting the
   // user click it again for the same answer.
   const [undecodable, setUndecodable] = useState(false);
+  // Set when the browser was handed a preview and refused to paint it. See the note on the
+  // `<img>` below for the one cause known today. What it does not tell us is *which* cause: an
+  // `error` event on an image carries no reason, so this cannot be worded more precisely than
+  // "not shown here".
+  const [previewRefused, setPreviewRefused] = useState(false);
 
   // An unrevoked `blob:` URL keeps the decrypted-derived pixels alive for the life of the
   // document. Scrolling a conversation unmounts these freely, so the cleanup is the only thing
@@ -59,7 +66,8 @@ export function Attachment({
   // Attempting a decode on every PDF that goes past would cost a decode to learn nothing. This
   // reads the sender's hint, and that is safe here: it decides how much work to do, not what to
   // trust. A lie in either direction costs a wasted decode or a missing preview.
-  const offerPreview = looksLikeImage(attachment.mime) && preview === null && !undecodable;
+  const offerPreview =
+    looksLikeImage(attachment.mime) && preview === null && !undecodable && !previewRefused;
 
   // Failure is not benign at this layer: the AEAD rejects a substituted or altered blob, so a
   // decryption error means the ciphertext is not the one a group member produced.
@@ -111,7 +119,7 @@ export function Attachment({
   };
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-tight">
       {preview !== null && (
         <img
           src={preview.url}
@@ -120,6 +128,17 @@ export function Attachment({
           alt={attachment.name}
           width={preview.width}
           height={preview.height}
+          // The desktop shell serves this page under a CSP whose `img-src` lists `'self' data:
+          // asset: http://asset.localhost` and not `blob:` — see `apps/desktop/tauri.conf.json`.
+          // Every preview here is a `blob:` URL minted from our own canvas, so on that target the
+          // image is blocked before it is ever decoded. Dropping back to the download row is not
+          // a fix for that; widening a security policy is its own decision, made in its own
+          // commit. What this handler buys is that the failure is visible and the file is still
+          // reachable, instead of an empty frame the user cannot tell from a slow load.
+          onError={() => {
+            setPreview(null);
+            setPreviewRefused(true);
+          }}
           className="h-auto max-w-full rounded-bubble"
         />
       )}
@@ -128,9 +147,17 @@ export function Attachment({
         type="button"
         onClick={download}
         disabled={busy}
-        className="flex items-center gap-2 text-left underline disabled:opacity-60"
+        aria-busy={busy}
+        className="flex items-center gap-snug text-left underline disabled:opacity-60"
       >
-        <span aria-hidden>📎</span>
+        {/* The paperclip was a literal 📎, drawn by whatever emoji font the platform ships: blue
+            on Windows, flat grey on Linux, and a tofu box in a container with no emoji font at
+            all. The Lucide glyph is `currentColor` and the same shape everywhere.
+
+            The spinner takes the icon's slot rather than sitting beside it. Both are 16 px, so
+            the label does not move when the download starts — and the busy mark lands on the
+            control that is actually working. */}
+        {busy ? <Spinner /> : <Icon name="attach" />}
         <span className="break-all">{attachment.name}</span>
       </button>
 
@@ -139,13 +166,13 @@ export function Attachment({
           type="button"
           onClick={show}
           disabled={busy}
-          className="text-xs underline opacity-70 disabled:opacity-60"
+          className="text-caption text-(--color-ink-muted) underline disabled:opacity-60"
         >
           Show image
         </button>
       )}
 
-      <p className="text-xs opacity-70">
+      <p className="text-caption text-(--color-ink-muted)">
         {formatSize(attachment.size)}
         {busy && " — decrypting…"}
       </p>
@@ -153,18 +180,27 @@ export function Attachment({
       {/* A canvas holds one frame. Saying so is the difference between a limitation and a bug
           the user reports; the animation is one download away. */}
       {preview !== null && mayAnimate(attachment.mime) && (
-        <p className="text-xs opacity-70">First frame only — download the file for the rest.</p>
+        <p className="text-caption text-(--color-ink-muted)">
+          First frame only — download the file for the rest.
+        </p>
       )}
 
       {undecodable && (
-        <p className="text-xs opacity-70">
+        <p className="text-caption text-(--color-ink-muted)">
           This file does not decode as an image, whatever it says it is. It can only be
           downloaded.
         </p>
       )}
 
+      {previewRefused && (
+        <p className="text-caption text-(--color-ink-muted)">
+          The preview could not be shown here. The file itself is unaffected — download it to
+          open it.
+        </p>
+      )}
+
       {error && (
-        <p role="alert" className="text-xs text-(--color-danger)">
+        <p role="alert" className="text-caption text-(--color-danger)">
           {error}
         </p>
       )}

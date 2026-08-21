@@ -3,13 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { EmojiDrawer } from "@/components/EmojiPicker";
 import { ShortcodeMenu, LISTBOX_ID, useShortcodes } from "@/components/Shortcodes";
 import { Messages } from "@/components/Messages";
-import { PresenceLine } from "@/components/Presence";
 import { Verification } from "@/components/Verification";
-import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
-import { useDuo } from "@/lib/duo";
 import { compactNameOf, type NameSources } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
-import { useShortcut } from "@/lib/shortcuts";
 import { useOcclusion } from "@/lib/viewport";
 import { EmojiText } from "@/ui/Emoji";
 import { Icon } from "@/ui/Icon";
@@ -19,7 +15,6 @@ import { Tooltip } from "@/ui/Tooltip";
 import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
-import { useNavigate, useRoute } from "@/routes/Router";
 
 /** The id the skip link aims at, so tabbing can jump the rail and the whole message list. */
 export const COMPOSER_ID = "conversation-composer";
@@ -27,13 +22,19 @@ export const COMPOSER_ID = "conversation-composer";
 /**
  * Everybody this thread can attribute something to.
  *
+ * Exported because the bar above the thread needs exactly this list and must not compute its own.
+ * `compactNameOf` decides whether a name is ambiguous by comparing it against the people it could
+ * be confused with, so two callers with two member lists can call the same person two different
+ * things on the same screen — the title saying "Charlie" while the reply bar says "@charlie2".
+ * One list is what keeps the header and the thread agreeing.
+ *
  * `accounts` and `peers` both, because they answer at different moments and neither is a superset
  * of the other: `peers` is restored with the conversation, `accounts` arrives with the first
  * poll, and somebody removed from the group is still the author of what they said. The union is
  * what the ambiguity check in `compactNameOf` has to compare against — a rival left out of it is
  * a fallback that does not happen.
  */
-function membersOf(view: ConversationView): string[] {
+export function membersOf(view: ConversationView): string[] {
   return [
     ...new Set([...view.accounts.map((a) => a.handle), ...view.peers.map((p) => p.name)]),
   ];
@@ -102,9 +103,6 @@ export function Conversation({ view }: { view: ConversationView }) {
   const session = useSession();
   const bump = useBump();
   const report = useReport();
-  const route = useRoute();
-  const navigate = useNavigate();
-  const duo = useDuo();
   const names = useNames();
   // Seeded from the session, which is what makes a half-written message survive a look at
   // another conversation. Keyed on the view, so switching remounts with the right draft.
@@ -129,20 +127,6 @@ export function Conversation({ view }: { view: ConversationView }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const occlusion = useOcclusion();
-
-  const detailOpen = route.kind === "conversation" && route.detail !== undefined;
-
-  const toggleDetail = () => {
-    if (detailOpen) {
-      navigate({ kind: "conversation", key: view.key });
-      return;
-    }
-    navigate({ kind: "conversation", key: view.key, detail: {} });
-  };
-
-  // The keyboard route into the detail column. It is a navigation like the button, so it lands
-  // in history and the back gesture closes the panel.
-  useShortcut("mod+i", toggleDetail);
 
   /**
    * Announces arrivals to a screen reader that is already on this conversation.
@@ -343,22 +327,9 @@ export function Conversation({ view }: { view: ConversationView }) {
     composer.current?.focus();
   };
 
-  const isTyping = session.typingIn(view);
-
-  /*
-    One line and no room for a second: the line under this one belongs to the typing indicator
-    and the presence line, both of which say something the title cannot. So the compact form,
-    which falls back to handles rather than showing a name it cannot tell apart from another
-    member's. The full two-line form is in the detail column, which is where somebody goes when
-    they want to know exactly who is in the room.
-  */
+  // The same list the bar above the thread names people against. See `membersOf`: two lists would
+  // let the two halves of one screen disagree about who "Charlie" is.
   const members = membersOf(view);
-  const title =
-    view.accounts.map((a) => compactNameOf(a.handle, names, members)).join(", ") ||
-    [...new Set(view.peers.map((p) => p.name))]
-      .map((n) => compactNameOf(n, names, members))
-      .join(", ") ||
-    "empty conversation";
 
   /*
     Who is being answered, and what they said.
@@ -383,58 +354,6 @@ export function Conversation({ view }: { view: ConversationView }) {
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-(--color-surface)">
-      <header className="safe-top flex items-center justify-between gap-pane border-b border-(--color-border-subtle) px-pane py-snug">
-        {/* Only where the list is not beside us. It undoes the navigation that opened this
-            conversation rather than going to `#/`, so a round trip between the list and a thread
-            does not stack one history entry per visit — see the rule in `routes/Router.tsx`. */}
-        {!duo && (
-          <IconButton
-            label="Back to conversations"
-            icon={<Icon name="back" size={20} />}
-            onClick={() => history.back()}
-            className="-ml-tight shrink-0"
-          />
-        )}
-        {/*
-          The epoch is not displayed — it is a protocol detail that teaches the user nothing.
-          It is exposed as an attribute because two members on different epochs can no longer
-          read each other at all: it is the first thing to check when a message fails to
-          arrive, and finding it any other way means instrumenting the WebAssembly module.
-        */}
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate text-body font-medium" data-epoch={String(view.epoch)}>
-            {title}
-          </h2>
-          {/*
-            "is typing…" wins over presence: typing implies being online, and showing both adds
-            noise without adding information. One-to-one only — in a group, "online" would not
-            say who it is talking about.
-          */}
-          {isTyping.length > 0 ? (
-            <span className="text-caption text-(--color-ink-muted)">
-              {isTyping.map((handle) => compactNameOf(handle, names, members)).join(", ")}{" "}
-              {isTyping.length > 1 ? "are typing" : "is typing"}…
-            </span>
-          ) : (
-            view.accounts.length === 1 && (
-              <PresenceLine session={session} handle={view.accounts[0].handle} />
-            )
-          )}
-        </div>
-
-        <Tooltip label="Conversation details">
-          <IconButton
-            id={INFO_TOGGLE_ID}
-            label="Conversation details"
-            icon={<Icon name="info" size={18} />}
-            aria-expanded={detailOpen}
-            aria-controls={DETAIL_PANEL_ID}
-            onClick={toggleDetail}
-            className="shrink-0"
-          />
-        </Tooltip>
-      </header>
-
       {/*
         Warns only when a fingerprint changes. In the nominal case this component renders
         nothing: a permanent warning teaches people to ignore it, and would make this one

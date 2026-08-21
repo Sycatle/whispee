@@ -165,6 +165,13 @@
  * win by document order. These tokens exist so that nothing *inside* the application can get in
  * front of them by accident.
  *
+ * **Write these as `z-(--z-index-overlay)`, not `z-overlay`.** Tailwind builds utilities from a
+ * fixed list of theme namespaces — `--color-*`, `--spacing-*`, `--radius-*`, `--text-*`,
+ * `--font-*`, `--shadow-*`, `--ease-*` and a few more — and `--z-index-*` is not one of them. The
+ * short name compiles to nothing at all, and a class that generates no rule fails silently: the
+ * element simply keeps whatever it had. Same trap as the durations below, and it is the reason
+ * both notes say so out loud.
+ *
  * What this does not solve: it says nothing about ordering *within* a layer. Two open menus are
  * a design problem, not a `z-index` problem. */
 @theme static {
@@ -183,7 +190,15 @@
  * that reads `--duration-quick` respects the preference without writing a single condition, so
  * the respect is structural instead of remembered. Places that already disable a transition by
  * hand with `motion-reduce:` stay as they are — they turn the transition off entirely, which is
- * still correct. */
+ * still correct.
+ *
+ * **Write these as `duration-(--duration-quick)`, not `duration-quick`.** There is no
+ * `--duration-*` theme namespace in Tailwind, so the short name produces no rule and the element
+ * quietly falls back to the 150ms default — which means the reduced-motion collapse above never
+ * reaches it. The failure is invisible: the animation still runs, just at the wrong speed and
+ * for people who asked for none. `--ease-out` is different and the short name `ease-out` works,
+ * because `--ease-*` *is* a namespace; that inconsistency is Tailwind's, not ours, and it is
+ * written here so nobody has to rediscover it. */
 @theme static {
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
   --duration-quick: 90ms;

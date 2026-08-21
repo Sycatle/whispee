@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 
 import { PresenceDot } from "@/components/Presence";
 import { timeOf } from "@/lib/datetime";
+import { compactNameOf, formatHandle, nameMatches, nameOf } from "@/lib/naming";
 import { roster } from "@/lib/roster";
 import type { ConversationView } from "@/lib/session";
 import { Avatar } from "@/ui/Avatar";
@@ -14,6 +15,7 @@ import { Menu } from "@/ui/Menu";
 import { Tooltip } from "@/ui/Tooltip";
 import { cn } from "@/ui/cn";
 import { useTheme } from "@/lib/theme";
+import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useRevision, useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
@@ -133,6 +135,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
   const revision = useRevision();
   const bump = useBump();
   const report = useReport();
+  const names = useNames();
   const route = useRoute();
   const navigate = useNavigate();
   const { theme, setTheme } = useTheme();
@@ -156,12 +159,17 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
   // `state/SessionProvider.tsx`.
   void revision;
 
+  /*
+    The filter searches every string a person has, not the handle alone. Somebody typing
+    "charlie" has no way of knowing which of the three strings the rail happens to be showing
+    them — that is the whole point of a naming order — so a filter that only looked at one of
+    them would answer "no match" about a row the reader can see.
+
+    What it does not solve: it still only filters the list. Message bodies are not searched, for
+    the reasons stated where `filter` is declared.
+  */
   const matches = (view: ConversationView) =>
-    filter === ""
-      ? true
-      : view.accounts.some((account) =>
-          account.handle.toLowerCase().includes(filter.toLowerCase().replace(/^@/, "")),
-        );
+    view.accounts.some((account) => nameMatches(account.handle, names, filter));
 
   /*
     Most recent first. The list used to be in whatever order the `Map` happened to hold, which
@@ -190,8 +198,39 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
     .map((account) => account.handle);
 
   const contacts = roster({ conversations, verified, self: session.handle }).filter((handle) =>
-    filter === "" ? true : handle.toLowerCase().includes(filter.toLowerCase().replace(/^@/, "")),
+    nameMatches(handle, names, filter),
   );
+
+  /**
+   * Every handle the rail draws, in one set.
+   *
+   * It is the `among` passed to every compact name below, and it is deliberately the whole rail
+   * rather than one row: here the reader compares rows *against each other*, so a display name
+   * that could be mistaken for somebody in another conversation is ambiguous in this list even
+   * though the two people never share a thread. Narrowing it per row would let exactly that pair
+   * render identically, one above the other.
+   *
+   * What it does not solve: the set is what is on screen after filtering, so typing in the filter
+   * can remove the rival that was forcing a fallback and let a name appear. That is honest —
+   * a name is only ambiguous against what is actually shown — but it does mean a row can change
+   * its label while being filtered.
+   */
+  const rendered = new Set([
+    ...listed.flatMap((view) => [
+      ...view.accounts.map((account) => account.handle),
+      ...view.peers.map((peer) => peer.name),
+    ]),
+    ...contacts,
+  ]);
+
+  /**
+   * What this account calls itself, or nothing.
+   *
+   * Read from `session.displayName` and not through `nameOf`: `profiles` holds what *other*
+   * people asserted about themselves, and this account never announces itself to itself. There
+   * is no petname on oneself either, so the whole naming order collapses to these two cases.
+   */
+  const self = session.displayName;
 
   const open = async (handle: string) => {
     try {
@@ -213,9 +252,9 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         {/* Shown from a handful of conversations up. Below that it is one more thing on screen
             between the reader and a list they can already see all of. */}
         {conversations.length > 5 && (
-          <Tooltip label="Filter by handle">
+          <Tooltip label="Filter by name">
             <IconButton
-              label="Filter by handle"
+              label="Filter by name"
               icon="search"
               aria-expanded={searching}
               onClick={() => {
@@ -239,8 +278,8 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
           <Input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter by handle"
-            aria-label="Filter conversations by handle"
+            placeholder="Filter by name or handle"
+            aria-label="Filter conversations by name or handle"
             autoFocus
             className="w-full text-base"
           />
@@ -256,9 +295,17 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
               const last = session.lastActivityIn(view);
               const selected = currentKey === view.key;
               const only = view.accounts.length === 1 ? view.accounts[0] : undefined;
+              /*
+                The compact form, because this row has no second line to move the handle onto:
+                the one under the title is the message preview, and the preview is why anybody
+                looks at this list. So the name shown here has to be able to stand alone, which
+                is precisely what `compactNameOf` refuses to let it do when it cannot.
+              */
               const title =
-                view.accounts.map((a) => `@${a.handle}`).join(", ") ||
-                [...new Set(view.peers.map((p) => p.name))].map((n) => `@${n}`).join(", ") ||
+                view.accounts.map((a) => compactNameOf(a.handle, names, rendered)).join(", ") ||
+                [...new Set(view.peers.map((p) => p.name))]
+                  .map((n) => compactNameOf(n, names, rendered))
+                  .join(", ") ||
                 "empty conversation";
 
               return (
@@ -345,7 +392,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             })}
             {listed.length === 0 && (
               <li className="px-snug py-snug text-caption text-(--color-ink-muted)">
-                {filter === "" ? "No conversations yet." : "No conversation matches that handle."}
+                {filter === "" ? "No conversations yet." : "No conversation matches that."}
               </li>
             )}
           </ul>
@@ -355,18 +402,32 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             what that means and what it cannot see. */}
         <Section id="contacts" label="Contacts" count={contacts.length}>
           <ul className="px-snug pb-snug">
-            {contacts.map((handle) => (
-              <li key={handle}>
-                <button
-                  type="button"
-                  onClick={() => void open(handle)}
-                  className="flex w-full items-center gap-snug rounded-control px-snug py-snug text-left text-body hover:bg-(--color-surface) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
-                >
-                  <Avatar label={`@${handle}`} size="sm" className="shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">@{handle}</span>
-                </button>
-              </li>
-            ))}
+            {contacts.map((handle) => {
+              const contact = nameOf(handle, names);
+
+              return (
+                <li key={handle}>
+                  <button
+                    type="button"
+                    onClick={() => void open(handle)}
+                    className="flex w-full items-center gap-snug rounded-control px-snug py-snug text-left text-body hover:bg-(--color-surface) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
+                  >
+                    <Avatar label={contact.primary} size="sm" className="shrink-0" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate">{contact.primary}</span>
+                      {/* Room for a second line here, unlike a conversation row: nothing else
+                          claims it, so the handle stays on screen under the name instead of being
+                          replaced by it. */}
+                      {contact.secondary !== null && (
+                        <span className="block truncate text-caption text-(--color-ink-muted)">
+                          {contact.secondary}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
             {contacts.length === 0 && (
               <li className="px-snug py-snug text-caption text-(--color-ink-muted)">
                 People you share a group with, or have verified, appear here once they have no
@@ -397,12 +458,25 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             >
               <Avatar
                 seed={session.accountFingerprint()}
-                label={`@${session.handle}`}
+                label={self ?? formatHandle(session.handle)}
                 size="md"
                 className="shrink-0"
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-body font-medium">@{session.handle}</span>
+                <span className="block truncate text-body font-medium">
+                  {self ?? formatHandle(session.handle)}
+                </span>
+                {/*
+                  A named account gets three lines here rather than two, and the device
+                  identifier keeps the last of them. It is not a decoration: it is what somebody
+                  compares character by character while pairing, and dropping it to make room for
+                  a name would trade evidence for a label the user typed themselves.
+                */}
+                {self !== undefined && (
+                  <span className="block truncate text-caption text-(--color-ink-muted)">
+                    {formatHandle(session.handle)}
+                  </span>
+                )}
                 <span className="block truncate font-evidence text-caption text-(--color-ink-muted)">
                   {session.deviceId.slice(session.handle.length + 1)}
                 </span>
@@ -411,7 +485,14 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             </button>
           }
         >
-          <Menu.Label>@{session.handle}</Menu.Label>
+          {/* One line, but a wide one, so both strings fit side by side and the anchor is not
+              lost the moment the menu is the only thing on screen. */}
+          <Menu.Label>
+            {self ?? formatHandle(session.handle)}
+            {self !== undefined && (
+              <span className="ml-tight">{formatHandle(session.handle)}</span>
+            )}
+          </Menu.Label>
 
           <Menu.Sub label="Theme" icon="theme">
             <Menu.Item onSelect={() => setTheme("system")}>

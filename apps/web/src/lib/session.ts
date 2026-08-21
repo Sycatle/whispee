@@ -11,6 +11,7 @@ import { deviceNameCandidates, detectDeviceKind } from "./device";
 import { type PairingCode, awaitPairing, decodePairingCode, encodePairingCode } from "./pairing";
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
+import { withoutTone } from "./emoji";
 import * as envelope from "./envelope";
 import { type Cached, decodeHistory, encodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
@@ -580,11 +581,13 @@ export class Session {
       conversations: stored.conversationFlags ?? {},
       searchCoverage: stored.searchCoverage ?? {},
       blocked: stored.blocked ?? [],
+      recentEmojis: stored.recentEmojis ?? [],
       // The two that mean something by their absence keep it. Spread conditionally for the reason
       // `session-codec.ts` gives: a property present and holding `undefined` is not an absent one,
       // and the difference is exactly what "follow the system" is made of.
       ...(stored.locale === undefined ? {} : { locale: stored.locale }),
       ...(stored.contactPolicy === undefined ? {} : { contactPolicy: stored.contactPolicy }),
+      ...(stored.skinTone === undefined ? {} : { skinTone: stored.skinTone }),
     };
 
     if (stored.logHead) {
@@ -876,10 +879,12 @@ export class Session {
       conversationFlags: this.preferences.conversations,
       searchCoverage: this.preferences.searchCoverage,
       blocked: this.preferences.blocked,
+      recentEmojis: this.preferences.recentEmojis,
       ...(this.preferences.locale === undefined ? {} : { locale: this.preferences.locale }),
       ...(this.preferences.contactPolicy === undefined
         ? {}
         : { contactPolicy: this.preferences.contactPolicy }),
+      ...(this.preferences.skinTone === undefined ? {} : { skinTone: this.preferences.skinTone }),
       history: await this.atRest.seal(
         encodeHistory(
           new Map(
@@ -1961,6 +1966,28 @@ export class Session {
   /** Replies by quoting an earlier message. */
   replyTo(view: ConversationView, target: number, text: string): Promise<void> {
     return this.sendContent(view, { kind: "reply", target, text });
+  }
+
+  /**
+   * Records that an emoji was just used, so the picker can offer it first next time.
+   *
+   * The tone is stripped before storing: what is remembered is the emoji, and the tone is a
+   * separate preference applied on the way out. Without that, choosing a tone once fills the list
+   * with five variants of the same thumb and pushes everything else off it.
+   *
+   * Twenty-four is two rows of twelve at the width the picker uses. A longer list is not a longer
+   * memory, it is a second grid nobody scrolls.
+   */
+  async noteEmojiUse(emoji: string): Promise<void> {
+    const base = withoutTone(emoji);
+    if (!base) return;
+
+    await this.updatePreferences((preferences) => {
+      preferences.recentEmojis = [
+        base,
+        ...preferences.recentEmojis.filter((known) => known !== base),
+      ].slice(0, 24);
+    });
   }
 
   /** Signalling settings, as they apply right now. */

@@ -428,11 +428,32 @@ export interface Preferences {
   contactPolicy?: "open" | "known" | "closed";
   /** Handles this device declines to display. Hides; does not prevent. */
   blocked: string[];
+  /**
+   * Emoji recently reacted with or inserted, most recent first, base form without a skin tone.
+   *
+   * Kept here rather than in `localStorage`, where the theme preference lives, because the two
+   * are not the same kind of fact. Which emoji somebody reaches for is a habit, and a habit is
+   * exactly what a device seized after the fact should not read off the disk in the clear. In
+   * this object it is sealed by `DeviceCipher` along with everything else.
+   *
+   * Stored untoned so that five variants of one thumb cannot crowd out the rest of the list; the
+   * tone is applied on the way out by `applyTone`.
+   */
+  recentEmojis: string[];
+  /**
+   * The skin tone applied to emoji that take one, as an index into the five Unicode modifiers.
+   *
+   * Zero is the yellow glyph, which is the **absence** of a tone rather than one of them — hence
+   * six values for five modifiers. Optional on top of that, and the difference matters: absent
+   * means nobody has been asked, `0` means somebody chose yellow. Only the second is a decision
+   * to preserve if a default ever changes.
+   */
+  skinTone?: 0 | 1 | 2 | 3 | 4 | 5;
 }
 
 /** The preferences of an account that has never expressed one. */
 export function freshPreferences(): Preferences {
-  return { conversations: {}, searchCoverage: {}, blocked: [] };
+  return { conversations: {}, searchCoverage: {}, blocked: [], recentEmojis: [] };
 }
 
 /** The flags of one conversation, or an empty set if it has never had any. */

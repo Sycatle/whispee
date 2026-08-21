@@ -209,6 +209,17 @@ interface StoredSession {
    * courtesy to oneself rather than a barrier.
    */
   blocked?: string[];
+  /**
+   * Emoji recently used, most recent first, untoned. See `Preferences.recentEmojis`.
+   *
+   * Here rather than in `localStorage` because it is a habit, and this record is sealed.
+   */
+  recentEmojis?: string[];
+  /**
+   * The chosen skin tone, as an index into the five Unicode modifiers, `0` being the yellow
+   * glyph. **Absent means nobody chose**, which is not the same as choosing yellow.
+   */
+  skinTone?: 0 | 1 | 2 | 3 | 4 | 5;
 }
 
 /** What the user agrees to emit. */

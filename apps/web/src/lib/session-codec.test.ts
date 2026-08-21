@@ -181,3 +181,21 @@ test("a blocked handle that is not a string is refused rather than stored", () =
 test("the contact policy is a cache of the server's answer and round trips as one", () => {
   assert.equal(roundTrip(session({ contactPolicy: "known" })).contactPolicy, "known");
 });
+
+test("the emoji preferences survive the native codec", () => {
+  const restored = roundTrip(session({ recentEmojis: ["👍", "🎉"], skinTone: 3 }));
+
+  assert.deepEqual(restored.recentEmojis, ["👍", "🎉"]);
+  assert.equal(restored.skinTone, 3);
+});
+
+test("a chosen yellow skin tone is not confused with never having chosen", () => {
+  // `0` is a decision — the yellow glyph — and absence is the lack of one. A codec that
+  // normalised either way would claim something the reader never said.
+  const chosen = roundTrip(session({ skinTone: 0 }));
+  const never = roundTrip(session());
+
+  assert.equal(chosen.skinTone, 0);
+  assert.ok("skinTone" in chosen);
+  assert.ok(!("skinTone" in never));
+});

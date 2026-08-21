@@ -22,6 +22,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
+import { EmojiDrawer } from "@/components/EmojiPicker";
 import { continues, dayLabel, opensDay, timeOf } from "@/lib/datetime";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
@@ -36,7 +37,14 @@ import { IconButton } from "@/ui/IconButton";
 import { Spinner } from "@/ui/Spinner";
 import { Tooltip } from "@/ui/Tooltip";
 
-/** Palette offered on hover. Deliberately short: a full picker is a different subject. */
+/**
+ * The palette offered on hover, before this account has a history of its own.
+ *
+ * Five and not more: the row sits inside the bubble's width and every extra button pushes Reply
+ * further from the thumb. Once somebody has reacted a few times these are replaced by
+ * `preferences.recentEmojis`, which is the same idea with the choosing done by the person using
+ * it rather than by us. The full set is a keypress away in the picker beside them.
+ */
 const EMOJIS = ["👍", "❤️", "😂", "😮", "🙏"];
 
 export function Messages({
@@ -168,11 +176,26 @@ export function Messages({
   const react = (seq: number, emoji: string) => {
     session
       .reactTo(view, seq, emoji)
+      // Remembered on the way out rather than inside `reactTo`: an emoji chosen from the picker
+      // and an emoji chosen from the shortcut row are the same gesture, and the shortcut row is
+      // built from this list — so a reaction that failed to send should still count as a choice.
+      .then(() => session.noteEmojiUse(emoji))
       .then(bump)
       .catch((e: unknown) => {
         report.error(e instanceof Error ? e.message : String(e));
       });
   };
+
+  /**
+   * The five shortcuts, which are the five most recently used once there are five.
+   *
+   * Topped up from the defaults rather than shown short: a row that grows from one button to
+   * five over a week moves Reply under the reader's thumb a little further every day.
+   */
+  const quick = [
+    ...session.preferences.recentEmojis,
+    ...EMOJIS.filter((emoji) => !session.preferences.recentEmojis.includes(emoji)),
+  ].slice(0, 5);
 
   const isTyping = session.typingIn(view);
 
@@ -426,16 +449,27 @@ export function Messages({
                     )}
                     data-actions
                   >
-                    {EMOJIS.map((emoji) => (
+                    {quick.map((emoji) => (
                       <Tooltip key={emoji} label={`React ${emoji}`}>
                         <IconButton
                           label={`React with ${emoji}`}
-                          icon={emoji}
+                          icon={<Emoji char={emoji} />}
                           size="sm"
                           onClick={() => react(message.seq, emoji)}
                         />
                       </Tooltip>
                     ))}
+
+                    {/* Everything the five shortcuts are not. `side="top"` because the row sits
+                        under a bubble and a panel opening downwards would cover the next
+                        message; Radix flips it anyway when there is no room above. */}
+                    <EmojiDrawer
+                      label="React with another emoji"
+                      size="sm"
+                      side="top"
+                      align={message.mine ? "end" : "start"}
+                      onPick={(emoji) => react(message.seq, emoji)}
+                    />
                     {/*
                       A word and not a glyph, alone in this row. `ui/Icon.tsx` is a closed
                       inventory and holds no reply arrow; borrowing the back chevron would name

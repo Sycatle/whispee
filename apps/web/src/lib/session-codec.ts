@@ -65,6 +65,8 @@ export function encodeSession(session: StoredSession): Uint8Array {
     searchCoverage: session.searchCoverage,
     contactPolicy: session.contactPolicy,
     blocked: session.blocked,
+    recentEmojis: session.recentEmojis,
+    skinTone: session.skinTone,
   };
 
   return new TextEncoder().encode(JSON.stringify(raw));
@@ -146,6 +148,19 @@ export function decodeSession(bytes: Uint8Array): StoredSession {
             requireString(value, `blocked[${index}]`),
           ),
         }),
+    ...(field.recentEmojis === undefined
+      ? {}
+      : {
+          recentEmojis: requireArray(field.recentEmojis, "recentEmojis").map((value, index) =>
+            requireString(value, `recentEmojis[${index}]`),
+          ),
+        }),
+    // Spread conditionally like every other scalar, and here it carries meaning: absent is
+    // "nobody chose a skin tone", `0` is "somebody chose the yellow one". Normalising the first
+    // to the second would silently claim a decision was made.
+    ...(field.skinTone === undefined
+      ? {}
+      : { skinTone: field.skinTone as StoredSession["skinTone"] }),
   };
 }
 

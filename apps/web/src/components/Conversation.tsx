@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { EmojiDrawer } from "@/components/EmojiPicker";
 import { Messages } from "@/components/Messages";
 import { PresenceLine } from "@/components/Presence";
 import { Verification } from "@/components/Verification";
@@ -50,6 +51,7 @@ export function Conversation({ view }: { view: ConversationView }) {
   const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const occlusion = useOcclusion();
 
   const detailOpen = route.kind === "conversation" && route.detail !== undefined;
@@ -150,6 +152,33 @@ export function Conversation({ view }: { view: ConversationView }) {
     setText(value);
     session.setDraft(view, value);
     if (value) void session.notifyTyping(view).catch(() => {});
+  };
+
+  /**
+   * Drops an emoji where the caret is, not at the end of the field.
+   *
+   * Appending would be simpler and wrong: somebody who moved the caret back to fix a word and
+   * then reached for the picker gets their emoji at the end of a sentence they were not looking
+   * at. `selectionStart`/`selectionEnd` also cover a selection, which is replaced — the same
+   * thing typing a character does.
+   *
+   * The caret is restored in a microtask rather than immediately, because React has not written
+   * the new value into the DOM yet at this point and setting `selectionStart` against the old
+   * one would land in the wrong place. Focus goes back to the field either way: the picker took
+   * it, and a composer you have to click again to keep typing in is a composer that interrupts.
+   */
+  const insert = (emoji: string) => {
+    const field = composer.current;
+    const at = field?.selectionStart ?? text.length;
+    const to = field?.selectionEnd ?? text.length;
+
+    typing(`${text.slice(0, at)}${emoji}${text.slice(to)}`);
+
+    queueMicrotask(() => {
+      const caret = at + emoji.length;
+      field?.focus();
+      field?.setSelectionRange(caret, caret);
+    });
   };
 
   const attach = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -299,7 +328,13 @@ export function Conversation({ view }: { view: ConversationView }) {
           The height follows the content up to a ceiling, past which it scrolls: a composer that
           grows without limit eats the conversation it belongs to.
         */}
+        {/* Between the paperclip and the field, which is where every messenger puts it: the two
+            things you attach to a message, in the order you reach for them. `side="top"` — the
+            composer is at the bottom of the pane and there is nowhere else to open. */}
+        <EmojiDrawer label="Insert an emoji" side="top" align="start" onPick={insert} />
+
         <textarea
+          ref={composer}
           id={COMPOSER_ID}
           value={text}
           onChange={(e) => typing(e.target.value)}

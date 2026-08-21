@@ -12,6 +12,7 @@ import {
   Search,
   SendHorizontal,
   Settings,
+  SmilePlus,
   SunMoon,
   Trash2,
   TriangleAlert,
@@ -21,12 +22,12 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 /**
- * The icon inventory. Eighteen, named by role, and closed.
+ * The icon inventory. Nineteen, named by role, and closed.
  *
  * # Named imports only, never `import * as icons`
  *
  * A star import defeats tree-shaking: the bundler cannot prove which of the fifteen hundred
- * modules in `lucide-react` are unreachable, so it keeps them. Eighteen named imports are a few
+ * modules in `lucide-react` are unreachable, so it keeps them. Nineteen named imports are a few
  * kilobytes; the star import is the whole set. This is not a style preference, it is the
  * difference between the budget the plan allowed for icons and roughly three hundred times it.
  *
@@ -39,9 +40,16 @@ import type { LucideIcon } from "lucide-react";
  *
  * # What this does not cover
  *
- * The five reaction emoji stay Unicode. They are content, not chrome: they must look like what
- * the recipient sees, and redrawing them in a line-art set would make the sender and the
- * receiver disagree about what was sent.
+ * The emoji people send. They are content, not chrome: the sender and the receiver have to see
+ * the same thing, and a line-art icon would say something else entirely.
+ *
+ * They used to be Unicode, drawn by whatever font the platform had — which meant three different
+ * pictures on three platforms, and tofu on a Linux build with no emoji font installed. They are
+ * now Fluent artwork served from `public/emoji`, and `ui/Emoji.tsx` is where that lives. The
+ * conclusion is unchanged and the reason is stronger: content is not an entry in this table.
+ *
+ * `emoji` below is the exception that proves it. It is the *button* that opens the picker, which
+ * is an interface control like any other.
  */
 export type IconName =
   | "add"
@@ -53,6 +61,7 @@ export type IconName =
   | "collapse"
   | "copy"
   | "devices"
+  | "emoji"
   | "info"
   | "lock"
   | "notifications"
@@ -82,6 +91,15 @@ const ICONS: Record<IconName, LucideIcon> = {
   copy: Copy,
   /** The device list: this account's, and a peer's. */
   devices: MonitorSmartphone,
+  /**
+   * Opens the emoji picker, from the composer and from the reaction bar.
+   *
+   * Chrome, not content — which is the distinction the note at the top of this file draws, and
+   * the reason it survives the emoji becoming artwork of their own. What a person *says* is a
+   * Fluent SVG on every platform (`ui/Emoji.tsx`); the button that opens the drawer of them is
+   * an interface control and belongs to the same line-art set as everything else here.
+   */
+  emoji: SmilePlus,
   /** Opens the detail panel, where verification actually happens. */
   info: Info,
   /** The local lock. A padlock, and no attempt to distinguish locked from unlocked by shape. */

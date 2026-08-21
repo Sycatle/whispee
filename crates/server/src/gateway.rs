@@ -103,6 +103,10 @@ const MAX_FRAME_BYTES: usize = 64 * 1024;
 ///
 /// Aligned on [`MAX_SUBSCRIPTIONS`]: a client has no reason to announce a cursor for a group it
 /// cannot subscribe to.
+///
+/// Since the gap check, an entry buys **two** queries rather than one. The ceiling did not move
+/// for it: doubling a bounded cost leaves it bounded, and halving the ceiling would penalise
+/// every honest multi-group client to shave a constant off the abusive case.
 const MAX_CURSORS: usize = MAX_SUBSCRIPTIONS;
 
 /// Ceiling on envelopes announced per group during catch-up.
@@ -156,6 +160,14 @@ enum ServerFrame<'a> {
     Hello { heartbeat_ms: u64, nonce: String },
     Ready { groups: Vec<String> },
     Envelope { group_id: String, seq: i64 },
+    /// The cursor announced in `identify` points below what the group still holds.
+    ///
+    /// Emitted during catch-up only, before that group's `envelope` frames. Without it the
+    /// session would stay silent about a purged group — indistinguishable, from the client's
+    /// side, from a group where nothing happened — and silence is what turns a purge into a
+    /// corruption. Same field and same meaning as `oldest` on the HTTP fetch, deliberately: a
+    /// client must not have to learn the gap rule twice.
+    Gap { group_id: String, oldest: i64 },
     Signal { group_id: String, payload: String },
     HeartbeatAck,
     /// Deliberately coarse reason: see [`reason`].
@@ -364,12 +376,20 @@ impl Session {
         self.subscriptions.insert(group_id, receiver);
     }
 
-    /// Announces the sequences posted since the client's cursor.
+    /// Announces the sequences posted since the client's cursor, and the gaps beneath it.
     ///
     /// Serves numbers only: the client will go and read by the HTTP path, which rechecks its
     /// membership. A cursor on a group the device is not a member of is **silently ignored** —
     /// answering "unknown" rather than "not a member" would make this catch-up an oracle for
     /// group existence.
+    ///
+    /// A cursor pointing below what the group still holds gets a [`ServerFrame::Gap`] first.
+    /// Staying silent there was defensible while nothing was ever deleted; it stopped being so
+    /// the day `crate::purge_once` learned to delete envelopes, because the client's reading of
+    /// silence — "I have missed nothing" — became false without anything on the wire saying so.
+    ///
+    /// The gap is not an oracle: it is served only for a group the caller is already a member
+    /// of, and it says how far that group's own history reaches, which every member may know.
     async fn resume(
         &self,
         sender: &mut Sender,
@@ -393,6 +413,20 @@ impl Session {
             let Ok(group_id) = hex::decode(&cursor.group_id) else { continue };
             if !members.contains(group_id.as_slice()) {
                 continue;
+            }
+
+            // Announced before the sequences, not after: a client that reads frames in order must
+            // learn the history is broken before it is handed numbers to go and fetch. The other
+            // order would have it decrypt a run of envelopes against a ratchet it has already
+            // lost, which in a release build is one error per envelope and in a debug build is
+            // the OpenMLS `debug_assert!` — see CONTRIBUTING.
+            let oldest = crate::routes::oldest_surviving(&self.pool, &group_id).await?;
+            if cursor.seq < oldest - 1 {
+                let frame =
+                    ServerFrame::Gap { group_id: cursor.group_id.clone(), oldest };
+                if send(sender, &frame).await.is_err() {
+                    return Ok(());
+                }
             }
 
             let rows: Vec<(i64,)> = sqlx::query_as(

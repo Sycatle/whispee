@@ -518,15 +518,33 @@ export class Api {
     if (!response.ok) throw new ApiError(response.status, await response.text());
   }
 
+  /**
+   * Reads a page of the mailbox, and where that mailbox now begins.
+   *
+   * `oldest` is the smallest sequence the server still holds for this group. It exists because
+   * the server purges envelopes: without it an empty page would mean either "nothing new" or
+   * "everything you had not read is gone", and a client reading it as the first would sit
+   * forever on a ratchet that can no longer advance.
+   *
+   * The comparison is `after < oldest - 1`, and it belongs to the caller rather than here — this
+   * class is the wire, and deciding a conversation is broken is a decision about state.
+   */
   async fetchEnvelopes(
     groupId: Uint8Array,
     after: number,
-  ): Promise<{ seq: number; payload: Uint8Array }[]> {
-    const rows = await this.request<{ seq: number; payload: string }[]>(
-      "GET",
-      `/v1/groups/${toHex(groupId)}/envelopes?after=${after}`,
-    );
-    return rows.map((row) => ({ seq: row.seq, payload: fromBase64(row.payload) }));
+  ): Promise<{ oldest: number; envelopes: { seq: number; payload: Uint8Array }[] }> {
+    const page = await this.request<{
+      oldest: number;
+      envelopes: { seq: number; payload: string }[];
+    }>("GET", `/v1/groups/${toHex(groupId)}/envelopes?after=${after}`);
+
+    return {
+      oldest: page.oldest,
+      envelopes: page.envelopes.map((row) => ({
+        seq: row.seq,
+        payload: fromBase64(row.payload),
+      })),
+    };
   }
 }
 

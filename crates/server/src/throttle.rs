@@ -41,10 +41,18 @@
 //! account, which this server does not have. Saying the rate limit solves storage would be the
 //! comfortable lie.
 //!
-//! **And it does not bound `envelopes` as a table.** An envelope is never deleted and cannot be:
-//! each one consumes a generation of the MLS application ratchet, and the server has no notion
-//! of "delivered", so it has no moment at which removing one is safe. The quota bounds how fast
-//! one device adds to that table. It does not make it shrink, ever.
+//! **And what it bounds in `envelopes` is a rate, not a total.** The table is no longer
+//! unbounded — `crate::purge_once` deletes an envelope once it is both older than thirty days
+//! and five hundred sequences behind the group's head — but that is not a ceiling either. It is
+//! a steady state: a group settles at roughly the last thirty days of its own traffic, so growth
+//! stops being proportional to all of history and becomes proportional to a month of it. A group
+//! writing five hundred messages a day still holds fifteen thousand envelopes, forever, and the
+//! quota is what stops that number being chosen by an attacker rather than by the conversation.
+//!
+//! The bound that is still missing is the same one as above, and it is now the more pressing of
+//! the two: a stored-bytes quota per account. The history vault is deliberately never purged —
+//! it is what makes deleting envelopes acceptable — so it has inherited the role of this
+//! server's unbounded store, held back only by ten writes per minute per device.
 //!
 //! # What this does not close
 //!

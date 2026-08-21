@@ -180,6 +180,31 @@ export interface ConversationView {
   contentCursor: number;
   /** How far the user has actually seen the conversation on screen. */
   readCursor: number;
+  /**
+   * The server no longer holds envelopes we never read.
+   *
+   * Set when a fetch — or a gateway `gap` frame — reports an `oldest` sequence above our cursor
+   * plus one. The server purges envelopes past thirty days once a group is more than five
+   * hundred ahead, so a device left offline that long comes back to a mailbox with a hole in it.
+   *
+   * # Why this stops the loop rather than logging
+   *
+   * A missing envelope is a missing generation of the MLS application ratchet: nothing after it
+   * decrypts, ever. Carrying on would produce one error per envelope, on every poll, for the
+   * lifetime of the session — the "unreadable message does not block the conversation" rule in
+   * `poll` is right for a single bad envelope and wrong for a severed ratchet. So the flag stops
+   * the conversation being polled at all.
+   *
+   * Deliberately not persisted, like `gossiped` and `hydrated`: it is re-derived from the first
+   * fetch of the next session, and persisting it would risk carrying a stale verdict past the
+   * re-introduction that fixes it.
+   *
+   * **What it does not do**, and what a later lot owes the user: nothing renders it. The
+   * conversation goes quiet rather than displaying an error, which is the lesser of two wrongs
+   * and still a wrong. Recovery — restoring the content from the vault and asking to be re-added
+   * to the group — is not implemented here either.
+   */
+  stale?: boolean;
   /** Peers currently typing, with their expiry timestamp. */
   typing: Typing[];
   /** Last time we emitted a typing indicator, for the debounce. */

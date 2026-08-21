@@ -1903,8 +1903,9 @@ export class Session {
    *
    * Nothing is stored, neither by us nor by the server. The signal is encrypted under the group's
    * epoch key, posted without a device signature, relayed to connected members, then forgotten.
-   * That is the point of the separate channel: `envelopes` is never purged, and routing keystrokes
-   * through it would keep a permanent record of who hesitated.
+   * That is the point of the separate channel: an envelope survives thirty days at minimum and
+   * indefinitely in a conversation shorter than five hundred messages, so routing keystrokes
+   * through it would keep a record of who hesitated for as long as the conversation lasts.
    *
    * # What the server learns anyway
    *
@@ -2075,6 +2076,21 @@ export class Session {
         onSignal: (groupId, payload) => {
           void this.absorbSignal(groupId, payload).then(onChange).catch(() => {});
         },
+        onGap: (groupId, oldest) => {
+          // The frame arrives before the sequence announcements for that group, so flagging here
+          // is what stops the poll they would otherwise trigger. Rechecked against the cursor
+          // rather than trusted outright: the session is never load-bearing, and a cursor that
+          // advanced between reconnection and this frame must not be overruled by a stale
+          // announcement.
+          const view = this.conversations.get(toHex(groupId));
+          if (!view || view.cursor >= oldest - 1) return;
+
+          console.warn(
+            `conversation ${view.key} interrupted: the server holds nothing before ${oldest}`,
+          );
+          view.stale = true;
+          onChange();
+        },
       },
       // Evaluated on every (re)connection, never frozen: between two attempts the poll may have
       // advanced, and a stale cursor would re-announce sequences already read.
@@ -2164,7 +2180,22 @@ export class Session {
     }
 
     for (const view of this.conversations.values()) {
-      const envelopes = await this.api.fetchEnvelopes(view.groupId, view.cursor);
+      // A severed ratchet does not heal by being asked again. See `ConversationView.stale`.
+      if (view.stale) continue;
+
+      const page = await this.api.fetchEnvelopes(view.groupId, view.cursor);
+
+      // `oldest - 1` because the cursor names the last sequence we hold: the next one we expect
+      // is `cursor + 1`, and the history is intact exactly while the server still has it.
+      if (view.cursor < page.oldest - 1) {
+        console.warn(
+          `conversation ${view.key} interrupted: the server holds nothing before ${page.oldest}`,
+        );
+        view.stale = true;
+        continue;
+      }
+
+      const envelopes = page.envelopes;
       const before = view.messages.length;
 
       for (const row of envelopes) {
@@ -2348,8 +2379,11 @@ export class Session {
       if (this.conversations.has(hex)) continue;
 
       const groupId = hexToBytes(hex);
-      const envelopes = await this.api.fetchEnvelopes(groupId, 0);
+      const { envelopes } = await this.api.fetchEnvelopes(groupId, 0);
 
+      // No gap check here: a purged Welcome shows up as "no Welcome found", which this loop
+      // already handles by leaving the group undiscovered. Flagging a conversation we have never
+      // opened would mean creating one in order to declare it broken.
       for (const row of envelopes) {
         let parsed: envelope.Parsed;
         try {

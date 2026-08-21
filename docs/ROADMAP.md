@@ -142,12 +142,15 @@ These predate the mobile work and are argued in full in [`../README.md`](../READ
 [`./THREAT-MODEL.md`](./THREAT-MODEL.md). The short list, so this page is not misleading by
 omission:
 
-- **`envelopes` is never purged, and cannot be** — every envelope consumes a generation of the
-  MLS application ratchet, and the server has no notion of "delivered". The table grows without
-  bound. That is an operational problem, not a simplification. Per-device write quotas now bound
-  the *rate* at which one device can add to it; they bound no total, and the anonymous post path
-  is not rate-limited at all, because attributing a post to a device is the power sealed sender
-  removes.
+- **The history vault is the server's unbounded store, and must stay unpurged.** `envelopes` is
+  no longer the gap it was: the retention purge deletes an envelope past thirty days once its
+  group is five hundred sequences ahead of it, which turns unbounded growth into a steady state
+  proportional to the last month of traffic. That purge is only acceptable because the content
+  survives elsewhere — in `vault_entries`, which is therefore deliberately never purged, and has
+  inherited the role `envelopes` used to play. The debt moved; it was not paid. The bound that
+  would settle it is the per-account **stored-bytes quota** `crates/server/src/throttle.rs`
+  already names: write quotas cap a rate per device per minute, and ten vault writes a minute,
+  forever, is still forever.
 - **On the desktop build, notifications neither collapse nor open the conversation.** Tauri's
   notification plugin replaces `window.Notification` with a shim that drops the `tag` and returns
   no handle, so forty arriving messages would be forty notices and clicking one does nothing. The

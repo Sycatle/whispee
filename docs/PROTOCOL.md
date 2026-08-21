@@ -558,6 +558,7 @@ Server frames:
 | `hello` | `heartbeat_ms`, `nonce` |
 | `ready` | `groups[]` |
 | `envelope` | `group_id`, `seq` |
+| `gap` | `group_id`, `oldest` |
 | `signal` | `group_id`, `payload` |
 | `heartbeat_ack` | — |
 | `error` | `reason` |
@@ -608,7 +609,8 @@ normal HTTP path, which rechecks its membership and applies pagination — dupli
 here would have duplicated its access control, and it is the forgotten copy that becomes the hole.
 
 At open time the client announces its cursors in `identify` and the server replies only if it has
-something to say. Catch-up serves sequence numbers only.
+something to say. Catch-up serves sequence numbers only — and, when the cursor has fallen behind
+what the group still holds, a `gap` frame first. See § 10.
 
 ### 9.6 Presence and multi-instance fan-out
 
@@ -625,3 +627,69 @@ Across instances, the broadcast hub speaks over Postgres `LISTEN/NOTIFY` on a si
 `group_members` — so this adds nothing to what it knows. What it does add: a deployment set to
 `log_statement = all` would see signals in its logs. "Signals never reach the disk" therefore now
 depends on a database setting rather than being true by construction.
+
+---
+
+## 10. Retention, and the gap it can open
+
+The server deletes an envelope when **both** conditions hold:
+
+```
+created_at < now() - 30 days   AND   seq <= groups.next_seq - 500
+```
+
+The conjunction is the design, not a tuning. Age alone empties a quiet conversation — three
+hundred messages over two years, weighing nothing, gone. The tail alone evicts a device away for
+two hours from a talkative group. Together, **no conversation shorter than 500 envelopes is ever
+touched, at any age**, and losing anything takes being both a month and five hundred messages
+behind.
+
+Attachments go by age alone, at **90 days** — longer than envelopes, because a message restored
+from the vault carries its attachment descriptor and stays resolvable for a while after the
+envelope that delivered it is gone. Past three months the file is no longer downloadable, and
+keeping it is the recipient's business.
+
+A group with no member and no envelope younger than 30 days is deleted outright, and the
+`ON DELETE CASCADE` takes its mailbox with it.
+
+There are **no server-side delivery cursors**, and there will not be: a
+`delivery_cursors(group_id, device_id, seq)` table would be a movement journal — when each person
+last collected their mail, per conversation — which is precisely what the presence design refuses.
+It would also bound nothing, since `MIN(cursor)` is pinned by the one device that never comes
+back, so an age floor would be needed on top of it anyway.
+
+### 10.1 `oldest`, and why the fetch response changed shape
+
+`GET /v1/groups/{id}/envelopes` no longer returns a bare array. It returns:
+
+```json
+{ "oldest": 1204, "envelopes": [ { "seq": 1204, "payload": "…" } ] }
+```
+
+`oldest` is the smallest sequence the group still holds, or `next_seq + 1` when it holds none —
+so a brand new group reports `1`, and a client at cursor `0` correctly concludes it has missed
+nothing.
+
+The client's rule is one line:
+
+```
+cursor < oldest - 1   ⟹   the envelopes in between no longer exist
+```
+
+Without this field an empty page means either "nothing new" or "everything you had not read is
+gone", and a client reading it as the first waits forever on a ratchet that can never advance.
+This is an unversioned breaking change to the response body, taken deliberately rather than added
+as an optional sibling field: an optional field is one a client can keep ignoring, and ignoring
+this one is exactly the failure being fixed.
+
+The gateway says the same thing with the `gap` frame, emitted during catch-up **before** that
+group's `envelope` frames — a client reading frames in order must learn its history is broken
+before it is handed numbers to fetch.
+
+### 10.2 What a gap actually costs
+
+Not the history: the content is in the vault, which is on by default. **The MLS state.** A missing
+envelope is a missing generation of the application ratchet, and nothing after it decrypts. A
+device on the wrong side of a purge must therefore stop trying to decrypt — otherwise it produces
+one error per envelope, on every poll, forever — restore what it can read from the vault, and ask
+to be re-introduced to the group. If the vault is disabled, the content is gone.

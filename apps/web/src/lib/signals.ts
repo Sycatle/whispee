@@ -7,9 +7,10 @@
  * each message consumes a generation, and too wide a gap breaks decryption of what follows. That
  * is exactly what messages need — and exactly what a typing indicator does not.
  *
- * The consequence is not theoretical. The `envelopes` table is never purged, and **cannot be**
- * without punching a hole in the ratchet. Routing typing through that path would keep, forever, a
- * record of who started to answer and then thought better of it.
+ * The consequence is not theoretical. The server does prune `envelopes`, but only past thirty
+ * days and only five hundred sequences behind the group's head — a quiet conversation never
+ * reaches the second condition at all. Routing typing through that path would keep a record of
+ * who started to answer and then thought better of it for a month at best, and forever at worst.
  *
  * Here nothing is stored: the server relays and forgets.
  *

@@ -201,7 +201,7 @@ export function Messages({
                 // loss nobody thinks to check.
                 className={`inline-block max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-lg px-3 py-2 text-left text-sm ${
                   message.mine
-                    ? "bg-(--color-accent) text-white"
+                    ? "bg-(--color-accent) text-(--color-accent-ink)"
                     : "bg-(--color-surface-raised) border border-(--color-border-subtle)"
                 }`}
               >
@@ -303,8 +303,10 @@ export function Messages({
         {view.outbox.map((entry) => (
           <li key={entry.localId} className="text-right">
             <div
-              className={`inline-block max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-lg px-3 py-2 text-left text-sm text-white ${
-                entry.state === "failed" ? "bg-(--color-danger)" : "bg-(--color-accent) opacity-60"
+              className={`inline-block max-w-[75%] whitespace-pre-wrap wrap-anywhere rounded-bubble px-gutter py-snug text-left text-body ${
+                entry.state === "failed"
+                  ? "bg-(--color-danger) text-(--color-state-ink)"
+                  : "bg-(--color-accent) text-(--color-accent-ink) opacity-60"
               }`}
             >
               {entry.text}

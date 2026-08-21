@@ -121,15 +121,27 @@ function Appearance() {
   );
 }
 
-/** The six existing panels, now reached by URL and called without a single prop. */
+/**
+ * The six existing panels, now reached by URL.
+ *
+ * Three of them still take a callback, and it is not an oversight on either side: `onClose` and
+ * `onDone` mean "this flow has finished", which is a different statement from "the panel is
+ * gone". They used to collapse an inline panel; here they hand the reader back to the list of
+ * settings, which is the closest thing to what they meant. Navigating rather than going back:
+ * the flow completing is not the reader undoing anything, and `history.back()` from a pairing
+ * they just finished would land them wherever they came from instead of where the result is.
+ */
 function Section({ section }: { section: SettingsSection }) {
+  const navigate = useNavigate();
+  const done = () => navigate({ kind: "settings", section: null });
+
   switch (section) {
     case "devices":
-      return <DeviceSettings />;
+      return <DeviceSettings onClose={done} />;
     case "pairing":
-      return <PairDevice />;
+      return <PairDevice onDone={done} />;
     case "lock":
-      return <LockSettings />;
+      return <LockSettings onDone={done} />;
     case "backup":
       return <VaultSettings />;
     case "receipts":

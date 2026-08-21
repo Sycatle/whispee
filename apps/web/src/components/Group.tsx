@@ -209,7 +209,7 @@ export function GroupPanel({
                       setLeaving(false);
                     })
                   }
-                  className="rounded-md bg-(--color-danger) px-3 py-1.5 text-xs font-medium text-white"
+                  className="rounded-control bg-(--color-danger) px-gutter py-control text-caption font-medium text-(--color-state-ink)"
                 >
                   {heir !== null ? `Hand over to @${heir} and leave` : "Request to leave"}
                 </button>

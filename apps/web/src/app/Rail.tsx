@@ -216,7 +216,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
           <Tooltip label="Filter by handle">
             <IconButton
               label="Filter by handle"
-              icon={<Icon name="search" />}
+              icon="search"
               aria-expanded={searching}
               onClick={() => {
                 setSearching(!searching);
@@ -228,7 +228,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         <Tooltip label="Start a conversation">
           <IconButton
             label="Start a conversation"
-            icon={<Icon name="add" />}
+            icon="add"
             onClick={() => navigate({ kind: "new" })}
           />
         </Tooltip>
@@ -413,7 +413,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         >
           <Menu.Label>@{session.handle}</Menu.Label>
 
-          <Menu.Sub label="Theme" icon={<Icon name="theme" />}>
+          <Menu.Sub label="Theme" icon="theme">
             <Menu.Item onSelect={() => setTheme("system")}>
               System{theme === "system" ? " ✓" : ""}
             </Menu.Item>
@@ -427,45 +427,45 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
 
           {/* The one lock action that happens on the spot. Configuring the lock is a screen with
               a password field in it, and a password field does not belong in a dropdown. */}
-          <Menu.Item icon={<Icon name="lock" />} disabled={!session.locked} onSelect={onLock}>
+          <Menu.Item icon="lock" disabled={!session.locked} onSelect={onLock}>
             Lock now
           </Menu.Item>
 
           <Menu.Separator />
 
           <Menu.Item
-            icon={<Icon name="devices" />}
+            icon="devices"
             onSelect={() => navigate({ kind: "settings", section: "devices" })}
           >
             Your devices
           </Menu.Item>
           <Menu.Item
-            icon={<Icon name="pair" />}
+            icon="pair"
             onSelect={() => navigate({ kind: "settings", section: "pairing" })}
           >
             Add a device
           </Menu.Item>
           <Menu.Item
-            icon={<Icon name="lock" />}
+            icon="lock"
             onSelect={() => navigate({ kind: "settings", section: "lock" })}
           >
             Lock
           </Menu.Item>
           <Menu.Item
-            icon={<Icon name="backup" />}
+            icon="backup"
             onSelect={() => navigate({ kind: "settings", section: "backup" })}
           >
             {/* The off state reads as a deliberate anomaly, not as an invitation. */}
             {session.archiving ? "History backup" : "Backup disabled"}
           </Menu.Item>
           <Menu.Item
-            icon={<Icon name="settings" />}
+            icon="settings"
             onSelect={() => navigate({ kind: "settings", section: "receipts" })}
           >
             Receipts and indicators
           </Menu.Item>
           <Menu.Item
-            icon={<Icon name="notifications" />}
+            icon="notifications"
             onSelect={() => navigate({ kind: "settings", section: "notifications" })}
           >
             Notifications
@@ -473,7 +473,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
 
           <Menu.Separator />
 
-          <Menu.Item icon={<Icon name="revoke" />} tone="danger" onSelect={() => setErasing(true)}>
+          <Menu.Item icon="revoke" tone="danger" onSelect={() => setErasing(true)}>
             Erase this identity
           </Menu.Item>
         </Menu>

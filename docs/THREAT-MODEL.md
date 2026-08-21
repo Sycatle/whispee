@@ -197,6 +197,22 @@ the loss surface for no gain against a server that never sees it.
 - **Contact discovery.** There is none, deliberately: no phone number and no email address
   anywhere. Discovery by number is the most toxic part of a messaging system — even hashed, the
   number space is enumerable in hours.
+- **Impersonation by display name.** A display name is asserted by the account it describes and
+  arrives over MLS: the group learns which member sent it, and nothing else. Anybody can call
+  themselves Charlie, and the person who wants to be mistaken for Charlie is the one who will.
+  Three things bound the damage rather than remove it — the handle stays on screen beside the
+  name; the two surfaces with no room for both, a bubble author and a notification, drop the name
+  entirely when two members of a conversation would render alike or when a name is another
+  member's handle; and a local nickname, which no peer or server can influence, overrules the
+  claim outright. None of that stops a convincing lookalike: `Charlle` is not `Charlie`, and no
+  string comparison is going to say so. The handle underneath is the defence, and past it the
+  fingerprint.
+
+  The canonical handle format, `^[a-z0-9_]{3,32}$`, removes the wide classes — mixed case,
+  bidirectional overrides, whitespace, non-ASCII homoglyphs — and closes the ambiguity that let a
+  handle containing `:` split a device id. It leaves the narrow ones alone: `rn` still reads as
+  `m`, and `_` is still a separator nobody looks at.
+
 - **Legal compulsion of the operator.** It changes what the operator does, not what it can do; the
   "malicious server" row already covers the capability.
 - **Supply chain below the source.** Reproducible builds cover the binary against the published

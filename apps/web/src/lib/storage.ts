@@ -22,7 +22,7 @@ import { isTauri } from "./platform";
 import type { DeviceKeys } from "./keys";
 import type { LockEnvelope } from "./lock";
 
-const DB_NAME = "whatsapp-clone";
+const DB_NAME = "whispee";
 const DB_VERSION = 1;
 const STORE = "device";
 

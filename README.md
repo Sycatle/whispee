@@ -1,4 +1,4 @@
-# whatsapp_clone
+# Whispee
 
 Messagerie chiffrée de bout en bout, multi-plateforme, à cœur crypto unique en Rust.
 
@@ -264,7 +264,7 @@ La clé privée n'entre jamais dans le dépôt. Pour en produire une :
 
 ```sh
 openssl genpkey -algorithm ed25519 -out cle-privee.pem
-openssl pkey -in cle-privee.pem -pubout -out release/whatsapp_clone.pub
+openssl pkey -in cle-privee.pem -pubout -out release/whispee.pub
 ```
 
 Ce que cela ne change pas encore : la cryptographie tourne toujours en WebAssembly dans la

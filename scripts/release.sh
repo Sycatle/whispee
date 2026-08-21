@@ -33,7 +33,7 @@
 # La clé privée n'est jamais lue depuis le dépôt et n'y entre jamais. Pour en créer une :
 #
 #   openssl genpkey -algorithm ed25519 -out cle-privee.pem
-#   openssl pkey -in cle-privee.pem -pubout -out release/whatsapp_clone.pub
+#   openssl pkey -in cle-privee.pem -pubout -out release/whispee.pub
 set -euo pipefail
 
 racine="$(git rev-parse --show-toplevel)"
@@ -89,7 +89,7 @@ echo "→ construction de l'interface"
 echo "→ construction du binaire"
 cargo build -p desktop --release
 
-cp target/release/desktop "$sortie/whatsapp_clone"
+cp target/release/desktop "$sortie/whispee"
 
 # Les versions font partie de la publication, pas de la documentation. La reproductibilité vaut
 # **à environnement donné** : une autre version de `rustc` ou de `pnpm` produit un binaire
@@ -105,7 +105,7 @@ pnpm=$(pnpm --version)
 INFO
 
 echo "→ empreintes et signature"
-(cd "$sortie" && sha256sum whatsapp_clone BUILD-INFO > SHA256SUMS)
+(cd "$sortie" && sha256sum whispee BUILD-INFO > SHA256SUMS)
 
 # La signature porte sur `SHA256SUMS`, pas sur le binaire : un seul fichier signé couvre ainsi
 # l'ensemble de la publication, y compris `BUILD-INFO`. Signer le binaire seul laisserait les

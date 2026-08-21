@@ -39,7 +39,7 @@ pub struct TestServer {
 
 pub async fn start() -> TestServer {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://whatsapp_clone:dev_only_not_a_secret@localhost:55432/whatsapp_clone".into()
+        "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
     });
 
     let pool = server::connect(&database_url).await.unwrap_or_else(|e| {
@@ -55,7 +55,7 @@ pub async fn start() -> TestServer {
 /// Serveur de test à limite de débit imposée.
 pub async fn start_with_throttle(quota: u32) -> TestServer {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://whatsapp_clone:dev_only_not_a_secret@localhost:55432/whatsapp_clone".into()
+        "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
     });
 
     let pool = server::connect(&database_url).await.unwrap();
@@ -68,7 +68,7 @@ pub async fn start_with_throttle(quota: u32) -> TestServer {
 /// consomme plusieurs, et les deux bornes n'ont rien à voir l'une avec l'autre.
 pub async fn start_with_claim_quota(quota: u32) -> TestServer {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://whatsapp_clone:dev_only_not_a_secret@localhost:55432/whatsapp_clone".into()
+        "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
     });
 
     let pool = server::connect(&database_url).await.unwrap();
@@ -112,7 +112,7 @@ impl ReveilEspion {
 /// Un serveur dont on observe les réveils.
 pub async fn start_avec_reveil() -> (TestServer, std::sync::Arc<ReveilEspion>) {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://whatsapp_clone:dev_only_not_a_secret@localhost:55432/whatsapp_clone".into()
+        "postgres://whispee:dev_only_not_a_secret@localhost:55432/whispee".into()
     });
     let pool = server::connect(&database_url).await.unwrap();
     let espion = std::sync::Arc::new(ReveilEspion::default());

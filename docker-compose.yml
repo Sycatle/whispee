@@ -6,17 +6,17 @@
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: whatsapp_clone_pg
+    container_name: whispee_pg
     environment:
-      POSTGRES_USER: whatsapp_clone
+      POSTGRES_USER: whispee
       POSTGRES_PASSWORD: dev_only_not_a_secret
-      POSTGRES_DB: whatsapp_clone
+      POSTGRES_DB: whispee
     ports:
       - "55432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U whatsapp_clone -d whatsapp_clone"]
+      test: ["CMD-SHELL", "pg_isready -U whispee -d whispee"]
       interval: 2s
       timeout: 3s
       retries: 30

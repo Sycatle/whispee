@@ -28,11 +28,11 @@
 #
 #   scripts/verify-release.sh [repertoire] [cle-publique]
 #
-# Par défaut : `release/artefacts` et `release/whatsapp_clone.pub`.
+# Par défaut : `release/artefacts` et `release/whispee.pub`.
 set -euo pipefail
 
 artefacts="${1:-release/artefacts}"
-publique="${2:-release/whatsapp_clone.pub}"
+publique="${2:-release/whispee.pub}"
 
 for fichier in "$artefacts/SHA256SUMS" "$artefacts/SHA256SUMS.sig" "$publique"; do
     if [[ ! -r "$fichier" ]]; then

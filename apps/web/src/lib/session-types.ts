@@ -16,11 +16,21 @@
  *
  * # What is deliberately not here
  *
- * The class. Splitting `Session` itself was considered and refused: everything in it is an
- * instance method over private fields behind a private constructor, so extracting a second slice
- * would mean widening the visibility of state that has no reason to be visible. Moving the
- * shapes costs nothing and buys both of the above; moving the behaviour would cost the
- * encapsulation and buy line count.
+ * The class. Splitting `Session` was once considered and refused, on an argument worth keeping
+ * because it is correct: everything in it is an instance method over private fields behind a
+ * private constructor, so extracting a slice by handing its state to a free function would mean
+ * widening the visibility of state that has no reason to be visible.
+ *
+ * What the argument does not cover is moving the state **with** its owner. A collaborator that
+ * holds the fields it reads has not widened anything — `private` protects them in the new file as
+ * well as in the old one — and it can be reached by `node --test`, which `Session` cannot: its
+ * constructor is private and `open` calls `loadCrypto`. That is what the `session-*.ts` slices
+ * do, and it is why the refusal above stopped applying rather than stopped being true.
+ *
+ * The objection still rules out the shape it was aimed at. A module of free functions taking
+ * `Session`'s private state as parameters, or a collaborator holding a reference back to the
+ * session, is the mixin this paragraph refused — one more file, one more indirection, nothing
+ * testable in isolation. See `docs/ARCHITECTURE.md`, "Read this first".
  */
 import type { ResolvedAccount } from "./account";
 import type * as content from "./content";

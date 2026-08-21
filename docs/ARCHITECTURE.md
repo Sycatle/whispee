@@ -13,23 +13,48 @@ in [`./THREAT-MODEL.md`](./THREAT-MODEL.md), and what it claims to guarantee is 
 
 ## Read this first
 
-**`apps/web/src/lib/session.ts` is 2 323 lines, and it is the point where everything
-converges.** The WASM module, the delivery service client, local storage, the local lock, the
-history vault, the gateway, receipts, typing signals, presence, roles, pairing, device
-revocation and account rotation all meet in a single `Session` class. It is the largest file
-in the repository by a factor of four, and there is no smaller unit that can be understood on
-its own before it.
+**`apps/web/src/lib/session.ts` is 2 934 lines, and it is the point where everything
+converges.** The WASM module, the delivery service client, local storage, the gateway, roles,
+pairing, device revocation and account rotation all meet in a single `Session` class. It is the
+largest file in the client, and the second largest in the repository after the server's
+integration tests. There is no smaller unit that can be understood on its own before it.
 
-That is not an accident of growth to be tidied away in passing. It holds exactly the
-decisions the protocol does not make — when to replenish KeyPackages, when to persist, how a
-guest discovers the group waiting for it, which cursor advances on what — and those decisions
-are coupled to each other in ways that survive being split into files. Before touching it,
-read it. A change made in one method of that class routinely has to be paid for in three
-others.
+Part of that was an accident of growth, and that part has been paid off. Nine slices now sit
+beside it — `conversation-view.ts`, `session-persist.ts`, `session-preferences.ts`,
+`session-naming.ts`, `session-trust.ts`, `session-presence.ts`, `session-vault.ts`,
+`session-lock.ts`, `session-log.ts` — about 1 550 lines carrying 95 tests between them. **None of
+that was reachable before.** `Session` has a private constructor and `open` calls `loadCrypto`,
+so nothing inside it can be instantiated by `node --test`: the largest file in the client was
+also the only untested one, and the mapping whose failure is silent — a field dropped on the way
+to disk reads back as `undefined` at the next start, with no error — had no coverage at all.
 
-The mobile work found the same thing from the other side: three separate workstreams all had
-to edit `session.ts`, and they only stayed parallel because their regions inside it happened
-to be disjoint. See [`./ROADMAP.md`](./ROADMAP.md).
+The rest was not an accident, and what this paragraph used to say is still true of it. The core
+holds exactly the decisions the protocol does not make — when to replenish KeyPackages, when to
+persist, how a guest discovers the group waiting for it, which cursor advances on what — and
+those are coupled to each other in ways that survive being split into files. Concretely:
+`persist`, `poll` and `pollOnce`, `absorb`, `publishAndApply`, `sendContent`, the group
+operations that commit, and `attach`/`open`/`restore`/`forget`. Before touching those, read
+them. A change made in one of them routinely has to be paid for in three others, and none of
+them is tested.
+
+**The rule that keeps a slice a slice.** No collaborator receives `Session`. It takes its
+dependencies and nothing else; it never calls `persist` — it exposes `snapshot` and lets
+`session.ts` decide when to write, because that decision is ordered against the MLS state; and it
+does not know what `conversations` is, so it is handed a `ConversationView` or it reports a
+change that `session.ts` turns into a `touch`. A file that breaks one of those three is a mixin
+with an extra indirection, and buys nothing.
+
+Where a slice would otherwise import Tauri IPC or the WASM module — the lock, the log — the
+platform operations arrive as a port instead. Not for layering: a module importing either cannot
+be loaded by `node --test` at all, and a slice that cannot be tested is a slice that was not
+worth moving. Four of them also own **both directions** of their own mapping, `hydrate` beside
+`snapshot`, so a round-trip test can assert the two halves agree — which neither half could be
+asked on its own while one lived in `composeStored` and the other three hundred lines away in
+`Session.open`.
+
+The mobile work found the coupling from the other side: three separate workstreams all had to
+edit `session.ts`, and they only stayed parallel because their regions inside it happened to be
+disjoint. For the extracted slices that is no longer luck. For the core it still is.
 
 ## The repository
 
@@ -49,9 +74,12 @@ crates/
 apps/
   web/             Vite 7 + React 19 + Tailwind 4. Also the source of the desktop and mobile
                    interfaces — it is built once and packaged three times.
-    src/lib/       All non-UI logic. session.ts is the convergence point named above,
-                   and session-types.ts holds the shapes it hands around — split out so that
-                   several features can grow without colliding in the same two hundred lines.
+    src/lib/       All non-UI logic. session.ts is the convergence point named above;
+                   session-types.ts holds the shapes it hands around, and session-*.ts the
+                   slices extracted from it — each owning its own state, contributing to the
+                   stored session through snapshot(), and receiving no Session. See the rule
+                   under "Read this first": break one of its three clauses and the file is a
+                   mixin with an extra indirection.
     src/ui/        Primitives. A Button that cannot fail contrast, a Field whose label is
                    required by its type. Nothing here knows what a conversation is.
     src/state/     The bridge between a mutable class and React: a revision counter, the

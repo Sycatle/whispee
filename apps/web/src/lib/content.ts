@@ -18,6 +18,29 @@ const TYPE_POSTING_KEY = 3;
 const TYPE_RECEIPT = 4;
 const TYPE_REACTION = 5;
 const TYPE_REPLY = 6;
+/**
+ * A wrapper, not a content type: `u8 7 ‖ u64 BE milliseconds ‖ <any encoded content>`.
+ *
+ * # Why a wrapper rather than a field in each layout
+ *
+ * Six displayable-or-not layouts already exist, each with its own fixed shape. Adding eight bytes
+ * to each would mean six format changes to review instead of one, and six chances to get the
+ * offsets wrong. Wrapping composes: whatever gains a type byte tomorrow is stamped without
+ * touching this.
+ *
+ * # What an older client does with it
+ *
+ * Refuses it, cleanly. `decode` throws on an unknown type, which is the behaviour the header
+ * already promises — a message from a later version must not break the conversation, and it does
+ * not: that one message fails to display and the rest of the thread carries on.
+ *
+ * # What the stamp is worth
+ *
+ * It is **declared by the sender**, and a group member can therefore put anything in it. It is an
+ * annotation, not evidence: the order of the thread stays `seq`, which the server assigns and no
+ * member controls. See `docs/PROTOCOL.md`.
+ */
+const TYPE_STAMPED = 7;
 
 export type Content =
   | { kind: "text"; text: string }
@@ -58,6 +81,17 @@ const RECEIPT_READ = 1;
 export interface GossipHead {
   size: number;
   root: Uint8Array;
+}
+
+/**
+ * A decoded message: its content, and when its sender says it was written.
+ *
+ * `sentAt` is absent for control traffic, which is never stamped, and for anything written before
+ * stamping existed.
+ */
+export interface Stamped {
+  body: Content;
+  sentAt?: number;
 }
 
 export function encodeText(text: string): Uint8Array {
@@ -103,7 +137,25 @@ export function isControl(body: Content): boolean {
   return body.kind === "gossip" || body.kind === "posting-key" || body.kind === "receipt";
 }
 
-export function encode(body: Content): Uint8Array {
+/**
+ * Encodes any content, stamped when a time is given.
+ *
+ * Control traffic is never stamped even if a time is passed: it is not displayed, so the eight
+ * bytes would buy nothing, and a receipt that looked like a dated message would be one more thing
+ * for `isControl` to have to un-say.
+ */
+export function encode(body: Content, sentAt?: number): Uint8Array {
+  const inner = encodeBody(body);
+  if (sentAt === undefined || isControl(body)) return inner;
+
+  const out = new Uint8Array(1 + 8 + inner.length);
+  out[0] = TYPE_STAMPED;
+  new DataView(out.buffer).setBigUint64(1, BigInt(Math.trunc(sentAt)), false);
+  out.set(inner, 9);
+  return out;
+}
+
+function encodeBody(body: Content): Uint8Array {
   switch (body.kind) {
     case "text":
       return encodeText(body.text);
@@ -190,7 +242,24 @@ export function encodeAttachment(ref: AttachmentRef): Uint8Array {
  * Forward compatibility: a message from a later version, carrying an unknown type, must not break
  * the conversation.
  */
-export function decode(bytes: Uint8Array): Content {
+export function decode(bytes: Uint8Array): Stamped {
+  if (bytes.length < 1) throw new Error("empty content");
+
+  if (bytes[0] === TYPE_STAMPED) {
+    if (bytes.length < 1 + 8) throw new Error("truncated timestamp");
+    const sentAt = Number(new DataView(bytes.buffer, bytes.byteOffset + 1).getBigUint64(0, false));
+
+    // One level, never two. A wrapper around a wrapper is not something a correct sender
+    // produces, and unwrapping recursively would let a hostile member nest a few thousand of
+    // them and spend our stack on it.
+    const inner = decodeBody(bytes.subarray(9));
+    return { body: inner, sentAt };
+  }
+
+  return { body: decodeBody(bytes) };
+}
+
+function decodeBody(bytes: Uint8Array): Content {
   if (bytes.length < 1) throw new Error("empty content");
 
   const body = bytes.subarray(1);

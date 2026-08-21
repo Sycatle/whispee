@@ -80,7 +80,10 @@ interface Archived {
 }
 
 export async function encryptEntry(key: CryptoKey, message: Message): Promise<Uint8Array> {
-  const body = content.encode(message.content);
+  // Re-encoded **with its stamp**, so the archive keeps the time it was written rather than the
+  // time it was restored. `Archived` gains no field for it: the stamp already travels inside the
+  // encoded body, and a second copy would be one more thing that can disagree with the first.
+  const body = content.encode(message.content, message.sentAt);
 
   const archived: Archived = { sender: message.sender, mine: message.mine, body: [...body] };
   const plaintext = new TextEncoder().encode(JSON.stringify(archived));
@@ -112,11 +115,13 @@ export async function decryptEntry(
   );
 
   const archived = JSON.parse(new TextDecoder().decode(plaintext)) as Archived;
+  const { body, sentAt } = content.decode(new Uint8Array(archived.body));
   return {
     seq,
     sender: archived.sender,
     mine: archived.mine,
-    content: content.decode(new Uint8Array(archived.body)),
+    content: body,
+    ...(sentAt === undefined ? {} : { sentAt }),
   };
 }
 

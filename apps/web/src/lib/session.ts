@@ -63,6 +63,18 @@ export interface Message {
   sender: string | null;
   mine: boolean;
   /**
+   * When the sender says it was written, in milliseconds.
+   *
+   * **Declared, not proven.** It travels inside the MLS message, so the server never sees it and
+   * cannot alter it — but any member of the group can put whatever they like in their own. It is
+   * an annotation on the thread, never its order: that stays `seq`, which the server assigns and
+   * no member controls.
+   *
+   * Optional because two real cases have none: control traffic is never stamped, and neither is
+   * anything written before stamping existed.
+   */
+  sentAt?: number;
+  /**
    * Decrypted content lives in memory only. It is never persisted: writing it to disk would
    * throw away part of what the encryption buys.
    */
@@ -1900,9 +1912,15 @@ export class Session {
   }
 
   private async sendContent(view: ConversationView, body: content.Content): Promise<void> {
+    // Stamped from this device's clock, which is the only one available: the server's is not
+    // asked for, precisely so it learns nothing more than it already does, and a clock that is
+    // wrong here shows as wrong to the recipient rather than being silently corrected. `encode`
+    // drops the stamp for control traffic on its own.
+    const sentAt = Date.now();
+
     // Padded **before** encryption: it is the plaintext size that determines the ciphertext size.
     // Padding afterwards would hide nothing more and cost as much.
-    const encoded = padding.pad(content.encode(body));
+    const encoded = padding.pad(content.encode(body, sentAt));
 
     const ciphertext = this.client.encrypt(view.groupId, encoded);
     const { seq } = await this.api.postEnvelope(
@@ -1927,7 +1945,7 @@ export class Session {
       return;
     }
 
-    const message: Message = { seq, sender: this.deviceId, content: body, mine: true };
+    const message: Message = { seq, sender: this.deviceId, content: body, mine: true, sentAt };
     view.messages.push(message);
     await this.archive(view, [message]);
     await this.persist();
@@ -2182,7 +2200,7 @@ export class Session {
     const incoming = this.client.process(view.groupId, parsed.payload, revoked) as Incoming;
     if (incoming.kind !== "application") return;
 
-    const decode = content.decode(padding.unpad(incoming.plaintext));
+    const { body: decode, sentAt } = content.decode(padding.unpad(incoming.plaintext));
 
     // Protocol traffic is processed then kept out of the thread: showing it would drown the
     // conversation in empty bubbles.
@@ -2210,6 +2228,10 @@ export class Session {
       sender: incoming.sender,
       content: decode,
       mine: false,
+      // Absent when the sender did not stamp — an older client, or a build from before stamping.
+      // The thread renders that as a message with no time rather than inventing one: guessing
+      // "now" for something received during a catch-up would date a week-old message to today.
+      ...(sentAt === undefined ? {} : { sentAt }),
     });
 
     // Only messages move this cursor. See its definition: it is what stops receipts from breeding

@@ -60,6 +60,11 @@ export function encodeSession(session: StoredSession): Uint8Array {
     logHead: session.logHead,
     history: session.history === undefined ? undefined : toBase64(session.history),
     discloseConversationName: session.discloseConversationName,
+    conversationFlags: session.conversationFlags,
+    locale: session.locale,
+    searchCoverage: session.searchCoverage,
+    contactPolicy: session.contactPolicy,
+    blocked: session.blocked,
   };
 
   return new TextEncoder().encode(JSON.stringify(raw));
@@ -119,6 +124,28 @@ export function decodeSession(bytes: Uint8Array): StoredSession {
     ...(field.discloseConversationName === undefined
       ? {}
       : { discloseConversationName: field.discloseConversationName as boolean }),
+    // Everything below is additive and optional, and none of it bumped `VERSION`. That is the
+    // whole point: `decodeSession` throws on a version it does not recognise, so raising the
+    // number to announce a field nothing is required to read would refuse every session written
+    // before today, on both directions of an upgrade. A reader that tolerates absence needs no
+    // announcement; a reader that does not would not be fixed by one.
+    ...(field.conversationFlags === undefined
+      ? {}
+      : { conversationFlags: field.conversationFlags as StoredSession["conversationFlags"] }),
+    ...(field.locale === undefined ? {} : { locale: requireString(field.locale, "locale") }),
+    ...(field.searchCoverage === undefined
+      ? {}
+      : { searchCoverage: field.searchCoverage as StoredSession["searchCoverage"] }),
+    ...(field.contactPolicy === undefined
+      ? {}
+      : { contactPolicy: field.contactPolicy as StoredSession["contactPolicy"] }),
+    ...(field.blocked === undefined
+      ? {}
+      : {
+          blocked: requireArray(field.blocked, "blocked").map((value, index) =>
+            requireString(value, `blocked[${index}]`),
+          ),
+        }),
   };
 }
 

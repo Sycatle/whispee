@@ -2,62 +2,215 @@
 
 /* Colour.
  *
- * Ten roles, named for what they mean and not for what they are: `surface-raised` survives a
- * change of hue, `gray-50` does not. OKLCH throughout, because the dark variant below is the
+ * Thirteen roles, named for what they mean and not for what they are: `surface-raised` survives
+ * a change of hue, `gray-50` does not. OKLCH throughout, because the dark variant below is the
  * same hue and chroma with the lightness moved — in sRGB hex that relationship is invisible and
  * has to be re-eyeballed on every edit.
  *
- * `border-subtle` and `border-strong` are the whole elevation system; see the note under the
- * dark block. */
-@theme {
-  --color-surface: oklch(0.99 0.002 250);
+ * # Why `@theme` sits here and the variants sit in plain `:root` blocks
+ *
+ * `@theme` was previously nested inside `@media (prefers-color-scheme: dark)`. Tailwind hoists
+ * `@theme` out of any conditional context, so the emitted stylesheet carried a single set of
+ * values — the dark one — with no media query at all. The light palette was dead code and the
+ * application was locked to dark for everybody. The rule that avoids repeating that mistake:
+ * **`@theme` declares the light palette once, and every other appearance is an ordinary
+ * redeclaration of the same custom properties.** Those win by cascade, and the utilities keep
+ * working because `bg-(--color-surface)` references the variable, not its value.
+ *
+ * `static` because this file deliberately defines tokens before the screen that needs them —
+ * see the elevation note below. Without it Tailwind prunes whatever no utility mentions, which
+ * is how `--color-border-strong` came to be documented in sixty lines of comment and absent
+ * from the build.
+ *
+ * # Why not `light-dark()`
+ *
+ * It would halve this file. But the tree leans on the opacity modifier throughout —
+ * `bg-(--color-danger)/20` and friends, on twenty-five alert banners — and that compiles to
+ * `color-mix(in oklab, var(--color-danger) 20%, transparent)`. `color-mix()` over a
+ * `light-dark()` argument is valid per spec and far less travelled in WebKitGTK, which is the
+ * engine the desktop build runs on. Alert banners are the wrong place to find out.
+ *
+ * What this does not solve: there is no anti-flash script, and there cannot be — the CSP forbids
+ * inline scripts with no nonce. The *system* default therefore paints correctly on first frame,
+ * and only a reader who explicitly asked to contradict their OS sees one frame of the other
+ * theme. See `lib/theme.ts`. */
+@theme static {
+  /* The shell behind the work: the rail, the empty centre, the detail column. */
+  --color-surface-sunken: oklch(0.955 0.004 265);
+  /* The working ground: a conversation, the body of a panel. */
+  --color-surface: oklch(0.985 0.003 265);
+  /* What sits on top of the ground: a received bubble, a card, a floating surface. */
   --color-surface-raised: oklch(1 0 0);
-  --color-border-subtle: oklch(0.91 0.004 250);
-  --color-border-strong: oklch(0.78 0.008 250);
-  --color-ink: oklch(0.24 0.01 250);
-  --color-ink-muted: oklch(0.52 0.012 250);
-  --color-accent: oklch(0.55 0.13 250);
-  --color-danger: oklch(0.55 0.19 25);
-  --color-warn: oklch(0.62 0.15 70);
-  --color-ok: oklch(0.55 0.12 155);
+
+  --color-border-subtle: oklch(0.9 0.005 265);
+  --color-border-strong: oklch(0.72 0.01 265);
+
+  --color-ink: oklch(0.22 0.012 265);
+  --color-ink-muted: oklch(0.5 0.012 265);
+
+  /* Selection, focus, "you are here". Rationed on purpose: this interface is recognisable by a
+     pattern rather than by a colour, so the accent never decorates. */
+  --color-accent: oklch(0.48 0.14 258);
+  /* Text laid **on** the accent. Its whole reason to exist: `text-white` on an accent whose
+     lightness flips with the theme failed AA at 2.1:1 in twenty-one places, including every
+     primary button and every sent bubble. Against this pair the ratio is ~6.4:1 in light and
+     ~8:1 in dark, and there is no longer a literal colour anywhere to get it wrong again. */
+  --color-accent-ink: oklch(0.99 0 0);
+
+  --color-danger: oklch(0.52 0.19 27);
+  --color-warn: oklch(0.58 0.13 72);
+  --color-ok: oklch(0.5 0.11 158);
+  /* Text laid on a filled state — a destructive button. Same argument as `accent-ink`. */
+  --color-state-ink: oklch(0.99 0 0);
 }
 
+/* The dark palette, declared three times for three different questions: what the system asks
+   for, and what the reader explicitly chose either way. The `[data-theme]` blocks outrank the
+   media query by specificity, which is what makes an override an override. */
 @media (prefers-color-scheme: dark) {
-  @theme {
-    --color-surface: oklch(0.19 0.008 250);
-    --color-surface-raised: oklch(0.24 0.01 250);
-    --color-border-subtle: oklch(0.32 0.012 250);
-    --color-border-strong: oklch(0.45 0.014 250);
-    --color-ink: oklch(0.94 0.004 250);
-    --color-ink-muted: oklch(0.68 0.012 250);
-    --color-accent: oklch(0.72 0.12 250);
-    --color-danger: oklch(0.7 0.17 25);
-    --color-warn: oklch(0.78 0.14 70);
-    --color-ok: oklch(0.72 0.13 155);
+  :root {
+    --color-surface-sunken: oklch(0.13 0.008 265);
+    --color-surface: oklch(0.17 0.008 265);
+    --color-surface-raised: oklch(0.22 0.01 265);
+    --color-border-subtle: oklch(0.29 0.01 265);
+    --color-border-strong: oklch(0.44 0.014 265);
+    --color-ink: oklch(0.95 0.004 265);
+    --color-ink-muted: oklch(0.68 0.01 265);
+    --color-accent: oklch(0.72 0.13 258);
+    --color-accent-ink: oklch(0.17 0.02 258);
+    --color-danger: oklch(0.7 0.17 27);
+    --color-warn: oklch(0.8 0.13 75);
+    --color-ok: oklch(0.74 0.12 158);
+    --color-state-ink: oklch(0.15 0.01 265);
   }
 }
 
-/* Elevation, such as it is: there are no shadows and there is no shadow token.
+:root[data-theme="dark"] {
+  --color-surface-sunken: oklch(0.13 0.008 265);
+  --color-surface: oklch(0.17 0.008 265);
+  --color-surface-raised: oklch(0.22 0.01 265);
+  --color-border-subtle: oklch(0.29 0.01 265);
+  --color-border-strong: oklch(0.44 0.014 265);
+  --color-ink: oklch(0.95 0.004 265);
+  --color-ink-muted: oklch(0.68 0.01 265);
+  --color-accent: oklch(0.72 0.13 258);
+  --color-accent-ink: oklch(0.17 0.02 258);
+  --color-danger: oklch(0.7 0.17 27);
+  --color-warn: oklch(0.8 0.13 75);
+  --color-ok: oklch(0.74 0.12 158);
+  --color-state-ink: oklch(0.15 0.01 265);
+}
+
+:root[data-theme="light"] {
+  --color-surface-sunken: oklch(0.955 0.004 265);
+  --color-surface: oklch(0.985 0.003 265);
+  --color-surface-raised: oklch(1 0 0);
+  --color-border-subtle: oklch(0.9 0.005 265);
+  --color-border-strong: oklch(0.72 0.01 265);
+  --color-ink: oklch(0.22 0.012 265);
+  --color-ink-muted: oklch(0.5 0.012 265);
+  --color-accent: oklch(0.48 0.14 258);
+  --color-accent-ink: oklch(0.99 0 0);
+  --color-danger: oklch(0.52 0.19 27);
+  --color-warn: oklch(0.58 0.13 72);
+  --color-ok: oklch(0.5 0.11 158);
+  --color-state-ink: oklch(0.99 0 0);
+}
+
+/* Tell the user agent which way the page leans, so form controls, scrollbars and the caret are
+   drawn to match. Without it a dark interface gets a white scrollbar and a light caret. */
+:root {
+  color-scheme: light dark;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* Elevation.
  *
- * Nothing in this interface floats. There is no modal, no dropdown, no popover, and not one
- * `z-index` in `src/` — every surface is laid flat against another and separated by a 1px
- * border. A shadow scale would therefore be five tokens describing a dimension the design does
- * not have, and the first component to reach for one would be inventing a new visual language
- * rather than using this one.
+ * This note used to say that nothing in this interface floats, that there was no modal, no
+ * dropdown, no popover and not one `z-index` in `src/`, and that a shadow scale would therefore
+ * describe a dimension the design did not have. That was true and it is no longer: a three
+ * column shell needs a profile menu, a mobile sheet and a destructive confirmation, and those
+ * are built on Radix, which portals them out of the layout.
  *
- * What separation is actually made of, and the only two steps that exist:
+ * What separation is made of now, in order of how much work each does:
  *
- *   - `border-subtle` — the default hairline. A card against the page, a row against the next
- *     row, the pane divider. It is meant to be read as "these are two things", not looked at.
- *   - `border-strong` — the same 1px, dark enough to be *noticed*. For the case a hairline
- *     cannot carry: which conversation is selected, which control has focus, which destructive
- *     confirmation you are one click from. Nothing uses it yet — the app currently leaves focus
- *     to the user agent's outline and marks selection with a fill — and it is defined here so
- *     the next screen that needs emphasis has an answer that is not "invent a shadow".
+ *   - `border-subtle` — the default hairline, and still the workhorse. Two things side by side.
+ *   - `border-strong` — the same 1px, dark enough to be *noticed*. The edge of a floating
+ *     surface, and the ring around whatever has focus.
+ *   - the two shadows below — they say "above", never "important".
  *
- * What this does not solve: a floating layer, if one is ever added, needs a shadow token *and*
- * a z-index scale, and neither is guessed at here. Two tokens chosen against a real interface
- * beat six chosen against an imagined one. */
+ * What this does not solve: in the dark palette a black shadow over an L=0.17 ground is very
+ * nearly invisible. That is why the hairline on a floating surface is mandatory rather than
+ * decorative — in dark it carries the whole separation and the shadow does nothing. Do not
+ * "fix" that by raising the opacity; the result is a dirty halo, not depth. */
+@theme static {
+  --shadow-menu:
+    0 1px 2px oklch(0 0 0 / 0.06), 0 6px 20px oklch(0 0 0 / 0.12);
+  --shadow-overlay:
+    0 2px 4px oklch(0 0 0 / 0.08), 0 16px 48px oklch(0 0 0 / 0.2);
+}
+
+/* Stacking.
+ *
+ * Three steps, because the interface has exactly three ordering relationships: something that
+ * sticks inside a list that scrolls, something that floats over the content, and something that
+ * has to stay legible even over a dialog — the toast that reports an action succeeded.
+ *
+ * Radix portals mount inside `#overlays`, a sibling of `#root` in `index.html`, so they already
+ * win by document order. These tokens exist so that nothing *inside* the application can get in
+ * front of them by accident.
+ *
+ * **Write these as `z-(--z-index-overlay)`, not `z-overlay`.** Tailwind builds utilities from a
+ * fixed list of theme namespaces — `--color-*`, `--spacing-*`, `--radius-*`, `--text-*`,
+ * `--font-*`, `--shadow-*`, `--ease-*` and a few more — and `--z-index-*` is not one of them. The
+ * short name compiles to nothing at all, and a class that generates no rule fails silently: the
+ * element simply keeps whatever it had. Same trap as the durations below, and it is the reason
+ * both notes say so out loud.
+ *
+ * What this does not solve: it says nothing about ordering *within* a layer. Two open menus are
+ * a design problem, not a `z-index` problem. */
+@theme static {
+  --z-index-sticky: 10;
+  --z-index-overlay: 100;
+  --z-index-toast: 1000;
+}
+
+/* Motion.
+ *
+ * Two durations and one curve, and the count is the argument again: a menu opening and a panel
+ * sliding are the only two speeds this interface needs, and a third would only be noticed by
+ * whoever added it.
+ *
+ * The reduced-motion answer is a redeclaration rather than a rule per component: a component
+ * that reads `--duration-quick` respects the preference without writing a single condition, so
+ * the respect is structural instead of remembered. Places that already disable a transition by
+ * hand with `motion-reduce:` stay as they are — they turn the transition off entirely, which is
+ * still correct.
+ *
+ * **Write these as `duration-(--duration-quick)`, not `duration-quick`.** There is no
+ * `--duration-*` theme namespace in Tailwind, so the short name produces no rule and the element
+ * quietly falls back to the 150ms default — which means the reduced-motion collapse above never
+ * reaches it. The failure is invisible: the animation still runs, just at the wrong speed and
+ * for people who asked for none. `--ease-out` is different and the short name `ease-out` works,
+ * because `--ease-*` *is* a namespace; that inconsistency is Tailwind's, not ours, and it is
+ * written here so nobody has to rediscover it. */
+@theme static {
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --duration-quick: 90ms;
+  --duration-panel: 180ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-quick: 1ms;
+    --duration-panel: 1ms;
+  }
+}
 
 /* Spacing.
  *
@@ -65,7 +218,7 @@
  * than assumed, because the six names below are only meaningful as multiples of something.
  *
  * These six are not a scale someone designed; they are the distances the interface already
- * uses, counted. A messenger of two panes, bubbles and dense settings panels has a genuinely
+ * uses, counted. A messenger of three panes, bubbles and dense settings panels has a genuinely
  * narrow set: `p-3`/`px-3` and `p-4`/`px-4` account for most of the padding in the tree, `mt-2`
  * and `gap-2` for most of the separation, and `py-1.5` exists on its own because a compact
  * control next to 0.875rem text is too tall at 0.5rem and too cramped at 0.25rem.
@@ -73,7 +226,7 @@
  * Naming them by role rather than by number is the point: `p-gutter` says a decision was made,
  * `p-3` says a number was typed. What it does not solve: nothing stops a component from writing
  * `p-5` anyway. This is vocabulary, not enforcement — no lint rule backs it. */
-@theme {
+@theme static {
   --spacing: 0.25rem;
 
   /* Between two things on the same line that belong together: an icon and its label. */
@@ -100,7 +253,7 @@
  * `rounded-lg` on the message bubble), so a component switching from the numeric name to the
  * semantic one changes nothing on screen. That is deliberate: the rename should be reviewable as
  * a rename. */
-@theme {
+@theme static {
   /* A tag, a badge, a swatch — small enough that anything rounder looks like a mistake. */
   --radius-tag: 0.25rem;
   /* Buttons, inputs, cards, panels. The default, and by a wide margin the most used. */
@@ -123,7 +276,7 @@
  * `text-sm` → `text-body` is a no-op. What this does not solve: it says nothing about weight or
  * measure. Weight in this tree is `font-medium` or nothing, and line length is bounded by the
  * pane, so neither has earned a token. */
-@theme {
+@theme static {
   /* The explanatory line under a control. Present on nearly every setting in the app: this is
      where the honesty about what a feature costs lives, so it is small but never faint. */
   --text-caption: 0.75rem;
@@ -148,16 +301,69 @@
   --text-display--line-height: 2rem;
 }
 
-/* Two panes side by side, or one at a time.
+/* Typefaces.
  *
- * The breakpoint describes a **capability**, not a device: is there room to show the list and
- * the conversation together? A tablet in portrait says no, so does a phone laid flat in
- * landscape, so does a narrow desktop window. Naming the variant after what it allows rather
- * than after a device avoids renaming it at the first case that does not fit the box.
+ * The interface font is the platform's own, and that is a decision rather than an omission: it
+ * is already resident, already hinted for the display it is on, and it follows whatever the
+ * reader set in their system accessibility preferences. On a project whose goal is to feel
+ * native on each device, the native UI font *is* the answer. It also costs nothing on a bundle
+ * where the WebAssembly module already spends 1.59 MB.
+ *
+ * One family is embedded, and it is the monospace, because that is the one place where getting
+ * it wrong costs something. Fingerprints, device identifiers, pairing codes and recovery phrases
+ * are compared character by character by a human being. The system monospace stack resolves to
+ * Menlo, Consolas or DejaVu Sans Mono depending on the machine — three different metrics, three
+ * different zeroes, for a string we ask someone to check digit by digit. IBM Plex Mono was drawn
+ * as an engineering typeface: its zero is unambiguous and its figures stay distinct at 12px.
+ *
+ * Self-hosted, and no CSP change was needed for it: `font-src` is absent and therefore inherits
+ * `default-src 'self'`, and a file under `public/` served from the origin satisfies that on both
+ * targets. `lib/wasm.ts` already proves the pattern by loading `/crypto_wasm_bg.wasm` the same
+ * way under Tauri's custom protocol.
+ *
+ * What this does not solve: the Latin subset is 29.6 kB for the two weights and covers Latin-1
+ * plus general punctuation. Hexadecimal fingerprints and BIP-39 words are ASCII, so they are
+ * safe — but a future screen that puts non-Latin text under `--font-evidence` will silently fall
+ * back to the system stack. `font-display: swap` so that a slow first paint shows the fallback
+ * rather than nothing; the fingerprint is legible either way, only the metrics differ. */
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/ibm-plex-mono-latin-500-normal.woff2") format("woff2");
+}
+
+@theme static {
+  /* Anything a human is asked to read as data rather than as prose. */
+  --font-evidence:
+    "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+}
+
+/* Three panes, two panes, or one at a time.
+ *
+ * Each breakpoint describes a **capability**, not a device: is there room to show these things
+ * together? A tablet in portrait says no to three, so does a narrow desktop window, so does the
+ * desktop shell shrunk to its 480px minimum. Naming the variants after what they allow rather
+ * than after a device avoids renaming them at the first case that does not fit the box.
  *
  * `min-width` and not `pointer`: the number of panes is a question of width. The finger is a
  * separate problem, handled by `touch:`. */
 @custom-variant duo (@media (min-width: 48rem));
+
+/* Room for the detail column **beside** the conversation rather than **over** it. The number is
+   288 (rail) + 384 (the narrowest a thread can be and still read as a thread) + 320 (detail),
+   and 64rem leaves the margin. Below it the detail column covers the centre instead of
+   shrinking it: a thread under 384px is not a thread, it is a column of words. */
+@custom-variant trio (@media (min-width: 64rem));
 
 /* What gets manipulated with a finger.
  *
@@ -174,11 +380,35 @@ body {
   color: var(--color-ink);
 }
 
+/* Focus, made structural.
+ *
+ * There was no `:focus-visible` rule anywhere in this project, which left the user agent's own
+ * outline as the only indicator — and against a dark surface, on the underlined muted-ink links
+ * the settings menu was made of, it was very nearly invisible.
+ *
+ * Declared once on everything focusable rather than per component, so that a control added
+ * later inherits it instead of forgetting it. `:focus-visible` and not `:focus`: a mouse click
+ * on a button should not leave a ring behind, and the user agent already knows the difference
+ * between a pointer and a keyboard better than we could guess it.
+ *
+ * What this does not solve: an element that suppresses the outline locally still wins. The
+ * primitives in `ui/` therefore restate the ring in their own variant tables rather than relying
+ * on this rule — this is the floor, not the mechanism. */
+@layer base {
+  :where(a, button, summary, input, textarea, select, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
 /* System insets, exposed as utilities.
  *
  * Declared here rather than as arbitrary classes scattered around: `env()` does not interpolate
  * readably inside Tailwind's bracket syntax, and these four values are the same everywhere. They
- * are zero on a screen without a notch, so nothing needs to make them conditional. */
+ * are zero on a screen without a notch, so nothing needs to make them conditional.
+ *
+ * These apply to floating surfaces too: a Radix portal mounts in `#overlays`, outside the
+ * layout, so a mobile sheet that forgets them is the exact case where the omission shows. */
 .safe-top {
   padding-top: env(safe-area-inset-top);
 }
@@ -195,9 +425,10 @@ body {
 }
 
 /* Fingerprints are compared character by character: a fixed pitch and a zero distinct from the
-   letter O are not cosmetic, they make the comparison reliable. */
+   letter O are not cosmetic, they make the comparison reliable. The family now comes from
+   `--font-evidence`, which is the same decision made once for every screen that shows data. */
 .fingerprint {
-  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  font-family: var(--font-evidence);
   font-variant-ligatures: none;
   letter-spacing: 0.05em;
 }

@@ -119,3 +119,65 @@ test("a missing required field throws", () => {
     /cursors/,
   );
 });
+
+/**
+ * The fields added for pinning, muting, language, search coverage and contact policy are all
+ * optional, and none of them raised `VERSION`. That is the contract this test pins down: a
+ * session written before they existed has to keep opening, or the upgrade costs everyone their
+ * identity.
+ */
+test("a session written before the preference fields existed still reads back", () => {
+  const original = session({ cursors: { "0a0b": 3 } });
+  const restored = roundTrip(original);
+
+  assert.deepEqual(restored, original);
+  assert.equal("conversationFlags" in restored, false);
+  assert.equal("locale" in restored, false);
+  assert.equal("blocked" in restored, false);
+});
+
+test("conversation flags survive a round trip through the native codec", () => {
+  const original = session({
+    conversationFlags: {
+      "0a0b": { pinned: true, mutedUntil: 1_700_000_000_000 },
+      "0c0d": { archived: true, ephemeralMs: 86_400_000 },
+    },
+  });
+
+  assert.deepEqual(roundTrip(original), original);
+});
+
+/**
+ * Three states, not two. "Never chosen" has to stay distinguishable from "chosen to match the
+ * current default", or changing the default later silently overrides somebody's decision.
+ */
+test("an absent locale is not turned into a present undefined", () => {
+  const restored = roundTrip(session());
+
+  assert.equal("locale" in restored, false);
+  assert.equal(restored.locale, undefined);
+});
+
+test("a locale that was chosen comes back as the same string", () => {
+  assert.equal(roundTrip(session({ locale: "fr" })).locale, "fr");
+});
+
+test("search coverage records the range each conversation was indexed over", () => {
+  const original = session({ searchCoverage: { "0a0b": { from: 1, to: 200 } } });
+
+  assert.deepEqual(roundTrip(original).searchCoverage, { "0a0b": { from: 1, to: 200 } });
+});
+
+test("a blocked handle that is not a string is refused rather than stored", () => {
+  const raw = JSON.parse(new TextDecoder().decode(encodeSession(session()))) as Record<
+    string,
+    unknown
+  >;
+  raw.blocked = ["bob", 7];
+
+  assert.throws(() => decodeSession(new TextEncoder().encode(JSON.stringify(raw))), /blocked\[1\]/);
+});
+
+test("the contact policy is a cache of the server's answer and round trips as one", () => {
+  assert.equal(roundTrip(session({ contactPolicy: "known" })).contactPolicy, "known");
+});

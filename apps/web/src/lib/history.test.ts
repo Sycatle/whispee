@@ -12,7 +12,15 @@ const text = (seq: number, extra: Partial<Message> = {}): Message => ({
   ...extra,
 });
 
-const thread = (messages: Message[], outbox: Pending[] = []): Cached => ({ messages, outbox });
+// `readCursor` is required by `Cached` and was missing here. Nothing caught it: `pnpm test` runs
+// the files through Node's type stripper, which erases annotations without checking them, and
+// `tsconfig.json` excludes `*.test.ts` from `tsc` on purpose. A helper that does not build the
+// shape it claims to build makes every assertion below weaker than it looks.
+const thread = (messages: Message[], outbox: Pending[] = [], readCursor = 0): Cached => ({
+  messages,
+  outbox,
+  readCursor,
+});
 
 const roundTrip = (conversations: Map<string, Cached>) =>
   decodeHistory(encodeHistory(conversations));

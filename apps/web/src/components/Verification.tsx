@@ -1,6 +1,11 @@
 import { useState } from "react";
 import type { ResolvedAccount } from "@/lib/account";
 import type { VerificationState } from "@/lib/session";
+import { Banner } from "@/ui/Banner";
+import { Button } from "@/ui/Button";
+import { ProofStrip } from "@/ui/ProofStrip";
+import { useBump, useSession } from "@/state/SessionProvider";
+import { useReport } from "@/state/report";
 import { Fingerprint } from "./Fingerprint";
 
 /**
@@ -27,6 +32,18 @@ import { Fingerprint } from "./Fingerprint";
  * So it does not move when a peer adds a phone. That is deliberate: a fingerprint that changed
  * on every added device would force a re-check after every mundane event, and would be ignored
  * within weeks. Device additions are reported separately, by [`DeviceAdded`].
+ *
+ * # Why the alert lives at the conversation and the comparison lives in the detail column
+ *
+ * [`Verification`] renders in the thread, above the messages. [`VerificationPanel`] renders in
+ * the right-hand column, which is closed by default. The split is not a layout preference: a
+ * closed column is documentation one goes looking for, and an alert nobody opened the drawer for
+ * is an alert that was never raised. The thing that shouts has to be where the reader already is;
+ * the thing that rewards attention can wait behind a click.
+ *
+ * What that does not solve: a reader who scrolls past the banner without reading it is in exactly
+ * the same position as one who never opened the column. Placement buys a chance at attention, not
+ * attention itself.
  */
 export function Verification({
   account,
@@ -35,24 +52,23 @@ export function Verification({
   account: ResolvedAccount;
   state: VerificationState;
 }) {
+  // The padding is applied here rather than by the caller because the caller — `Conversation.tsx`
+  // — stacks these directly between the header and the message list with no wrapper of its own,
+  // and a card flush against both edges reads as a bar rather than as something inserted.
+  const inset = "px-pane pt-snug";
+
   // The server served a device it could not have produced. This is worse than a fingerprint
   // change: there is no benign explanation.
   if (account.rejected.length > 0) {
     return (
-      <div
-        role="alert"
-        className="border-b border-(--color-danger) bg-(--color-danger)/20 px-4 py-3 text-sm"
-      >
-        <p className="font-medium text-(--color-danger)">
-          Unattested device presented for @{account.handle}
-        </p>
-        <p className="mt-1 text-(--color-ink-muted)">
+      <div className={inset}>
+        <Banner tone="danger" title={`Unattested device presented for @${account.handle}`}>
           The server announced {account.rejected.length}{" "}
           {account.rejected.length === 1 ? "device" : "devices"} whose signature does not match
           this account. A legitimate account cannot produce that: either the server has been
           compromised, or it is trying to insert itself into the conversation. These devices were
           discarded and receive nothing.
-        </p>
+        </Banner>
       </div>
     );
   }
@@ -61,18 +77,12 @@ export function Verification({
   if (state.status !== "changed") return null;
 
   return (
-    <div
-      role="alert"
-      className="border-b border-(--color-danger) bg-(--color-danger)/10 px-4 py-3 text-sm"
-    >
-      <p className="font-medium text-(--color-danger)">
-        @{account.handle}&apos;s fingerprint has changed
-      </p>
-      <p className="mt-1 text-(--color-ink-muted)">
+    <div className={inset}>
+      <Banner tone="danger" title={`@${account.handle}'s fingerprint has changed`}>
         Either @{account.handle} restored their account from their recovery phrase, or someone
         has stepped in between. The first explanation is rare, the second is an attack — and
         nothing in the protocol tells them apart. Check before you send anything sensitive.
-      </p>
+      </Banner>
     </div>
   );
 }
@@ -84,119 +94,133 @@ export function Verification({
  * added by a compromised account is duly attested, so indistinguishable from a legitimate
  * addition: only the user can say whether they really own that device. Hence a notice rather
  * than an automatic verdict.
+ *
+ * `info` rather than `warn`, and the tone is the whole claim: a `warn` banner takes `role="alert"`
+ * and cuts across a screen reader mid-sentence. Somebody buying a laptop is not an emergency, and
+ * spending the interruption here is spending it against the fingerprint alert above.
+ *
+ * What that does not solve: an addition the user does not recognise *is* the emergency, and this
+ * component cannot know which of the two it is holding. It states the fact and hands the
+ * judgement over, which is the only honest thing available to it.
  */
 export function DeviceAdded({ handle, devices }: { handle: string; devices: string[] }) {
   if (devices.length === 0) return null;
 
   return (
-    <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-2 text-xs text-(--color-ink-muted)">
+    <Banner tone="info">
       @{handle} added {devices.length === 1 ? "a device" : `${devices.length} devices`}:{" "}
       {devices.join(", ")}. If this was not you, that account may be compromised.
-    </div>
+    </Banner>
   );
 }
 
 /**
- * Manual fingerprint comparison, on demand.
+ * Manual fingerprint comparison, as a section of the detail column.
  *
- * Stays available for whoever really wants to check, without forcing the ritual on everyone.
- * The natural next step is a QR code shown and scanned: two seconds and no misreading, where
- * comparing digits by eye is tedious and unreliable — but that assumes camera access, out of
- * scope here.
+ * # A section, not a panel of its own
+ *
+ * It used to be a free-standing surface with its own border, background and Close link, opened
+ * over the conversation. It is now unwrapped content the detail column lays out, because it is
+ * one step of the reading that column already exists for: the strip says *something changed*, the
+ * words say *what kind of change*, and this is where the reader does the only thing that settles
+ * it. Three surfaces for one question was three chances to close the wrong one.
+ *
+ * # The strip is here, and it is not the comparison
+ *
+ * The proof strips sit above each fingerprint so the eye gets the shapes before the digits — but
+ * nineteen bits of pattern are grindable in seconds of CPU. **The strip detects a change; it does
+ * not verify an identity.** Only the hexadecimal below it, read out over another channel, does
+ * that, and it is why the digits are set in `--font-evidence` on a fixed grid rather than as
+ * running text.
+ *
+ * # What this still does not solve
+ *
+ * Comparing digits by eye is tedious and unreliable, and a reader in a hurry will click "The
+ * fingerprints match" having glanced at the first block. The natural next step is a QR code shown
+ * and scanned: two seconds and no misreading — but that assumes camera access, out of scope here.
  */
 export function VerificationPanel({
   account,
-  state,
-  myName,
-  myFingerprint,
-  onVerified,
   onClose,
 }: {
   account: ResolvedAccount;
-  state: VerificationState;
-  myName: string;
-  myFingerprint: string;
-  onVerified: () => void;
   onClose: () => void;
 }) {
-  return (
-    <div className="border-b border-(--color-border-subtle) bg-(--color-surface-raised) px-4 py-4 text-sm">
-      <div className="flex items-baseline justify-between gap-4">
-        <h2 className="font-medium">Verify @{account.handle}&apos;s identity</h2>
-        <button type="button" onClick={onClose} className="text-(--color-ink-muted) underline">
-          Close
-        </button>
-      </div>
+  const session = useSession();
+  const bump = useBump();
+  const report = useReport();
+  const [busy, setBusy] = useState(false);
 
-      <p className="mt-2 text-(--color-ink-muted)">
-        Compare these two fingerprints out loud or over another channel. If they match, nobody
-        has stepped in between.
+  const state = session.verificationOf(account);
+  const mine = session.accountFingerprint();
+
+  const confirm = () => {
+    setBusy(true);
+    void session
+      .markVerified(account)
+      .then(() => {
+        bump();
+        report.done(`Marked @${account.handle} as verified.`);
+        onClose();
+      })
+      .catch((e: unknown) => report.error(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="space-y-snug">
+      <p className="text-body text-(--color-ink-muted)">
+        Read these two fingerprints to each other out loud, or over a channel this server does not
+        carry. If every block matches, nobody has stepped in between.
       </p>
 
-      <p className="mt-1 text-xs text-(--color-ink-muted)">
-        The fingerprint covers the account: it stays the same when @{account.handle} adds or
+      <p className="text-caption text-(--color-ink-muted)">
+        The fingerprint covers the account, so it stays the same when @{account.handle} adds or
         removes a device. This account currently declares {account.devices.length}.
       </p>
 
-      <div className="mt-4 space-y-3">
-        <div className="space-y-1">
-          <p className="text-xs uppercase tracking-wide text-(--color-ink-muted)">
+      <div className="space-y-gutter">
+        <div className="space-y-tight">
+          <p className="text-caption tracking-wide text-(--color-ink-muted) uppercase">
             @{account.handle}
           </p>
+          <ProofStrip fingerprint={account.fingerprint} scale="detail" verification={state} />
           <Fingerprint value={account.fingerprint} />
         </div>
 
         {state.status === "changed" && (
-          <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-(--color-danger)">
+          <div className="space-y-tight">
+            <p className="text-caption tracking-wide text-(--color-danger) uppercase">
               Previously verified fingerprint
             </p>
+            <ProofStrip fingerprint={state.previous} scale="detail" />
             <Fingerprint value={state.previous} />
           </div>
         )}
 
-        <div className="space-y-1">
-          <p className="text-xs uppercase tracking-wide text-(--color-ink-muted)">
-            {myName} (yours)
+        <div className="space-y-tight">
+          <p className="text-caption tracking-wide text-(--color-ink-muted) uppercase">
+            @{session.handle} (yours)
           </p>
-          <Fingerprint value={myFingerprint} />
+          <ProofStrip fingerprint={mine} scale="detail" />
+          <Fingerprint value={mine} />
         </div>
       </div>
 
-      {state.status === "verified" ? (
-        <p className="mt-4 text-(--color-ok)">✓ You have already verified this fingerprint.</p>
-      ) : (
-        <button
-          type="button"
-          onClick={onVerified}
-          className="mt-4 rounded-control bg-(--color-accent) px-gutter py-control font-medium text-(--color-accent-ink)"
-        >
-          The fingerprints match
-        </button>
-      )}
+      <div className="flex flex-wrap gap-snug">
+        {state.status === "verified" ? (
+          <p className="text-caption text-(--color-ok)">
+            You have already compared this fingerprint by hand. It has not changed since.
+          </p>
+        ) : (
+          <Button variant="primary" size="sm" busy={busy} onClick={confirm}>
+            The fingerprints match
+          </Button>
+        )}
+        <Button variant="quiet" size="sm" onClick={onClose}>
+          Cancel
+        </Button>
+      </div>
     </div>
-  );
-}
-
-/** Discreet entry point to verification, in the conversation header. */
-export function VerificationToggle({
-  state,
-  onClick,
-}: {
-  state: VerificationState;
-  onClick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title="Verify identity"
-      className={`text-xs ${state.status === "verified" ? "text-(--color-ok)" : "text-(--color-ink-muted)"} ${hover ? "underline" : ""}`}
-    >
-      {state.status === "verified" ? "✓ verified" : "verify identity"}
-    </button>
   );
 }

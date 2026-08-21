@@ -54,9 +54,25 @@ import { useNavigate, useRoute } from "@/routes/Router";
  * than in a `gap` on the container, since the container also holds the header, which must not be
  * pushed away from the content it covers.
  *
+ * # Its header exists at two widths out of three
+ *
+ * At `trio` this panel has **no header bar**. The conversation bar above it spans the centre and
+ * this column both, it already carries the conversation's title, and its `[ⓘ]` is a toggle with
+ * `aria-expanded` — so a second bar here would be a second title for the same conversation and a
+ * second control for the same open/closed state. The heading survives as an `sr-only` `<h2>`,
+ * because it is what focus lands on when the panel opens and what names the region to a screen
+ * reader; only its painting goes.
+ *
+ * At `duo` and below the bar comes back, and the reason is what this panel *is* at those widths
+ * rather than a shortage of room. At `duo` it is an overlay: it paints over the right hand side
+ * of the conversation, bar included, so there is no shared bar left for it to borrow a close
+ * control from. Below `duo` it is the only pane mounted. Detached surfaces carry their own chrome;
+ * that is the whole difference between a surface and a section.
+ *
  * # How it closes, and why the rules differ by width
  *
- * - `[✕]` everywhere. It is the control that always works and the one a mouse looks for.
+ * - `[✕]` at `duo` exactly. At `trio` the control that closes this column is the `[ⓘ]` in the
+ *   shared bar; below `duo` it is `[‹]` and the back gesture.
  * - **Escape at `duo` and below only.** There the column is laid over the conversation and reads
  *   as a temporary surface, so dismissing it with Escape is what the gesture means. At `trio` it
  *   is an inline third of the layout, no more modal than the rail is; closing a permanent column
@@ -73,12 +89,15 @@ import { useNavigate, useRoute } from "@/routes/Router";
  * On open, focus moves to the panel heading, which carries `tabIndex={-1}` so it can receive it
  * without becoming a tab stop of its own. On close it returns to the `[ⓘ]` that opened it.
  *
- * That return is done by element id rather than by a shared ref, and the reason is a boundary:
- * `[ⓘ]` lives in the conversation header and this panel is mounted by the shell, so a ref would
- * have to travel through a context whose only member is one button. What it does not solve: at
- * one panel the toggle is not mounted while the detail covers the screen, so the focus lands
- * wherever the browser puts it after a history move. That is the browser's job on a back
- * navigation and it does it better than we would.
+ * That return is done by element id rather than by a shared ref. `[ⓘ]` lives in
+ * `ConversationHeader`, which is this panel's sibling under the shell rather than its ancestor:
+ * a ref would have to go up to the shell and back down, through a context whose only member is
+ * one button, and it would have to survive the bar being mounted in two different places
+ * depending on the width. An id is the same lookup at all three widths.
+ *
+ * What it does not solve: at one panel the toggle is not mounted while the detail covers the
+ * screen, so the focus lands wherever the browser puts it after a history move. That is the
+ * browser's job on a back navigation and it does it better than we would.
  */
 
 /** The id the conversation header's `[ⓘ]` carries, so this panel can hand focus back to it. */
@@ -389,36 +408,53 @@ export function DetailPanel({ view }: { view: ConversationView }) {
       className="safe-sides flex h-full min-h-0 w-full flex-col overflow-y-auto bg-(--color-surface)"
     >
       {/*
-        The header keeps its hairline while the sections below have lost theirs, and the two are
-        not the same kind of line. A section boundary separates two blocks that are simply next to
-        each other, and space says that better than a rule. This one separates a bar that stays
-        put from content that slides underneath it: the scrolled sentence has to stop somewhere
-        visible, and without the rule it fades into the identically coloured bar mid-word.
+        At three columns the heading is announced and not painted. The bar above this column names
+        the conversation already, and a panel that repeated the name under the bar showing it
+        would be saying the same word twice, six millimetres apart. It stays in the DOM because it
+        is what `focus()` lands on when the panel opens and what a screen reader reads on entering
+        the region — removing it would trade a duplicated word for a panel nobody can be put into.
 
-        The fill has to be opaque and has to match the panel exactly, which is why it is repeated
-        here rather than inherited — a sticky element with no background of its own shows whatever
-        is passing behind it.
+        `tabIndex={-1}` for the same reason as below: focusable on purpose, never a tab stop.
       */}
-      <header className="safe-top sticky top-0 z-(--z-index-sticky) flex items-center gap-snug border-b border-(--color-border-subtle) bg-(--color-surface) px-pane py-snug">
-        {!duo && (
-          <IconButton
-            label="Back to the conversation"
-            icon={<Icon name="back" size={20} />}
-            onClick={() => history.back()}
-            className="-ml-tight"
-          />
-        )}
-        <h2
-          ref={heading}
-          tabIndex={-1}
-          className="min-w-0 flex-1 truncate text-body font-medium outline-none"
-        >
+      {trio ? (
+        <h2 ref={heading} tabIndex={-1} className="sr-only">
           {focused ? nameOf(focused.handle, names).primary : title}
         </h2>
-        {duo && (
-          <IconButton label="Close details" icon={<Icon name="close" />} onClick={close} />
-        )}
-      </header>
+      ) : (
+        /*
+          The header keeps its hairline while the sections below have lost theirs, and the two are
+          not the same kind of line. A section boundary separates two blocks that are simply next
+          to each other, and space says that better than a rule. This one separates a bar that
+          stays put from content that slides underneath it: the scrolled sentence has to stop
+          somewhere visible, and without the rule it fades into the identically coloured bar
+          mid-word.
+
+          The fill has to be opaque and has to match the panel exactly, which is why it is
+          repeated here rather than inherited — a sticky element with no background of its own
+          shows whatever is passing behind it.
+        */
+        <header className="safe-top sticky top-0 z-(--z-index-sticky) flex items-center gap-snug border-b border-(--color-border-subtle) bg-(--color-surface) px-pane py-snug">
+          {!duo && (
+            <IconButton
+              label="Back to the conversation"
+              icon={<Icon name="back" size={20} />}
+              onClick={() => history.back()}
+              className="-ml-tight"
+            />
+          )}
+          <h2
+            ref={heading}
+            tabIndex={-1}
+            className="min-w-0 flex-1 truncate text-body font-medium outline-none"
+          >
+            {focused ? nameOf(focused.handle, names).primary : title}
+          </h2>
+          {/* `duo` and not `trio` too: at three columns this panel is in flow under a shared bar
+              whose `[ⓘ]` closes it, and a second closing control for one state is a second thing
+              to keep in step. */}
+          {duo && <IconButton label="Close details" icon={<Icon name="close" />} onClick={close} />}
+        </header>
+      )}
 
       {/* A group that has not singled anybody out lists its members; picking one is a navigation,
           so the back gesture collapses the card and leaves the column open. */}
@@ -487,6 +523,22 @@ export function DetailPanel({ view }: { view: ConversationView }) {
       {view.accounts.length > 1 && (
         <section className="space-y-snug p-pane">
           <SectionTitle>Conversation</SectionTitle>
+          {/*
+            Why the `[+]` in the conversation bar is inert for this group, written where somebody
+            who pressed it and got nothing will look next — beside the membership controls, one
+            press of `[ⓘ]` away from the button itself.
+
+            It is the truth and not a placeholder for missing work: nothing in this client can add
+            a member to a group that already exists. `api.addMembers` is reached only from
+            starting a conversation and from catching up an existing member's new device, and
+            turning it into an invitation is protocol work on a cryptographic ratchet rather than
+            a screen. Until that exists, the sentence is what the reader is owed.
+          */}
+          <p className="text-caption text-(--color-ink-muted)">
+            Nobody can be added to this group. Its members are the members it was created with,
+            minus anybody removed since. Talking to somebody new means starting a conversation
+            that has them in it.
+          </p>
           <GroupPanel view={view} onClose={close} />
         </section>
       )}

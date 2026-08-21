@@ -4,6 +4,7 @@ import { COMPOSER_ID, Conversation } from "@/components/Conversation";
 import { useDuo, useTrio } from "@/lib/duo";
 import { useRevision, useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
+import { ConversationHeader } from "./ConversationHeader";
 import { DetailPanel } from "./DetailPanel";
 import { EmptyCenter } from "./EmptyCenter";
 import { NewConversation } from "./NewConversation";
@@ -40,7 +41,22 @@ import { SettingsScreen } from "./SettingsScreen";
  *
  * - **`trio` (≥ 64rem)** — all three side by side. Opening the detail column *shrinks* the
  *   conversation; nothing is covered, because there is room not to cover it.
- * - **`duo` (≥ 48rem)** — rail and centre. The detail column slides in **over the right hand
+ *
+ *   The conversation bar is hoisted out of the centre here and spans the centre **and** the
+ *   detail column: it is a surface of its own, laid across the top of the row, and both columns
+ *   below start under it. The detail column consequently has **no header of its own** at this
+ *   width — no title repeating the one above it, no `[✕]`, because the control that closes it is
+ *   the `[ⓘ]` in the shared bar, which is already a toggle carrying `aria-expanded`.
+ * - **`duo` (≥ 48rem)** — rail and centre. The bar stays inside the centre surface, and the
+ *   detail panel **keeps its own header and its own `[✕]`**. That asymmetry with `trio` is not a
+ *   corner cut: at this width the panel is an overlay, lifted off the thread and painting over
+ *   the right hand side of it — including over any bar drawn there. Nothing can begin "under" a
+ *   surface that covers it, so a shared bar would be a bar the panel hides half of, with the
+ *   close control possibly among the hidden half. The panel is detached, so it carries its own
+ *   chrome. A client whose right hand column is always in flow — Discord's is — never meets this
+ *   case and never has to choose.
+ *
+ *   The detail column slides in **over the right hand
  *   side of the centre**, not over the window: `absolute inset-y-gap right-gap w-80` inside the
  *   centre, so it is inset by the same gutter as everything else and reads as a card lifted off
  *   the thread rather than a slab welded to its edge. It keeps `shadow-overlay` and drops the
@@ -57,7 +73,9 @@ import { SettingsScreen } from "./SettingsScreen";
  *   one thing this panel must not do. It stays a panel: the composer keeps focus if it had it,
  *   and a click outside dismisses.
  * - **below `duo`** — one panel mounted at a time. Not hidden: a hidden conversation would keep
- *   scrolling, keep polling and keep claiming keyboard focus.
+ *   scrolling, keep polling and keep claiming keyboard focus. The detail panel is the whole
+ *   screen when it is up, so it keeps its header and its back chevron for the plainest of
+ *   reasons: there is no other bar on screen to share one with.
  *
  * # What is not in here
  *
@@ -137,6 +155,17 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
     }
   };
 
+  /**
+   * The conversation bar, or nothing at all.
+   *
+   * It is mounted by the shell rather than by the thread because at `trio` it has to span two
+   * columns, and a component cannot be wider than the column it lives in. Only the conversation
+   * route has one: `EmptyCenter`, `NewConversation` and `SettingsScreen` each carry a header of
+   * their own describing something that is not a conversation.
+   */
+  const header =
+    route.kind === "conversation" && view !== null ? <ConversationHeader view={view} /> : null;
+
   // One panel: exactly one of the four is mounted, and which one is a property of the route
   // alone.
   if (!duo) {
@@ -147,7 +176,13 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
         ) : detailOpen && view !== null ? (
           <DetailPanel view={view} />
         ) : (
-          centre()
+          // The bar and the thread are siblings in a column here, where they used to be parent
+          // and child. Nothing about one panel changes: the bar is still directly above the
+          // messages and still the full width of the screen.
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {header}
+            {centre()}
+          </div>
         )}
       </div>
     );
@@ -178,29 +213,45 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
 
       <Rail onLock={onLock} onForget={onForget} />
 
-      {/* `relative` so the two-pane detail column can be positioned against the centre rather
-          than against the window: it must cover the thread and stop at the rail.
+      {/* Everything to the right of the rail: at `trio` a detached bar above a row of two columns,
+          below it a single column with the bar inside it. `gap-gap` is the same gutter as
+          everywhere else and it is what separates the bar from what it covers — at `duo` this
+          element has one child and the gap costs nothing. */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-gap">
+        {trio && header}
 
-          `overflow-hidden` is what makes the rounded corners real: the children — a sticky
-          header, a scrolling thread, a composer — all paint their own backgrounds square, and
-          without the clip they would fill the corners back in. It also clips the sliding detail
-          panel at the centre's right edge, which is what makes it appear from under that edge
-          instead of from off-window. */}
-      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-(--color-surface) duo:rounded-surface">
-        {centre()}
+        <div className="flex min-h-0 min-w-0 flex-1 gap-gap">
+          {/* `relative` so the two-pane detail column can be positioned against the centre rather
+              than against the window: it must cover the thread and stop at the rail.
 
-        {!trio && detailOpen && view !== null && (
-          <div className="absolute inset-y-gap right-gap z-(--z-index-overlay) w-80 max-w-full overflow-hidden rounded-surface bg-(--color-surface) shadow-overlay duration-(--duration-panel) ease-out starting:translate-x-full motion-safe:transition-transform">
-            <DetailPanel view={view} />
+              `overflow-hidden` is what makes the rounded corners real: the children — the bar, a
+              scrolling thread, a composer — all paint their own backgrounds square, and without
+              the clip they would fill the corners back in. It also clips the sliding detail
+              panel at the centre's right edge, which is what makes it appear from under that edge
+              instead of from off-window.
+
+              `flex-col`, because the bar is now a sibling of the thread rather than its first
+              child. The thread still owns its own scrolling: it is `min-h-0 flex-1` inside its
+              own section and the column above it is `min-h-0` too, so nothing here gives the
+              overflow somewhere else to go. */}
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--color-surface) duo:rounded-surface">
+            {!trio && header}
+            {centre()}
+
+            {!trio && detailOpen && view !== null && (
+              <div className="absolute inset-y-gap right-gap z-(--z-index-overlay) w-80 max-w-full overflow-hidden rounded-surface bg-(--color-surface) shadow-overlay duration-(--duration-panel) ease-out starting:translate-x-full motion-safe:transition-transform">
+                <DetailPanel view={view} />
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      {trio && detailOpen && view !== null && (
-        <div className="w-80 shrink-0 overflow-hidden bg-(--color-surface) duo:rounded-surface">
-          <DetailPanel view={view} />
+          {trio && detailOpen && view !== null && (
+            <div className="w-80 shrink-0 overflow-hidden bg-(--color-surface) duo:rounded-surface">
+              <DetailPanel view={view} />
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

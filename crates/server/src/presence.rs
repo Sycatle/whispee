@@ -30,10 +30,10 @@ pub const PRESENCE_REFRESH: Duration = Duration::from_secs(60);
 
 /// In-memory damping, in front of the SQL guard.
 ///
-/// Kept in a `static` rather than in the application state: the attachment router only has
-/// `PgPool` as state, and the `Signed` extractor is generic over `S`. In any case the real
-/// protection is the `WHERE` clause below — it stays correct across several instances, this cache
-/// does not.
+/// Kept in a `static` rather than in the application state: the `Signed` extractor is generic
+/// over `S`, and threading a cache through it would constrain every router that wants to touch
+/// presence. In any case the real protection is the `WHERE` clause below — it stays correct
+/// across several instances, this cache does not.
 static LAST_TOUCH: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 

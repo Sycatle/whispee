@@ -18,6 +18,7 @@ use crate::auth::Signed;
 use crate::error::{ApiError, ApiResult};
 use crate::presence;
 use crate::stream::{Hub, Notice};
+use crate::throttle::{Writes, Written};
 
 /// Cap on the number of KeyPackages published in one request. Without it, a single device can
 /// fill the database on its own.
@@ -94,14 +95,19 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Attachment routes, isolated to carry a higher body limit.
-pub fn attachment_router(pool: PgPool) -> Router {
+///
+/// Takes the whole [`AppState`] rather than a bare pool, unlike when it was written: an upload
+/// is counted against a per-device quota, and the counter lives in the state. The handlers still
+/// extract `State<PgPool>` — `FromRef` derives it — so only the family's own limiter had to be
+/// threaded through.
+pub fn attachment_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/groups/{group_id}/attachments", post(upload_attachment))
         .route(
             "/v1/groups/{group_id}/attachments/{attachment_id}",
             get(download_attachment),
         )
-        .with_state(pool)
+        .with_state(state)
 }
 
 fn decode_b64(value: &str) -> ApiResult<Vec<u8>> {
@@ -950,8 +956,17 @@ struct PublishKeyPackages {
 /// this device any more.
 async fn publish_key_packages(
     State(pool): State<PgPool>,
+    State(writes): State<Arc<Writes>>,
     signed: Signed,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // A signature identifies the caller; it does not bound it. One registered device could
+    // append `MAX_KEY_PACKAGES_PER_REQUEST` rows as fast as the network allowed, and the stock
+    // is only consumed one package at a time by people opening conversations — so what is
+    // published mostly stays. See `crate::throttle` for the number and for what it does not fix.
+    if !writes.allows(Written::KeyPackages, &signed.device_id) {
+        return Err(ApiError::TooManyRequests);
+    }
+
     let payload: PublishKeyPackages = signed.json()?;
 
     if payload.packages.is_empty() {
@@ -1269,9 +1284,18 @@ async fn caller_handle(pool: &PgPool, device_id: &str) -> ApiResult<String> {
 /// archive the same conversation without stepping on each other.
 async fn store_vault(
     State(pool): State<PgPool>,
+    State(writes): State<Arc<Writes>>,
     Path(group_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Membership below stops the vault being used as free storage under someone else's group;
+    // it does nothing about a member archiving the same group without end. The quota is what
+    // bounds the volume, and it is deliberately checked before the two membership queries: a
+    // refusal should not cost the database anything.
+    if !writes.allows(Written::Vault, &signed.device_id) {
+        return Err(ApiError::TooManyRequests);
+    }
+
     let group_id = decode_group_id(&group_id)?;
     let payload: StoreVault = signed.json()?;
 
@@ -1500,6 +1524,7 @@ async fn post_envelope(
     State(pool): State<PgPool>,
     State(hub): State<Arc<Hub>>,
     State(waker): State<Arc<dyn crate::push::Waker>>,
+    State(writes): State<Arc<Writes>>,
     Path(group_id): Path<String>,
     request: axum::extract::Request,
 ) -> ApiResult<Json<EnvelopePosted>> {
@@ -1514,6 +1539,22 @@ async fn post_envelope(
     } else {
         let signed = <Signed as axum::extract::FromRequest<PgPool>>::from_request(request, &pool)
             .await?;
+        // **Only the signed path is counted, and the gap is not an oversight.**
+        //
+        // The anonymous path has no device to count: that is the whole point of sealed sender,
+        // and re-attributing a post in order to bound it would hand back the exact power the
+        // mechanism took away. Counting the group instead would bound the group — a busy
+        // conversation would throttle its own members to punish whichever one of them is
+        // abusing it — so it is not done either.
+        //
+        // What remains open, plainly: anyone holding a group's posting key can grow `envelopes`
+        // in that group without any rate bound from this server. That is a member, and a member
+        // can already do it through the signed path at 120 a minute; the anonymous path removes
+        // the ceiling, not the requirement to be a member.
+        if !writes.allows(Written::Envelopes, &signed.device_id) {
+            return Err(ApiError::TooManyRequests);
+        }
+
         let payload: PostEnvelope = signed.json()?;
         require_membership(&pool, &group_id, &signed.device_id).await?;
         sender = Some(signed.device_id.clone());
@@ -1568,9 +1609,23 @@ struct AttachmentUploaded {
 /// of that travels encrypted in the MLS message that will reference this id.
 async fn upload_attachment(
     State(pool): State<PgPool>,
+    State(writes): State<Arc<Writes>>,
     Path(group_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<AttachmentUploaded>> {
+    // The heaviest write the server accepts: `MAX_ATTACHMENT_BYTES` a call, kept forever, with
+    // no way to tell an attachment nobody will fetch from one somebody still needs. The quota
+    // slows the fill; it does not stop it, and `crate::throttle` says so rather than implying
+    // otherwise.
+    //
+    // Counted before the membership query and before the body is looked at — but **after** the
+    // `Signed` extractor, which has already read the whole body off the socket. The bytes are
+    // therefore spent even on a refusal; only the disk is spared. Refusing earlier would mean
+    // refusing before knowing who is calling.
+    if !writes.allows(Written::Attachments, &signed.device_id) {
+        return Err(ApiError::TooManyRequests);
+    }
+
     let group_id = decode_group_id(&group_id)?;
     require_membership(&pool, &group_id, &signed.device_id).await?;
 

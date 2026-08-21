@@ -1,6 +1,12 @@
-//! Rate limit on the open routes.
+//! Rate limits: what one caller may do per minute.
 //!
-//! # What this closes
+//! Three counters live here, and they count different subjects on purpose — an address for the
+//! routes that have no caller yet, a caller-target pair for KeyPackage claims, a device for the
+//! authenticated writes. Merging them into one would mean picking a single quota for "create an
+//! account", "drain someone else's stock" and "send a message", which are three orders of
+//! magnitude apart.
+//!
+//! # What this closes, on the open routes
 //!
 //! Four routes run **with no authentication at all**, because they come before an identity
 //! exists: account creation, device registration, pairing post and pairing fetch. Nothing
@@ -13,6 +19,32 @@
 //! `ON DELETE CASCADE` foreign key on `log_entries` does offer a way out — delete the accounts —
 //! but it punches a hole in the log, choosing to break the proofs rather than keep the garbage.
 //! Neither exit is good: the entry had to be prevented.
+//!
+//! # What this closes, on the authenticated writes
+//!
+//! Every route that appends a row on the caller's behalf — KeyPackages, vault entries,
+//! attachments, envelopes — was unbounded. Authentication is not a bound: one registered device,
+//! obtained through two open requests, could fill `key_packages`, `vault_entries`, `attachments`
+//! and `envelopes` at whatever rate the network allowed. Revoking the device afterwards does not
+//! give the disk back.
+//!
+//! The counting subject is the device rather than the account, because the device is what the
+//! signature proves. An account with ten devices therefore gets ten times the quota, which is
+//! correct — ten devices are ten people's worth of typing — and also the way a determined abuser
+//! multiplies their allowance, at the cost of two open requests per device. Those two requests
+//! are themselves counted by the address limit above; that is the only thing standing between
+//! the two mechanisms, and it is thin.
+//!
+//! **What this does not do is stop a disk from filling.** Nothing keyed on time can: the quotas
+//! turn "fill the disk this afternoon" into "fill the disk over a fortnight", which buys an
+//! operator the chance to notice. The bound that actually closes it is a stored-bytes quota per
+//! account, which this server does not have. Saying the rate limit solves storage would be the
+//! comfortable lie.
+//!
+//! **And it does not bound `envelopes` as a table.** An envelope is never deleted and cannot be:
+//! each one consumes a generation of the MLS application ratchet, and the server has no notion
+//! of "delivered", so it has no moment at which removing one is safe. The quota bounds how fast
+//! one device adds to that table. It does not make it shrink, ever.
 //!
 //! # What this does not close
 //!
@@ -49,11 +81,70 @@ pub const DEFAULT_PER_MINUTE: u32 = 60;
 /// victim — an attack that still works: the limit would look set without preventing anything.
 pub const DEFAULT_CLAIMS_PER_MINUTE: u32 = 5;
 
+/// Default quota for KeyPackage top-ups, per device and per minute.
+///
+/// A top-up is a background action, not an interactive one: the client replenishes when its
+/// stock runs low, and one request already carries up to `MAX_KEY_PACKAGES_PER_REQUEST` — a
+/// hundred packages, a hundred conversations someone can open with this device. Five requests a
+/// minute is five hundred packages a minute, which no client legitimately needs and which is
+/// still two orders of magnitude below what it takes to make the table a problem in an hour.
+pub const DEFAULT_KEY_PACKAGES_PER_MINUTE: u32 = 5;
+
+/// Default quota for vault writes, per device and per minute.
+///
+/// The vault is archival: a client uploads a batch when it decides to, not continuously, and one
+/// request carries up to `MAX_VAULT_ENTRIES` — two hundred archived messages. Ten a minute lets
+/// a device that has been offline for a long time push two thousand messages a minute, which
+/// covers the worst honest catch-up, and no more.
+pub const DEFAULT_VAULT_WRITES_PER_MINUTE: u32 = 10;
+
+/// Default quota for attachment uploads, per device and per minute.
+///
+/// Set from the human action, which is picking a batch of photographs and sending them at once:
+/// thirty in a minute is a generous version of that and nothing a person exceeds by accident.
+///
+/// **This is the one number that is uncomfortable and should be read as such.** An attachment
+/// may be `MAX_ATTACHMENT_BYTES` — twenty-five mebibytes — so thirty a minute is three quarters
+/// of a gibibyte a minute in the worst case. That is a bound and it is a bad one; it exists
+/// because unbounded is worse, not because it is sufficient. What would make it sufficient is a
+/// stored-bytes quota per account, which is a different mechanism and is not here.
+pub const DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE: u32 = 30;
+
+/// Default quota for envelope posts, per device and per minute.
+///
+/// Two a second, sustained. A person typing does not approach it, and the burst a client emits
+/// when it commits a group change — one envelope per commit, not per member — stays far below.
+/// The margin is deliberately wide here: refusing a message is the most visible failure this
+/// server can produce, and an envelope is a kilobyte where an attachment is megabytes.
+pub const DEFAULT_ENVELOPES_PER_MINUTE: u32 = 120;
+
+/// The four write quotas are ordered by what the row costs to keep.
+///
+/// A message is a kilobyte, an attachment up to twenty-five mebibytes, a vault write up to two
+/// hundred rows and a KeyPackage top-up up to a hundred — so the widest quota belongs to the
+/// cheapest write and the narrowest to the most expensive. Every doc comment above argues from
+/// that ordering; checked here so an edit that inverts it fails the build instead of quietly
+/// making four paragraphs untrue.
+const _: () = assert!(
+    DEFAULT_ENVELOPES_PER_MINUTE > DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE
+        && DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE > DEFAULT_VAULT_WRITES_PER_MINUTE
+        && DEFAULT_VAULT_WRITES_PER_MINUTE > DEFAULT_KEY_PACKAGES_PER_MINUTE
+);
+
 /// Past this many tracked addresses, stale entries are swept.
 ///
 /// Without that cleanup, the table would grow by one entry per address seen and never shrink:
 /// we would have traded a way to fill a disk for a way to fill memory, which is no progress.
 const SWEEP_THRESHOLD: usize = 4096;
+
+/// A quota from the environment, or the compiled-in default.
+///
+/// An unparseable value falls back to the default rather than failing the start-up. Refusing to
+/// boot on a typo in an optional tuning variable would turn a harmless mistake into an outage;
+/// the default is a safe number by construction.
+fn quota(variable: &str, fallback: u32) -> u32 {
+    std::env::var(variable).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
+}
 
 pub struct Throttle {
     quota: u32,
@@ -82,12 +173,7 @@ impl Throttle {
 
     /// Quota read from `THROTTLE_PER_MINUTE`, or [`DEFAULT_PER_MINUTE`].
     pub fn from_environment() -> Self {
-        let quota = std::env::var("THROTTLE_PER_MINUTE")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_PER_MINUTE);
-
-        Self::per_minute(quota)
+        Self::per_minute(quota("THROTTLE_PER_MINUTE", DEFAULT_PER_MINUTE))
     }
 
     /// Counts a request under a key, and says whether it may pass.
@@ -141,17 +227,129 @@ impl Claims {
 
     /// Quota read from `CLAIM_QUOTA_PER_MINUTE`, or [`DEFAULT_CLAIMS_PER_MINUTE`].
     pub fn from_environment() -> Self {
-        let quota = std::env::var("CLAIM_QUOTA_PER_MINUTE")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_CLAIMS_PER_MINUTE);
-
-        Self::per_minute(quota)
+        Self::per_minute(quota("CLAIM_QUOTA_PER_MINUTE", DEFAULT_CLAIMS_PER_MINUTE))
     }
 
     /// `pair` identifies the caller **and** its target.
     pub fn allows(&self, pair: &str) -> bool {
         self.0.allows(pair)
+    }
+}
+
+
+/// Which table a write lands in.
+///
+/// An enum rather than four methods so that adding a write route makes the compiler ask which
+/// quota it belongs to. A route that quietly reuses a neighbour's counter is how a limit ends up
+/// looking set while bounding the wrong thing.
+#[derive(Clone, Copy, Debug)]
+pub enum Written {
+    KeyPackages,
+    Vault,
+    Attachments,
+    Envelopes,
+}
+
+/// Limits on the authenticated write routes, per device.
+///
+/// # Why four counters and not one
+///
+/// The same reason [`Claims`] is not a [`Throttle`]: a top-up of a hundred KeyPackages, a
+/// twenty-five mebibyte attachment and a one kilobyte message are not the same event, and a
+/// single quota would have to be set for the worst of them — which makes it useless for the
+/// others. Each counter also keeps its own table, so a device that hits its attachment ceiling
+/// can still send messages. Coupling them would let an abuser silence their own account's
+/// conversations, which is not a security property anybody asked for.
+pub struct Writes {
+    key_packages: Throttle,
+    vault: Throttle,
+    attachments: Throttle,
+    envelopes: Throttle,
+}
+
+impl Writes {
+    /// Every write quota at the same value.
+    ///
+    /// For the tests: `0` disables them all, which the harness needs — the suite publishes
+    /// KeyPackages and posts envelopes in tight loops — and a low value makes each of them bite
+    /// in turn.
+    pub fn per_minute(quota: u32) -> Self {
+        Self {
+            key_packages: Throttle::per_minute(quota),
+            vault: Throttle::per_minute(quota),
+            attachments: Throttle::per_minute(quota),
+            envelopes: Throttle::per_minute(quota),
+        }
+    }
+
+    /// Quotas from the environment, each falling back to its documented default.
+    pub fn from_environment() -> Self {
+        Self {
+            key_packages: Throttle::per_minute(quota(
+                "KEY_PACKAGE_QUOTA_PER_MINUTE",
+                DEFAULT_KEY_PACKAGES_PER_MINUTE,
+            )),
+            vault: Throttle::per_minute(quota(
+                "VAULT_QUOTA_PER_MINUTE",
+                DEFAULT_VAULT_WRITES_PER_MINUTE,
+            )),
+            attachments: Throttle::per_minute(quota(
+                "ATTACHMENT_QUOTA_PER_MINUTE",
+                DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE,
+            )),
+            envelopes: Throttle::per_minute(quota(
+                "ENVELOPE_QUOTA_PER_MINUTE",
+                DEFAULT_ENVELOPES_PER_MINUTE,
+            )),
+        }
+    }
+
+    /// Counts one write by `device_id`, and says whether it may go through.
+    ///
+    /// The device, not the account: the signature proves a device and nothing more, and reading
+    /// the account back would put a query on the path of every write to bound something the
+    /// caller can multiply anyway by registering more devices.
+    pub fn allows(&self, table: Written, device_id: &str) -> bool {
+        match table {
+            Written::KeyPackages => &self.key_packages,
+            Written::Vault => &self.vault,
+            Written::Attachments => &self.attachments,
+            Written::Envelopes => &self.envelopes,
+        }
+        .allows(device_id)
+    }
+}
+
+/// Every limit the application enforces, in one place.
+///
+/// Grouped so that adding a limiter does not change the signature of `crate::app_with` again,
+/// and so that a caller cannot construct an application having silently forgotten one.
+pub struct Limits {
+    pub throttle: Throttle,
+    pub claims: Claims,
+    pub writes: Writes,
+}
+
+impl Limits {
+    pub fn from_environment() -> Self {
+        Self {
+            throttle: Throttle::from_environment(),
+            claims: Claims::from_environment(),
+            writes: Writes::from_environment(),
+        }
+    }
+
+    /// Every limit disabled.
+    ///
+    /// **For the tests only.** The suite runs dozens of accounts, top-ups and posts from the
+    /// loopback within seconds, which no realistic quota lets through. Each test that checks a
+    /// limit actually bites turns exactly that one back on.
+    pub fn off() -> Self {
+        Self {
+            throttle: Throttle::per_minute(0),
+            claims: Claims::per_minute(0),
+            writes: Writes::per_minute(0),
+        }
     }
 }
 
@@ -182,6 +380,47 @@ mod tests {
         assert!(!throttle.allows(&ip(1)));
 
         assert!(throttle.allows(&ip(2)), "the counter is per address, not global");
+    }
+
+
+    /// Each written table keeps its own counter.
+    ///
+    /// Sharing one would let a device that has filled its attachment allowance be refused a
+    /// message — the server silencing an account because it sent too many photographs.
+    #[test]
+    fn exhausting_one_write_quota_leaves_the_others_alone() {
+        let writes = Writes::per_minute(1);
+
+        assert!(writes.allows(Written::Attachments, "alice:laptop"));
+        assert!(!writes.allows(Written::Attachments, "alice:laptop"));
+
+        assert!(
+            writes.allows(Written::Envelopes, "alice:laptop"),
+            "a full attachment quota must not stop a message"
+        );
+    }
+
+    /// The write quotas count devices, not the server.
+    #[test]
+    fn one_device_does_not_exhaust_the_write_quota_of_another() {
+        let writes = Writes::per_minute(1);
+
+        assert!(writes.allows(Written::Envelopes, "alice:laptop"));
+        assert!(!writes.allows(Written::Envelopes, "alice:laptop"));
+
+        assert!(writes.allows(Written::Envelopes, "bob:phone"));
+    }
+
+    /// `Limits::off()` really turns everything off, including what is added later.
+    #[test]
+    fn the_disabled_limits_never_refuse_anything() {
+        let limits = Limits::off();
+
+        for _ in 0..1000 {
+            assert!(limits.throttle.allows(&ip(1)));
+            assert!(limits.claims.allows("alice:laptop:bob:phone"));
+            assert!(limits.writes.allows(Written::Envelopes, "alice:laptop"));
+        }
     }
 
     /// A zero quota makes the limiter transparent — which the test harness depends on.

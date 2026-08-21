@@ -2771,3 +2771,105 @@ async fn an_expired_pairing_is_already_unreadable_before_it_is_purged() {
 
     assert_eq!(refused.status(), 404, "an expired packet was served");
 }
+
+// ---------------------------------------------------------------- write quotas
+
+/// **The test that pins down the bound on authenticated writes.**
+///
+/// A signature identifies the caller; it does not bound it. One registered device — two open
+/// requests to obtain — could append a hundred KeyPackages per call for as long as it liked, and
+/// the stock is drained one package at a time by people opening conversations, so what is
+/// published mostly stays.
+#[tokio::test]
+async fn a_device_cannot_publish_key_packages_without_end() {
+    let server = common::start_with_write_quota(2).await;
+    let alice = Device::register(&server, &unique("alice")).await;
+
+    let batch = serde_json::json!({ "packages": [BASE64_STANDARD.encode([1u8; 32])] });
+
+    for round in 1..=2 {
+        let response = alice.post("/v1/key-packages", batch.clone()).await;
+        assert!(response.status().is_success(), "top-up {round} should have passed");
+    }
+
+    let refused = alice.post("/v1/key-packages", batch).await;
+    assert_eq!(refused.status(), 429, "the stock could be grown without limit");
+}
+
+/// The same, on the route that matters most to a user.
+///
+/// Note what this does **not** claim to fix: `envelopes` still never shrinks. An envelope
+/// consumes a generation of the MLS application ratchet and the server has no notion of
+/// "delivered", so there is no moment at which deleting one is safe. The quota bounds the rate
+/// at which one device adds to that table, and nothing else.
+#[tokio::test]
+async fn a_device_cannot_post_envelopes_without_end() {
+    let server = common::start_with_write_quota(2).await;
+    let (alice, _bob, group_id) = group_with_two_members(&server).await;
+
+    for round in 1..=2 {
+        let response = alice
+            .post(
+                &group_path(&group_id, "/envelopes"),
+                serde_json::json!({ "payload": BASE64_STANDARD.encode([round as u8]) }),
+            )
+            .await;
+        assert!(response.status().is_success(), "envelope {round} should have passed");
+    }
+
+    let refused = alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([3u8]) }),
+        )
+        .await;
+    assert_eq!(refused.status(), 429, "a single device could fill the table");
+}
+
+/// A quota is per device, so one abuser does not answer for their whole account's peers.
+#[tokio::test]
+async fn one_device_does_not_consume_another_devices_write_quota() {
+    let server = common::start_with_write_quota(1).await;
+    let alice = TestAccount::create(&server, &unique("alice")).await;
+
+    let laptop = alice.device(&server, "laptop").await;
+    let phone = alice.device(&server, "phone").await;
+
+    let batch = serde_json::json!({ "packages": [BASE64_STANDARD.encode([1u8; 32])] });
+
+    assert!(laptop.post("/v1/key-packages", batch.clone()).await.status().is_success());
+    assert_eq!(laptop.post("/v1/key-packages", batch.clone()).await.status(), 429);
+
+    assert!(
+        phone.post("/v1/key-packages", batch).await.status().is_success(),
+        "a second device of the same account was punished for the first"
+    );
+}
+
+/// Each written table carries its own counter.
+///
+/// Sharing one would mean the server silencing an account's conversations because it sent too
+/// many photographs — a failure mode nobody asked for and which no attacker needs to be spared.
+#[tokio::test]
+async fn a_full_attachment_quota_does_not_stop_a_message() {
+    let server = common::start_with_write_quota(1).await;
+    let (alice, _bob, group_id) = group_with_two_members(&server).await;
+
+    const ENCRYPTED: &[u8] = b"already-encrypted";
+    let path = group_path(&group_id, "/attachments");
+    let upload = async || {
+        alice.forge("POST", &path, ENCRYPTED.to_vec(), ENCRYPTED.to_vec(), now(), &path).await
+    };
+
+    assert!(upload().await.status().is_success(), "the first upload was refused");
+    assert_eq!(upload().await.status(), 429, "attachments are not bounded");
+
+    let message = alice
+        .post(
+            &group_path(&group_id, "/envelopes"),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode([1u8]) }),
+        )
+        .await;
+
+    assert!(message.status().is_success(), "a full attachment quota silenced the account");
+}

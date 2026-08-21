@@ -47,6 +47,12 @@ pub struct AppState {
     /// a single bound would be either too loose to protect a stock, or too tight to let anyone
     /// sign up.
     pub claims: Arc<throttle::Claims>,
+    /// Per-device ceilings on the authenticated write routes.
+    ///
+    /// Separate again, and for the same reason: a device may legitimately post a hundred
+    /// messages in a minute and has no business uploading a hundred attachments in one. See
+    /// `throttle::Writes` for each number and for what none of them solve.
+    pub writes: Arc<throttle::Writes>,
     /// What wakes sleeping devices.
     ///
     /// [`push::Silent`] by default, and that is a design choice, not a placeholder: a deployment
@@ -82,6 +88,12 @@ impl FromRef<AppState> for Arc<dyn push::Waker> {
 impl FromRef<AppState> for Arc<throttle::Claims> {
     fn from_ref(state: &AppState) -> Self {
         state.claims.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<throttle::Writes> {
+    fn from_ref(state: &AppState) -> Self {
+        state.writes.clone()
     }
 }
 
@@ -315,24 +327,16 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
 }
 
 pub fn app(pool: PgPool) -> axum::Router {
-    app_with(
-        pool,
-        throttle::Throttle::from_environment(),
-        throttle::Claims::from_environment(),
-    )
+    app_with(pool, throttle::Limits::from_environment())
 }
 
-/// Variant with an imposed rate limit.
+/// Variant with imposed limits.
 ///
-/// Exists for the tests: the harness disables the limit — it creates dozens of accounts in a few
-/// seconds from the loopback, which no realistic quota would allow — and the test that checks
-/// the limit bites builds itself an application with a low quota.
-pub fn app_with(
-    pool: PgPool,
-    throttle: throttle::Throttle,
-    claims: throttle::Claims,
-) -> axum::Router {
-    app_with_waker(pool, throttle, claims, Arc::new(push::Silent))
+/// Exists for the tests: the harness disables them — it creates dozens of accounts, publishes
+/// KeyPackages and posts envelopes in a few seconds from the loopback, which no realistic quota
+/// would allow — and each test that checks one limit bites turns exactly that one back on.
+pub fn app_with(pool: PgPool, limits: throttle::Limits) -> axum::Router {
+    app_with_waker(pool, limits, Arc::new(push::Silent))
 }
 
 /// The same application, with a chosen wake-up emitter.
@@ -342,8 +346,7 @@ pub fn app_with(
 /// go by, hence being able to substitute the emitter.
 pub fn app_with_waker(
     pool: PgPool,
-    throttle: throttle::Throttle,
-    claims: throttle::Claims,
+    limits: throttle::Limits,
     push: Arc<dyn push::Waker>,
 ) -> axum::Router {
     use tower_http::limit::RequestBodyLimitLayer;
@@ -355,8 +358,9 @@ pub fn app_with_waker(
     let state = AppState {
         pool: pool.clone(),
         hub: stream::Hub::new(),
-        throttle: Arc::new(throttle),
-        claims: Arc::new(claims),
+        throttle: Arc::new(limits.throttle),
+        claims: Arc::new(limits.claims),
+        writes: Arc::new(limits.writes),
         // The default is `Silent`, set by `app_with`: wiring up Apple or Google requires secrets
         // a deployment must provide knowingly, after reading what the wake-up leaks.
         push,
@@ -370,8 +374,12 @@ pub fn app_with_waker(
     purge_expired(pool.clone());
 
     let messages = routes::router(state.clone()).layer(RequestBodyLimitLayer::new(1024 * 1024));
-    let attachments =
-        routes::attachment_router(pool).layer(RequestBodyLimitLayer::new(MAX_ATTACHMENT_BYTES));
+    // The attachment router now carries the whole state rather than just the pool: uploads are
+    // counted against a per-device quota, and the counter lives in the state. The alternative —
+    // a second, process-wide limiter reachable from a bare `PgPool` — would have been a
+    // duplicate of the machinery already here, which is exactly how two limits come to disagree.
+    let attachments = routes::attachment_router(state.clone())
+        .layer(RequestBodyLimitLayer::new(MAX_ATTACHMENT_BYTES));
 
     // The open routes additionally carry the rate limit. It applies to them alone: elsewhere the
     // signature identifies the caller, and abuse is handled by revoking the device rather than

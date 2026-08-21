@@ -304,7 +304,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             <IconButton
               id={FILTER_TOGGLE_ID}
               label="Filter by name"
-              icon="search"
+              icon={<Icon name="search" size={18} />}
               aria-expanded={searching}
               onClick={() => {
                 setSearching(!searching);
@@ -316,7 +316,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         <Tooltip label="Start a conversation">
           <IconButton
             label="Start a conversation"
-            icon="add"
+            icon={<Icon name="add" size={18} />}
             onClick={() => navigate({ kind: "new" })}
           />
         </Tooltip>

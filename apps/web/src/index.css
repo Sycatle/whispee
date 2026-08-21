@@ -408,6 +408,14 @@
  * the question being asked: how much precision can be demanded of the user? */
 @custom-variant touch (@media (pointer: coarse));
 
+/* The other half of the same question, and it exists because the negation cannot be written as a
+ * plain utility. Hiding something under a fine pointer means `hidden` competing with the
+ * `inline-flex` a component sets on itself, and `cn()` is `clsx` without `tailwind-merge`, so both
+ * classes survive and which one wins is decided by their order in the stylesheet — not by the one
+ * written last. A variant lands in a media query, which is generated after the base utilities, so
+ * it wins for a reason rather than by luck. */
+@custom-variant fine (@media (pointer: fine));
+
 body {
   background: var(--color-surface);
   color: var(--color-ink);

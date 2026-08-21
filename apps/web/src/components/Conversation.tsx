@@ -554,10 +554,18 @@ export function Conversation({ view }: { view: ConversationView }) {
               submit. Under a fine pointer it is redundant with a key the writer's hands are
               already on, and one more thing between the text and the thread.
 
-              `hidden touch:inline-flex` and not an opacity: `display: none` takes it out of the
-              tab order, which is the whole point here — the opposite of the action bar in
-              `Messages.tsx`, where hiding it that way was the bug. There is nothing to reach with
-              Tab on a desktop because Enter has already done the job.
+              `fine:hidden` and not an opacity: `display: none` takes it out of the tab order,
+              which is the whole point here — the opposite of the action bar in `Messages.tsx`,
+              where hiding it that way was the bug. There is nothing to reach with Tab on a
+              desktop because Enter has already done the job.
+
+              Written as the negative — hide under a fine pointer — rather than `hidden
+              touch:inline-flex`, which is what this was and which did not work: `hidden` and the
+              `inline-flex` the button sets on itself are both display utilities of equal
+              specificity, `cn()` is `clsx` with no `tailwind-merge` to drop the loser, and the
+              stylesheet order decided in favour of the one that was supposed to be overridden.
+              The button stayed on screen. A variant is generated inside a media query, which
+              comes after the base utilities, so it wins by construction.
 
               The rule is the same `pointer: coarse` the keydown tests, so the two cannot drift:
               the button is present in precisely the case where Enter declines to send.
@@ -570,7 +578,7 @@ export function Conversation({ view }: { view: ConversationView }) {
                 type="submit"
                 label="Send"
                 variant="primary"
-                className="hidden touch:inline-flex"
+                className="fine:hidden"
                 icon={sending ? <Spinner size="sm" /> : <Icon name="send" size={18} />}
                 // Empty means nothing to do. `send` still returns early, but a control that looks
                 // pressable and answers with silence is the defect this replaces.

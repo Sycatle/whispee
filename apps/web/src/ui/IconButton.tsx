@@ -1,4 +1,4 @@
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { forwardRef, type ButtonHTMLAttributes, type ReactElement } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "./cn.ts";
 
@@ -100,7 +100,16 @@ export interface IconButtonProps
     VariantProps<typeof iconButton> {
   /** The accessible name. Names the action — "Close", not "Cross". */
   label: string;
-  icon: ReactNode;
+  /**
+   * The glyph. A `ReactElement`, deliberately narrower than `ReactNode`.
+   *
+   * `ReactNode` includes `string`, so `icon="add"` type-checked and rendered the *word* "add" in
+   * the corner of the rail — which is exactly what it did, in the shipped interface, next to the
+   * heading. `Menu.Item` takes an `IconName` and builds the element itself, so the same spelling
+   * is correct there and wrong here; nothing in either signature said so. Narrowing the type is
+   * what makes the mistake unwriteable rather than something to catch in review.
+   */
+  icon: ReactElement;
   className?: string;
 }
 

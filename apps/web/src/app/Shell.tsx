@@ -140,6 +140,40 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
   const names = useNames();
 
   /**
+   * At three columns the detail panel starts open.
+   *
+   * There is room for it there — that is what `trio` means — and a column of blank ground beside
+   * a conversation teaches nobody that the fingerprint, the members and the verification live one
+   * click away. The panel is where verification actually happens, and a feature reachable only by
+   * a button nobody has a reason to press is a feature most people never meet.
+   *
+   * **Once, and never again**, which is the whole difficulty. Written as "if trio and no detail,
+   * open it", this would be a default that reasserts itself: closing the panel would set the
+   * route, the effect would run on the next render and put it straight back, and the close button
+   * would appear broken rather than disobeyed. The ref is what makes it an initial state instead
+   * of an invariant. `Shell.tsx`'s first-conversation selection above is the same shape for the
+   * same reason.
+   *
+   * `replace` and not `push`: nobody asked for this, so it must not become a history entry whose
+   * removal changes nothing on screen. The first press of the back button has to leave the
+   * conversation, not close a panel the user never opened.
+   *
+   * What this does not solve: the choice is not remembered across reloads. Closing the panel and
+   * refreshing brings it back, because the preference lives in the route and the route is rebuilt
+   * from the URL. Persisting it means a stored preference, which is a setting, and a setting for
+   * this is more machinery than the panel is worth today.
+   */
+  const detailed = useRef(false);
+
+  useEffect(() => {
+    if (!trio || detailed.current) return;
+    if (route.kind !== "conversation" || route.detail !== undefined || view === null) return;
+
+    detailed.current = true;
+    navigate({ ...route, detail: {} }, { replace: true });
+  }, [trio, route, view, navigate]);
+
+  /**
    * The name of the screen, for the announcement.
    *
    * Computed here rather than inside each screen because the region that says it has to be

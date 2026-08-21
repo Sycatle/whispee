@@ -1,0 +1,172 @@
+name: Tests
+
+# Runs the test suites, the linters, and the check that the shipped WebAssembly matches its
+# source.
+#
+# # Why this exists now, when the convention was "nothing builds automatically"
+#
+# `CONTRIBUTING.md` explains that the mobile workflows stay off `dev` to spend the Actions quota
+# on artefacts someone installs rather than on intermediate states. That reasoning is about
+# **builds**, and it holds. It does not carry over to tests: 327 of them exist, and until this
+# workflow they ran only where someone remembered to run them.
+#
+# The WebAssembly check is the part that could not be replaced by discipline. The `.wasm` loaded
+# by every target is a committed binary, and nothing in the repository related it to
+# `crates/crypto-wasm` — so a fix in the cryptography could be merged without reaching anyone,
+# and a modified binary committed alone would pass every other check. See `scripts/verify-wasm.sh`.
+#
+# # What it costs
+#
+# One Ubuntu runner, and the cache makes the usual run short. Triggering on `pull_request` rather
+# than on every push to `dev` keeps the spend on the moment a change is proposed, which is the
+# moment the answer is worth having.
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # The server's tests talk to a real Postgres — nothing is mocked, which is what makes them
+    # worth running. Same major version as `docker-compose.yml`; the port is the container's
+    # default here, since there is no host Postgres to avoid on a runner.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: whispee
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # No `toolchain:` input on purpose: with a `rust-toolchain.toml` present, this action
+      # installs what that file pins. Naming a channel here would install a second toolchain and
+      # then not use it — and the pin is what makes the WebAssembly comparison reproducible.
+      - uses: dtolnay/rust-toolchain@master
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No `cargo fmt --check`.
+      #
+      # This tree is formatted by hand and deliberately: rustfmt wants to rejoin lines that were
+      # split to be read, and even with `use_small_heuristics = "Max"` it still disagrees in 189
+      # places. Adding the check would mean reformatting the whole codebase against its author's
+      # intent, which is a decision about style, not a safety net. Clippy stays, because it
+      # reports defects rather than shapes.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --release -- -D warnings
+
+      # **`--release`, and this is not a preference.**
+      #
+      # OpenMLS 0.8.1 runs a `debug_assert!(false)` before returning its decryption error. In a
+      # debug build one altered byte in transit panics the process instead of being rejected — a
+      # denial of service any remote party can trigger. `ciphertext_altere_rejete` is skipped in
+      # debug for that reason, so a debug run would report success while proving nothing about
+      # the property that matters most. See CONTRIBUTING.md.
+      - name: Tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/whispee
+        run: cargo test --workspace --release
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+
+      # `pnpm run build` runs this too, but on its own it fails in seconds instead of after a
+      # bundle.
+      - name: Types
+        working-directory: apps/web
+        run: pnpm run typecheck
+
+      - name: Tests
+        working-directory: apps/web
+        run: pnpm test
+
+  # Separate from `rust` because it needs the WebAssembly target and `wasm-pack`, and because its
+  # failure means something different: not "a test broke" but "what ships is not what the source
+  # says".
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      # The `wasm32-unknown-unknown` target comes from `rust-toolchain.toml`, like the channel.
+      - uses: dtolnay/rust-toolchain@master
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.15.0
+
+      - name: The committed WebAssembly matches its source
+        run: ./scripts/verify-wasm.sh
+
+  # Advisories are reported without failing the run, deliberately.
+  #
+  # A new advisory against a transitive dependency appears without anything in this repository
+  # changing, and a job that turns red on someone else's publication blocks unrelated work while
+  # teaching nothing. What is wanted is the notification, read by a person who decides.
+  #
+  # The ones known at the time of writing are on the OpenMLS crypto path, through
+  # `openmls_rust_crypto` -> `hpke-rs` -> `libcrux-*`, and none of them can be fixed from here:
+  # the fixed versions are `0.0.x` releases that Cargo does not treat as compatible, so they need
+  # `hpke-rs` to bump. Recorded in `docs/THREAT-MODEL.md` rather than silenced here.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Advisories
+        run: cargo audit

@@ -230,6 +230,26 @@ export function Messages({
    * need `useRevision()` in the dependency list to be correct at all — and would be silently
    * wrong the day somebody trimmed the list.
    */
+  /**
+   * The one message whose receipt is worth drawing.
+   *
+   * A tick on every line we sent turns a column of text into a column of ticks: the mark repeats
+   * down the thread and stops being read, while the thing anybody actually wants to know — did
+   * the last thing I said get through — is no more visible than the forty answers before it.
+   * Receipts only ever describe our own messages, so this is the last of ours rather than the
+   * last of the thread; when somebody replies underneath, the state of what we sent has not
+   * stopped mattering.
+   *
+   * What this does not solve: an older message that is still only `sent` while a newer one has
+   * been read now says so nowhere. That happens when a delivery is stuck for one device and not
+   * another, and the honest place for it is the detail column, which knows about devices — not a
+   * tick that would have to explain itself.
+   */
+  const lastMine = visible.reduce<number | null>(
+    (found, message) => (message.mine ? message.seq : found),
+    null,
+  );
+
   const rows = layout(visible, { authorOf, readCursor: boundary.current });
 
   /**
@@ -662,23 +682,24 @@ export function Messages({
                       ) : spoken !== null ? (
                         <EmojiText text={spoken} big />
                       ) : null}
+
+                      {/*
+                        Inside the text and not beside it, so the ticks follow the last word the
+                        way a full stop would. Pushed to the end of the row — which is what
+                        `flex-1` on this block used to do — they landed against the right edge of
+                        the measure, an inch of blank paper away from the sentence they were
+                        about, and on a wide window that gap was the width of the message itself.
+
+                        `whitespace-nowrap` so the mark cannot be left behind on a line of its
+                        own, and `align-baseline` so it sits on the text's baseline rather than
+                        on the line box, which puts it a pixel low next to a capital.
+                      */}
+                      {message.seq === lastMine && (
+                        <span className="ml-snug align-baseline whitespace-nowrap text-caption text-(--color-ink-muted)">
+                          <Status state={session.statusOf(view, message.seq)} />
+                        </span>
+                      )}
                     </div>
-
-                    {/*
-                      The receipt at the end of the line rather than under the text: with the
-                      bubble gone there is no box for it to sit inside, and a line of its own for
-                      two ticks would double the height of every message we send.
-
-                      What this does not solve: on a single-line message the action bar overlaps
-                      this corner while the pointer is over the row, so the ticks are hidden for
-                      exactly as long as somebody is reaching for a reaction. The state is not
-                      urgent and comes back the moment the pointer leaves.
-                    */}
-                    {message.mine && (
-                      <span className="shrink-0 text-caption text-(--color-ink-muted)">
-                        <Status state={session.statusOf(view, message.seq)} />
-                      </span>
-                    )}
                   </div>
 
                   {emojis.length > 0 && (

@@ -57,9 +57,12 @@ import { Spinner } from "@/ui/Spinner";
  * # What this does not solve
  *
  * Nothing about coverage, any more. Twemoji draws every emoji the catalogue lists — flags,
- * keycaps, `©️` — and the generator refuses to emit an entry it has no artwork for. What is not
- * here is `:shortcode:` completion while typing, which Emojibase would now give us for free and
- * which belongs to the composer rather than to this panel.
+ * keycaps, `©️` — and the generator refuses to emit an entry it has no artwork for.
+ *
+ * This is not the only way to reach an emoji, and deliberately not the fastest. Somebody who
+ * knows a name types `:joy:` into the composer and never opens this panel at all — see
+ * `components/Shortcodes.tsx`. A grid is for the case where you know roughly what you want and
+ * not what it is called.
  */
 
 /** The keyboard's idea of the grid. Twelve is what fits the popover at the width it opens. */

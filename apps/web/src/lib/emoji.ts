@@ -282,7 +282,10 @@ export function search(from: Catalogue, query: string): Entry[] {
     else if (label.startsWith(needle)) prefix.push(entry);
     else if (label.includes(needle)) loose.push(entry);
     else {
-      const haystack = `${label} ${entry.keywords.map(fold).join(" ")}`;
+      // Shortcodes are in the haystack too: somebody who knows an emoji as `:thumbsup:` should
+      // find it by typing that here, not only in the composer.
+      const extras = [...entry.keywords, ...(entry.codes ?? [])].map(fold).join(" ");
+      const haystack = `${label} ${extras}`;
       if (terms.every((term) => haystack.includes(term))) scattered.push(entry);
     }
   }

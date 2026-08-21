@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { EmojiDrawer } from "@/components/EmojiPicker";
+import { ShortcodeMenu, LISTBOX_ID, useShortcodes } from "@/components/Shortcodes";
 import { Messages } from "@/components/Messages";
 import { PresenceLine } from "@/components/Presence";
 import { Verification } from "@/components/Verification";
@@ -177,31 +178,54 @@ export function Conversation({ view }: { view: ConversationView }) {
   };
 
   /**
+   * The caret, mirrored into state so the completion menu can see it.
+   *
+   * A `<textarea>` reports its caret on the element and never in a render, so nothing derived
+   * from it updates on its own. Mirroring on every event that can move it — typing, clicking,
+   * arrowing — is what lets `useShortcodes` tell a caret still inside the `:word` being completed
+   * from one that has been moved away from it.
+   */
+  const [caret, setCaret] = useState(0);
+
+  /**
+   * Overwrites a span of the draft and leaves the caret after what replaced it.
+   *
+   * The one edit the composer performs on its own behalf, and both callers need exactly it: the
+   * picker replaces the selection (or nothing, at the caret), a completion replaces the `:word`
+   * that was being typed.
+   *
+   * The caret is restored in a microtask rather than immediately, because React has not written
+   * the new value into the DOM at this point and setting `selectionStart` against the old one
+   * would land in the wrong place. Focus goes back to the field either way: the picker took it,
+   * and a composer you have to click again to keep typing in is a composer that interrupts.
+   */
+  const replace = (at: number, to: number, insertion: string) => {
+    const field = composer.current;
+
+    typing(`${text.slice(0, at)}${insertion}${text.slice(to)}`);
+
+    queueMicrotask(() => {
+      const after = at + insertion.length;
+      field?.focus();
+      field?.setSelectionRange(after, after);
+      setCaret(after);
+    });
+  };
+
+  /**
    * Drops an emoji where the caret is, not at the end of the field.
    *
    * Appending would be simpler and wrong: somebody who moved the caret back to fix a word and
    * then reached for the picker gets their emoji at the end of a sentence they were not looking
    * at. `selectionStart`/`selectionEnd` also cover a selection, which is replaced — the same
    * thing typing a character does.
-   *
-   * The caret is restored in a microtask rather than immediately, because React has not written
-   * the new value into the DOM yet at this point and setting `selectionStart` against the old
-   * one would land in the wrong place. Focus goes back to the field either way: the picker took
-   * it, and a composer you have to click again to keep typing in is a composer that interrupts.
    */
   const insert = (emoji: string) => {
     const field = composer.current;
-    const at = field?.selectionStart ?? text.length;
-    const to = field?.selectionEnd ?? text.length;
-
-    typing(`${text.slice(0, at)}${emoji}${text.slice(to)}`);
-
-    queueMicrotask(() => {
-      const caret = at + emoji.length;
-      field?.focus();
-      field?.setSelectionRange(caret, caret);
-    });
+    replace(field?.selectionStart ?? text.length, field?.selectionEnd ?? text.length, emoji);
   };
+
+  const shortcodes = useShortcodes({ text, caret, replace });
 
   const attach = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -365,25 +389,53 @@ export function Conversation({ view }: { view: ConversationView }) {
             composer is at the bottom of the pane and there is nowhere else to open. */}
         <EmojiDrawer label="Insert an emoji" side="top" align="start" onPick={insert} />
 
-        <textarea
-          ref={composer}
-          id={COMPOSER_ID}
-          value={text}
-          onChange={(e) => typing(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key !== "Enter" || e.shiftKey) return;
-            if (matchMedia("(pointer: coarse)").matches) return;
-            e.preventDefault();
-            void send(e);
-          }}
-          rows={1}
-          aria-label={replyTo === null ? "Message" : "Reply"}
-          placeholder={replyTo === null ? "Message" : "Reply"}
-          // `text-base` on purpose: below 16 pixels, iOS zooms into the field on focus and does
-          // not zoom back out on blur. Fixing that by forbidding zoom would strip a fallback
-          // from the people who need it; fixing it by font size costs nothing.
-          className="max-h-32 min-w-0 flex-1 resize-none rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) px-gutter py-snug text-base field-sizing-content focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent) touch:min-h-11"
-        />
+        {/* The field and its suggestions share a positioning context: the menu opens upwards from
+            the top of the field, because the composer is at the bottom of the pane and there is
+            nothing below it but the software keyboard. */}
+        <div className="relative flex min-w-0 flex-1">
+          <ShortcodeMenu rows={shortcodes.rows} active={shortcodes.active} onPick={shortcodes.accept} />
+
+          <textarea
+            ref={composer}
+            id={COMPOSER_ID}
+            value={text}
+            onChange={(e) => {
+              const at = e.target.selectionStart;
+              setCaret(at);
+              // The closing colon first: `:joy:` becomes the emoji whether or not the menu was ever
+              // opened, and `settle` says whether it took the change so this does not write it
+              // twice.
+              if (shortcodes.settle(e.target.value, at)) return;
+              typing(e.target.value);
+            }}
+            // Clicking and arrowing move the caret without changing the value, and both can carry
+            // it out of the `:word` the menu is completing. Without this the menu would keep
+            // offering suggestions for a token the caret has left.
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+            onBlur={shortcodes.dismiss}
+            onKeyDown={(e) => {
+              // The menu takes Up, Down, Enter, Tab and Escape while it is open — Enter above all,
+              // which would otherwise send a message the writer was still naming an emoji in.
+              if (shortcodes.onKeyDown(e)) return;
+              if (e.key !== "Enter" || e.shiftKey) return;
+              if (matchMedia("(pointer: coarse)").matches) return;
+              e.preventDefault();
+              void send(e);
+            }}
+            rows={1}
+            role="combobox"
+            aria-expanded={shortcodes.open}
+            aria-controls={LISTBOX_ID}
+            aria-autocomplete="list"
+            aria-activedescendant={shortcodes.activeId}
+            aria-label={replyTo === null ? "Message" : "Reply"}
+            placeholder={replyTo === null ? "Message" : "Reply"}
+            // `text-base` on purpose: below 16 pixels, iOS zooms into the field on focus and does
+            // not zoom back out on blur. Fixing that by forbidding zoom would strip a fallback
+            // from the people who need it; fixing it by font size costs nothing.
+            className="max-h-32 min-w-0 flex-1 resize-none rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) px-gutter py-snug text-base field-sizing-content focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent) touch:min-h-11"
+          />
+        </div>
         <Button type="submit" variant="primary" icon={<Icon name="send" size={16} />}>
           Send
         </Button>

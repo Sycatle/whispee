@@ -60,223 +60,37 @@ const KEY_PACKAGE_TARGET = 10;
 /** Replenishment threshold. At zero, nobody can reach us any more. */
 const KEY_PACKAGE_LOW_WATER = 3;
 
-export interface Message {
-  seq: number;
-  sender: string | null;
-  mine: boolean;
-  /**
-   * When the sender says it was written, in milliseconds.
-   *
-   * **Declared, not proven.** It travels inside the MLS message, so the server never sees it and
-   * cannot alter it — but any member of the group can put whatever they like in their own. It is
-   * an annotation on the thread, never its order: that stays `seq`, which the server assigns and
-   * no member controls.
-   *
-   * Optional because two real cases have none: control traffic is never stamped, and neither is
-   * anything written before stamping existed.
-   */
-  sentAt?: number;
-  /**
-   * Decrypted content lives in memory only. It is never persisted: writing it to disk would
-   * throw away part of what the encryption buys.
-   */
-  content: content.Content;
-}
-
-export type VerificationState =
-  | { status: "unverified" }
-  | { status: "verified" }
-  /** The fingerprint changed since verification: a reinstall, or a substitution. */
-  | { status: "changed"; previous: string };
-
 /**
- * A message written but not yet accepted by the server.
+ * The conversation shapes now live in `session-types.ts`, and are re-exported here.
  *
- * # Why these live beside `messages` and not inside it
- *
- * A `Message` is identified by `seq`, which the **server** assigns. Everything downstream depends
- * on that: `view.mine` skips our own envelopes by sequence, receipts acknowledge up to a number,
- * a reply points at one. A message that has not been posted has no such number, and inventing a
- * placeholder would put a fake one into all of it — the kind of value that leaks into a receipt
- * and acknowledges a message nobody sent.
- *
- * So they are kept apart, rendered after the thread, and moved into it under the number the
- * server gives them.
- *
- * # What is deliberately not queued
- *
- * Attachments, reactions and replies. An attachment has to upload before its descriptor can be
- * written, so "queued" would mean holding a file in the outbox and re-uploading it later —
- * a different feature with its own failure modes. A reaction that fails costs a tap. A reply
- * points at a `seq`, and a `seq` is exactly what an unsent message does not have.
+ * Re-exported rather than moved outright so that no import anywhere else has to change: this
+ * module has been the address of `Message` and `ConversationView` since they existed, and a
+ * rename across thirty call sites would have buried the actual change in noise. The file that
+ * holds them explains why they had to leave.
  */
-export interface Pending {
-  /** Ours, not the server's. Stable across a reload, which is what makes retrying possible. */
-  localId: string;
-  text: string;
-  sentAt: number;
-  /**
-   * `sending` while a request is in flight, `failed` once one has come back badly.
-   *
-   * A reload turns `sending` into `failed`: a request whose answer we did not see may or may not
-   * have arrived, and the honest thing is to say it did not go rather than to retry silently and
-   * risk a double. The user decides.
-   */
-  state: "sending" | "failed";
-}
+export {
+  LogProofRefused,
+  freshSignalState,
+  type ConversationFlags,
+  type ConversationView,
+  type Message,
+  type Pending,
+  type Roles,
+  type VerificationState,
+} from "./session-types";
 
-/** Group roles: a single admin, with moderators under them. */
-export interface Roles {
-  admin: string;
-  moderators: string[];
-}
-
-export interface ConversationView {
-  groupId: Uint8Array;
-  /** Stable display key: a `Uint8Array` cannot be used as a Map or React key. */
-  key: string;
-  messages: Message[];
-  /** One per member device. Two devices of the same account appear twice. */
-  peers: Peer[];
-  /**
-   * Peers grouped by account, with attestations re-verified.
-   *
-   * Filled during polling rather than at render time: resolution goes over the network, and a
-   * React component is not the place to decide whether to trust someone.
-   */
-  accounts: ResolvedAccount[];
-  epoch: bigint;
-  cursor: number;
-  /**
-   * Has our log head already been gossiped in this conversation?
-   *
-   * Deliberately not persisted: one broadcast per session. The check is about the existence of
-   * a fork, and redoing it now and then costs one message.
-   */
-  gossiped?: boolean;
-  /**
-   * Has the archived history already been pulled back in this session?
-   *
-   * Same reasoning as `gossiped`: deliberately not persisted, because messages only live in
-   * memory. Every session must therefore ask the vault again — once, when the conversation is
-   * opened, not on every poll.
-   */
-  hydrated?: boolean;
-  /**
-   * The group's posting key, if we know it.
-   *
-   * Its presence switches sends onto the anonymous path: the server stops learning which member
-   * is writing. Its absence is not an error — conversations created before sealed sender keep
-   * using signed posts.
-   */
-  postingKey?: Uint8Array;
-  /** Has the key already been shared in this conversation, this session? */
-  postingKeyShared?: boolean;
-  /**
-   * Sequence numbers we posted ourselves.
-   *
-   * They are already applied locally and MLS refuses to read them again. So we skip them when
-   * polling — but **without moving the cursor up to them**: the number the server assigns to our
-   * message says nothing about the envelopes before it. Skipping that far steps over other
-   * members' commits, and the group freezes at a stale epoch with no error to show for it.
-   */
-  mine: Set<number>;
-  /**
-   * What each account has acknowledged, in this conversation.
-   *
-   * Not persisted: a receipt means "as of then", and replaying it across sessions would show a
-   * read state nobody has confirmed since. Receipts come back on their own at the next poll.
-   */
-  receipts: ReceiptBook;
-  /**
-   * Highest sequence number of a **received, displayable message**.
-   *
-   * # Why reusing `cursor` is not enough
-   *
-   * `cursor` advances on every processed envelope, receipts included. Acknowledging up to
-   * `cursor` therefore acknowledges the acknowledgements: each receipt breeds another, and the
-   * conversation never stops. Measured, in local production: ten envelopes in forty seconds for
-   * two people saying nothing.
-   *
-   * A receipt says "I received your messages up to N", where N is a message. That is the only
-   * cursor with a bound: protocol traffic does not move it, so it eventually goes quiet.
-   */
-  contentCursor: number;
-  /** How far the user has actually seen the conversation on screen. */
-  readCursor: number;
-  /** Peers currently typing, with their expiry timestamp. */
-  typing: Typing[];
-  /** Last time we emitted a typing indicator, for the debounce. */
-  typingSentAt?: number;
-  /**
-   * Written here, not yet accepted by the server.
-   *
-   * Persisted, unlike the rest of the ephemeral state: a message the user typed is the one thing
-   * on this screen they would be angry to lose, and losing it silently on a reload is exactly
-   * what happened before.
-   */
-  outbox: Pending[];
-}
-
-/**
- * Signalling state for a brand-new conversation.
- *
- * None of it is persisted: a receipt or a typing indicator means "right now". Restoring them
- * across sessions would show a state nobody has confirmed since.
- */
-function freshSignalState(): Pick<
-  ConversationView,
-  "receipts" | "contentCursor" | "readCursor" | "typing" | "outbox"
-> {
-  return { receipts: new Map(), contentCursor: 0, readCursor: 0, typing: [], outbox: [] };
-}
-
-/**
- * The server failed to prove what it claims about an account key.
- *
- * # Why this is an error and not a banner
- *
- * It used to be only a banner. `resolve` recorded the anomaly and returned the account anyway,
- * so a conversation opened on a key the server had just failed to place in the log — which is
- * precisely the case the log exists to catch. The apparatus produced its signal and nothing
- * acted on it.
- *
- * The rule now matches the one already applied to unattested devices in `startConversation`,
- * and for the same stated reason: refusing to open beats quietly carrying on, because keeping
- * quiet cancels out the whole point of the machinery.
- *
- * # What it is deliberately not
- *
- * A **network** failure. A log that cannot be reached proves nothing either way, and treating
- * unreachable as hostile would make every outage look like an attack. That path stays a warning
- * and a retry, as before.
- *
- * # Why there is no way to override it
- *
- * An override would be clicked. This project already refuses to show a permanent warning on the
- * grounds that one taught to be ignored is inaudible on the day it matters; a "continue anyway"
- * button on the one alert that cannot be a false positive is the same mistake wearing a
- * different shape. A conversation already open is not cut off — `refreshAccounts` falls back to
- * the account it last verified — but a new one does not start.
- *
- * # The cost, stated rather than discovered
- *
- * Now that the anchor survives restarts, **wiping the server's database looks exactly like an
- * amputated log**, because from the client's side it is one: the head shrank. A developer who
- * resets Postgres while keeping a browser session will find every resolve refused, and the way
- * out is to erase the local identity. That is not a defect to work around — a client that
- * shrugged at a shrinking log would not be checking anything — but it is a real change in what
- * a local reset costs, and it should not be found out the hard way.
- */
-export class LogProofRefused extends Error {
-  constructor(
-    readonly handle: string,
-    reason: string,
-  ) {
-    super(`The server failed to prove its key for @${handle}: ${reason}`);
-    this.name = "LogProofRefused";
-  }
-}
+import {
+  LogProofRefused,
+  freshPreferences,
+  freshSignalState,
+  touch,
+  type Preferences,
+  type ConversationView,
+  type Message,
+  type Pending,
+  type Roles,
+  type VerificationState,
+} from "./session-types";
 
 export class Session {
   private constructor(
@@ -336,6 +150,29 @@ export class Session {
   /** Records the choice, so a reload does not quietly return to the quiet default. */
   async setDiscloseConversationName(value: boolean): Promise<void> {
     this.discloseConversationName = value;
+    await this.persist();
+  }
+
+  /**
+   * Everything else the user has chosen and expects to find again.
+   *
+   * Public and mutable, which is unusual here and deliberate: the alternative is a getter and a
+   * setter per preference on a class that is already the largest file in the client, and a merge
+   * conflict for every feature that adds one. `Preferences` explains the trade in full.
+   *
+   * Read it freely; to change it, go through `updatePreferences` so the change reaches disk.
+   */
+  preferences: Preferences = freshPreferences();
+
+  /**
+   * Applies a change and writes it down.
+   *
+   * Takes a mutator rather than a whole object so that two callers changing different preferences
+   * cannot overwrite each other by handing back a stale copy — the mutation happens on the
+   * current value, at the moment it is applied.
+   */
+  async updatePreferences(change: (preferences: Preferences) => void): Promise<void> {
+    change(this.preferences);
     await this.persist();
   }
 
@@ -739,6 +576,16 @@ export class Session {
     // for an account that has never resolved anyone, so they have no anchor to hand over, and a
     // parameter they would all pass as `undefined` teaches nothing.
     session.discloseConversationName = stored.discloseConversationName === true;
+    session.preferences = {
+      conversations: stored.conversationFlags ?? {},
+      searchCoverage: stored.searchCoverage ?? {},
+      blocked: stored.blocked ?? [],
+      // The two that mean something by their absence keep it. Spread conditionally for the reason
+      // `session-codec.ts` gives: a property present and holding `undefined` is not an absent one,
+      // and the difference is exactly what "follow the system" is made of.
+      ...(stored.locale === undefined ? {} : { locale: stored.locale }),
+      ...(stored.contactPolicy === undefined ? {} : { contactPolicy: stored.contactPolicy }),
+    };
 
     if (stored.logHead) {
       session.seenHead = {
@@ -827,6 +674,7 @@ export class Session {
     }
 
     view.messages.push(...added);
+    touch(view);
     return added.length;
   }
 
@@ -1025,6 +873,13 @@ export class Session {
           .map((view) => [view.key, toBase64(view.postingKey as Uint8Array)]),
       ),
       discloseConversationName: this.discloseConversationName,
+      conversationFlags: this.preferences.conversations,
+      searchCoverage: this.preferences.searchCoverage,
+      blocked: this.preferences.blocked,
+      ...(this.preferences.locale === undefined ? {} : { locale: this.preferences.locale }),
+      ...(this.preferences.contactPolicy === undefined
+        ? {}
+        : { contactPolicy: this.preferences.contactPolicy }),
       history: await this.atRest.seal(
         encodeHistory(
           new Map(
@@ -1906,6 +1761,7 @@ export class Session {
     };
 
     view.outbox.push(entry);
+    touch(view);
     await this.persist();
     await this.flush(view, entry);
   }
@@ -1919,6 +1775,7 @@ export class Session {
    */
   private async flush(view: ConversationView, entry: Pending): Promise<void> {
     entry.state = "sending";
+    touch(view);
 
     try {
       await this.sendContent(view, { kind: "text", text: entry.text }, entry.sentAt);
@@ -1927,6 +1784,8 @@ export class Session {
       entry.state = "failed";
       console.warn("message not sent", error);
     }
+
+    touch(view);
 
     await this.persist();
   }
@@ -1940,6 +1799,7 @@ export class Session {
   /** Drops one, when the user would rather rewrite it than send it. */
   async discard(view: ConversationView, localId: string): Promise<void> {
     view.outbox = view.outbox.filter((queued) => queued.localId !== localId);
+    touch(view);
     await this.persist();
   }
 
@@ -2176,6 +2036,7 @@ export class Session {
 
     const message: Message = { seq, sender: this.deviceId, content: body, mine: true, sentAt };
     view.messages.push(message);
+    touch(view);
     await this.archive(view, [message]);
     await this.persist();
   }
@@ -2462,6 +2323,8 @@ export class Session {
       // "now" for something received during a catch-up would date a week-old message to today.
       ...(sentAt === undefined ? {} : { sentAt }),
     });
+
+    touch(view);
 
     // Only messages move this cursor. See its definition: it is what stops receipts from breeding
     // one another.

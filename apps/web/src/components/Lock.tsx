@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MIN_LENGTH, approximateBits, check } from "@/lib/password";
+import { MIN_LENGTH, type Verdict, check } from "@/lib/password";
 import { biometricEnabled, biometricAvailable } from "@/lib/biometrics";
 import type { ProposedMigration, Session } from "@/lib/session";
 
@@ -226,9 +226,34 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const verdict = check(password);
-  const bits = approximateBits(password);
+  /**
+   * The verdict, which arrives after the password does.
+   *
+   * The estimator's dictionaries are behind a dynamic import — see `password.ts` — so the first
+   * judgement lands a moment after the first keystroke. A verdict for a password that has since
+   * changed must be dropped, otherwise a fast typist gets shown the reason their previous draft
+   * was refused.
+   */
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
   const match = password === confirmation;
+
+  useEffect(() => {
+    if (!password) {
+      setVerdict(null);
+      return;
+    }
+
+    let current = true;
+    // The handle goes in as a known input: a password built out of one's own username is a
+    // dictionary word to anyone who has seen the account, and to no generic word list.
+    void check(password, [session.handle]).then((judged) => {
+      if (current) setVerdict(judged);
+    });
+
+    return () => {
+      current = false;
+    };
+  }, [password, session.handle]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -322,11 +347,34 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
           className="w-full rounded-md border border-(--color-border-subtle) bg-(--color-surface) px-2 py-1.5"
         />
 
-        {password && !verdict.ok && <p className="text-(--color-danger)">{verdict.reason}</p>}
-        {password && verdict.ok && (
+        {password && !verdict && <p className="text-xs text-(--color-ink-muted)">Measuring…</p>}
+
+        {verdict && !verdict.ok && (
+          <p className="text-(--color-danger)">
+            {verdict.reason}
+            {verdict.advice && <span className="block opacity-80">{verdict.advice}</span>}
+          </p>
+        )}
+
+        {/*
+          The number is an order of magnitude of guesses, not a bit count of an alphabet: it is
+          what an attacker running published word lists, name lists, dates, keyboard runs and the
+          usual letter-for-digit swaps would have to try. It says nothing about someone who knows
+          the user — that person's first guesses are not in any list, and the copy has to stop
+          short of implying otherwise.
+        */}
+        {verdict?.ok && verdict.guessesLog10 !== null && (
           <p className="text-xs text-(--color-ink-muted)">
-            About {bits} bits, assuming characters picked at random — which no human ever does.
-            Treat this as a ceiling, not a guarantee.
+            Around 10^{Math.round(verdict.guessesLog10)} tries for someone working through known
+            passwords, words, names and the usual substitutions. Someone who knows you is not
+            working through a list, and this number says nothing about them.
+          </p>
+        )}
+
+        {verdict?.ok && verdict.guessesLog10 === null && (
+          <p className="text-xs text-(--color-warn)">
+            The strength checker did not load, so only the length was checked. This password may
+            still be one of the ones everybody uses.
           </p>
         )}
         {confirmation && !match && (
@@ -335,7 +383,7 @@ export function LockSettings({ session, onDone }: { session: Session; onDone: ()
 
         <button
           type="submit"
-          disabled={busy || !verdict.ok || !match}
+          disabled={busy || !verdict?.ok || !match}
           className="rounded-md bg-(--color-accent) px-3 py-1.5 font-medium text-white disabled:opacity-50"
         >
           {busy ? "Encrypting…" : "Turn on the lock"}

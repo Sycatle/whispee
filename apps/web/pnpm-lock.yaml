@@ -11,6 +11,15 @@ importers:
       '@tauri-apps/api':
         specifier: ^2.11.1
         version: 2.11.1
+      '@zxcvbn-ts/core':
+        specifier: ^4.2.0
+        version: 4.2.0
+      '@zxcvbn-ts/language-common':
+        specifier: ^4.1.3
+        version: 4.1.3
+      '@zxcvbn-ts/language-en':
+        specifier: ^4.1.1
+        version: 4.1.1
       qrcode-generator:
         specifier: ^2.0.4
         version: 2.0.4
@@ -580,6 +589,18 @@ packages:
     peerDependencies:
       vite: ^4.2.0 || ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0
 
+  '@zxcvbn-ts/core@4.2.0':
+    resolution: {integrity: sha512-tuwzwOcYVca9MufHuUvzKGRyL04iP52OjCNoRDuGXjzzrtPiPcl8r5QtOotbx0AyTR/CMcDTU9qLkN16b9fXiw==}
+
+  '@zxcvbn-ts/dictionary-compression@3.0.1':
+    resolution: {integrity: sha512-p3KyPzxGc3vWSap5hHA6SllbUCmh7s+NtpGyC3qEWrxYJT9t9TUAzjPm48Okipo+UUyPQfDlIvTcs9JRShBFiQ==}
+
+  '@zxcvbn-ts/language-common@4.1.3':
+    resolution: {integrity: sha512-g2bg4skmlJG9aJqC/nWziZzgYpSe/f3rKeGobrkdFiOrfZVFqqzUgC6BUQWuX54Sua9j0Jxxt+1bf4f/Mal1Kg==}
+
+  '@zxcvbn-ts/language-en@4.1.1':
+    resolution: {integrity: sha512-6UdzuBd3Uex8TKubohcn+uXRVAH34Zjs2eCfT4hQVo9zeTy7AkQRQfdV4OnHR5hQfW/XBrK/AGTZk7VBWh7wwQ==}
+
   baseline-browser-mapping@2.11.15:
     resolution: {integrity: sha512-FwMjJJ7HnyZpWe+oWxegG0fezZyBZUagI5LZEoO3GCbtbKNwRfMH9Ue5d5v01PNePBy1QSfPSDTTeVL0Hb9EzA==}
     engines: {node: '>=6.0.0'}
@@ -627,6 +648,10 @@ packages:
   escalade@3.2.0:
     resolution: {integrity: sha512-WUj2qlxaQtO4g6Pq5c29GTcWGDyd8itL8zTlipgECz3JesAiiOKotd8JU6otB3PACgG6xkJUyVhboMS+bje/jA==}
     engines: {node: '>=6'}
+
+  fastest-levenshtein@1.0.16:
+    resolution: {integrity: sha512-eRnCtTTtGZFpQCwhJiUOuxPQWRXVKYDn0b2PeHfXL6/Zi53SLAzAHfVhVWK2AryC/WH05kGfxhFIPvTF0SXQzg==}
+    engines: {node: '>= 4.9.1'}
 
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
@@ -1277,6 +1302,20 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@zxcvbn-ts/core@4.2.0':
+    dependencies:
+      fastest-levenshtein: 1.0.16
+
+  '@zxcvbn-ts/dictionary-compression@3.0.1': {}
+
+  '@zxcvbn-ts/language-common@4.1.3':
+    dependencies:
+      '@zxcvbn-ts/dictionary-compression': 3.0.1
+
+  '@zxcvbn-ts/language-en@4.1.1':
+    dependencies:
+      '@zxcvbn-ts/dictionary-compression': 3.0.1
+
   baseline-browser-mapping@2.11.15: {}
 
   browserslist@4.28.8:
@@ -1336,6 +1375,8 @@ snapshots:
       '@esbuild/win32-x64': 0.28.2
 
   escalade@3.2.0: {}
+
+  fastest-levenshtein@1.0.16: {}
 
   fdir@6.5.0(picomatch@4.0.5):
     optionalDependencies:

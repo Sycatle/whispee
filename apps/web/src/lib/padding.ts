@@ -24,8 +24,9 @@
  * says more than the lengths. Masking it would take decoy traffic — a permanent cost, including
  * when nobody is talking.
  *
- * Attachments do not go through here: they travel by another path and their size is dominated by
- * the file anyway.
+ * Attachments go through here too, with a ceiling — see `attachments.ts`. Their size is dominated
+ * by the file, so the first buckets never apply to them; what applies is the doubling, and the
+ * bandwidth it costs is far from free on a file of several megabytes.
  */
 
 /** First bucket. Chosen above nearly all written messages. */
@@ -39,11 +40,19 @@ const FIRST_BUCKET = 256;
  */
 const MARKER = 0x80;
 
-/** The bucket reaching at least `length`. */
-function bucket(length: number): number {
+/**
+ * The bucket reaching at least `length`, never above `ceiling`.
+ *
+ * A ceiling is not a refinement of the scheme, it is a concession to a transport that has one:
+ * everything between the last reachable doubling and the ceiling collapses into a single final
+ * bucket. That bucket leaks no more than the doubling would have — "larger than the last bucket"
+ * is exactly the class the next doubling would have carved out — but it costs more bandwidth,
+ * because a payload just past the last doubling is inflated all the way to the ceiling.
+ */
+function bucket(length: number, ceiling: number): number {
   let size = FIRST_BUCKET;
-  while (size < length) size *= 2;
-  return size;
+  while (size < length && size < ceiling) size *= 2;
+  return Math.min(size, ceiling);
 }
 
 /**
@@ -51,9 +60,18 @@ function bucket(length: number): number {
  *
  * The marker is **always** added, even when the length falls exactly on a bucket: without it,
  * removal would not know whether the last byte belongs to the content.
+ *
+ * `ceiling` caps the largest bucket, for a caller whose transport refuses anything above a size.
+ * It throws rather than returning something shorter than asked: a caller that hands over more
+ * than `ceiling - 1` bytes has a bug in its own limit, and silently padding to less than the
+ * ceiling would produce a size that identifies the payload — the opposite of the point.
  */
-export function pad(body: Uint8Array): Uint8Array {
-  const size = bucket(body.length + 1);
+export function pad(body: Uint8Array, ceiling = Number.POSITIVE_INFINITY): Uint8Array {
+  if (body.length + 1 > ceiling) {
+    throw new Error(`body of ${body.length} bytes does not fit under a ceiling of ${ceiling}`);
+  }
+
+  const size = bucket(body.length + 1, ceiling);
   const out = new Uint8Array(size);
   out.set(body);
   out[body.length] = MARKER;

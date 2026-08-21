@@ -5,6 +5,7 @@ import { PresenceLine } from "@/components/Presence";
 import { Verification } from "@/components/Verification";
 import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
 import { useDuo } from "@/lib/duo";
+import { compactNameOf, type NameSources } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { useShortcut } from "@/lib/shortcuts";
 import { useOcclusion } from "@/lib/viewport";
@@ -12,6 +13,7 @@ import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
 import { Tooltip } from "@/ui/Tooltip";
+import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
@@ -20,17 +22,36 @@ import { useNavigate, useRoute } from "@/routes/Router";
 export const COMPOSER_ID = "conversation-composer";
 
 /**
+ * Everybody this thread can attribute something to.
+ *
+ * `accounts` and `peers` both, because they answer at different moments and neither is a superset
+ * of the other: `peers` is restored with the conversation, `accounts` arrives with the first
+ * poll, and somebody removed from the group is still the author of what they said. The union is
+ * what the ambiguity check in `compactNameOf` has to compare against — a rival left out of it is
+ * a fallback that does not happen.
+ */
+function membersOf(view: ConversationView): string[] {
+  return [
+    ...new Set([...view.accounts.map((a) => a.handle), ...view.peers.map((p) => p.name)]),
+  ];
+}
+
+/**
  * What a screen reader should hear when a message lands in the thread already on screen.
  *
  * Reactions are left out for the same reason the rail's preview leaves them out: "👍" announced
  * on its own says nothing, and a busy thread would read a string of them over whatever the user
  * was doing.
  */
-function spoken(view: ConversationView): string | null {
+function spoken(view: ConversationView, names: NameSources): string | null {
   const last = view.messages.at(-1);
   if (!last || last.mine) return null;
 
-  const who = last.sender === null ? "Someone" : `@${last.sender}`;
+  // The compact form: a spoken sentence has no second line, and reading out both strings for
+  // every arrival would double the length of the one announcement people are trying to hear
+  // over whatever else they are doing.
+  const who =
+    last.sender === null ? "Someone" : compactNameOf(last.sender, names, membersOf(view));
   const { content } = last;
   if (content.kind === "text" || content.kind === "reply") return `${who}: ${content.text}`;
   if (content.kind === "attachment") return `${who} sent ${content.ref.name}`;
@@ -44,6 +65,7 @@ export function Conversation({ view }: { view: ConversationView }) {
   const route = useRoute();
   const navigate = useNavigate();
   const duo = useDuo();
+  const names = useNames();
   // Seeded from the session, which is what makes a half-written message survive a look at
   // another conversation. Keyed on the view, so switching remounts with the right draft.
   const [text, setText] = useState(() => session.draftIn(view));
@@ -96,7 +118,7 @@ export function Conversation({ view }: { view: ConversationView }) {
     if (last.seq <= announced.current) return;
     announced.current = last.seq;
 
-    const line = spoken(view);
+    const line = spoken(view, names);
     if (line !== null) setAnnouncement(line);
   });
 
@@ -172,9 +194,19 @@ export function Conversation({ view }: { view: ConversationView }) {
 
   const isTyping = session.typingIn(view);
 
+  /*
+    One line and no room for a second: the line under this one belongs to the typing indicator
+    and the presence line, both of which say something the title cannot. So the compact form,
+    which falls back to handles rather than showing a name it cannot tell apart from another
+    member's. The full two-line form is in the detail column, which is where somebody goes when
+    they want to know exactly who is in the room.
+  */
+  const members = membersOf(view);
   const title =
-    view.accounts.map((a) => `@${a.handle}`).join(", ") ||
-    [...new Set(view.peers.map((p) => p.name))].map((n) => `@${n}`).join(", ") ||
+    view.accounts.map((a) => compactNameOf(a.handle, names, members)).join(", ") ||
+    [...new Set(view.peers.map((p) => p.name))]
+      .map((n) => compactNameOf(n, names, members))
+      .join(", ") ||
     "empty conversation";
 
   return (
@@ -208,7 +240,7 @@ export function Conversation({ view }: { view: ConversationView }) {
           */}
           {isTyping.length > 0 ? (
             <span className="text-caption text-(--color-ink-muted)">
-              {isTyping.map((handle) => `@${handle}`).join(", ")}{" "}
+              {isTyping.map((handle) => compactNameOf(handle, names, members)).join(", ")}{" "}
               {isTyping.length > 1 ? "are typing" : "is typing"}…
             </span>
           ) : (

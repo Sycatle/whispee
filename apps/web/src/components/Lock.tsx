@@ -8,6 +8,7 @@ import { Banner } from "@/ui/Banner";
 import { Button } from "@/ui/Button";
 import { Field } from "@/ui/Field";
 import { Icon } from "@/ui/Icon";
+import { IconButton } from "@/ui/IconButton";
 import { Input } from "@/ui/Input";
 import { Panel } from "@/ui/Panel";
 import { Switch } from "@/ui/Switch";
@@ -166,7 +167,11 @@ export function Unlock({
         </p>
       )}
 
-      <div className="flex flex-col gap-snug border-t border-(--color-border-subtle) pt-pane">
+      {/* The escape hatch, set apart from the form above it by distance alone. The screen is
+          already a `gap-section` column, so this adds one more step on top of it: what follows is
+          not another way to unlock, it is what you do when you cannot. A hairline said the same
+          thing and drew a line across a screen whose entire job is to look calm. */}
+      <div className="flex flex-col gap-snug pt-pane">
         <Button
           variant="quiet"
           size="sm"
@@ -249,8 +254,11 @@ export function BiometricToggle() {
     }
   };
 
+  // A separate setting inside the panel that removes the lock, and a different subject from the
+  // password form above: distance carries the change, as it does everywhere else in this file
+  // now — `mt-section` against the form's own `gap-gutter` is the step that says so.
   return (
-    <div className="mt-pane flex flex-col gap-snug border-t border-(--color-border-subtle) pt-gutter">
+    <div className="mt-section flex flex-col gap-snug">
       <div className="flex items-start justify-between gap-gutter">
         <div className="min-w-0">
           <h3 className="text-body font-medium text-(--color-ink)">
@@ -353,11 +361,7 @@ export function LockSettings({ onDone }: { onDone: () => void }) {
         tone="danger"
         title="Remove the lock"
         description="Without a lock, your conversations stay encrypted on disk, but anyone who opens this browser can read them."
-        actions={
-          <Button variant="quiet" size="sm" onClick={onDone}>
-            Close
-          </Button>
-        }
+        actions={<IconButton label="Close" icon={<Icon name="close" />} onClick={onDone} />}
       >
         <form onSubmit={submit} className="flex flex-col gap-gutter">
           <Field
@@ -400,11 +404,7 @@ export function LockSettings({ onDone }: { onDone: () => void }) {
     <Panel
       title="Lock this device"
       description="Your conversations will be encrypted with this password, which never leaves this device. It is not a recovery method: forgetting it loses nothing, your twelve-word phrase remains the only way back in."
-      actions={
-        <Button variant="quiet" size="sm" onClick={onDone}>
-          Close
-        </Button>
-      }
+      actions={<IconButton label="Close" icon={<Icon name="close" />} onClick={onDone} />}
     >
       <form onSubmit={submit} className="flex flex-col gap-gutter">
         <Field

@@ -3,6 +3,8 @@ import type { ResolvedAccount } from "@/lib/account";
 import type { VerificationState } from "@/lib/session";
 import { Banner } from "@/ui/Banner";
 import { Button } from "@/ui/Button";
+import { Icon } from "@/ui/Icon";
+import { IconButton } from "@/ui/IconButton";
 import { ProofStrip } from "@/ui/ProofStrip";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { useReport } from "@/state/report";
@@ -224,9 +226,12 @@ export function VerificationPanel({
             The fingerprints match
           </Button>
         )}
-        <Button variant="quiet" size="sm" onClick={onClose}>
-          Cancel
-        </Button>
+        {/* Backing out of a comparison changes nothing and can be started again from the same
+            button that opened it, which is the reversible-and-frequent case the rule at the top
+            of `ui/IconButton.tsx` reserves for a glyph. The affirmation beside it keeps its full
+            sentence: "The fingerprints match" is the one claim on this screen that has to be
+            read before it is pressed. */}
+        <IconButton label="Cancel" size="sm" icon={<Icon name="close" />} onClick={onClose} />
       </div>
     </div>
   );

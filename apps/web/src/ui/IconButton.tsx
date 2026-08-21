@@ -5,6 +5,40 @@ import { cn } from "./cn.ts";
 /**
  * A button whose whole content is a glyph.
  *
+ * # When a control may be a glyph, and when it owes the reader a word
+ *
+ * The tree had the same gesture written both ways — `DetailPanel.tsx` closed with `[✕]` while
+ * `Devices.tsx`, `Lock.tsx` and `Pairing.tsx` closed with the word "Close" — which is not a
+ * disagreement about anything, just two people writing on different days. This is the rule that
+ * settles it.
+ *
+ * **A glyph alone** for a gesture that is frequent, reversible, and drawn by a picture nobody has
+ * to be taught: close, dismiss, cancel, back, search, attach, send. All three conditions, not any
+ * one of them. Frequent, because a glyph is learned by repetition and a control seen once a
+ * quarter never gets learned. Reversible, because the price of guessing wrong has to be one
+ * click. Unambiguous, because there is no such thing as a self-explanatory icon — there are only
+ * icons a reader has already met somewhere else, and ✕ and ‹ are those, while a strongbox and a
+ * padlock are already a stretch.
+ *
+ * **A word** for a gesture that is rare or irreversible: "Revoke", "Erase", "Hand over",
+ * "Leave the group", "Change the account key", "Remove moderator". The deciding case is two
+ * destructive actions next to each other. A trash can beside a trash can does not say which of
+ * "revoke this device" and "change your account key" is about to happen, and the reader who
+ * needs to know is exactly the reader who is in a hurry. A word is slower to scan and that is
+ * the point: the pause belongs there.
+ *
+ * A word may also be the right answer for a rare gesture that is perfectly safe, simply because
+ * nobody will have met its glyph. Rarity alone is enough to disqualify an icon; danger makes it
+ * certain.
+ *
+ * What this does not solve, and it is the honest part: "frequent", "reversible" and
+ * "unambiguous" are judgements, not tests. Nothing here can be checked by `tsc`, no lint rule
+ * can read a glyph, and two reasonable people will disagree about "Done" or about a copy button.
+ * The rule exists so that a disagreement is about *this paragraph* rather than about taste, and
+ * so the answer, once argued, lands in one place instead of being re-decided per file. When a
+ * case is genuinely on the line, a word is the safer error: it is merely wordy, whereas a wrong
+ * glyph is a mystery, and on the destructive side it is a mystery with consequences.
+ *
  * # `label` is required, and it is required in the type
  *
  * An icon-only control has no accessible name unless one is written, and "unless one is

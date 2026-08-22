@@ -526,3 +526,63 @@ export function freshPreferences(): Preferences {
 export function flagsOf(preferences: Preferences, key: string): ConversationFlags {
   return preferences.conversations[key] ?? {};
 }
+
+/**
+ * Is this account one we have declined to read?
+ *
+ * A list rather than a set on disk, because it round-trips through JSON and because it is short —
+ * the number of people somebody has blocked, not the number they have met. The linear scan is
+ * paid once per arrival, against a list that is empty for almost every account.
+ *
+ * # What blocking is, and is not
+ *
+ * It hides. It does not prevent: anyone registered can still add anyone to a group and have
+ * envelopes delivered to them, so this is a decision to decline something that exists and is
+ * stored. `storage.ts` says so at the field, and names `contactPolicy` as the server-side half
+ * that would prevent — the half that is not built.
+ */
+export function isBlocked(preferences: Preferences, account: string): boolean {
+  return preferences.blocked.includes(account);
+}
+
+/**
+ * Is this conversation silenced at `now`?
+ *
+ * The stored value is the moment silence ends, not a boolean, and that is what lets "mute for an
+ * hour" exist without anything having to run a timer and come back for it. The comparison happens
+ * where a notification would fire, so a mute simply stops applying — nothing to schedule, and
+ * nothing left behind if the device was asleep when it lapsed.
+ *
+ * A mute in the past is not muted, and a mute exactly at `now` has ended: the boundary belongs to
+ * the side that makes a lapsed mute lapse rather than linger.
+ */
+export function isMuted(flags: ConversationFlags, now: number): boolean {
+  return flags.mutedUntil !== undefined && flags.mutedUntil > now;
+}
+
+/**
+ * May a notification name this conversation?
+ *
+ * Three states, and the middle one is the whole reason this is a function. An absent flag means
+ * "follow the account setting", which is not `false`: turning the account-wide setting on must not
+ * reveal the name of the one conversation somebody marked as the one to stay quiet about, and
+ * turning it off must not leave a per-conversation `true` shouting.
+ */
+export function disclosesName(flags: ConversationFlags, accountWide: boolean): boolean {
+  return flags.discloseName ?? accountWide;
+}
+
+/**
+ * Should messages from this conversation be deposited in the vault?
+ *
+ * Only an explicit `false` opts out, for the reason `vaultEnabled` gives about itself one layer
+ * up: absence is "never asked", and treating it as a refusal would cut backup off for every
+ * conversation that predates the flag.
+ *
+ * The account-wide switch is not consulted here. It is enforced by `Archive` itself, which holds
+ * no key when the vault is off — so a conversation that says `true` against an account that says
+ * no still deposits nothing.
+ */
+export function archivesToVault(flags: ConversationFlags): boolean {
+  return flags.archiveToVault !== false;
+}

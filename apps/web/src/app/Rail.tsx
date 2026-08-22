@@ -11,6 +11,7 @@ import { AccountCard } from "@/app/AccountCard";
 import { useBinding, useRunBinding } from "@/app/Shortcuts";
 import { say } from "@/lib/i18n";
 import { ContextMenu } from "@/ui/ContextMenu";
+import { byPinnedThenRecent } from "@/lib/ordering";
 import { roster } from "@/lib/roster";
 import { useRoving } from "@/lib/useRoving";
 import type { ConversationView } from "@/lib/session";
@@ -250,9 +251,50 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
     code reads by key, and rotating it to express a display concern would be the wrong place
     to hold this.
   */
+  /*
+    Pinned first, then most recent. Archived out of the list entirely.
+
+    Two orderings stacked rather than one comparator doing both, because they answer different
+    questions: pinning is a standing decision about a conversation, activity is what happened to
+    it. A pinned thread that has been quiet for a month stays where its owner put it — that is the
+    whole of what pinning means, and a comparator that let activity break the tie between a pinned
+    and an unpinned row would make it mean "usually first".
+  */
+  const pinned = (view: ConversationView) => session.flagsIn(view).pinned === true;
+  const archived = (view: ConversationView) => session.flagsIn(view).archived === true;
+
+  const byActivity = (a: ConversationView, b: ConversationView) =>
+    session.lastActivityIn(b) - session.lastActivityIn(a);
+
+  // The comparator lives in `lib/ordering.ts` with its tests. The version that belongs inline is
+  // the one that adds a constant to a pinned conversation's timestamp and sorts once — and that
+  // one is wrong in a way a screen with three conversations on it never shows.
   const listed = conversations
-    .filter(matches)
-    .sort((a, b) => session.lastActivityIn(b) - session.lastActivityIn(a));
+    .filter((view) => matches(view) && !archived(view))
+    .sort((a, b) =>
+      byPinnedThenRecent(
+        { pinned: pinned(a), activity: session.lastActivityIn(a) },
+        { pinned: pinned(b), activity: session.lastActivityIn(b) },
+      ),
+    );
+
+  /*
+    The archive, and why it is a place rather than a filter.
+
+    Hiding a conversation with no way to see what is hidden is a state the interface can produce
+    and cannot undo: the thread drops out of the list, and the screen that would unarchive it is
+    reached *through* the list. So the archive is a section of its own, closed by default, showing
+    what is in it.
+
+    Its rows are deliberately plainer than the ones above — a name, a line, and the way back in.
+    An archive is somewhere you go to retrieve something, not a second inbox, and reproducing the
+    full row would say the opposite.
+
+    A search still reaches in here. `matches` runs on both lists, because a filter that answered
+    "no match" about a conversation the reader knows exists would be lying about the only thing it
+    is for.
+  */
+  const shelved = conversations.filter((view) => matches(view) && archived(view)).sort(byActivity);
 
   /**
    * Handles verified out of band, as far as this component can see them.
@@ -578,9 +620,15 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
 
               return (
                 <li key={view.key}>
-                  {/* The rail's menu is short because the protocol is: there is no archive, no
-                      mute and no delete to offer, and a menu padded with actions that do not exist
-                      would be worse than none. What is here is what the row can honestly do. */}
+                  {/* Pin, mute and archive are here because they now exist — this comment used to
+                      say the opposite, and said it correctly: a menu padded with actions the
+                      protocol cannot perform would be worse than none.
+
+                      They are a shortcut and never the only way in. `ui/ContextMenu.tsx` requires
+                      that, and the visible path is `ConversationSettings`, at the foot of the
+                      detail column, which offers these three and two more the row has no room to
+                      explain. Muting from here takes the shorter of the two durations offered
+                      there; the choice between them is a question, and a menu item is an answer. */}
                   <ContextMenu
                     trigger={
                   <button
@@ -698,6 +746,51 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     }
                   >
                     <ContextMenu.Item
+                      icon="pin"
+                      onSelect={() => {
+                        const flags = session.flagsIn(view);
+                        void session
+                          .setConversationFlags(view.key, {
+                            ...flags,
+                            pinned: flags.pinned === true ? undefined : true,
+                          })
+                          .catch((error: unknown) => report.error(String(error)));
+                      }}
+                    >
+                      {session.flagsIn(view).pinned === true ? "Unpin" : "Pin to the top"}
+                    </ContextMenu.Item>
+                    <ContextMenu.Item
+                      icon="notifications"
+                      onSelect={() => {
+                        const flags = session.flagsIn(view);
+                        void session
+                          .setConversationFlags(view.key, {
+                            ...flags,
+                            // Eight hours, the shorter of the two the settings panel offers. A
+                            // menu item cannot ask how long, and the answer that lapses soonest is
+                            // the one somebody who was not asked would rather have.
+                            mutedUntil: session.mutedIn(view)
+                              ? undefined
+                              : Date.now() + 8 * 60 * 60 * 1000,
+                          })
+                          .catch((error: unknown) => report.error(String(error)));
+                      }}
+                    >
+                      {session.mutedIn(view) ? "Unmute" : "Mute for 8 hours"}
+                    </ContextMenu.Item>
+                    <ContextMenu.Item
+                      icon="archive"
+                      onSelect={() => {
+                        const flags = session.flagsIn(view);
+                        void session
+                          .setConversationFlags(view.key, { ...flags, archived: true })
+                          .catch((error: unknown) => report.error(String(error)));
+                      }}
+                    >
+                      Hide from the list
+                    </ContextMenu.Item>
+                    <ContextMenu.Separator />
+                    <ContextMenu.Item
                       icon="info"
                       onSelect={() =>
                         openDetail()
@@ -795,6 +888,41 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             )}
           </ul>
         </Section>
+
+        {/*
+          The archive, closed by default and hidden entirely when it is empty.
+
+          Empty means nobody has ever archived anything, and a section offering to show nothing is
+          one more heading between the reader and what they came for. It appears the moment there
+          is something in it, which is also the moment its owner has a reason to remember it
+          exists.
+
+          The rows carry no context menu, no unread badge and no presence. What they carry is the
+          way back: the row opens the conversation, and its settings — in the detail column — are
+          where "Hide from the list" is turned off again.
+        */}
+        {shelved.length > 0 && (
+          <Section id="archived" label="Archived" count={shelved.length}>
+            <ul role="list" aria-label="Archived" className="px-snug pb-snug">
+              {shelved.map((view) => (
+                <li key={view.key}>
+                  <button
+                    type="button"
+                    onClick={() => navigate({ kind: "conversation", key: view.key })}
+                    className="flex w-full min-w-0 flex-col items-start gap-px rounded-(--radius-control) px-snug py-snug text-left hover:bg-(--color-surface-raised) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
+                  >
+                    <span className="w-full truncate text-body">
+                      {titleOf(view, names, rendered, session.isGroup(view) ? session.accountId : undefined)}
+                    </span>
+                    <span className="w-full truncate text-caption text-(--color-ink-muted)">
+                      {preview(view, names, session.accountId).text}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
       </div>
 
       {/*

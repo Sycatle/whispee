@@ -1,4 +1,5 @@
 import {
+  Archive,
   Bell,
   Check,
   ChevronDown,
@@ -14,6 +15,7 @@ import {
   MicOff,
   MonitorSmartphone,
   Paperclip,
+  Pin,
   Plus,
   QrCode,
   Reply,
@@ -89,7 +91,9 @@ export type IconName =
   | "search"
   | "send"
   | "settings"
-  | "theme";
+  | "theme"
+  | "pin"
+  | "archive";
 
 const ICONS: Record<IconName, LucideIcon> = {
   /** Start a conversation, add a member. */
@@ -168,6 +172,15 @@ const ICONS: Record<IconName, LucideIcon> = {
    */
   more: Ellipsis,
   notifications: Bell,
+  /**
+   * Kept at the top of the list, whatever was said last.
+   *
+   * A pin and not a star: a star is a rating, and this is a position. The two get confused in
+   * every product that ships both, and this one ships neither rating nor favourite.
+   */
+  pin: Pin,
+  /** Out of the list and still receiving — the box, not the bin. `revoke` is the bin. */
+  archive: Archive,
   /** Pairing, which is a QR code in practice. */
   pair: QrCode,
   /** Your own account: the name you show and the handle you cannot change. */

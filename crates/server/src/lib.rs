@@ -442,23 +442,58 @@ pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 /// this server from a user's browser. Requests stay signed, so a third-party site could not
 /// authenticate anything — but allowing broadly without reason is exactly what turns a minor
 /// defect into a breach.
+/// The origins no deployment may remove.
+///
+/// The operating system imposes them on the desktop application: `tauri://localhost` on Linux and
+/// macOS, `http://tauri.localhost` on Windows and Android. They depend on no configuration, so
+/// there is nothing a deployment could know that would make dropping them right.
+const FIXED_ORIGINS: [&str; 2] = ["tauri://localhost", "http://tauri.localhost"];
+
+/// The origins a deployment names, plus the ones it does not get to choose.
+///
+/// # Why `ALLOWED_ORIGINS` adds rather than replaces
+///
+/// It used to replace the whole list, and that is a trap that closes silently. Somebody sets the
+/// variable to add a port — a second preview server, a staging host — and takes the desktop
+/// application's two origins away with it, without touching anything that looks like the desktop
+/// application. The symptom is the one this function's headers already warn about: a "Failed to
+/// fetch" the browser emits **before** sending, so the server logs nothing and the message names
+/// no cause.
+///
+/// It happened here, between two sessions working on the same machine, which is how it was found.
+///
+/// # The two halves are not the same kind of thing, and the split is the point
+///
+/// The development origins are configurable **because they depend on the deployment** — which
+/// ports somebody happens to serve a client on is not something this crate can know. The two
+/// above are imposed by an operating system and depend on nothing. Merging them into one
+/// overridable list was treating a fact as a preference. Whoever is tempted to "simplify" this
+/// back into a substitution should read that sentence first.
+fn allowed_origins(configured: Option<String>) -> Vec<String> {
+    let named = configured
+        .unwrap_or_else(|| "http://127.0.0.1:5173,http://localhost:5173".into())
+        .split(',')
+        .map(|origin| origin.trim().to_owned())
+        .filter(|origin| !origin.is_empty())
+        .collect::<Vec<_>>();
+
+    // Deduplicated, so a deployment naming a fixed origin explicitly does not get it twice.
+    let mut origins = named;
+    for fixed in FIXED_ORIGINS {
+        if !origins.iter().any(|origin| origin == fixed) {
+            origins.push(fixed.to_owned());
+        }
+    }
+    origins
+}
+
 fn cors_layer() -> tower_http::cors::CorsLayer {
     use axum::http::{HeaderName, Method, HeaderValue};
     use tower_http::cors::CorsLayer;
 
-    // The desktop application's origins are in the default, not only in the documentation: they
-    // are fixed — the operating system imposes them, they depend on no deployment — and
-    // forgetting them produces a "Failed to fetch" the browser emits before sending anything, so
-    // without leaving a trace in the server logs.
-    //
-    // `tauri://localhost` on Linux and macOS, `http://tauri.localhost` on Windows and Android.
-    let origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| {
-            "http://127.0.0.1:5173,http://localhost:5173,tauri://localhost,http://tauri.localhost"
-                .into()
-        })
-        .split(',')
-        .filter_map(|origin| origin.trim().parse().ok())
+    let origins: Vec<HeaderValue> = allowed_origins(std::env::var("ALLOWED_ORIGINS").ok())
+        .iter()
+        .filter_map(|origin| origin.parse().ok())
         .collect();
 
     CorsLayer::new()
@@ -553,4 +588,53 @@ pub fn app_with_waker(
         .merge(public)
         .layer(cors_layer())
         .layer(TraceLayer::new_for_http())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The regression that made [`allowed_origins`] exist.**
+    ///
+    /// Setting the variable to add a port used to take the desktop application's two origins away
+    /// with it. Nothing in that change looks like it touches the desktop, and the failure it
+    /// produces leaves no trace on this side: the browser refuses before sending.
+    #[test]
+    fn naming_origins_does_not_remove_the_ones_a_deployment_cannot_choose() {
+        let origins = allowed_origins(Some("http://localhost:5176".into()));
+
+        assert!(origins.contains(&"http://localhost:5176".to_owned()));
+        for fixed in FIXED_ORIGINS {
+            assert!(origins.contains(&fixed.to_owned()), "{fixed} was dropped by an override");
+        }
+    }
+
+    #[test]
+    fn an_unset_variable_still_serves_a_local_client_and_the_desktop() {
+        let origins = allowed_origins(None);
+
+        assert!(origins.contains(&"http://127.0.0.1:5173".to_owned()));
+        // Two spellings of one host, and the browser treats them as two origins: a client served
+        // from `localhost` cannot reach a server that only allows `127.0.0.1`.
+        assert!(origins.contains(&"http://localhost:5173".to_owned()));
+        assert!(origins.contains(&"tauri://localhost".to_owned()));
+    }
+
+    /// A deployment naming a fixed origin explicitly must not have it listed twice: a duplicated
+    /// entry is the kind of header a strict intermediary rejects.
+    #[test]
+    fn naming_a_fixed_origin_does_not_list_it_twice() {
+        let origins = allowed_origins(Some("tauri://localhost,http://localhost:5176".into()));
+
+        assert_eq!(origins.iter().filter(|origin| *origin == "tauri://localhost").count(), 1);
+    }
+
+    #[test]
+    fn blank_entries_are_dropped_rather_than_parsed() {
+        // A trailing comma is what a hand-edited environment file grows, and an empty origin
+        // parses into nothing useful.
+        let origins = allowed_origins(Some("http://localhost:5176, ,".into()));
+
+        assert_eq!(origins.iter().filter(|origin| origin.is_empty()).count(), 0);
+    }
 }

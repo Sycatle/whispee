@@ -20,14 +20,41 @@ name: Tests
 # One Ubuntu runner, and the cache makes the usual run short. Triggering on `pull_request` rather
 # than on every push to `dev` keeps the spend on the moment a change is proposed, which is the
 # moment the answer is worth having.
+#
+# # Why `pull_request` carries no branch filter
+#
+# It carried `branches: [dev, main]`, and that filter reads the **base** of a pull request, not
+# the branch the work is on. A pull request based on another pull request's branch — a stack, the
+# ordinary way to propose a change that depends on a change still under review — therefore matched
+# nothing and ran nothing. Not "ran late": `gh pr checks` reported *no checks reported*, which is
+# indistinguishable on screen from a queue that has not started, so the branch sits waiting for a
+# verdict that was never going to be produced.
+#
+# Two things made it worse than a missing run. A `workflow_dispatch` started by hand does not
+# attach to the pull request as a check, so it can go green without the pull request noticing. And
+# retargeting a pull request onto `dev` afterwards does not replay the event, so the fix that
+# looks right — "just point it at `dev`" — leaves it exactly as silent.
+#
+# So the filter is gone. Every pull request is a change somebody is proposing, whatever it is
+# proposed into, and the cost argument above already says that is the moment the answer is worth
+# having. A stack of three now costs three runs, which is the correct number: three changes are
+# being proposed.
 
 on:
   pull_request:
-    branches: [dev, main]
   push:
     branches: [main]
   workflow_dispatch:
 
+# One run at a time per ref, and the newest wins: a branch pushed three times in a minute should
+# answer for its final state, not spend three runners racing to answer for two states nobody will
+# ship.
+#
+# `github.ref` differs between a pull request (`refs/pull/N/merge`) and a branch, so two levels of
+# a stack never collide. A **dispatched** run and a pull-request run on the same branch do collide,
+# and one cancels the other — which reads as a mysterious `cancelled` rather than as a policy.
+# That is the price of grouping by ref, and it is the right price: the alternative groups by event
+# and lets two runs of the same commit burn two runners.
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true

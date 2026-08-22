@@ -253,10 +253,11 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
       className={cn(
         "safe-top flex items-center gap-pane px-pane py-snug",
         trio
-          ? // Its own surface, sat on the sunken ground: at three columns this bar is a neighbour
-            // of the two columns under it and the gutter is what separates neighbours here. A
-            // hairline as well would be two devices doing one job.
-            "shrink-0 rounded-surface bg-(--color-surface)"
+          ? // The top of the surface the columns below continue, rather than a neighbour of them.
+            // It was `rounded-surface` and separated by the gutter, which made a conversation's
+            // title a third floating thing; it is flush now, so only its top corners are rounded
+            // and it keeps the hairline that gives scrolling content something to stop against.
+            "shrink-0 rounded-t-surface border-b border-(--color-border-subtle) bg-(--color-surface)"
           : // The lid of the centre surface. Content scrolls up to it, so it needs a line to stop
             // against.
             "border-b border-(--color-border-subtle)",

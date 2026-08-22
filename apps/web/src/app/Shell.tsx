@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { COMPOSER_ID, Conversation, membersOf } from "@/components/Conversation";
 import { useDuo, useTrio } from "@/lib/duo";
 import { titleOf } from "@/lib/naming";
+import { cn } from "@/ui/cn";
 import { useNames } from "@/state/names";
 import { useDetail } from "@/state/detail";
 import { useRevision, useSession } from "@/state/SessionProvider";
@@ -300,11 +301,18 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
 
       <Rail onLock={onLock} onForget={onForget} />
 
-      {/* Everything to the right of the rail: at `trio` a detached bar above a row of two columns,
-          below it a single column with the bar inside it. `gap-gap` is the same gutter as
-          everywhere else and it is what separates the bar from what it covers — at `duo` this
-          element has one child and the gap costs nothing. */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-gap">
+      {/* Everything to the right of the rail: at `trio` a bar spanning a row of two columns,
+          below it a single column with the bar inside it.
+ 
+          **No gutter under the bar.** It used to carry the same `gap-gap` as everywhere else, on
+          the argument that a detached surface is separated from its neighbours — and the argument
+          was wrong about this pair. The gutter says "two different things"; a conversation's
+          title and the conversation are one thing, and a strip of ground between them made the
+          title look like it was floating over a thread rather than naming it.
+ 
+          The gap that remains is horizontal, between the conversation and the detail column,
+          which is where two different things actually meet. */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {trio && header}
 
         <div className="flex min-h-0 min-w-0 flex-1 gap-gap">
@@ -330,7 +338,16 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
               screen and is still an `<aside>`, because it is genuinely the margin at every other
               width and swapping its element by breakpoint would buy less than it costs to
               explain. */}
-          <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--color-surface) duo:rounded-surface">
+          {/* `duo:rounded-b-surface` at three columns rather than all four corners: the bar sits
+              flush on top now, so rounding the top of this column would cut a notch out of the
+              surface they form together. At `duo` the bar is *inside* this element, so the whole
+              surface is this one and every corner is its own. */}
+          <main
+            className={cn(
+              "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--color-surface)",
+              trio ? "duo:rounded-b-surface" : "duo:rounded-surface",
+            )}
+          >
             {!trio && header}
             {centre()}
 
@@ -341,8 +358,17 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
             )}
           </main>
 
+          {/* The one thing that stays detached, and detached on both axes.
+ 
+              The bar is flush against the conversation because a title and the thread it names
+              are one thing. This column is not: it is a different subject — who is here, what is
+              verified — so the gutter that separates it horizontally separates it from the bar as
+              well. `mt-gap` is that same gutter, applied upwards.
+ 
+              It follows that all four of its corners are its own, where the centre column keeps
+              only its bottom two. */}
           {trio && detailOpen && view !== null && (
-            <div className="w-80 shrink-0 overflow-hidden bg-(--color-surface) duo:rounded-surface">
+            <div className="mt-gap w-80 shrink-0 overflow-hidden rounded-surface bg-(--color-surface)">
               <DetailPanel view={view} />
             </div>
           )}

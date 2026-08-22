@@ -6,8 +6,12 @@ import {
   CircleQuestionMark,
   Copy,
   Ellipsis,
+  HeadphoneOff,
+  Headphones,
   Info,
   Lock,
+  Mic,
+  MicOff,
   MonitorSmartphone,
   Paperclip,
   Plus,
@@ -72,6 +76,10 @@ export type IconName =
   | "help"
   | "info"
   | "lock"
+  | "headphones"
+  | "headphonesOff"
+  | "mic"
+  | "micOff"
   | "more"
   | "notifications"
   | "pair"
@@ -90,6 +98,21 @@ const ICONS: Record<IconName, LucideIcon> = {
   alert: TriangleAlert,
   /** The composer's paperclip, which was a literal emoji. */
   attach: Paperclip,
+  /**
+   * The two halves of a call's audio, in four glyphs.
+   *
+   * On and off are separate entries rather than one name with a crossed variant, because the
+   * crossed form is not a state of the same picture — it is the picture that says "this is not
+   * happening", and a reader scanning a bar has to tell them apart at 18px without reading a
+   * label. Lucide draws both with the same slash, which is what keeps the pair legible as a pair.
+   *
+   * Nothing captures audio yet. See `app/AccountCard.tsx`, which says so where somebody would
+   * otherwise assume the button mutes something.
+   */
+  headphones: Headphones,
+  headphonesOff: HeadphoneOff,
+  mic: Mic,
+  micOff: MicOff,
   /** The vault. Lucide's `Vault` is a strongbox, which is what the vault screen describes. */
   backup: Vault,
   /** Leaves a pane on the way back. Distinct from `collapse`, which opens something in place. */

@@ -576,6 +576,14 @@ impl AccountKey {
     pub fn vault_key(&self) -> Vec<u8> {
         self.inner.vault_key().to_vec()
     }
+
+    /// Symmetric key every device of the account shares, for the state they owe each other.
+    ///
+    /// Distinct from the vault key on purpose — see `Account::device_sync_key`.
+    #[wasm_bindgen(js_name = deviceSyncKey)]
+    pub fn device_sync_key(&self) -> Vec<u8> {
+        self.inner.device_sync_key().to_vec()
+    }
 }
 
 /// Verifies a device attestation served by the server.

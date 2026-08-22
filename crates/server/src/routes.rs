@@ -740,6 +740,28 @@ struct AccountDevices {
     account: String,
     identity_key: String,
     devices: Vec<AccountDevice>,
+    /// Whether this account has refused presence, **served to the account owner only**.
+    ///
+    /// # Why it is readable at all
+    ///
+    /// It was write-only, and a write-only setting has no way to reach a device that was not
+    /// there when it was written. The signalling settings travel between an account's devices as
+    /// a sealed message inside the conversations they share; a device restored from the recovery
+    /// phrase has no conversation yet, so it has no channel, so it would draw the switch in its
+    /// default position — "on" — for an account the server has already stopped recording.
+    ///
+    /// The other two settings do not need this: with no conversation there is nobody to emit a
+    /// receipt or a typing indicator to, so a device that has not heard them yet cannot be
+    /// contradicting them. Presence is the one that is true of the account the moment it is set.
+    ///
+    /// # Why only the owner
+    ///
+    /// The same reason as `last_seen` above, and a sharper one: this field answers "does this
+    /// person refuse to be observed", which is a fact about someone worth more to a stranger than
+    /// to its owner. `caller_account` is what decides, from the signing device — never from a
+    /// parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_optout: Option<bool>,
 }
 
 /// Lists an account's devices, with their attestations.
@@ -756,12 +778,12 @@ async fn list_account_devices(
     Path(account): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<AccountDevices>> {
-    let found: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT identity_key FROM accounts WHERE id = $1")
+    let found: Option<(Vec<u8>, bool)> =
+        sqlx::query_as("SELECT identity_key, presence_optout FROM accounts WHERE id = $1")
             .bind(&account)
             .fetch_optional(&pool)
             .await?;
-    let (identity_key,) = found.ok_or(ApiError::NotFound)?;
+    let (identity_key, presence_optout) = found.ok_or(ApiError::NotFound)?;
 
     // Revoked devices are served TOO, with their certificate. Hiding them would leave the
     // client unable to tell a revocation from an omission — and omission is precisely what this
@@ -785,6 +807,7 @@ async fn list_account_devices(
     Ok(Json(AccountDevices {
         account,
         identity_key: BASE64_STANDARD.encode(identity_key),
+        presence_optout: owner.then_some(presence_optout),
         devices: rows
             .into_iter()
             .map(

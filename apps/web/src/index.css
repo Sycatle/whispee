@@ -274,6 +274,24 @@
    * flush against the window; the shell has to apply it, and below `duo` it deliberately does
    * not — see the note on `--radius-surface`. */
   --spacing-gap: 0.5rem;
+
+  /* The thread's left lane: the avatar at the top of a turn, the hour under it.
+   *
+   * 3.5rem is 40px for the avatar plus 16 of air. It is the one measurement the whole thread is
+   * built on — the name, the text, the quote and the reactions all begin at its inner edge, so a
+   * line that got it wrong would step sideways out of the column.
+   *
+   * A token rather than a scale value because a second thing now needs the same number: with our
+   * own turns mirrored, the action bar is offset by the lane so that it lines up with the edge of
+   * the message rather than with the wall of the pane. Two `w-14`s in two files is a measurement
+   * that drifts on the first change and reports nothing when it does — it only looks wrong.
+   *
+   * What this still does not gather: the avatar's own 40px (`AVATAR_40` in `Messages.tsx`, which
+   * is a size Avatar does not offer) and the reply banner in `Conversation.tsx`, whose quote
+   * should line up with the quotes inside the thread rather than with the composer. Both belong
+   * on this token; neither is moved here, because doing it properly means changing what those two
+   * look like and that is not this change. */
+  --spacing-lane: 3.5rem;
 }
 
 /* Radius.

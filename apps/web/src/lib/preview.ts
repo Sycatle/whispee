@@ -62,6 +62,32 @@ export const MAX_PREVIEW_PIXELS = 25_000_000;
 export const MAX_PREVIEW_EDGE = 1280;
 
 /**
+ * Longest edge kept when the image is the whole screen rather than a line in a thread.
+ *
+ * # Why a second number, and not simply a bigger first one
+ *
+ * `MAX_PREVIEW_EDGE` is sized for the bubble, and at that size a zoom control would be a lie:
+ * magnifying a 1280px re-encoding shows larger pixels and no more picture. Detail that was never
+ * decoded cannot be revealed by scaling what was.
+ *
+ * So the viewer decodes again, at its own ceiling, and 4096 is chosen against what people
+ * actually send: it is above the long edge of a 12-megapixel phone photo, which is the common
+ * case, so for most images the second decode is the whole picture and the zoom shows real detail.
+ *
+ * # What it costs, and why the inline path does not simply use it
+ *
+ * Four bytes a pixel, so a 4096-wide bitmap is on the order of 60MB retained — per image. A
+ * thread scrolling past thirty of those would hold what no tab should. The viewer is one image at
+ * a time, opened deliberately and closed explicitly, and it releases on the way out; the inline
+ * previews stay at the bubble's size, where they are cheap and there are many of them.
+ *
+ * `MAX_PREVIEW_PIXELS` does not move. It bounds the *decode*, which is the allocation this module
+ * cannot avoid making before it can measure — the limitation stated at the top of this file — and
+ * it is the same limit whichever size is asked for afterwards.
+ */
+export const MAX_VIEWER_EDGE = 4096;
+
+/**
  * Container formats that can hold more than one frame.
  *
  * Used only to word a caption. WebP and AVIF are listed because they *may* animate, not because
@@ -134,8 +160,17 @@ export interface Preview {
  * The canvas is created but **never inserted into the document**, and the bitmap is closed on
  * every path: the decoded pixels exist for the duration of this call and no longer. The only
  * thing that outlives it is the `blob:` URL, which the caller must `release`.
+ *
+ * `maxEdge` changes the size of what is kept and nothing about what is refused: the decoder is
+ * the same, the pixel ceiling is the same, and an image over it is dropped whichever size was
+ * asked for. A caller wanting the full-screen size passes `MAX_VIEWER_EDGE` and owns the much
+ * larger allocation that comes back.
  */
-export async function decodePreview(blob: Blob): Promise<Preview | null> {
+export async function decodePreview(
+  blob: Blob,
+  /** Longest edge of the re-encoding. `MAX_VIEWER_EDGE` for a full-screen look. */
+  maxEdge: number = MAX_PREVIEW_EDGE,
+): Promise<Preview | null> {
   let bitmap: ImageBitmap;
 
   try {
@@ -148,7 +183,7 @@ export async function decodePreview(blob: Blob): Promise<Preview | null> {
   try {
     if (!withinPixelBudget(bitmap.width, bitmap.height)) return null;
 
-    const size = fitWithin(bitmap.width, bitmap.height, MAX_PREVIEW_EDGE);
+    const size = fitWithin(bitmap.width, bitmap.height, maxEdge);
     const canvas = document.createElement("canvas");
     canvas.width = size.width;
     canvas.height = size.height;

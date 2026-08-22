@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { AttachmentViewer } from "@/components/attachment/AttachmentViewer";
 import { ImageViewer } from "@/components/attachment/ImageViewer";
 import type { AttachmentRef } from "@/lib/attachments";
 import { type ViewerKind, type ViewerProps, chooseViewer } from "@/lib/viewer";
@@ -64,6 +65,9 @@ export function Attachment({
   onOpen: () => Promise<Blob>;
 }) {
   const [busy, setBusy] = useState(false);
+  // Whether the open blob is filling the screen or sitting under the message. One flag and not a
+  // second copy of the bytes: the sheet shows the same `opened`, at a different size.
+  const [full, setFull] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState<Blob | null>(null);
   // Set when a viewer was handed bytes and gave them back. It carries the wording the viewer chose
@@ -77,6 +81,14 @@ export function Attachment({
   // Closing is not optional for audio and PDF: the blob is the decrypted file, and an unmounted
   // viewer that left it in state here would keep it for the life of the thread.
   useEffect(() => () => setOpened(null), []);
+
+  // A refusal drops the bytes and closes the sheet with them. Leaving the sheet up over a viewer
+  // that just said it could not read the file would be a frame around nothing.
+  const refuse = (message: string) => {
+    setOpened(null);
+    setFull(false);
+    setRefused(message);
+  };
 
   // Failure is not benign at this layer: the AEAD rejects a substituted or altered blob, so a
   // decryption error means the ciphertext is not the one a group member produced.
@@ -124,15 +136,52 @@ export function Attachment({
   return (
     <div className="space-y-tight">
       {Viewer !== undefined && opened !== null && (
-        <Viewer
-          blob={opened}
-          name={attachment.name}
-          mode="inline"
-          onRefused={(message) => {
-            setOpened(null);
-            setRefused(message);
-          }}
-        />
+        <>
+          {/* A picture is its own affordance: clicking it opens it, and an "Enlarge" link beside
+              it would only say what the click already says. It still has to be a real `<button>`
+              — a target only a pointer can reach is not a control.
+
+              Only a picture, though. Wrapping every viewer this way would put a media player's
+              own controls inside a button, where the outer click swallows play and seek, and
+              nested interactive elements are invalid besides. The kinds that carry their own
+              controls get an explicit trigger instead, below. */}
+          {kind === "image" ? (
+            <button
+              type="button"
+              onClick={() => setFull(true)}
+              className="block cursor-zoom-in rounded-bubble focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--color-accent)"
+              aria-label={`Open ${attachment.name} full screen`}
+            >
+              <Viewer blob={opened} name={attachment.name} mode="inline" onRefused={refuse} />
+            </button>
+          ) : (
+            <>
+              <Viewer blob={opened} name={attachment.name} mode="inline" onRefused={refuse} />
+              <button
+                type="button"
+                onClick={() => setFull(true)}
+                className="text-caption text-(--color-ink-muted) underline"
+              >
+                Open full screen
+              </button>
+            </>
+          )}
+
+          {full && kind !== null && (
+            <AttachmentViewer
+              blob={opened}
+              name={attachment.name}
+              kind={kind}
+              onRefused={refuse}
+              onClose={() => setFull(false)}
+            >
+              {/* The sheet is handed the component rather than the kind: this file is the only
+                  one that maps one to the other, and `AttachmentViewer` stays a frame that can
+                  hold whatever the next batch adds. */}
+              {(props) => <Viewer {...props} />}
+            </AttachmentViewer>
+          )}
+        </>
       )}
 
       <button

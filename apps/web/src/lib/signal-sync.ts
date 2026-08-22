@@ -22,12 +22,21 @@
  * `content.ts` states that argument at `TYPE_SIGNALS` and it is the reason this module exists at
  * all rather than a plain struct in the message body.
  *
- * # What it does not carry
+ * # And then the rest of the preferences
  *
- * Whether the vault is on, which conversations are muted, who is blocked — none of it, though the
- * format has room. Each of those has its own conflict question to settle, and settling them all
- * at once would settle none of them well.
+ * The same defect ran through everything else kept locally: a conversation muted on the laptop
+ * kept buzzing on the phone, a block held on one device and not the other. `session-types.ts`
+ * already said so about the per-conversation flags — "pinning something on a laptop therefore
+ * does nothing to a phone, and the settings screen has to say so rather than let it be
+ * discovered" — and the screen never said it.
+ *
+ * They travel in the same message, appended after the nine fixed bytes. What made them wait was
+ * not the channel but the arbitration: a single timestamp over a *map* loses edits, so each entry
+ * carries its own and removals are stamped rather than merely absent. `stamped.ts` is that rule,
+ * and it is where the argument for it lives.
  */
+import type { ConversationFlags } from "./session-types.ts";
+import type { StampedPatch } from "./stamped.ts";
 
 /** The three switches of the "Receipts and indicators" panel, as they travel. */
 export interface SyncedSignals {
@@ -38,10 +47,73 @@ export interface SyncedSignals {
   at: number;
 }
 
+/**
+ * Everything else an account's devices owe each other.
+ *
+ * # Why these and not the rest
+ *
+ * The test is whether the preference is a fact about the *account* or about the *machine*.
+ * Muting a conversation is about the conversation, so a phone that keeps buzzing after the laptop
+ * silenced it is simply wrong. The language the interface is drawn in is about the machine — a
+ * work laptop in English and a phone in French is a choice, not a drift — and so is
+ * `searchCoverage`, which records how much history *this* disk was willing to index. Those stay
+ * where they are.
+ *
+ * `recentEmojis` and `skinTone` are account facts and are still left out, for a different reason:
+ * they change on nearly every message. Syncing them would spend an envelope per conversation on
+ * somebody reaching for a thumbs-up.
+ *
+ * # Why petnames may travel now, having been forbidden
+ *
+ * `storage.ts` refused to emit them, and was right at the time: "sending one would hand a peer the
+ * note taken about them". This channel is sealed under a key only our own devices derive, so the
+ * peer carries the note without being able to read it. The objection was about the channel, and
+ * the channel changed.
+ */
+export interface SyncedPreferences {
+  /** `discloseConversationName` and `vaultEnabled`, which move together as one decision. */
+  scalars: { at: number; disclose: boolean; vault: boolean };
+  /** Per conversation, by hex group id. */
+  flags: StampedPatch<ConversationFlags>;
+  /** Per account, the name we have overruled theirs with. */
+  petnames: StampedPatch<string>;
+  /** Per account, present when blocked. The value is always `true`; absence is the removal. */
+  blocked: StampedPatch<true>;
+}
+
 const IV_LEN = 12;
 
-/** `u64 BE milliseconds ‖ u8 bitfield`. */
+/**
+ * `u64 BE milliseconds ‖ u8 bitfield`, and then, optionally, UTF-8 JSON.
+ *
+ * # Why the preferences are appended rather than given their own message
+ *
+ * One message means one envelope, and an envelope is padded, stored for thirty days and counted
+ * against a conversation's purge window. Two would double that for a pair of records that always
+ * change in the same session and are always read by the same code.
+ *
+ * # Why the first nine bytes did not move
+ *
+ * They are exactly the layout that shipped, so a device running the older build still reads the
+ * signalling settings out of a message from a newer one — it stops at nine bytes and never looks
+ * further. The reverse also holds: nine bytes and nothing after is a valid message, and it is
+ * what an older device sends. Preferences simply do not travel until both ends are new, which is
+ * the honest failure and not a silent one.
+ */
 const PLAINTEXT_LEN = 8 + 1;
+
+/**
+ * How much sealed JSON we are willing to put on the wire.
+ *
+ * Sixteen kilobytes holds several hundred conversations' flags along with the petnames and blocks
+ * of a lifetime; nothing an ordinary account produces comes close. It is a bound rather than an
+ * expectation — a decoder without one lets whoever writes the message decide how much memory it
+ * costs, and "whoever" includes a future version of ourselves with a bug in it.
+ *
+ * `Session` reports rather than truncates when a snapshot exceeds this. Half a preference set is
+ * worse than none: it would read as a decision to clear whatever fell off the end.
+ */
+export const MAX_PREFERENCES_BYTES = 16 * 1024;
 
 const BIT_READ_RECEIPTS = 1;
 const BIT_TYPING = 2;
@@ -68,13 +140,22 @@ export function importSyncKey(raw: Uint8Array): Promise<CryptoKey> {
  * A fresh random nonce per message, as the vault does and for the same reason: AES-GCM breaks
  * catastrophically on a nonce reused under one key, and this key never changes.
  */
-export async function sealSignals(key: CryptoKey, signals: SyncedSignals): Promise<Uint8Array> {
-  const plaintext = new Uint8Array(PLAINTEXT_LEN);
+export async function sealSignals(
+  key: CryptoKey,
+  signals: SyncedSignals,
+  preferences?: SyncedPreferences,
+): Promise<Uint8Array> {
+  const tail =
+    preferences === undefined ? new Uint8Array(0) : new TextEncoder().encode(JSON.stringify(preferences));
+  if (tail.length > MAX_PREFERENCES_BYTES) throw new Error("preference snapshot too large");
+
+  const plaintext = new Uint8Array(PLAINTEXT_LEN + tail.length);
   new DataView(plaintext.buffer).setBigUint64(0, BigInt(Math.max(0, Math.trunc(signals.at))), false);
   plaintext[8] =
     (signals.readReceipts ? BIT_READ_RECEIPTS : 0) |
     (signals.typingIndicator ? BIT_TYPING : 0) |
     (signals.presence ? BIT_PRESENCE : 0);
+  plaintext.set(tail, PLAINTEXT_LEN);
 
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ciphertext = new Uint8Array(
@@ -101,7 +182,7 @@ export async function openSignals(
   key: CryptoKey,
   sealed: Uint8Array,
   now: number,
-): Promise<SyncedSignals | null> {
+): Promise<{ signals: SyncedSignals; preferences?: SyncedPreferences } | null> {
   if (sealed.length <= IV_LEN) return null;
 
   let plaintext: Uint8Array;
@@ -117,21 +198,118 @@ export async function openSignals(
     return null;
   }
 
-  // A blob that authenticated under our own key and is still the wrong size is a newer version of
-  // this format, written by a device running a later build of ours. Refusing it is right: reading
-  // the first nine bytes of something whose layout has changed is how a setting gets silently
-  // inverted.
-  if (plaintext.length !== PLAINTEXT_LEN) return null;
+  // Shorter than the fixed head is not a version of this format at all — it authenticated under
+  // our own key, so it is our own bug rather than an attack, and reading a truncated header is how
+  // a setting gets silently inverted.
+  if (plaintext.length < PLAINTEXT_LEN) return null;
 
   const declared = Number(new DataView(plaintext.buffer, plaintext.byteOffset).getBigUint64(0, false));
   const flags = plaintext[8];
+  const clamp = (at: number) => (at > now + CLOCK_SKEW_MS ? now : at);
 
-  return {
+  const signals: SyncedSignals = {
     readReceipts: (flags & BIT_READ_RECEIPTS) !== 0,
     typingIndicator: (flags & BIT_TYPING) !== 0,
     presence: (flags & BIT_PRESENCE) !== 0,
-    at: declared > now + CLOCK_SKEW_MS ? now : declared,
+    at: clamp(declared),
   };
+
+  // Nothing after the head is an older device, which sent settings and had no preferences to
+  // send. That is a message with no preferences in it, not a message asking to clear them.
+  if (plaintext.length === PLAINTEXT_LEN) return { signals };
+  if (plaintext.length - PLAINTEXT_LEN > MAX_PREFERENCES_BYTES) return { signals };
+
+  const preferences = readPreferences(plaintext.subarray(PLAINTEXT_LEN), clamp);
+  return preferences === null ? { signals } : { signals, preferences };
+}
+
+/**
+ * Parses the appended preferences, or `null` if they are not what this build expects.
+ *
+ * # Why every field is checked rather than cast
+ *
+ * The bytes authenticated under a key only our own devices hold, so this is not defence against a
+ * peer. It is defence against ourselves: a later build that changes the shape, a partial write, a
+ * field that turned out to be optional. Casting would let any of those through as far as the
+ * merge, which writes to disk — and a preference set corrupted there is not recoverable from the
+ * network, because every other device would eventually be told the corrupt version is the newer
+ * one.
+ *
+ * Losing the preferences of one message is cheap: they are re-announced at every epoch.
+ */
+function readPreferences(
+  tail: Uint8Array,
+  clamp: (at: number) => number,
+): SyncedPreferences | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(tail));
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const body = parsed as Record<string, unknown>;
+
+  const scalars = body.scalars;
+  if (typeof scalars !== "object" || scalars === null) return null;
+  const { at, disclose, vault } = scalars as Record<string, unknown>;
+  if (typeof at !== "number" || typeof disclose !== "boolean" || typeof vault !== "boolean") {
+    return null;
+  }
+
+  const flags = readPatch<ConversationFlags>(body.flags, clamp, isFlags);
+  const petnames = readPatch<string>(body.petnames, clamp, (v): v is string => typeof v === "string");
+  const blocked = readPatch<true>(body.blocked, clamp, (v): v is true => v === true);
+  if (flags === null || petnames === null || blocked === null) return null;
+
+  return { scalars: { at: clamp(at), disclose, vault }, flags, petnames, blocked };
+}
+
+/** One stamped map, with every entry's clock clamped exactly as the scalars' is. */
+function readPatch<T>(
+  raw: unknown,
+  clamp: (at: number) => number,
+  isValue: (value: unknown) => value is T,
+): StampedPatch<T> | null {
+  if (typeof raw !== "object" || raw === null) return null;
+
+  const patch: StampedPatch<T> = {};
+  for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof entry !== "object" || entry === null) return null;
+
+    const { at, v } = entry as Record<string, unknown>;
+    if (typeof at !== "number") return null;
+    if (v !== null && !isValue(v)) return null;
+
+    patch[key] = { at: clamp(at), v: v === null ? null : (v as T) };
+  }
+
+  return patch;
+}
+
+/**
+ * A `ConversationFlags`, checked field by field.
+ *
+ * Every field is optional and absence is meaningful for each of them — `discloseName` and
+ * `archiveToVault` have three states, not two — so this rejects wrong *types* and never fills in
+ * a default. Unknown keys are tolerated: they are what a later build adds, and dropping the whole
+ * record over one would make every upgrade a synchronisation outage.
+ */
+function isFlags(value: unknown): value is ConversationFlags {
+  if (typeof value !== "object" || value === null) return false;
+  const flags = value as Record<string, unknown>;
+
+  const optional = (v: unknown, kind: "boolean" | "number") => v === undefined || typeof v === kind;
+
+  return (
+    optional(flags.pinned, "boolean") &&
+    optional(flags.archived, "boolean") &&
+    optional(flags.mutedUntil, "number") &&
+    optional(flags.discloseName, "boolean") &&
+    optional(flags.archiveToVault, "boolean") &&
+    optional(flags.ephemeralMs, "number")
+  );
 }
 
 /** `Uint8Array` to the `BufferSource` WebCrypto wants. Same helper, same cast, as `vault.ts`. */

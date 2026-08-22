@@ -99,6 +99,30 @@ test("the settings stamp survives, and so does its absence", () => {
 });
 
 /**
+ * The preference stamps have to survive too, and they are the tombstones.
+ *
+ * A stamp for a key that holds no value *is* the record of a removal — an unblock, a petname
+ * deleted. Lose it on the way back from disk and the device that still holds the value wins the
+ * next merge, so the block comes back and the petname reappears. There is no error and nothing on
+ * screen to explain it, which is why the codec is where this gets asserted rather than left to a
+ * round-trip somebody assumed.
+ */
+test("the preference stamps survive, tombstones included", () => {
+  assert.ok(!("prefStamps" in roundTrip(session())));
+
+  const stamps = {
+    scalars: 1_700_000_000_000,
+    flags: { aa: 1_700_000_000_001 },
+    petnames: { bb: 1_700_000_000_002 },
+    // No matching entry in `blocked`: this one only exists to say the block was lifted.
+    blocked: { cc: 1_700_000_000_003 },
+  };
+
+  assert.deepEqual(roundTrip(session({ prefStamps: stamps })).prefStamps, stamps);
+  assert.deepEqual(roundTrip(session({ prefStamps: {} })).prefStamps, {});
+});
+
+/**
  * Bytes survive past 127.
  *
  * The encoding goes through `String.fromCharCode` then `btoa`: a byte handled as a UTF-16 code

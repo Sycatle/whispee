@@ -26,11 +26,19 @@ import { Archive } from "./session-vault.ts";
 import { Lockbox, type LockKit } from "./session-lock.ts";
 import { LogWitness, type LogChecks } from "./session-log.ts";
 import { composeStored } from "./session-persist.ts";
-import { type SyncedSignals, importSyncKey, openSignals, sealSignals } from "./signal-sync.ts";
+import {
+  MAX_PREFERENCES_BYTES,
+  type SyncedPreferences,
+  type SyncedSignals,
+  importSyncKey,
+  openSignals,
+  sealSignals,
+} from "./signal-sync.ts";
+import { merge, patchOf } from "./stamped.ts";
 import { fromBase64, toHex } from "./keys";
 import { changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
-import type { SignalSettings } from "./storage";
+import type { SignalSettings, StoredSession } from "./storage";
 import { type Decision, type Steps, type Presence, decide, migrate } from "./migration";
 import {
   type Anchor,
@@ -124,6 +132,7 @@ import {
   freshSignalState,
   touch,
   type Preferences,
+  type ConversationFlags,
   type ConversationView,
   type Message,
   type Pending,
@@ -205,6 +214,15 @@ export class Session {
      * the device that speaks first becomes the account's, and one click changes it.
      */
     private signalsAt: number | undefined = undefined,
+    /**
+     * When each of the other preferences was last decided.
+     *
+     * Held here rather than inside `PreferencesStore` because a stamp is not a preference: it is
+     * the record of *when* one was chosen, it never appears on a screen, and it has to cover
+     * `petnames` too, which live in `Names` and not in the store at all. One place for the
+     * arbitration, whatever the value it arbitrates.
+     */
+    private prefStamps: NonNullable<StoredSession["prefStamps"]> = {},
   ) {}
 
   /**
@@ -229,7 +247,7 @@ export class Session {
   /** Records the choice, so a reload does not quietly return to the quiet default. */
   async setDiscloseConversationName(value: boolean): Promise<void> {
     this.settings.setDisclose(value);
-    await this.persist();
+    await this.stampScalars();
   }
 
   /**
@@ -256,6 +274,53 @@ export class Session {
   async updatePreferences(change: (preferences: Preferences) => void): Promise<void> {
     this.settings.update(change);
     await this.persist();
+  }
+
+  /**
+   * Sets the flags of one conversation, and tells our other devices.
+   *
+   * **Not `updatePreferences`**, and the difference is not stylistic. `conversations` and
+   * `blocked` are the two preferences that travel, and what makes them travel is a stamp taken at
+   * the moment of the decision — see `stamped.ts` for why one stamp over a whole map loses edits.
+   * A mutation that went through the generic path would be written to this disk and to no other,
+   * which is the defect this whole change exists to remove.
+   *
+   * Passing an empty object clears the entry rather than storing an empty record, so that "no
+   * flags" has one representation, as `setPetname` does for the absence of a name.
+   */
+  async setConversationFlags(groupId: string, flags: ConversationFlags): Promise<void> {
+    const empty = Object.values(flags).every((value) => value === undefined);
+
+    this.settings.update((preferences) => {
+      if (empty) delete preferences.conversations[groupId];
+      else preferences.conversations[groupId] = flags;
+    });
+    this.stamp("flags", groupId, Date.now());
+
+    await this.persist();
+    await this.announceSignalsEverywhere();
+  }
+
+  /**
+   * Blocks or unblocks an account, and tells our other devices.
+   *
+   * The unblock is the direction worth stating: it is recorded as a decision and not merely as an
+   * absence, because an absence loses to any earlier decision that was written down, and the
+   * device that still holds the block would put it back at the next announcement.
+   *
+   * What this still does not do is prevent anything. `storage.ts` says it plainly — a local block
+   * declines to display something that exists and is delivered — and no amount of synchronising
+   * changes that. It now declines on every device instead of one.
+   */
+  async setBlocked(account: string, blocked: boolean): Promise<void> {
+    this.settings.update((preferences) => {
+      const rest = preferences.blocked.filter((known) => known !== account);
+      preferences.blocked = blocked ? [...rest, account] : rest;
+    });
+    this.stamp("blocked", account, Date.now());
+
+    await this.persist();
+    await this.announceSignalsEverywhere();
   }
 
   /**
@@ -701,6 +766,7 @@ export class Session {
       // A missing `presence` means enabled: that is the default, the flag only records a refusal.
       { readReceipts: true, typingIndicator: true, ...stored.signals },
       stored.signalsAt,
+      stored.prefStamps ?? {},
     );
 
     // Assigned after construction rather than passed in: the other entry points build a session
@@ -766,7 +832,7 @@ export class Session {
    */
   async enableVault(): Promise<void> {
     await this.archive.enable(this.account.vaultKey());
-    await this.persist();
+    await this.stampScalars();
   }
 
   /**
@@ -778,7 +844,7 @@ export class Session {
    */
   async disableVault(): Promise<void> {
     this.archive.disable();
-    await this.persist();
+    await this.stampScalars();
   }
 
   /**
@@ -959,6 +1025,7 @@ export class Session {
         trust: this.trust.snapshot(),
         signals: this.signals,
         signalsAt: this.signalsAt,
+        prefStamps: this.prefStamps,
         preferences: this.settings.snapshot(),
         names: this.names.snapshot(),
         log: this.witness.snapshot(),
@@ -2260,8 +2327,75 @@ export class Session {
       at: this.signalsAt ?? Date.now(),
     };
 
-    const sealed = await sealSignals(await this.deviceSyncKey(), signals);
+    const sealed = await sealSignals(await this.deviceSyncKey(), signals, this.syncedPreferences());
     await this.sendContent(view, { kind: "signals", sealed });
+  }
+
+  /**
+   * The whole preference set, in the shape it travels.
+   *
+   * A full snapshot every time rather than a delta. A delta needs the receiver to have heard every
+   * earlier one, which a device that was off for a week has not; a snapshot catches it up in a
+   * single message and costs a few hundred bytes to do it.
+   *
+   * `undefined` when the snapshot would exceed what the format allows. That is not silent — the
+   * caller reports it — and it degrades to sending the signalling settings alone, which is what
+   * this message carried before the preferences joined it. Truncating instead would read as a
+   * decision to clear whatever fell off the end.
+   */
+  private syncedPreferences(): SyncedPreferences | undefined {
+    const preferences: SyncedPreferences = {
+      scalars: {
+        at: this.prefStamps.scalars ?? 0,
+        disclose: this.settings.discloseConversationName,
+        vault: this.archive.enabled,
+      },
+      flags: patchOf(this.settings.value.conversations, this.prefStamps.flags ?? {}),
+      petnames: patchOf(this.names.petnames, this.prefStamps.petnames ?? {}),
+      blocked: patchOf(
+        Object.fromEntries(this.settings.value.blocked.map((account) => [account, true as const])),
+        this.prefStamps.blocked ?? {},
+      ),
+    };
+
+    if (JSON.stringify(preferences).length > MAX_PREFERENCES_BYTES) {
+      console.warn("preference snapshot too large to sync; settings still travel", {
+        conversations: Object.keys(preferences.flags).length,
+        petnames: Object.keys(preferences.petnames).length,
+        blocked: Object.keys(preferences.blocked).length,
+      });
+      return undefined;
+    }
+
+    return preferences;
+  }
+
+  /**
+   * Stamps a decision about one keyed preference, so that it can win against an older one.
+   *
+   * The stamp is taken here, at the moment of the decision, and not when the announcement goes
+   * out: two changes made offline in a known order must reach the other devices in that order,
+   * and a stamp assigned at send time would collapse them onto whichever moment the network came
+   * back.
+   */
+  private stamp(map: "flags" | "petnames" | "blocked", key: string, at: number): void {
+    this.prefStamps = { ...this.prefStamps, [map]: { ...(this.prefStamps[map] ?? {}), [key]: at } };
+  }
+
+  /**
+   * Records that the two scalar preferences were just decided, writes them down, and tells the
+   * other devices.
+   *
+   * They share one stamp because they are two switches on two screens that nobody moves at the
+   * same instant, and giving each its own would double the bookkeeping to arbitrate a collision
+   * that has to be produced deliberately. That is the same trade `SyncedSignals` makes for its
+   * three booleans, and it is only ever wrong for maps — which is why the maps are stamped per
+   * entry instead.
+   */
+  private async stampScalars(): Promise<void> {
+    this.prefStamps = { ...this.prefStamps, scalars: Date.now() };
+    await this.persist();
+    await this.announceSignalsEverywhere();
   }
 
   /** The key our own devices share, imported once and kept. */
@@ -2286,15 +2420,96 @@ export class Session {
     const opened = await openSignals(await this.deviceSyncKey(), sealed, Date.now());
     // Not ours to read, or a shape a later build of ours writes. Both are ordinary.
     if (opened === null) return;
-    if (this.signalsAt !== undefined && opened.at <= this.signalsAt) return;
 
-    this.signals = {
-      readReceipts: opened.readReceipts,
-      typingIndicator: opened.typingIndicator,
-      presence: opened.presence,
+    let changed = false;
+
+    if (this.signalsAt === undefined || opened.signals.at > this.signalsAt) {
+      this.signals = {
+        readReceipts: opened.signals.readReceipts,
+        typingIndicator: opened.signals.typingIndicator,
+        presence: opened.signals.presence,
+      };
+      this.signalsAt = opened.signals.at;
+      changed = true;
+    }
+
+    if (opened.preferences) changed = this.absorbPreferences(opened.preferences) || changed;
+
+    // One write for both halves, and none at all when nothing moved. The announcement is
+    // periodic — once per epoch of every conversation — so most of these decide nothing, and
+    // persisting on each would re-encrypt the whole session for no change, for ever.
+    if (changed) await this.persist();
+  }
+
+  /**
+   * Merges the preferences another of our devices announced. Returns whether anything moved.
+   *
+   * # Why the arbitration is per entry and not per message
+   *
+   * Because a map is not a scalar. Block Bob on the laptop and Carol on the phone, and one stamp
+   * over the whole set means one of the two blocks disappears with nothing to report it.
+   * `stamped.ts` holds the rule and the argument; this is the wiring.
+   *
+   * # Why the vault is applied and not merely recorded
+   *
+   * `discloseConversationName` is read from the store every time something needs it, so writing
+   * it is enough. Archiving is a live object holding a key, so the decision has to be carried out
+   * — and it is carried out in the direction announced, including turning the vault **off**,
+   * which is the direction that matters: an account that refused backup on one device must not
+   * keep depositing from another.
+   */
+  private absorbPreferences(incoming: SyncedPreferences): boolean {
+    let changed = false;
+
+    const scalarsAt = this.prefStamps.scalars;
+    if (scalarsAt === undefined || incoming.scalars.at > scalarsAt) {
+      if (this.settings.discloseConversationName !== incoming.scalars.disclose) {
+        this.settings.setDisclose(incoming.scalars.disclose);
+        changed = true;
+      }
+      if (this.archive.enabled !== incoming.scalars.vault) {
+        if (incoming.scalars.vault) void this.archive.enable(this.account.vaultKey());
+        else this.archive.disable();
+        changed = true;
+      }
+      if (scalarsAt !== incoming.scalars.at) {
+        this.prefStamps = { ...this.prefStamps, scalars: incoming.scalars.at };
+        changed = true;
+      }
+    }
+
+    const flags = merge(this.settings.value.conversations, this.prefStamps.flags ?? {}, incoming.flags);
+    if (flags.changed) {
+      this.settings.update((preferences) => (preferences.conversations = flags.values));
+      changed = true;
+    }
+
+    const petnames = merge(this.names.petnames, this.prefStamps.petnames ?? {}, incoming.petnames);
+    if (petnames.changed) {
+      this.names.replacePetnames(petnames.values);
+      changed = true;
+    }
+
+    const held = Object.fromEntries(
+      this.settings.value.blocked.map((account) => [account, true as const]),
+    );
+    const blocked = merge(held, this.prefStamps.blocked ?? {}, incoming.blocked);
+    if (blocked.changed) {
+      this.settings.update((preferences) => (preferences.blocked = Object.keys(blocked.values)));
+      changed = true;
+    }
+
+    this.prefStamps = {
+      ...this.prefStamps,
+      flags: flags.stamps,
+      petnames: petnames.stamps,
+      blocked: blocked.stamps,
     };
-    this.signalsAt = opened.at;
-    await this.persist();
+
+    // A stamp that moved without a value moving still has to reach the disk. It is a tombstone,
+    // and a tombstone lost at the next start lets a third device re-assert what was removed —
+    // `Merged.stampsMoved` states the sequence in full.
+    return changed || flags.stampsMoved || petnames.stampsMoved || blocked.stampsMoved;
   }
 
   private async sendContent(
@@ -2814,7 +3029,9 @@ export class Session {
    */
   async setPetname(handle: string, name: string): Promise<void> {
     this.names.setPetname(handle, name);
+    this.stamp("petnames", handle, Date.now());
     await this.persist();
+    await this.announceSignalsEverywhere();
 
     // Every view, for the same reason `absorbProfile` touches every view: the person is drawn in
     // the thread, the conversation list and the member roster, and the revision counter is per

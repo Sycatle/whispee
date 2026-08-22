@@ -57,6 +57,7 @@ export function encodeSession(session: StoredSession): Uint8Array {
     knownDevices: session.knownDevices,
     signals: session.signals,
     signalsAt: session.signalsAt,
+    prefStamps: session.prefStamps,
     postingKeys: session.postingKeys,
     logHead: session.logHead,
     history: session.history === undefined ? undefined : toBase64(session.history),
@@ -117,6 +118,9 @@ export function decodeSession(bytes: Uint8Array): StoredSession {
     knownDevices: requireObject(field.knownDevices, "knownDevices") as Record<string, string[]>,
     ...(field.signals === undefined ? {} : { signals: field.signals as StoredSession["signals"] }),
     ...(typeof field.signalsAt === "number" ? { signalsAt: field.signalsAt } : {}),
+    ...(field.prefStamps === undefined
+      ? {}
+      : { prefStamps: field.prefStamps as StoredSession["prefStamps"] }),
     ...(field.postingKeys === undefined
       ? {}
       : { postingKeys: field.postingKeys as Record<string, string> }),

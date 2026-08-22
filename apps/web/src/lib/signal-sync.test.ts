@@ -22,7 +22,10 @@ test("the settings round-trip through the seal", async () => {
     NOW,
   );
 
-  assert.deepEqual(opened, SIGNALS);
+  assert.deepEqual(opened?.signals, SIGNALS);
+  // Nothing after the fixed head is an older device with no preferences to send — which is not
+  // the same as a device asking to clear them.
+  assert.equal(opened?.preferences, undefined);
 });
 
 test("each of the three switches survives on its own", async () => {
@@ -33,7 +36,7 @@ test("each of the three switches survives on its own", async () => {
     const one = { ...all, [field]: false };
 
     // One bit per switch, and a bitfield is exactly where two of them get read into one place.
-    assert.deepEqual(await openSignals(key, await sealSignals(key, one), NOW), one);
+    assert.deepEqual((await openSignals(key, await sealSignals(key, one), NOW))?.signals, one);
   }
 });
 
@@ -61,7 +64,7 @@ test("a time far in the future is replaced by the moment of receipt", async () =
   const pinned = { ...SIGNALS, at: NOW + 10 * 365 * 24 * 3600 * 1000 };
 
   const opened = await openSignals(key, await sealSignals(key, pinned), NOW);
-  assert.equal(opened?.at, NOW);
+  assert.equal(opened?.signals.at, NOW);
 });
 
 test("ordinary clock skew is believed rather than clamped", async () => {
@@ -71,7 +74,7 @@ test("ordinary clock skew is believed rather than clamped", async () => {
   const skewed = { ...SIGNALS, at: NOW + 60_000 };
 
   const opened = await openSignals(key, await sealSignals(key, skewed), NOW);
-  assert.equal(opened?.at, NOW + 60_000);
+  assert.equal(opened?.signals.at, NOW + 60_000);
 });
 
 test("a tampered blob does not open", async () => {
@@ -81,4 +84,98 @@ test("a tampered blob does not open", async () => {
   sealed[sealed.length - 1] ^= 0xff;
 
   assert.equal(await openSignals(await importSyncKey(KEY), sealed, NOW), null);
+});
+
+const PREFERENCES = {
+  scalars: { at: NOW - 500, disclose: true, vault: false },
+  flags: { aa: { at: NOW - 400, v: { pinned: true, mutedUntil: NOW + 60_000 } } },
+  petnames: { cc33453670c79bf3fa37635c08c8a677: { at: NOW - 300, v: "Le voisin" } },
+  blocked: { a8f8e14c20e4efd81117d54bb95c96f2: { at: NOW - 200, v: true as const } },
+};
+
+test("the preferences round-trip alongside the settings", async () => {
+  const key = await importSyncKey(KEY);
+  const opened = await openSignals(key, await sealSignals(key, SIGNALS, PREFERENCES), NOW);
+
+  assert.deepEqual(opened?.signals, SIGNALS);
+  assert.deepEqual(opened?.preferences, PREFERENCES);
+});
+
+test("a peer cannot read the preferences either", async () => {
+  // They are notes about people — petnames and blocks — carried by the very people they name.
+  const sealed = await sealSignals(await importSyncKey(KEY), SIGNALS, PREFERENCES);
+
+  assert.equal(await openSignals(await importSyncKey(OTHER_KEY), sealed, NOW), null);
+});
+
+test("every stamp in the preferences is clamped, not only the scalars'", async () => {
+  // A device whose clock is wrong would otherwise pin one petname or one block for ever, and its
+  // owner would have no way to see why the entry keeps coming back.
+  const key = await importSyncKey(KEY);
+  const far = NOW + 10 * 365 * 24 * 3600 * 1000;
+  const pinned = {
+    scalars: { at: far, disclose: true, vault: true },
+    flags: { aa: { at: far, v: { pinned: true } } },
+    petnames: { bb: { at: far, v: "Pinned" } },
+    blocked: { cc: { at: far, v: true as const } },
+  };
+
+  const opened = await openSignals(key, await sealSignals(key, SIGNALS, pinned), NOW);
+
+  assert.equal(opened?.preferences?.scalars.at, NOW);
+  assert.equal(opened?.preferences?.flags.aa.at, NOW);
+  assert.equal(opened?.preferences?.petnames.bb.at, NOW);
+  assert.equal(opened?.preferences?.blocked.cc.at, NOW);
+});
+
+test("a removal survives the round trip as a removal, not as an absence", async () => {
+  const key = await importSyncKey(KEY);
+  const tombstoned = { ...PREFERENCES, blocked: { bob: { at: NOW - 100, v: null } } };
+
+  const opened = await openSignals(key, await sealSignals(key, SIGNALS, tombstoned), NOW);
+  assert.deepEqual(opened?.preferences?.blocked, { bob: { at: NOW - 100, v: null } });
+});
+
+test("a malformed preference set is dropped without taking the settings with it", async () => {
+  // Losing one message's preferences is cheap — they are re-announced at every epoch. Letting a
+  // shape we do not recognise through to the merge is not: the merge writes to disk, and every
+  // other device would then be told the corrupt version is the newer one.
+  const key = await importSyncKey(KEY);
+
+  for (const broken of [
+    { ...PREFERENCES, scalars: { at: NOW, disclose: "yes", vault: false } },
+    { ...PREFERENCES, flags: { aa: { at: NOW, v: { pinned: "true" } } } },
+    { ...PREFERENCES, petnames: { bb: { at: "soon", v: "x" } } },
+    { ...PREFERENCES, blocked: { cc: { at: NOW, v: "true" } } },
+    { ...PREFERENCES, scalars: undefined },
+  ]) {
+    const sealed = await sealSignals(key, SIGNALS, broken as never);
+    const opened = await openSignals(key, sealed, NOW);
+
+    assert.deepEqual(opened?.signals, SIGNALS, "the settings were lost with the preferences");
+    assert.equal(opened?.preferences, undefined);
+  }
+});
+
+test("an unknown flag from a later build does not throw the conversation away", async () => {
+  // Otherwise every upgrade is a synchronisation outage for whoever upgrades second.
+  const key = await importSyncKey(KEY);
+  const ahead = { ...PREFERENCES, flags: { aa: { at: NOW, v: { pinned: true, folded: true } } } };
+
+  const opened = await openSignals(key, await sealSignals(key, SIGNALS, ahead as never), NOW);
+  assert.equal(opened?.preferences?.flags.aa.v?.pinned, true);
+});
+
+test("a snapshot past the ceiling is refused on the way out", async () => {
+  // Refused rather than truncated: half a preference set reads as a decision to clear the half
+  // that fell off the end.
+  const key = await importSyncKey(KEY);
+  const huge = {
+    ...PREFERENCES,
+    petnames: Object.fromEntries(
+      Array.from({ length: 2000 }, (_, i) => [`account${i}`, { at: NOW, v: "a name that is long" }]),
+    ),
+  };
+
+  await assert.rejects(() => sealSignals(key, SIGNALS, huge));
 });

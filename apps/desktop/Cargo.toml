@@ -44,6 +44,30 @@ zeroize.workspace = true
 # permissions rather than dependencies.
 tauri-plugin-biometric = "2"
 tauri-plugin-opener = "2.5.4"
+# The link preview, and every one of these is a deliberate line.
+#
+# `rustls` rather than the system's TLS, with `default-features = false`: the default pulls
+# `native-tls`, which on Linux means OpenSSL and its build script, and the certificate policy
+# would then differ between the three platforms this ships on. A preview that trusts a different
+# set of roots depending on the machine is not a property anybody can reason about.
+#
+# No `cookies` feature, and it is absent rather than disabled by configuration: a cookie jar in
+# this process would carry state between two sites somebody previewed, which is the tracking this
+# whole feature is written to avoid.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+# The parser, and more importantly the resolver of a relative reference against a base — an
+# `og:image` is usually relative, and joining URLs by hand is how a path traversal becomes a host
+# somebody else chose.
+url = "2"
+# `LinkPreview` crosses the IPC as JSON.
+serde = { version = "1", features = ["derive"] }
+# `lookup_host`, so the resolution happens here and its answer is what we connect to. Tauri
+# already runs on Tokio; this only names the parts this module uses.
+tokio = { version = "1", features = ["net", "time"] }
+
+[dev-dependencies]
+# `#[tokio::test]`, so the address filter can be exercised on the async path it actually runs on.
+tokio = { version = "1", features = ["macros", "rt"] }
 
 
 [features]

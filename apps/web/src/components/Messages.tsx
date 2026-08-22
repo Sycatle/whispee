@@ -930,7 +930,13 @@ export function Messages({
                           align={message.mine ? "end" : "start"}
                         />
                       ) : spoken !== null ? (
-                        <RichText text={spoken} among={members} view={view} big />
+                        // `cards` is passed here and nowhere else. A preview is a request to a
+                        // server the *sender* chose, so it discloses the reader's address the
+                        // moment it happens — which is why it may only be offered where somebody
+                        // is reading a delivered message and can press a button. The rail, the
+                        // quotations and the outbox render through the same component and do not
+                        // pass it, so none of them can produce one.
+                        <RichText text={spoken} among={members} view={view} big cards />
                       ) : null}
 
                       {/*

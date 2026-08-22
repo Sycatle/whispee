@@ -34,6 +34,7 @@
 
 pub mod cipher;
 pub mod commands;
+pub mod link;
 pub mod store;
 
 /// Starts the application.
@@ -71,6 +72,8 @@ pub fn run() {
             commands::master_present,
             commands::master_clear,
             commands::biometric_available,
+            commands::link_preview,
+            commands::link_image,
         ])
         // The vault is opened at startup and its failure is fatal: an application that starts
         // without being able to persist seems to work and loses everything on the first restart.

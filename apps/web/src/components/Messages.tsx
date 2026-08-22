@@ -681,9 +681,9 @@ export function Messages({
                   // the rail's rows, because an outline drawn outside a full-width row is clipped
                   // by the scrolling list.
                   "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)",
-                  // `relative` is load-bearing: the action bar is absolutely positioned against
-                  // this row so that it can overlap the row's top edge without reserving height
-                  // inside it. Revealing it by reflow made the thread jump under the pointer.
+                  // `group` is what reveals the action bar on hover; `relative` is what the
+                  // `before:` rule below draws against. The bar itself is an ordinary flex item
+                  // of this row now — see where it is rendered.
                   "group relative flex px-pane py-tight",
                   // Our own turns mirror the row: the lane crosses to the right and the text
                   // hangs off it. Every other `message.mine` test for layout in this file
@@ -840,7 +840,24 @@ export function Messages({
                     stack of differently-bounded pieces. */}
                 <div
                   className={cn(
-                    "min-w-0 max-w-[min(66%,var(--container-measure))] flex-1",
+                    // `flex-1` was here and had to go when the action bar joined this row.
+                    //
+                    // It made the column take its full two thirds whatever the message was, so a
+                    // three-word sentence still reserved 622px — and the bar, sitting after it,
+                    // landed six hundred pixels from the words it acts on, floating in space that
+                    // belonged to nothing. Hugging the content instead puts the bar against the
+                    // message, which is the whole point of moving it into the line.
+                    //
+                    // The two-thirds cap is untouched: `max-w` still bounds a long message, and
+                    // `min-w-0` still lets a code block scroll inside instead of stretching the
+                    // thread. What changes is only that a short message stops claiming width it
+                    // was not using. The row's own `flex-row-reverse` keeps our turns on the
+                    // right without the column having to fill anything.
+                    //
+                    // The bar now moves with the length of each message, and that is invisible in
+                    // practice: it is revealed by hovering one row, so two are never on screen at
+                    // once and there is no line for the eye to compare against.
+                    "min-w-0 max-w-[min(66%,var(--container-measure))]",
                     // prose ragged-left when it hangs off a right-hand avatar.
                     message.mine && "text-right",
 
@@ -1034,48 +1051,55 @@ export function Messages({
                   // `data-state="open"` for as long as the panel is up, which is exactly the
                   // condition wanted.
                   className={cn(
-                    "absolute z-(--z-index-sticky) flex items-center gap-tight rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-tight text-body shadow-menu opacity-0 transition-opacity duration-(--duration-quick) ease-out group-focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100 motion-reduce:transition-none touch:opacity-100",
-                    // under the message, on the same side for everybody.
+                    // **In the row's flow, beside the message, and wearing nothing.**
                     //
-                    // Anchoring it per author was the first answer to the mirrored layout — the
-                    // bar had to leave `right-pane`, where it was landing on the name and the
-                    // hour of our own turns. Moving it below sidesteps the collision without
-                    // making the control's position depend on who spoke, which is one less thing
-                    // for the eye to track.
+                    // Three arrangements came before this one and each hid something. `-bottom-3`
+                    // anchored the bar's bottom edge under the row, so its 36px climbed back up
+                    // and covered 13 of the 20 pixels the sentence occupies. `top-full
+                    // -translate-y-2` put it below the row instead, which moved the damage rather
+                    // than removing it: thread rows are contiguous, so 28px landed on the row
+                    // *below* — enough to hide an attachment's file name outright. Reserving that
+                    // space with padding fixed the overlap and cost every row 40px of height,
+                    // hovered or not, which made the thread read as a list of separated cards.
                     //
-                    // `top-full` and not `-bottom-3`, which was the obvious spelling and the
-                    // wrong one: `bottom: -12px` anchors the bar's *bottom* edge just under the
-                    // row, so its 35px of height climb back up into the row and cover 13 of the
-                    // 20 pixels the sentence occupies. A control that hides the message it acts
-                    // on is worse than one in the wrong corner. Measured, not guessed.
+                    // All three were arguments about where to put an element that was out of
+                    // flow. The row is already a flex row whose only child is the message, and
+                    // the message is at most two thirds of the width — so there is empty space
+                    // beside it, on the side the sender is not. Put the bar there and it costs
+                    // **width that was already empty and no height at all**. `flex-row-reverse`
+                    // on our own turns carries it across without a second rule, which is what
+                    // that line on the row means by "every other `message.mine` test follows
+                    // from this one".
                     //
-                    // Anchoring the top edge to the row's bottom puts the whole bar below it.
-                    // `-translate-y-2` pulls it back by 8px, which stays inside the row's own
-                    // `py-tight` padding and never reaches the text.
+                    // No border, no ground, no shadow. Those said "a surface has opened over the
+                    // conversation", which was true of a floating bar and is a lie about one
+                    // sitting in the line. What is left is seven glyphs at the size the rest of
+                    // the interface uses for a control inside a row.
+                    "flex items-center gap-tight self-start opacity-0 transition-opacity duration-(--duration-quick) ease-out group-focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100 motion-reduce:transition-none touch:opacity-100",
+                    // **Centred on the message's first line, not on the row.**
                     //
-                    // What this still trades, and it is the objection written at the top of this
-                    // block: the bar now overlaps the first 27px of the row *below*, so it covers
-                    // the next speaker's avatar and name — where the reader is heading rather
-                    // than where they have been. `-top-3` made the same trade upwards.
-                    "top-full -translate-y-2",
-                    // flush with the message's own edge, not the pane's.
+                    // `self-start` alone aimed at whatever the row began with, and that is not
+                    // the same thing twice: a turn that opens with a name and an hour put the bar
+                    // beside *those*, while a continuation put it beside the words. Measured at
+                    // 129 against 149 on one row and 307 against 307 on the next — two different
+                    // targets, which is what made a column of them read as ragged.
                     //
-                    // Against the pane's wall it read as chrome belonging to the window rather
-                    // than to the sentence. The offset is the lane plus the row's padding — that
-                    // is, exactly where the text column begins — so the bar lines up with the
-                    // first character of a received turn and the last of one of ours.
+                    // So the bar is offset by exactly what sits above the body. `continues` is
+                    // the same flag that decides whether that header is rendered at all, which is
+                    // what keeps the two from drifting apart: there is no second condition to
+                    // remember.
                     //
-                    // Both distances are tokens, which is why `--spacing-lane` exists: the same
-                    // number written here and in `LANE` would drift on the first change of lane
-                    // width, and report it by looking slightly wrong rather than by failing.
+                    // The numbers are the line and the button. A line of the thread is 20px and
+                    // the bar is 28 — `IconButton size="sm"` is a 20px glyph with `p-tight` round
+                    // it — so centring one on the other is a 4px lift, and a header adds one line
+                    // above. Hence 16 with a header and −4 without. The lift is inside the row's
+                    // own `py-tight`, so nothing crosses into the row above.
                     //
-                    // What this still is: a position computed from the column rather than taken
-                    // from it. Anchoring the bar inside the text element would need no arithmetic
-                    // at all, and is the better shape once that element stops also being the
-                    // thing that holds the header and the reactions.
-                    message.mine
-                      ? "right-[calc(var(--spacing-pane)+var(--spacing-lane))]"
-                      : "left-[calc(var(--spacing-pane)+var(--spacing-lane))]",
+                    // `shrink-0` because it must not be squeezed by a message that wants the
+                    // whole two thirds — it would fold its glyphs onto two lines and grow the
+                    // row, which is the height this arrangement exists to not spend.
+                    "shrink-0",
+                    continues ? "-mt-1" : "mt-4",
                   )}
                   data-actions
                 >

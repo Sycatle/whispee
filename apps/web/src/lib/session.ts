@@ -420,7 +420,10 @@ export class Session {
     // receipt and the typing indicator have refused since they were written.
     if (!this.callsAllowed()) return Promise.resolve();
 
-    return this.calls.place(view.key, this.accountId);
+    // `accounts` is the people on the other side, us excluded — see `membersOf`. It is exactly
+    // the number of refusals it takes before there is nobody left to wait for, and the slice
+    // cannot work it out on its own: it holds a group id and nothing that knows what a group is.
+    return this.calls.place(view.key, this.accountId, view.accounts.length);
   }
 
   /** Answers a ringing call. */
@@ -2348,7 +2351,13 @@ export class Session {
     if (signal === undefined) return;
 
     if (signal.kind === "call") {
-      this.calls.absorb(signal.event, signal.call, signal.device, this.deviceId);
+      this.calls.absorb(
+        signal.event,
+        signal.call,
+        signal.device,
+        this.deviceId,
+        signal.account,
+      );
       return;
     }
 

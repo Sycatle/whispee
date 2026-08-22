@@ -123,6 +123,20 @@ export class Calls {
    * It decides one thing only: who writes the conclusion to the thread. See {@link hang}.
    */
   private placed = false;
+  /**
+   * How many accounts this call is waiting on, and which of them have said no.
+   *
+   * A refusal ends a call between two people, and that is the only shape this used to handle: one
+   * `declined` frame, one hang-up. In a group of three it is wrong — Bob refusing while Carol is
+   * still ringing would end the call for Carol too, who would go on ringing into a room nobody
+   * is left in.
+   *
+   * Counted by **account** rather than by device, because an account rings on all of its devices
+   * and a busy one of them declines on its own. Three refusals from three devices of one person
+   * are one person saying no.
+   */
+  private awaited = 0;
+  private declined = new Set<string>();
   // Assigned in the body rather than declared as a parameter property: the test runner strips
   // types without transforming, and a parameter property is a transform.
   private ports: CallPorts;
@@ -148,11 +162,16 @@ export class Calls {
    * making it wait on a media server would mean a slow server delays the ring rather than the
    * audio.
    */
-  async place(group: string, from: string): Promise<void> {
+  async place(group: string, from: string, awaited: number): Promise<void> {
     if (this.busy()) return;
 
     const call = newCallId();
     this.placed = true;
+    // How many accounts have to refuse before there is nobody left to wait for. Required rather
+    // than optional: a caller that forgot it would get zero, and zero means the first refusal
+    // ends the call — the group bug this exists to close, reintroduced by an omission.
+    this.awaited = Math.max(1, awaited);
+    this.declined = new Set();
     this.state = { ...IDLE, phase: "dialling", call, group, from, since: this.ports.now() };
     this.ports.changed();
 
@@ -180,6 +199,11 @@ export class Calls {
     }
 
     this.placed = false;
+    // The person who rang is the one being waited on. The other members of a group may join or
+    // not; nothing about this device's ringing depends on them, and if the caller gives up, the
+    // silence timeout is what ends it here.
+    this.awaited = 1;
+    this.declined = new Set();
     this.state = { ...IDLE, phase: "incoming", call, group, from, since: this.ports.now() };
     this.heard = this.ports.now();
     this.ports.signal(group, "ringing", call);
@@ -253,7 +277,13 @@ export class Calls {
    * a frame that never arrives costs at most a timeout. The channel authenticates the group and
    * not the member — see `signals.ts` — so nothing below may be allowed to matter more than that.
    */
-  absorb(event: CallSignalEvent, call: string, device: string, ours: string): void {
+  absorb(
+    event: CallSignalEvent,
+    call: string,
+    device: string,
+    ours: string,
+    account: string,
+  ): void {
     if (call !== this.state.call || device === ours) return;
 
     this.heard = this.ports.now();
@@ -263,7 +293,17 @@ export class Calls {
       case "left":
         // Only meaningful while nobody has connected: once in a room, the media layer is what
         // says who is present, and it says it from what it observes rather than from a claim.
-        if (this.state.connectedAt === 0) void this.hang();
+        if (this.state.connectedAt !== 0) return;
+
+        // **One refusal is not the end of a group call.** Bob saying no while Carol is still
+        // ringing has to leave Carol ringing; ending it there would hang up on a person who was
+        // about to answer, on behalf of somebody who declined for themselves.
+        //
+        // The set is what makes this idempotent: a repeated frame, or two devices of one account
+        // declining, must not count twice — with two correspondents that would end the call on
+        // one person's refusal, which is the bug written the other way round.
+        this.declined.add(account);
+        if (this.declined.size >= this.awaited) void this.hang();
         return;
 
       case "accepted":

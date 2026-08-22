@@ -95,7 +95,7 @@ function harness(options: { failJoin?: boolean } = {}): Recorder {
 
 test("an outgoing call rings before it is a call", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
 
   // In the room, and nobody has answered. Reporting that as a call in progress would start a
   // duration counter over a phone that is still ringing.
@@ -113,7 +113,7 @@ test("an outgoing call rings before it is a call", async () => {
  */
 test("a call becomes a call when somebody else is actually in the room", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
 
   h.observe(["peer-1"]);
 
@@ -123,7 +123,7 @@ test("a call becomes a call when somebody else is actually in the room", async (
 
 test("an accepted call sends nothing durable until it ends, and then its duration", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
 
   h.advance(65_000);
@@ -141,7 +141,7 @@ test("an accepted call sends nothing durable until it ends, and then its duratio
  */
 test("a call nobody answers is announced as missed by the caller", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
 
   h.advance(RING_TIMEOUT_MS);
   h.calls.tick();
@@ -164,7 +164,7 @@ test("refusing a call writes nothing to the thread", async () => {
 
 test("an incoming call is refused while another is in progress", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
 
   h.calls.receive("other", "aabbccdd", "carol");
@@ -193,7 +193,7 @@ test("a ringing device gives up on a caller that went quiet", async () => {
 
 test("a live call is not given up on for silence, only for a lost connection", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
 
   h.advance(ALIVE_TIMEOUT_MS * 10);
@@ -205,7 +205,7 @@ test("a live call is not given up on for silence, only for a lost connection", a
 
 test("the last participant leaving ends the call", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
 
   h.observe([]);
@@ -222,7 +222,7 @@ test("the last participant leaving ends the call", async () => {
  */
 test("a call that cannot reach the media server ends instead of hanging", async () => {
   const h = harness({ failJoin: true });
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
 
   assert.equal(h.calls.current().phase, "idle");
   assert.deepEqual(h.announced, ["invite", "missed"]);
@@ -230,7 +230,7 @@ test("a call that cannot reach the media server ends instead of hanging", async 
 
 test("hanging up twice is a thing interfaces do", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
 
   await h.calls.hang();
@@ -282,10 +282,10 @@ test("a callee whose room empties writes no conclusion either", async () => {
 
 test("a frame about another call is ignored", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
 
-  h.calls.absorb("left", "not-this-call", "their-device", "our-device");
+  h.calls.absorb("left", "not-this-call", "their-device", "our-device", "bob");
 
   assert.equal(h.calls.current().phase, "connected");
 });
@@ -298,7 +298,7 @@ test("our own frames are ignored", async () => {
   const h = harness();
   h.calls.receive("group", "9f2c41ab", "bob");
 
-  h.calls.absorb("declined", "9f2c41ab", "our-device", "our-device");
+  h.calls.absorb("declined", "9f2c41ab", "our-device", "our-device", "alice");
 
   assert.equal(h.calls.current().phase, "incoming");
 });
@@ -309,10 +309,10 @@ test("our own frames are ignored", async () => {
  */
 test("a left frame cannot end a call that is already connected", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
 
-  h.calls.absorb("left", h.calls.current().call, "their-device", "our-device");
+  h.calls.absorb("left", h.calls.current().call, "their-device", "our-device", "bob");
   await settle();
 
   assert.equal(h.calls.current().phase, "connected");
@@ -320,11 +320,75 @@ test("a left frame cannot end a call that is already connected", async () => {
 
 test("muting is announced and remembered", async () => {
   const h = harness();
-  await h.calls.place("group", "alice");
+  await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
 
   await h.calls.mute(true);
 
   assert.equal(h.calls.current().muted, true);
   assert.ok(h.signals.some((entry) => entry.startsWith("muted:")));
+});
+
+/**
+ * **One refusal is not the end of a group call.**
+ *
+ * The rule used to be "a `declined` frame ends a ringing call", which is right with one
+ * correspondent and wrong with two: Bob saying no while Carol is still ringing would hang up on
+ * Carol, on behalf of somebody who declined only for themselves.
+ */
+test("in a group, one refusal leaves the call ringing for the others", async () => {
+  const h = harness();
+  await h.calls.place("group", "alice", 2);
+  const call = h.calls.current().call;
+
+  h.calls.absorb("declined", call, "bob-device", "our-device", "bob");
+  await settle();
+
+  assert.equal(h.calls.current().phase, "ringing", "Carol was hung up on by Bob's refusal");
+});
+
+test("a call ends once everybody it was waiting on has refused", async () => {
+  const h = harness();
+  await h.calls.place("group", "alice", 2);
+  const call = h.calls.current().call;
+
+  h.calls.absorb("declined", call, "bob-device", "our-device", "bob");
+  h.calls.absorb("declined", call, "carol-device", "our-device", "carol");
+  await settle();
+
+  assert.equal(h.calls.current().phase, "idle");
+  assert.deepEqual(h.announced, ["invite", "missed"]);
+});
+
+/**
+ * An account rings on all of its devices, and a busy one declines on its own. Counting refusals
+ * by device would let one person's second phone stand in for a second person — which, with two
+ * correspondents, ends the call on one refusal: the same bug, written the other way round.
+ */
+test("two devices of one person refusing are one person refusing", async () => {
+  const h = harness();
+  await h.calls.place("group", "alice", 2);
+  const call = h.calls.current().call;
+
+  h.calls.absorb("declined", call, "bob-phone", "our-device", "bob");
+  h.calls.absorb("declined", call, "bob-laptop", "our-device", "bob");
+  await settle();
+
+  assert.equal(h.calls.current().phase, "ringing", "one person counted as two");
+});
+
+/**
+ * A one-to-one is the case that already worked, and it has to keep working: with a single
+ * correspondent, their refusal is the end of it and the caller should not sit through the full
+ * ring timeout to find out.
+ */
+test("with one correspondent, their refusal still ends the call at once", async () => {
+  const h = harness();
+  await h.calls.place("group", "alice", 1);
+  const call = h.calls.current().call;
+
+  h.calls.absorb("declined", call, "bob-device", "our-device", "bob");
+  await settle();
+
+  assert.equal(h.calls.current().phase, "idle");
 });

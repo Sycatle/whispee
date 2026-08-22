@@ -40,6 +40,17 @@ export interface AttachmentViewerProps extends Omit<ViewerProps, "mode"> {
   /** The viewer for `kind`, resolved by the caller — this file never maps kinds to components. */
   children: (props: ViewerProps & { scale: number }) => React.ReactNode;
   onClose: () => void;
+  /** Writes the original bytes to disk. The viewer shows a re-encoding; this is the file. */
+  onSave: () => void;
+}
+
+/** A byte count a person can read. Third copy in the tree, and the note in `Conversation.tsx`
+ *  explains why: three ranges and no decimals below a megabyte is four lines, and exporting it
+ *  would make a component module a utility module. */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} kB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 export function AttachmentViewer({
@@ -48,8 +59,16 @@ export function AttachmentViewer({
   kind,
   onRefused,
   onClose,
+  onSave,
   children,
 }: AttachmentViewerProps) {
+  // What the decoder found, reported by the viewer through `onMeta`.
+  //
+  // Read from the viewer and not off the DOM, which was the first attempt and was wrong: an
+  // `<img>` reports the size of the re-encoding it was handed, so a 5016×5016 photograph
+  // announced itself as 4096×4096 — our own thumbnail's size, stated as the file's. The size a
+  // reader is shown has to be the one that was decoded.
+  const [meta, setMeta] = useState<{ width: number; height: number } | null>(null);
   const [step, setStep] = useState(0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
 
@@ -119,10 +138,27 @@ export function AttachmentViewer({
         if (!next) onClose();
       }}
       title={name}
-      description={zoomable ? "Use + and − to zoom, arrow keys to pan, 0 to reset." : undefined}
+      // Where the file's own facts live now. They were under the thumbnail, in the thread, where
+      // they described the furniture rather than the subject; here they are what somebody came
+      // to look at, and the resolution is only knowable once something has been decoded.
+      description={[
+        meta === null ? null : `${meta.width} × ${meta.height}`,
+        formatSize(blob.size),
+        zoomable ? "Use + and − to zoom, arrow keys to pan, 0 to reset." : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")}
       actions={
-        zoomable ? (
-          <div className="flex items-center gap-snug">
+        <div className="flex items-center gap-snug">
+          {/* The visible route to the real bytes. `lib/preview.ts` requires one beside every
+              preview — what is on screen is a re-encoding, and the download is the file. It is
+              here rather than under the thumbnail because this is where there is room for it and
+              where somebody has already said they want a closer look. */}
+          <Button variant="secondary" onClick={onSave}>
+            Save original
+          </Button>
+          {zoomable ? (
+            <div className="flex items-center gap-snug">
             {/* Buttons and not only the wheel or a pinch. Those are shortcuts for the people who
                 have them; a control that exists only as a gesture does not exist for a keyboard
                 or for a trackpad nobody has configured. */}
@@ -141,8 +177,9 @@ export function AttachmentViewer({
             <span aria-live="polite" className="text-caption text-(--color-ink-muted)">
               {Math.round(scale * 100)}%
             </span>
-          </div>
-        ) : undefined
+            </div>
+          ) : null}
+        </div>
       }
     >
       {/* No role and no tab stop: what a reader needs to know about the zoom is in the sheet's
@@ -156,7 +193,7 @@ export function AttachmentViewer({
           // asked the system for less of that.
           className="transition-transform duration-(--duration-quick) ease-out motion-reduce:transition-none"
         >
-          {children({ blob, name, mode: "full", onRefused, scale })}
+          {children({ blob, name, mode: "full", onRefused, onMeta: setMeta, scale })}
         </div>
       </div>
     </Sheet>

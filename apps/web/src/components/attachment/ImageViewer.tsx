@@ -55,7 +55,7 @@ function reasonFor(refusal: Refusal): string {
   }
 }
 
-export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
+export function ImageViewer({ blob, name, mode, onRefused, onMeta }: ViewerProps) {
   const [preview, setPreview] = useState<Preview | null>(null);
 
   // An unrevoked `blob:` URL keeps the decoded-derived pixels alive for the life of the document.
@@ -82,6 +82,9 @@ export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
 
       if (decoded.ok) {
         setPreview(decoded.preview);
+        // The decoded size, not the re-encoded one. `preview.source` exists precisely because
+        // this is the last point at which it is known.
+        onMeta?.(decoded.preview.source);
         return;
       }
 
@@ -120,13 +123,25 @@ export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
           setPreview(null);
           onRefused("The preview could not be shown here. The file itself is unaffected.");
         }}
-        // `max-h-screen` and not `max-h-full` on the full path: the wrapper around this is what
-        // the zoom transform is applied to, so a height bounded by the *parent* would fight the
-        // scale instead of being magnified by it.
+        // Inline, an image is a thumbnail and not the picture. It used to take the full width of
+        // the text column, which put a 533px square in the middle of a conversation and pushed
+        // everything said around it off the screen — an attachment is one line of a thread, and
+        // it should cost about what a few lines of text cost.
+        //
+        // Bounded on the *height* rather than the width, because the width is already bounded by
+        // the column and the shape that actually breaks a thread is the tall one: a screenshot of
+        // a phone is narrow and endless, and `max-w` does nothing to it. `w-auto` keeps the ratio.
+        //
+        // Full screen is the other half of the same decision. The thumbnail can be small because
+        // one click makes it as large as the screen allows — see `AttachmentViewer`.
+        //
+        // `max-h-screen` and not `max-h-full` on that path: the wrapper around this is what the
+        // zoom transform is applied to, so a height bounded by the *parent* would fight the scale
+        // instead of being magnified by it.
         className={
           mode === "full"
             ? "mx-auto h-auto max-h-screen max-w-full object-contain"
-            : "h-auto max-w-full rounded-bubble"
+            : "h-auto max-h-[14rem] w-auto max-w-full rounded-bubble object-contain"
         }
       />
 

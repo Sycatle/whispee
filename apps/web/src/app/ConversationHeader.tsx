@@ -17,10 +17,11 @@ import { Input } from "@/ui/Input";
 import { Sheet } from "@/ui/Sheet";
 import { Tooltip } from "@/ui/Tooltip";
 import { useNames } from "@/state/names";
+import { useDetail } from "@/state/detail";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { useBinding } from "@/app/Shortcuts";
-import { useNavigate, useRoute } from "@/routes/Router";
+import { useNavigate } from "@/routes/Router";
 
 /**
  * The bar that names the conversation, and the controls that act on the conversation as a whole.
@@ -68,20 +69,17 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
   const session = useSession();
   const bump = useBump();
   const report = useReport();
-  const route = useRoute();
   const navigate = useNavigate();
   const duo = useDuo();
   const trio = useTrio();
   const names = useNames();
 
-  const detailOpen = route.kind === "conversation" && route.detail !== undefined;
+  const { detail, open, close } = useDetail();
+  const detailOpen = detail !== undefined;
 
   const toggleDetail = () => {
-    if (detailOpen) {
-      navigate({ kind: "conversation", key: view.key });
-      return;
-    }
-    navigate({ kind: "conversation", key: view.key, detail: {} });
+    if (detailOpen) close();
+    else open();
   };
 
   // The keyboard route into the detail column. It is a navigation like the button, so it lands

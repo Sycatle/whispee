@@ -4,6 +4,8 @@ import { AttachmentViewer } from "@/components/attachment/AttachmentViewer";
 import { ImageViewer } from "@/components/attachment/ImageViewer";
 import type { AttachmentRef } from "@/lib/attachments";
 import { type ViewerKind, type ViewerProps, chooseViewer } from "@/lib/viewer";
+import { cn } from "@/ui/cn";
+import { ContextMenu } from "@/ui/ContextMenu";
 import { Icon } from "@/ui/Icon";
 import { Spinner } from "@/ui/Spinner";
 
@@ -60,9 +62,21 @@ const VIEWERS: Partial<Record<ViewerKind, (props: ViewerProps) => React.ReactNod
 export function Attachment({
   attachment,
   onOpen,
+  align = "start",
 }: {
   attachment: AttachmentRef;
   onOpen: () => Promise<Blob>;
+  /**
+   * Which edge the rows hang from.
+   *
+   * A prop and not a selector reaching in from `Messages.tsx`. That is how it was done first —
+   * `[&_button.flex]:justify-end` on the row — and it worked for exactly one of the four things
+   * in here: `text-right` is inherited and reaches text nodes, but the file name and the preview
+   * are a flex button and an image, and both stayed against the left edge of a right-aligned
+   * message. A component that has to be styled from outside by guessing at its markup is a
+   * component that is styled wrongly the first time its markup changes.
+   */
+  align?: "start" | "end";
 }) {
   const [busy, setBusy] = useState(false);
   // Whether the open blob is filling the screen or sitting under the message. One flag and not a
@@ -75,6 +89,9 @@ export function Attachment({
   const [refused, setRefused] = useState<string | null>(null);
 
   const kind = chooseViewer(attachment.mime, attachment.name);
+  // True once something is actually on screen for this file. Not `opened !== null` alone: a
+  // viewer that refused sets `refused` and unmounts, and the name has to come back with it.
+  const shown = opened !== null && refused === null;
   const Viewer = kind === null ? undefined : VIEWERS[kind];
   const offer = Viewer !== undefined && opened === null && refused === null;
 
@@ -133,8 +150,10 @@ export function Attachment({
     }
   };
 
-  return (
-    <div className="space-y-tight">
+  const body = (
+    // A flex column rather than `space-y-*`, because the rows have to be aligned as well as
+    // spaced, and `items-*` is what says which edge they hang from.
+    <div className={cn("flex flex-col gap-tight", align === "end" ? "items-end" : "items-start")}>
       {Viewer !== undefined && opened !== null && (
         <>
           {/* A picture is its own affordance: clicking it opens it, and an "Enlarge" link beside
@@ -174,6 +193,7 @@ export function Attachment({
               kind={kind}
               onRefused={refuse}
               onClose={() => setFull(false)}
+              onSave={() => void download()}
             >
               {/* The sheet is handed the component rather than the kind: this file is the only
                   one that maps one to the other, and `AttachmentViewer` stays a frame that can
@@ -184,39 +204,63 @@ export function Attachment({
         </>
       )}
 
-      <button
-        type="button"
-        onClick={download}
-        disabled={busy}
-        aria-busy={busy}
-        className="flex items-center gap-snug text-left underline disabled:opacity-60"
-      >
-        {/* The paperclip was a literal 📎, drawn by whatever emoji font the platform ships: blue
-            on Windows, flat grey on Linux, and a tofu box in a container with no emoji font at
-            all. The Lucide glyph is `currentColor` and the same shape everywhere.
+      {/* Under a preview, the row is the picture and nothing else.
 
-            The spinner takes the icon's slot rather than sitting beside it. Both are 16 px, so
-            the label does not move when the download starts — and the busy mark lands on the
-            control that is actually working. */}
-        {busy ? <Spinner /> : <Icon name="attach" />}
-        <span className="break-all">{attachment.name}</span>
-      </button>
+          The name, the size and the download all used to sit beneath it, and together they said
+          more about the file than the file said about itself — a thread of photographs read as a
+          list of file names with pictures attached. None of the three is information somebody
+          scanning a conversation is looking for.
 
-      {offer && (
-        <button
-          type="button"
-          onClick={show}
-          disabled={busy}
-          className="text-caption text-(--color-ink-muted) underline disabled:opacity-60"
-        >
-          {kind === "image" ? "Show image" : "Show contents"}
-        </button>
+          They are not gone, they have moved to where they are the subject rather than the
+          furniture: the context menu on this row, and the viewer, which has both the room to
+          state them and a reason to. `lib/preview.ts` requires that the real bytes stay
+          reachable beside every preview — a preview is a look at the file, not the file — and the
+          viewer is where "beside" now is.
+
+          The menu is deliberately not the only route. `ui/ContextMenu.tsx` says why: a menu that
+          is the sole way to reach something is hidden behind a gesture that does not exist on
+          touch and is invisible to a screen reader. Clicking the picture opens the viewer, and
+          the viewer carries a real button. */}
+      {!shown && (
+        <>
+          <button
+            type="button"
+            onClick={download}
+            disabled={busy}
+            aria-busy={busy}
+            className={cn(
+              "flex items-center gap-snug underline disabled:opacity-60",
+              align === "end" ? "text-right" : "text-left",
+            )}
+          >
+            {/* The paperclip was a literal 📎, drawn by whatever emoji font the platform ships:
+                blue on Windows, flat grey on Linux, and a tofu box in a container with no emoji
+                font at all. The Lucide glyph is `currentColor` and the same shape everywhere.
+
+                The spinner takes the icon's slot rather than sitting beside it. Both are 16 px,
+                so the label does not move when the download starts — and the busy mark lands on
+                the control that is actually working. */}
+            {busy ? <Spinner /> : <Icon name="attach" />}
+            <span className="break-all">{attachment.name}</span>
+          </button>
+
+          {offer && (
+            <button
+              type="button"
+              onClick={show}
+              disabled={busy}
+              className="text-caption text-(--color-ink-muted) underline disabled:opacity-60"
+            >
+              {kind === "image" ? "Show image" : "Show contents"}
+            </button>
+          )}
+
+          <p className="text-caption text-(--color-ink-muted)">
+            {formatSize(attachment.size)}
+            {busy && " — decrypting…"}
+          </p>
+        </>
       )}
-
-      <p className="text-caption text-(--color-ink-muted)">
-        {formatSize(attachment.size)}
-        {busy && " — decrypting…"}
-      </p>
 
       {refused !== null && <p className="text-caption text-(--color-ink-muted)">{refused}</p>}
 
@@ -226,5 +270,39 @@ export function Attachment({
         </p>
       )}
     </div>
+  );
+
+  /**
+   * The file's own actions, on the file.
+   *
+   * Nested inside the row's menu, which is the pattern `Messages.tsx` already uses for the author
+   * card: Radix hands the event to the innermost trigger, so right-clicking a picture asks about
+   * the picture and right-clicking the sentence beside it asks about the message.
+   *
+   * Everything here is reachable without it — clicking the thumbnail opens the viewer, and the
+   * viewer carries both actions as buttons. That is the rule `ui/ContextMenu.tsx` states: this is
+   * a shortcut to what is already there, never the only way to it.
+   */
+  return (
+    <ContextMenu trigger={body}>
+      <ContextMenu.Item
+        icon="search"
+        // Only where there is something to enlarge. An entry that opens an empty frame is worse
+        // than an entry that is not there.
+        disabled={Viewer === undefined || busy}
+        onSelect={() => {
+          if (opened !== null) setFull(true);
+          else void show().then(() => setFull(true));
+        }}
+      >
+        Open larger
+      </ContextMenu.Item>
+
+      <ContextMenu.Item icon="attach" disabled={busy} onSelect={() => void download()}>
+        {/* "Original size" because the viewer shows a re-encoding: one frame of an animation, no
+            colour profile, no metadata. The distinction is the whole reason both entries exist. */}
+        Save to device — original size
+      </ContextMenu.Item>
+    </ContextMenu>
   );
 }

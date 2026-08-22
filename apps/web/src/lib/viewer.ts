@@ -74,6 +74,15 @@ export interface ViewerProps {
   mode: "inline" | "full";
   /** Called when the bytes did not survive this viewer's decoder. Wording reaches the user. */
   onRefused: (message: string) => void;
+  /**
+   * What the decoder found, once it has found it. Optional: a viewer with nothing to report
+   * simply never calls it.
+   *
+   * The frame around a viewer cannot read this off the DOM. An `<img>` reports the size of the
+   * re-encoding it was given, which for a large photograph is the thumbnail's size and not the
+   * file's — so a frame that measured its own child would confidently state the wrong numbers.
+   */
+  onMeta?: (meta: { width: number; height: number }) => void;
 }
 
 /** Strips the parameters (`; charset=…`) and the casing a sender may have used. */

@@ -4,6 +4,7 @@ import { PresenceBadge, PresenceLine } from "@/components/Presence";
 import { handleOf, nameOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { useNavigate } from "@/routes/Router";
+import { useDetail } from "@/state/detail";
 import { useNames } from "@/state/names";
 import { useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
@@ -48,6 +49,7 @@ export function MiniProfile({
   const session = useSession();
   const names = useNames();
   const navigate = useNavigate();
+  const { open: openDetail } = useDetail();
   const [open, setOpen] = useState(false);
 
   const name = nameOf(handle, names);
@@ -97,7 +99,7 @@ export function MiniProfile({
             size="sm"
             onClick={() => {
               setOpen(false);
-              navigate({ kind: "conversation", key: view.key, detail: { handle } });
+              openDetail(handle);
             }}
           >
             View full profile

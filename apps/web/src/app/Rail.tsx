@@ -24,6 +24,7 @@ import { Tooltip } from "@/ui/Tooltip";
 import { cn } from "@/ui/cn";
 import { useTheme } from "@/lib/theme";
 import { useNames } from "@/state/names";
+import { useDetail } from "@/state/detail";
 import { useReport } from "@/state/report";
 import { useBump, useRevision, useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
@@ -200,6 +201,9 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
   const route = useRoute();
   const navigate = useNavigate();
   const { theme, setTheme } = useTheme();
+  // Renamed on the way in: `open` is already a section's disclosure state in this file, and two
+  // things called `open` in one component is how the wrong one gets called.
+  const { open: openDetail } = useDetail();
   const [searching, setSearching] = useState(false);
   const [erasing, setErasing] = useState(false);
   /**
@@ -472,16 +476,11 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     data-row={view.key}
                     tabIndex={rows.at === view.key ? 0 : -1}
                     onClick={() =>
-                      navigate({
-                        kind: "conversation",
-                        key: view.key,
-                        // Switching conversation keeps the detail column as it was. That is what
-                        // Discord does and what people expect: the column is a mode you are in,
-                        // not a property of the thread you left.
-                        ...(route.kind === "conversation" && route.detail
-                          ? { detail: {} }
-                          : {}),
-                      })
+                      // Switching conversation keeps the detail column as it was — the column
+                      // is a mode you are in, not a property of the thread you left. That used
+                      // to need spreading the old route's detail into the new one; now the
+                      // column is state beside the route and simply does not move.
+                      navigate({ kind: "conversation", key: view.key })
                     }
                     // `aria-current` rather than the highlight alone: the selected conversation is a
                     // fact about where you are, and a background colour states it only to whoever can
@@ -580,7 +579,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     <ContextMenu.Item
                       icon="info"
                       onSelect={() =>
-                        navigate({ kind: "conversation", key: view.key, detail: {} })
+                        openDetail()
                       }
                     >
                       Conversation details

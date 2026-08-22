@@ -63,6 +63,7 @@ import { nextExpiry } from "@/lib/signals";
 import { layout, textOf } from "@/lib/thread";
 import { useRoving } from "@/lib/useRoving";
 import { useNavigate } from "@/routes/Router";
+import { useDetail } from "@/state/detail";
 import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
@@ -702,7 +703,7 @@ export function Messages({
 
                     Nothing here for our own turns: the card it would open is a verification
                     panel, and there is nothing to verify about the key this device holds. */}
-                <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
+                <AuthorMenu handle={authorOf(message)} mine={message.mine}>
                 {/* Marked only where the mark leads somewhere. `AuthorMenu` renders nothing of
                     its own for our own turns, so underlining our name on hover would promise a
                     menu that is not there — an affordance for an action that does not exist. */}
@@ -765,25 +766,31 @@ export function Messages({
                 </div>
                 </AuthorMenu>
 
-                {/* `max-w-measure`: the lane holds the text, and text has a width past which it
-                    stops being comfortable to read. See `--container-measure` in `index.css`.
+                {/* Two ceilings, and the smaller one wins.
+ 
+                    `--container-measure` is the reading one: text has a width past which it stops
+                    being comfortable, and that does not change with the layout around it.
+ 
+                    Two thirds is the *mirroring* one, and it exists because of the axis. An
+                    alignment says whose turn this is by which side it hangs from, and it can only
+                    say that if the other side is visibly empty. A turn allowed to fill the pane
+                    reaches both walls at once and the asymmetry disappears exactly when the
+                    message is long enough for somebody to have to look. On a narrow pane the
+                    measure never binds, so without this the mirroring would quietly stop working
+                    on the window where it is needed most.
+ 
+                    `min()` rather than a choice between them: on a wide pane the measure is the
+                    tighter of the two and stays in charge, on a narrow one the fraction is.
+ 
                     On the lane rather than on the paragraph, so the name, the hour, the quoted
                     reply and the reactions all stop at the same edge — a column, not a ragged
                     stack of differently-bounded pieces. */}
                 <div
                   className={cn(
-                    "min-w-0 max-w-measure flex-1",
+                    "min-w-0 max-w-[min(66%,var(--container-measure))] flex-1",
                     // prose ragged-left when it hangs off a right-hand avatar.
                     message.mine && "text-right",
-                    // `text-right` reaches text nodes and not flex containers, and an
-                    // attachment's rows are full-width flex — they stay left without this.
-                    //
-                    // Reaching into a child component's markup from here is coupling, and it is
-                    // written down as such rather than left to be discovered: the honest fix is
-                    // an `align` prop on `Attachment`. It is deferred because that component is
-                    // being restructured for the text, audio and PDF viewers, and adding the
-                    // prop now would mean adding it twice.
-                    message.mine && "[&_button.flex]:justify-end",
+
                   )}
                 >
                   {/* The name is announced once per turn, not once per line: a burst of three
@@ -796,7 +803,7 @@ export function Messages({
                         message.mine && "flex-row-reverse",
                       )}
                     >
-                      <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
+                      <AuthorMenu handle={authorOf(message)} mine={message.mine}>
                         {/* A real button, because the underline promises one. It is the only tab
                             stop the pair adds, and it lands once per turn rather than once per
                             message — the name is drawn only when the speaker changes. */}
@@ -872,6 +879,7 @@ export function Messages({
                         <Attachment
                           attachment={attachment}
                           onOpen={() => session.openAttachment(view, attachment)}
+                          align={message.mine ? "end" : "start"}
                         />
                       ) : spoken !== null ? (
                         <MentionText text={spoken} among={members} view={view} big />
@@ -1252,16 +1260,15 @@ export function Messages({
  */
 function AuthorMenu({
   handle,
-  view,
   mine,
   children,
 }: {
   handle: string | null;
-  view: ConversationView;
   mine: boolean;
   children: ReactNode;
 }) {
   const navigate = useNavigate();
+  const { open: openDetail } = useDetail();
   const report = useReport();
   const names = useNames();
 
@@ -1284,7 +1291,7 @@ function AuthorMenu({
       ) : (
         <ContextMenu.Item
           icon="info"
-          onSelect={() => navigate({ kind: "conversation", key: view.key, detail: { handle } })}
+          onSelect={() => openDetail(handle)}
         >
           View full profile
         </ContextMenu.Item>

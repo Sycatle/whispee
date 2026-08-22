@@ -4,6 +4,7 @@ import { COMPOSER_ID, Conversation, membersOf } from "@/components/Conversation"
 import { useDuo, useTrio } from "@/lib/duo";
 import { titleOf } from "@/lib/naming";
 import { useNames } from "@/state/names";
+import { useDetail } from "@/state/detail";
 import { useRevision, useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
 import { ConversationHeader } from "./ConversationHeader";
@@ -99,7 +100,8 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
   const trio = useTrio();
 
   const view = route.kind === "conversation" ? (session.conversations.get(route.key) ?? null) : null;
-  const detailOpen = route.kind === "conversation" && route.detail !== undefined && view !== null;
+  const { detail, open: openDetail } = useDetail();
+  const detailOpen = detail !== undefined && view !== null;
 
   /**
    * Opening the first conversation on a wide screen, once.
@@ -154,24 +156,26 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
    * of an invariant. `Shell.tsx`'s first-conversation selection above is the same shape for the
    * same reason.
    *
-   * `replace` and not `push`: nobody asked for this, so it must not become a history entry whose
-   * removal changes nothing on screen. The first press of the back button has to leave the
-   * conversation, not close a panel the user never opened.
+   * This used to `navigate(..., { replace: true })`, on the argument that a panel nobody asked
+   * for must not become a history entry whose removal changes nothing on screen. The panel is no
+   * longer a route at all — see `state/detail.tsx` — so there is no entry to avoid and no URL to
+   * replace, and the same property comes for free.
    *
-   * What this does not solve: the choice is not remembered across reloads. Closing the panel and
-   * refreshing brings it back, because the preference lives in the route and the route is rebuilt
-   * from the URL. Persisting it means a stored preference, which is a setting, and a setting for
-   * this is more machinery than the panel is worth today.
+   * What this does not solve, and now solves less well: the choice is not remembered across
+   * reloads. It never was, but the route did rebuild it from the URL, so closing the panel and
+   * refreshing used to bring back what the URL said rather than this default. Persisting it means
+   * a stored preference, which is a setting, and a setting for this is more machinery than the
+   * panel is worth today.
    */
   const detailed = useRef(false);
 
   useEffect(() => {
     if (!trio || detailed.current) return;
-    if (route.kind !== "conversation" || route.detail !== undefined || view === null) return;
+    if (route.kind !== "conversation" || detail !== undefined || view === null) return;
 
     detailed.current = true;
-    navigate({ ...route, detail: {} }, { replace: true });
-  }, [trio, route, view, navigate]);
+    openDetail();
+  }, [trio, route, view, detail, openDetail]);
 
   /**
    * The name of the screen, for the announcement.

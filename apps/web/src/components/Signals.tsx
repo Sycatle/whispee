@@ -120,7 +120,7 @@ export function SignalSettings() {
 
         <Field
           label="Typing indicator"
-          hint="The content is encrypted and never stored, but the server can see that something is being posted to this conversation. Turning it off is the only real protection, and it applies to every device you are signed in on. You keep seeing other people typing: there is nothing to hide in going without."
+          hint="Turning it off also stops you from seeing other people typing, and applies to every device you are signed in on. The content is encrypted and never stored, but the server can still see that something is being posted to this conversation — turning it off is the only real protection against that."
         >
           {(control) => (
             <Switch

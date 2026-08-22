@@ -131,6 +131,34 @@ export async function openTyping(
   }
 }
 
+/**
+ * Who is typing, as far as this device is willing to show.
+ *
+ * # Why `emitting` is a parameter
+ *
+ * It is the same flag that decides whether we send an indicator, and it is passed in rather than
+ * read from a settings module for the reason `receipts.statusOf` gives about its own: the
+ * reciprocity is a property of the call, so it belongs in the signature where a reader cannot
+ * miss it and a caller cannot forget it.
+ *
+ * # Why the setting cuts both directions
+ *
+ * It used to cut only emission, on the argument that there is nothing to hide in going without.
+ * There is: an account that stops emitting while still receiving gains a one-way view of who is
+ * hesitating before answering it, in every conversation, for free. That is an advantage over the
+ * people it is talking to, not privacy from them — and the read receipt next to it has refused
+ * exactly that trade since the beginning. Signal makes the same call for the same reason.
+ *
+ * The reception side cuts it too, in `Session.absorbSignal`, and the duplication is deliberate:
+ * the reciprocity must hold even if one of the two places is forgotten. This one is the backstop
+ * for anything already recorded when the switch moves.
+ */
+export function showing(typing: Typing[], mine: string, emitting: boolean): string[] {
+  if (!emitting) return [];
+
+  return [...new Set(typing.map((entry) => entry.handle))].filter((handle) => handle !== mine);
+}
+
 /** Keeps only the indicators that have not expired. */
 export function fresh(typing: Typing[], now: number): Typing[] {
   return typing.filter((entry) => now - entry.at < TYPING_TTL_MS);

@@ -6,6 +6,7 @@ import {
   TYPING_TTL_MS,
   fresh,
   nextExpiry,
+  showing,
   without,
   type Typing,
 } from "./signals.ts";
@@ -60,4 +61,28 @@ test("removing one correspondent leaves the others untouched", () => {
 
   assert.deepEqual(without(typing, "alice"), [{ handle: "bob", at: T0 }]);
   assert.deepEqual(without(typing, "carol"), typing);
+});
+
+test("nobody is shown typing when we do not emit ourselves", () => {
+  // The reciprocity, at the display end. Without it, turning the indicator off buys a one-way
+  // view of who hesitates before answering — an advantage over the other side, not privacy from
+  // the server, which is what the setting is actually for.
+  const typing: Typing[] = [{ handle: "bob", at: T0 }, { handle: "carol", at: T0 }];
+
+  assert.deepEqual(showing(typing, "alice", false), []);
+  assert.deepEqual(showing(typing, "alice", true), ["bob", "carol"]);
+});
+
+test("our own indicator is never shown back to us", () => {
+  const typing: Typing[] = [{ handle: "alice", at: T0 }, { handle: "bob", at: T0 }];
+
+  assert.deepEqual(showing(typing, "alice", true), ["bob"]);
+});
+
+test("one person typing from two devices is one person", () => {
+  // Every device of an account posts under the same id, so the raw list repeats it. The screen
+  // must read "Bob is typing", not "Bob and Bob".
+  const typing: Typing[] = [{ handle: "bob", at: T0 }, { handle: "bob", at: T0 + 10 }];
+
+  assert.deepEqual(showing(typing, "alice", true), ["bob"]);
 });

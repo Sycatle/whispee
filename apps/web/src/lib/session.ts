@@ -3192,7 +3192,19 @@ export class Session {
       // The reciprocity, at the receiving end, and deliberately duplicated: it has to hold even
       // if the emitting side is forgotten, which is the arrangement receipts and typing already
       // use. The caller sees a call nobody answers, which is what a refused call looks like.
-      this.callsAllowed()
+      this.callsAllowed() &&
+      // **The one place blocking touches a call, and it is about who placed it.**
+      //
+      // A ring arrives without being asked for and interrupts whatever is on screen, which is
+      // exactly what blocking exists to stop. A blocked member sitting in a call somebody else
+      // placed is the opposite case and is deliberately left alone — see the argument at the
+      // track-attach site in `lib/call.ts`.
+      //
+      // A sender we cannot attribute is *not* blocked, the rule the other channels already
+      // follow: declining what cannot be named would refuse precisely the traffic nobody can
+      // account for. It costs little here — an anonymous invitation rings once, expires by
+      // itself in thirty seconds, and the group MAC already stops it coming from a non-member.
+      !this.isBlocked(incoming.sender)
     ) {
       this.calls.receive(view.key, decode.call, incoming.sender);
     }

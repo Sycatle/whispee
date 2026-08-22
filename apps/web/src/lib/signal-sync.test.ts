@@ -62,7 +62,7 @@ test("a settings byte from a client that predates calls leaves them on", async (
   // Exactly the byte such a client writes: the three bits it knows, and nothing else.
   const opened = await openSignals(key, await sealSignals(key, { ...before, calls: true }), NOW);
 
-  assert.equal(opened?.calls, true);
+  assert.equal(opened?.signals.calls, true);
 });
 
 test("a peer cannot read the settings it carries", async () => {

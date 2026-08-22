@@ -70,7 +70,21 @@ export const TYPING_TTL_MS = 3000;
 export const TYPING_DEBOUNCE_MS = 1500;
 
 export interface Typing {
-  handle: string;
+  /**
+   * Who is typing, as an **account id** — not a handle, whatever the wire format's history
+   * suggests.
+   *
+   * The field was called `handle` and held an account id, which is not a harmless discrepancy:
+   * `Session.typingIn` filtered these entries against `this.handle` and therefore never matched a
+   * single one, so a guard that reads as "never show ourselves typing" had been doing nothing
+   * since the account id replaced the handle in the credential. Nothing broke, because
+   * `absorbSignal` drops our own indicator before it is ever recorded — but a backstop that
+   * cannot fire is not a backstop, and the name was the whole reason nobody noticed.
+   *
+   * An account id is also the right unit here: every device of an account emits under it, so two
+   * of them typing at once collapse to one name on screen rather than two.
+   */
+  account: string;
   /** Local receipt timestamp, for expiry. */
   at: number;
 }
@@ -78,12 +92,12 @@ export interface Typing {
 /**
  * Seals a typing indicator under the epoch key.
  *
- * The handle travels **inside** the ciphertext. It is not authenticated — see the module header
- * — but it is not visible to the server either, which is the point that matters: the server sees
- * a deposit towards a group, not who made it.
+ * The account id travels **inside** the ciphertext. It is not authenticated — see the module
+ * header — but it is not visible to the server either, which is the point that matters: the
+ * server sees a deposit towards a group, not who made it.
  */
-export async function sealTyping(key: Uint8Array, handle: string): Promise<Uint8Array> {
-  const body = new TextEncoder().encode(handle);
+export async function sealTyping(key: Uint8Array, account: string): Promise<Uint8Array> {
+  const body = new TextEncoder().encode(account);
   const plaintext = new Uint8Array(1 + body.length);
   plaintext[0] = TYPE_TYPING;
   plaintext.set(body, 1);
@@ -141,6 +155,9 @@ export async function openTyping(
  * reciprocity is a property of the call, so it belongs in the signature where a reader cannot
  * miss it and a caller cannot forget it.
  *
+ * `mine` is an **account id**, and the caller has to pass the right one — see `Typing.account`
+ * for what happened the last time it did not.
+ *
  * # Why the setting cuts both directions
  *
  * It used to cut only emission, on the argument that there is nothing to hide in going without.
@@ -156,7 +173,7 @@ export async function openTyping(
 export function showing(typing: Typing[], mine: string, emitting: boolean): string[] {
   if (!emitting) return [];
 
-  return [...new Set(typing.map((entry) => entry.handle))].filter((handle) => handle !== mine);
+  return [...new Set(typing.map((entry) => entry.account))].filter((account) => account !== mine);
 }
 
 /** Keeps only the indicators that have not expired. */
@@ -192,8 +209,8 @@ export function nextExpiry(typing: Typing[], now: number): number | undefined {
  * The risk of a "stopped typing" signal does not apply here: nothing is emitted, so nothing can be
  * lost. At worst we fail to switch it off, and expiry takes over.
  */
-export function without(typing: Typing[], handle: string): Typing[] {
-  return typing.filter((entry) => entry.handle !== handle);
+export function without(typing: Typing[], account: string): Typing[] {
+  return typing.filter((entry) => entry.account !== account);
 }
 
 /**

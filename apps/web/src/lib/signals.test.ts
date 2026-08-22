@@ -19,7 +19,7 @@ test("the send threshold never exceeds half the TTL", () => {
 });
 
 test("an indicator expires at the end of the TTL, not before", () => {
-  const typing: Typing[] = [{ handle: "alice", at: T0 }];
+  const typing: Typing[] = [{ account: "alice", at: T0 }];
 
   assert.equal(fresh(typing, T0 + TYPING_TTL_MS - 1).length, 1);
   assert.equal(fresh(typing, T0 + TYPING_TTL_MS).length, 0);
@@ -32,8 +32,8 @@ test("an indicator expires at the end of the TTL, not before", () => {
  */
 test("the expiry delay targets the oldest entry", () => {
   const typing: Typing[] = [
-    { handle: "alice", at: T0 },
-    { handle: "bob", at: T0 + 500 },
+    { account: "alice", at: T0 },
+    { account: "bob", at: T0 + 500 },
   ];
 
   assert.equal(nextExpiry(typing, T0), TYPING_TTL_MS);
@@ -45,7 +45,7 @@ test("with no indicator, no wake-up is scheduled", () => {
 });
 
 test("an already expired entry asks for an immediate render, never a negative delay", () => {
-  const typing: Typing[] = [{ handle: "alice", at: T0 }];
+  const typing: Typing[] = [{ account: "alice", at: T0 }];
   assert.equal(nextExpiry(typing, T0 + TYPING_TTL_MS * 10), 0);
 });
 
@@ -55,11 +55,11 @@ test("an already expired entry asks for an immediate render, never a negative de
  */
 test("removing one correspondent leaves the others untouched", () => {
   const typing: Typing[] = [
-    { handle: "alice", at: T0 },
-    { handle: "bob", at: T0 },
+    { account: "alice", at: T0 },
+    { account: "bob", at: T0 },
   ];
 
-  assert.deepEqual(without(typing, "alice"), [{ handle: "bob", at: T0 }]);
+  assert.deepEqual(without(typing, "alice"), [{ account: "bob", at: T0 }]);
   assert.deepEqual(without(typing, "carol"), typing);
 });
 
@@ -67,22 +67,40 @@ test("nobody is shown typing when we do not emit ourselves", () => {
   // The reciprocity, at the display end. Without it, turning the indicator off buys a one-way
   // view of who hesitates before answering — an advantage over the other side, not privacy from
   // the server, which is what the setting is actually for.
-  const typing: Typing[] = [{ handle: "bob", at: T0 }, { handle: "carol", at: T0 }];
+  const typing: Typing[] = [{ account: "bob", at: T0 }, { account: "carol", at: T0 }];
 
   assert.deepEqual(showing(typing, "alice", false), []);
   assert.deepEqual(showing(typing, "alice", true), ["bob", "carol"]);
 });
 
+/**
+ * The entries are **account ids**, and this is the test that says so.
+ *
+ * The field used to be called `handle` while holding an account id, and `Session.typingIn`
+ * filtered it against the session's handle — so the guard never matched anything, for as long as
+ * account ids have existed. It cost nothing, because `absorbSignal` drops our own indicator
+ * before recording it, but a backstop that cannot fire is not one. Realistic ids here rather than
+ * first names, so that the next person to compare against the wrong field sees this fail.
+ */
 test("our own indicator is never shown back to us", () => {
-  const typing: Typing[] = [{ handle: "alice", at: T0 }, { handle: "bob", at: T0 }];
+  const mine = "cc33453670c79bf3fa37635c08c8a677";
+  const theirs = "a8f8e14c20e4efd81117d54bb95c96f2";
+  const typing: Typing[] = [
+    { account: mine, at: T0 },
+    { account: theirs, at: T0 },
+  ];
 
-  assert.deepEqual(showing(typing, "alice", true), ["bob"]);
+  assert.deepEqual(showing(typing, mine, true), [theirs]);
+
+  // A handle passed where an account id belongs filters nothing — which is precisely what the
+  // call site was doing before this change.
+  assert.deepEqual(showing(typing, "@alice0539", true), [mine, theirs]);
 });
 
 test("one person typing from two devices is one person", () => {
   // Every device of an account posts under the same id, so the raw list repeats it. The screen
   // must read "Bob is typing", not "Bob and Bob".
-  const typing: Typing[] = [{ handle: "bob", at: T0 }, { handle: "bob", at: T0 + 10 }];
+  const typing: Typing[] = [{ account: "bob", at: T0 }, { account: "bob", at: T0 + 10 }];
 
   assert.deepEqual(showing(typing, "alice", true), ["bob"]);
 });

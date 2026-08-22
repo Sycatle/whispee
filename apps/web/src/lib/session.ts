@@ -2053,7 +2053,7 @@ export class Session {
   /** Peers currently typing, expired ones excluded — and nobody at all when we do not emit. */
   typingIn(view: ConversationView): string[] {
     view.typing = fresh(view.typing, Date.now());
-    return showing(view.typing, this.handle, this.signals.typingIndicator);
+    return showing(view.typing, this.accountId, this.signals.typingIndicator);
   }
 
   /**
@@ -2108,11 +2108,11 @@ export class Session {
     // forgotten, which is the arrangement `acknowledge` and `statusOf` already use for receipts.
     if (!this.signals.typingIndicator) return;
 
-    const handle = await openTyping(this.client.signalKey(view.groupId), payload);
-    if (handle === undefined || handle === this.accountId) return;
+    const account = await openTyping(this.client.signalKey(view.groupId), payload);
+    if (account === undefined || account === this.accountId) return;
 
     const now = Date.now();
-    view.typing = [...without(fresh(view.typing, now), handle), { handle, at: now }];
+    view.typing = [...without(fresh(view.typing, now), account), { account, at: now }];
   }
 
   /**

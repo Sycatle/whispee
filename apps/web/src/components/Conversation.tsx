@@ -6,6 +6,7 @@ import { MentionMenu, LISTBOX_ID as MENTION_LISTBOX_ID, useMentions } from "@/co
 import { ShortcodeMenu, LISTBOX_ID as SHORTCODE_LISTBOX_ID, useShortcodes } from "@/components/Shortcodes";
 import { Messages } from "@/components/Messages";
 import { Verification } from "@/components/Verification";
+import { plain } from "@/lib/markdown";
 import { compactNameOf, type NameSources } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { textOf } from "@/lib/thread";
@@ -70,7 +71,12 @@ function spoken(view: ConversationView, names: NameSources, self: string): strin
   const who =
     last.sender === null ? "Someone" : compactNameOf(last.sender, names, membersOf(view, self));
   const { content } = last;
-  if (content.kind === "text" || content.kind === "reply") return `${who}: ${content.text}`;
+  // Masked, and this is the one that matters most: a spoiler read aloud reaches somebody who did
+  // not choose to open it, and who cannot un-hear it. The markers are dropped with it, so the
+  // announcement is the sentence rather than its source.
+  if (content.kind === "text" || content.kind === "reply") {
+    return `${who}: ${plain(content.text, { spoilers: "mask" })}`;
+  }
   if (content.kind === "attachment") return `${who} sent ${content.ref.name}`;
   return null;
 }

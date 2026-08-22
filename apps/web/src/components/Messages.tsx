@@ -69,10 +69,12 @@ import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
+import { plain } from "@/lib/markdown";
 import { cn } from "@/ui/cn";
 import { Typing } from "@/ui/Typing";
 import { membersOf } from "@/components/Conversation";
 import { MentionText } from "@/components/MentionText";
+import { RichText } from "@/components/RichText";
 import { MiniProfile } from "@/components/MiniProfile";
 import { ContextMenu } from "@/ui/ContextMenu";
 import { Emoji } from "@/ui/Emoji";
@@ -884,7 +886,19 @@ export function Messages({
                         message.mine ? "border-r-2 pr-snug" : "border-l-2 pl-snug",
                       )}
                     >
-                      <MentionText text={textOf(messages, cite)} among={members} view={view} />
+                      {/* Flat, and the quote is why: this is a caption for a message that is
+                          already in the thread above, one line tall. A fenced block inside it
+                          would be a code block inside a caption, and a spoiler would offer to
+                          reveal — in a place nobody is reading for content — something the reader
+                          may not have opened where it was written.
+
+                          `plain` masks spoilers rather than dropping them, so the quote says a
+                          spoiler is there without saying what it hides. */}
+                      <MentionText
+                        text={plain(textOf(messages, cite), { spoilers: "mask" })}
+                        among={members}
+                        view={view}
+                      />
                     </span>
                   )}
 
@@ -916,7 +930,7 @@ export function Messages({
                           align={message.mine ? "end" : "start"}
                         />
                       ) : spoken !== null ? (
-                        <MentionText text={spoken} among={members} view={view} big />
+                        <RichText text={spoken} among={members} view={view} big />
                       ) : null}
 
                       {/*
@@ -1212,7 +1226,7 @@ export function Messages({
                     "opacity-60",
               )}
             >
-              <MentionText text={entry.text} among={members} view={view} big />
+              <RichText text={entry.text} among={members} view={view} big />
               {/* The sending state trails the sentence on the inner side. */}
               <span className="mt-tight flex flex-row-reverse items-center gap-snug text-caption">
                 {entry.state === "sending" ? (

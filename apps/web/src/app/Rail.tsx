@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 
 import { LeaveGroupDialog } from "@/components/Group";
 import { PresenceBadge } from "@/components/Presence";
+import { plain } from "@/lib/markdown";
 import { timeOf } from "@/lib/datetime";
 import { type NameSources, compactNameOf, handleOf, nameMatches, nameOf, titleOf } from "@/lib/naming";
 import * as mention from "@/lib/mention";
@@ -85,7 +86,10 @@ function preview(
    */
   const spell = (text: string): string =>
     mention
-      .runs(text, members)
+      // `plain` first: a row is one line, and the markers would be spent on characters that mean
+      // nothing without the shapes they produce. Spoilers are masked — the rail is the one place
+      // a hidden line could be read by somebody walking past a screen nobody is looking at.
+      .runs(plain(text, { spoilers: "mask" }), members)
       .map((run) => {
         if ("text" in run) return run.text;
         // The sigil is kept even though the name reads as prose without it. A preview is a

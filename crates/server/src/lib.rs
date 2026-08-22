@@ -15,6 +15,7 @@
 //! doing it.
 
 pub mod auth;
+pub mod call;
 pub mod error;
 pub mod gateway;
 pub mod handle;
@@ -60,6 +61,12 @@ pub struct AppState {
     /// that talks to neither Apple nor Google must stay fully functional. See `push` for what
     /// this wake-up costs in metadata.
     pub push: Arc<dyn push::Waker>,
+    /// Where calls are relayed, if anywhere.
+    ///
+    /// Empty by default, and for the reason the waker above is silent by default: a deployment
+    /// running no media server keeps a fully working messenger. See [`call`] for what a call
+    /// costs in metadata, which is more than a message does.
+    pub media: Arc<call::Media>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -83,6 +90,12 @@ impl FromRef<AppState> for Arc<throttle::Throttle> {
 impl FromRef<AppState> for Arc<dyn push::Waker> {
     fn from_ref(state: &AppState) -> Self {
         state.push.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<call::Media> {
+    fn from_ref(state: &AppState) -> Self {
+        state.media.clone()
     }
 }
 
@@ -507,6 +520,10 @@ pub fn app_with_waker(
         // The default is `Silent`, set by `app_with`: wiring up Apple or Google requires secrets
         // a deployment must provide knowingly, after reading what the wake-up leaks.
         push,
+        // Read from the environment rather than passed in, unlike the waker: there is nothing to
+        // substitute here. The tests that matter check what this server *sends* — a token's
+        // contents, a refusal when unconfigured — and both are reachable without a media server.
+        media: Arc::new(call::Media::from_environment()),
     };
 
     // Wires the hub onto Postgres, which allows running several instances without their clients

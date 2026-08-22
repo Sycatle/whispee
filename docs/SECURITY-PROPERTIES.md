@@ -24,6 +24,12 @@ Attachments follow the same rule by a different path: each file is encrypted cli
 and MIME type. Reusing a key across files would mean one leaked descriptor opens them all; one key
 per file bounds the damage and lets a specific attachment be shared without granting the rest.
 
+Call audio follows it by a third: a media server terminates the transport encryption — that is what
+routing one stream to several listeners means — so every frame is encrypted a second time before it
+gets there, under `export_secret(..., "wac-call-key-v1", call_id, 32)`. Each member derives those
+bytes from the current epoch, nothing is exchanged, and neither server ever holds a key it could be
+asked for. The call id is in the exporter's context so two calls in one epoch do not share a key.
+
 **Caveat.** Length is not content. Message bodies are padded into doubling buckets from 256 bytes,
 so the server learns an order of magnitude and no more. Attachments go into the same buckets,
 applied to the plaintext before encryption, with a top bucket capped just under the server's 25 MiB
@@ -313,6 +319,16 @@ to the fifth. Sealed sender protects against a server that observes, not against
 and no cryptography answers that. It is the price of the feature, which is why the feature is
 strictly optional and inert without configuration. See
 [`./THREAT-MODEL.md`](./THREAT-MODEL.md#4-push-notifications-degrade-sealed-sender).
+
+And the second one, of the same kind and larger: **calls**. Sealed sender does not survive the
+media path. A posted envelope carries no identity; an RTP stream carries a stable one for the
+length of a call, so the delivery service sees that somebody joined a call and towards which group,
+and the media server sees who shared a room with whom and for how long. The room is a digest over
+the group and call ids and the participant name is derived from the call key, so neither the
+conversation nor the device directory is handed over — but the *session* is legible in a way a
+message never is. Optional, inert without configuration, and switchable per account in both
+directions. If the fact that you spoke to somebody is what must not be known, do not place the
+call. See [`./THREAT-MODEL.md`](./THREAT-MODEL.md#4ter-calls-leak-more-than-messages-and-the-leak-has-no-cryptographic-answer).
 
 ---
 

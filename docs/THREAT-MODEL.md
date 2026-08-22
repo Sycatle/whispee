@@ -334,6 +334,45 @@ before offering the switch — the lock screen being the one surface encryption 
 
 ---
 
+## 4ter. Calls leak more than messages, and the leak has no cryptographic answer
+
+The second property this project knowingly trades away, and the argument is the same shape as §4:
+the audio stays unreadable, and the fact of the conversation does not.
+
+The content is safe, and it is worth being precise about why rather than asserting it. A media
+server has to read the transport in order to route one stream to five listeners without holding
+five conversations — so the audio is encrypted a **second** time before it reaches that server,
+frame by frame, under `export_secret(..., "wac-call-key-v1", call_id, 32)`. Every member derives
+those bytes from the current MLS epoch; nothing is exchanged, so neither the delivery service nor
+the media server is ever in possession of a key, and neither can be asked for one. A member removed
+mid-call loses the audio at the same commit that costs them the messages.
+
+What leaks is who was talking to whom, and for how long:
+
+> **Sealed sender does not survive the media path.** A posted envelope carries no identity at all;
+> an RTP stream carries a stable one for the length of a call. The delivery service sees that
+> somebody is joining a call, when, and towards which group — it signs the token, so it must. The
+> media server sees which participants share a room and for how long. Two calls in one conversation
+> look unrelated to it, and a room does not name its conversation, but the *session* is legible in
+> a way a message never is.
+
+Two things narrow it, and neither closes it. The room is named by a digest over the group id and
+the call id, so the media server cannot group a deployment's calls into conversations. The
+participant identity is derived from the call key rather than being the device id, so the media
+server never receives the directory — at the price that it is recognisable by members rather than
+unforgeable: a member can take another member's identity, which is the forgery the ephemeral
+channel already allows for the same reason (§ 2.4).
+
+As with push, the feature is **strictly optional and inert without configuration**: no media
+credentials, no token, no call button, and a fully working messenger. Unlike push, it is also
+switchable per account from the interface, and the switch cuts both directions — an account that
+places calls while refusing to receive them asks of others exactly what it declines to give.
+
+The honest summary: **if the fact that you spoke to somebody is what must not be known, do not
+place the call.** No setting in this application changes that, and no cryptography answers it.
+
+---
+
 ## 5. Known limitations
 
 The full table, in order of real importance. Nothing here is softened.

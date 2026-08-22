@@ -219,7 +219,7 @@ encryption path: AES-256-GCM under the epoch's **export secret**
 
 | | Durable channel | Ephemeral channel |
 |---|---|---|
-| Carries | messages, receipts, reactions, replies | typing |
+| Carries | messages, receipts, reactions, replies, call invitations and conclusions | typing, call frames |
 | Encryption | MLS application ratchet | AES-256-GCM under the epoch export secret |
 | Server storage | `envelopes` | **none** — relayed in memory, never the disk |
 | Losing one | recovered by the cursor | no consequence |
@@ -231,6 +231,63 @@ arrives.
 
 The export secret changes at every commit, so a removed member loses the typing channel at the
 same instant they lose the messages — post-compromise security applies here for free.
+
+### 3.6 Calls, and how they are split across the two channels
+
+A call needs both channels, and the split follows the missing sender authentication above rather
+than any notion of importance.
+
+**The invitation is not in the ephemeral channel.** "Alice is calling you" is a claim about *who*
+is speaking, and a key that belongs to the group cannot support one: any member could ring a group
+under somebody else's name. It travels as an ordinary MLS message — `content.ts`, type byte 13 —
+where the protocol authenticates its author. Three events share that byte: `invite`, `ended`
+carrying a duration in seconds, and `missed`. A refusal and a call nobody heard are deliberately
+the same event on the wire; telling the caller they were turned down rather than merely unheard is
+an admission the protocol has no reason to extract from a device.
+
+Two consequences come free. The call log and the missed call are messages, so they are ordered,
+archived and re-read like any other. And an invitation is an envelope, so `push::wake_detached`
+fires on it exactly as it does on a text — **without the server learning that this one was a
+call.**
+
+**Everything around the invitation is ephemeral**: `ringing`, `accepted`, `declined`, `left`,
+`muted`, `unmuted`, `alive`, under type byte 1 of the signal format. None is load-bearing. Who is
+actually in a call is whoever the media layer reports; these only let the interface react before
+it can know, and a forged one changes nothing that matters. Both ends run their own ring timeout
+(30 s) and their own silence timeout (15 s), because a frame saying "stop ringing" can be lost and
+a phone that then rang forever is the one failure a user cannot work around.
+
+### 3.7 The media path
+
+The audio does not go through this server. It goes through a media server, which terminates the
+transport encryption — that is what lets it route one stream to five listeners without holding
+five conversations — and is therefore **encrypted a second time before it gets there**, frame by
+frame, in the browser.
+
+That second key is `export_secret(..., "wac-call-key-v1", call_id, 32)`, derived by every member
+from the current epoch. Nothing is exchanged to obtain it, so neither server is ever in possession
+of one and neither can be asked for one. The call id sits in the exporter's context so that two
+calls in one epoch do not share a key — replaying one call's audio into another would otherwise
+decrypt. And because it is an epoch secret, a member removed mid-call loses the audio at the same
+commit that costs them the messages; the client re-derives it on a timer and hands it to the media
+layer, so the property is acted on rather than merely true.
+
+`POST /v1/groups/{group_id}/call/token` mints admission. It is authenticated by the **group MAC**,
+like a signal and an anonymous post and for the same reason. The room is named
+`SHA256("wac-call-room-v1" ‖ group_id ‖ call_id)`, so the media server learns neither which
+conversation a room belongs to nor that two rooms belong to the same one. The participant identity
+is derived from the call key, so members recognise each other while the media server sees an
+opaque string that changes every call — and, being derived from a group key, it is recognisable
+rather than unforgeable: a member can take another member's identity, the same forgery § 3.5
+already documents.
+
+The route answers **503** when the deployment holds no media credentials. Not 404: a missing route
+invites a retry, a refused feature tells the client to hide the call button.
+
+**What a call costs that a message does not.** This server sees that somebody is joining a call,
+when, and towards which group; the media server sees who shares a room with whom, and for how
+long. Sealed sender does not survive the media path — an RTP stream carries a stable identity for
+the length of a call. See `docs/THREAT-MODEL.md` § 4ter.
 
 ---
 

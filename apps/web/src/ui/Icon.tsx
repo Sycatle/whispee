@@ -15,6 +15,8 @@ import {
   MicOff,
   MonitorSmartphone,
   Paperclip,
+  Phone,
+  PhoneOff,
   Pin,
   Plus,
   QrCode,
@@ -33,12 +35,12 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 /**
- * The icon inventory. Twenty-four, named by role, and closed.
+ * The icon inventory. Twenty-eight, named by role, and closed.
  *
  * # Named imports only, never `import * as icons`
  *
  * A star import defeats tree-shaking: the bundler cannot prove which of the fifteen hundred
- * modules in `lucide-react` are unreachable, so it keeps them. Twenty-four named imports are a few
+ * modules in `lucide-react` are unreachable, so it keeps them. Twenty-eight named imports are a few
  * kilobytes; the star import is the whole set. This is not a style preference, it is the
  * difference between the budget the plan allowed for icons and roughly three hundred times it.
  *
@@ -69,6 +71,8 @@ export type IconName =
   | "attach"
   | "backup"
   | "back"
+  | "call"
+  | "hang"
   | "close"
   | "collapse"
   | "confirm"
@@ -121,6 +125,16 @@ const ICONS: Record<IconName, LucideIcon> = {
   backup: Vault,
   /** Leaves a pane on the way back. Distinct from `collapse`, which opens something in place. */
   back: ChevronLeft,
+  /** Places a call, and answers a ringing one — one glyph for the gesture that starts audio. */
+  call: Phone,
+  /**
+   * Ends a call, and refuses a ringing one.
+   *
+   * Distinct from `close`, and the distinction matters more here than anywhere else in this
+   * file: a cross dismisses a panel, and a panel dismissed by mistake is reopened. Hanging up by
+   * mistake ends a conversation somebody was having.
+   */
+  hang: PhoneOff,
   /** Dismiss a dialog, a sheet, a banner. */
   close: X,
   /** The disclosure chevron on the rail's sections. */

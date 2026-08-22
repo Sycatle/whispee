@@ -22,6 +22,26 @@
  * and deliberately not touched here.
  */
 
+/**
+ * How long a call lasted, as a line in the thread says it.
+ *
+ * Hand-formatted, like `timeOf` above and for the same reason: `Intl.RelativeTimeFormat` says
+ * "3 minutes ago", which is a different fact, and `Intl.DurationFormat` is not in every browser
+ * this application is meant to run in.
+ *
+ * Under a minute it stays in seconds. A call of eleven seconds is a call somebody picked up and
+ * hung up, and "0:11" reads as a stopwatch where "11 s" reads as what happened.
+ */
+export function spokenDuration(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  if (whole < 60) return `${whole} s`;
+
+  const minutes = Math.floor(whole / 60);
+  if (minutes < 60) return `${minutes} min`;
+
+  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")}`;
+}
+
 /** `HH:MM`, in the reader's local time. */
 export function timeOf(sentAt: number): string {
   const date = new Date(sentAt);

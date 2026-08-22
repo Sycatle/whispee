@@ -18,6 +18,8 @@ interface Recorder {
   calls: Calls;
   signals: string[];
   announced: string[];
+  /** The duration each conclusion carried. */
+  seconds: number[];
   /** Moves the clock. Nothing here waits on real time. */
   advance: (ms: number) => void;
   /** Reports a participant list, as the media layer would. */
@@ -34,6 +36,8 @@ function harness(options: { failJoin?: boolean } = {}): Recorder {
   const recorder = {
     signals: [] as string[],
     announced: [] as string[],
+    /** The duration each conclusion carried, so a test can check *what* it concluded. */
+    seconds: [] as number[],
     joins: 0,
   };
 
@@ -57,8 +61,9 @@ function harness(options: { failJoin?: boolean } = {}): Recorder {
     },
     now: () => now,
     signal: (_group, event, call) => recorder.signals.push(`${event}:${call.slice(0, 4)}`),
-    announce: async (_group, event) => {
+    announce: async (_group, event, _call, seconds) => {
       recorder.announced.push(event);
+      recorder.seconds.push(seconds);
     },
     admit: async () => ({
       join: {
@@ -81,6 +86,9 @@ function harness(options: { failJoin?: boolean } = {}): Recorder {
     },
     get announced() {
       return recorder.announced;
+    },
+    get seconds() {
+      return recorder.seconds;
     },
     get joins() {
       return recorder.joins;
@@ -127,10 +135,31 @@ test("an accepted call sends nothing durable until it ends, and then its duratio
   h.observe(["peer-1"]);
 
   h.advance(65_000);
-  await h.calls.hang();
+  h.observe([]);
+  await settle();
 
   assert.deepEqual(h.announced, ["invite", "ended"]);
   assert.equal(h.calls.current().phase, "idle");
+});
+
+/**
+ * **The conclusion is about the call, not about the writer leaving it.**
+ *
+ * A call of three whose caller hung up first wrote `Appel · 44 s` into a thread whose other two
+ * members went on talking for minutes. Leaving is not ending: a participant who still has
+ * somebody to leave behind says nothing, and the room emptying under the last one is what makes
+ * the line true.
+ */
+test("leaving a call others are still in writes nothing", async () => {
+  const h = harness();
+  await h.calls.place("group", "alice", 2);
+  h.observe(["peer-1", "peer-2"]);
+
+  h.advance(44_000);
+  await h.calls.hang();
+
+  assert.equal(h.calls.current().phase, "idle");
+  assert.deepEqual(h.announced, ["invite"], "a live call was written up as over");
 });
 
 /**
@@ -232,8 +261,9 @@ test("hanging up twice is a thing interfaces do", async () => {
   const h = harness();
   await h.calls.place("group", "alice", 1);
   h.observe(["peer-1"]);
+  h.observe([]);
+  await settle();
 
-  await h.calls.hang();
   await h.calls.hang();
 
   assert.deepEqual(h.announced, ["invite", "ended"], "the second hang-up wrote a second line");
@@ -243,9 +273,9 @@ test("hanging up twice is a thing interfaces do", async () => {
  * **The test that keeps one call to one line in the thread.**
  *
  * The thread is shared: a conclusion written by the device that answered is read by the device
- * that called, beside the one it wrote itself. The rule this pins down — only the caller writes
- * it — is what the first call between two browsers showed to be missing, with both threads
- * ending the same call twice.
+ * that called, beside the one it wrote itself. That is what the first call between two browsers
+ * put in both threads, and what the rule below — one writer, the last one out — exists to stop.
+ * Here the far side is still in the room, so this device has nothing to conclude.
  */
 test("a call that was answered rather than placed writes no conclusion", async () => {
   const h = harness();
@@ -262,22 +292,57 @@ test("a call that was answered rather than placed writes no conclusion", async (
 });
 
 /**
- * The same, for the hang-up nobody asked for: the media layer reporting an empty room.
+ * The other half of the same rule: a device that never placed the call still writes the
+ * conclusion when it is the one left holding an empty room.
  *
- * It is the path a callee takes when the caller hangs up first, and it is the common one — so a
- * rule that only held for the button would still double every call that ends normally.
+ * It is the common way a two-person call ends — the caller hangs up, the callee's media layer
+ * reports the room going empty — and a rule that only let the caller write would leave that call
+ * with no conclusion at all.
  */
-test("a callee whose room empties writes no conclusion either", async () => {
+test("a callee left alone in the room writes the conclusion", async () => {
   const h = harness();
   h.calls.receive("group", "9f2c41ab", "bob");
   await h.calls.accept();
   h.observe(["peer-1"]);
 
+  h.advance(30_000);
   h.observe([]);
   await settle();
 
   assert.equal(h.calls.current().phase, "idle");
+  assert.deepEqual(h.announced, ["ended"], "the last one out wrote nothing");
+});
+
+/**
+ * **The three-person shape the rule was got wrong on.**
+ *
+ * Alice calls Bob and Carol, all three connect, Alice leaves. From Alice's side the call is over;
+ * from the thread's side it is not, and the thread is what a reader comes back to. Carol, still
+ * talking to Bob, must not find `Appel · 44 s` above a conversation that ran for minutes.
+ *
+ * Written from Carol's seat: she answered, she watched Alice go, and she is the one who ends up
+ * alone in the room.
+ */
+test("a group call is concluded when the room empties, not when the caller goes", async () => {
+  const h = harness();
+  h.calls.receive("group", "9f2c41ab", "alice");
+  await h.calls.accept();
+  h.observe(["alice-peer", "bob-peer"]);
+
+  // Alice hangs up. Two of us are still talking, and nothing may be written yet.
+  h.advance(44_000);
+  h.observe(["bob-peer"]);
+  await settle();
+
+  assert.equal(h.calls.current().phase, "connected", "one departure ended a call of three");
   assert.deepEqual(h.announced, []);
+
+  h.advance(120_000);
+  h.observe([]);
+  await settle();
+
+  assert.deepEqual(h.announced, ["ended"]);
+  assert.equal(h.seconds.at(-1), 164, "the duration stopped at the first person to leave");
 });
 
 test("a frame about another call is ignored", async () => {
@@ -411,6 +476,7 @@ test("a ringing device stops when the caller gives up", async () => {
   await settle();
 
   assert.equal(h.calls.current().phase, "idle");
+  assert.deepEqual(h.announced, [], "the callee wrote a conclusion for the caller's call");
 });
 
 /**

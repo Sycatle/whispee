@@ -120,7 +120,9 @@ export class Calls {
   /**
    * Whether this device placed the call it is in.
    *
-   * It decides one thing only: who writes the conclusion to the thread. See {@link hang}.
+   * It decides one thing only, and it is not the conclusion of a call that happened — that goes
+   * to whoever is last out of the room. It decides who writes `missed`, for a call that never
+   * had a participant to be last. See {@link hang}.
    */
   private placed = false;
   /**
@@ -226,36 +228,47 @@ export class Calls {
    * the caller of this method has no way of knowing which applies. What it must never do is ask
    * the interface to decide.
    *
-   * # Only the device that placed the call writes the conclusion
+   * # The conclusion belongs to whoever is last out of the room
    *
-   * The thread is shared, so a line written by one member is read by all of them: a rule of
-   * "whoever was connected writes it" draws one line per participant, and a two-person call ends
-   * up ending twice. That is not a hypothesis — it is what the first call between two browsers
-   * put in both threads.
+   * The thread is shared, so a line written by one member is read by all of them, and the rule
+   * has to name exactly one writer per call. Two rules were tried before this one, and a real
+   * call broke each:
    *
-   * So the caller writes it, and it is the same device in every case the line has to cover: the
-   * call nobody took, the call that ran and ended, the call the other side hung up on. A callee
-   * that hangs up first still produces one, through the caller's own media layer reporting the
-   * room going empty.
+   *  * *whoever was connected writes it* — one line per participant. A call between two browsers
+   *    ended twice in both threads.
+   *  * *the caller writes it* — one line, at the wrong moment. In a call of three, the caller
+   *    hanging up first wrote `Appel · 44 s` into a thread whose other two members went on
+   *    talking for minutes. A conclusion is a statement about the call, not about the writer's
+   *    own departure, and the caller is only the last to leave by coincidence.
    *
-   * What this gives up is the call whose *caller* disappears — a closed browser, a lost network
-   * — which then ends with no line at all. That is a thread missing a conclusion rather than a
-   * thread stating one twice, and the second is the error a reader cannot make sense of.
+   * So it is the last participant out who writes it: the one who, at the moment of leaving, has
+   * nobody left to leave behind. That is one writer by construction — a room empties once — and
+   * the duration it reports is the one the call actually lasted rather than the writer's share
+   * of it.
+   *
+   * A call **nobody joined** has no last participant, so `missed` stays with the caller. That is
+   * what {@link placed} is still for, and it is the only thing it is for.
+   *
+   * What this gives up: a call whose participants all vanish at once — every browser closed, a
+   * network partition — leaves nobody holding an empty room, and so writes no line at all. A
+   * thread missing a conclusion is a thread a reader can still make sense of; one stating that a
+   * live call ended three minutes ago is not.
    */
   async hang(): Promise<void> {
-    const { phase, group, call, connectedAt } = this.state;
+    const { phase, group, call, connectedAt, peers } = this.state;
     if (phase === "idle") return;
 
     const placed = this.placed;
     this.ports.signal(group, phase === "incoming" ? "declined" : "left", call);
     await this.close();
 
-    if (!placed) return;
-
     if (connectedAt !== 0) {
+      // Somebody is still in there. They will write it when the room empties under them.
+      if (peers.length > 0) return;
+
       const seconds = Math.round((this.ports.now() - connectedAt) / 1000);
       await this.ports.announce(group, "ended", call, seconds);
-    } else if (phase === "dialling" || phase === "ringing") {
+    } else if (placed && (phase === "dialling" || phase === "ringing")) {
       await this.ports.announce(group, "missed", call, 0);
     }
   }

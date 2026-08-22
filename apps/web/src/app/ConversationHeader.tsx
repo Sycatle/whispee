@@ -317,7 +317,13 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
             same size as the messages under it — so the one piece of text saying *which
             conversation this is* had no more weight than any line inside it. One step up the
             scale, which is enough to be found without turning the bar into a banner. */}
-        <h1 className="truncate text-prose font-medium" data-epoch={String(view.epoch)}>
+        {/* `leading-tight`: the two lines are one block — a name and what that name is doing —
+            and the default leading set for prose put enough air between them to read as two
+            separate things stacked in a bar. */}
+        <h1
+          className="truncate text-prose leading-tight font-medium"
+          data-epoch={String(view.epoch)}
+        >
           {title}
         </h1>
         {/* Presence, and only presence.
@@ -334,7 +340,21 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
             One-to-one only. In a group — including one that removals have brought down to two —
             "last seen an hour ago" under a name standing for several people says nothing a
             reader can use. */}
-        {only !== undefined && <PresenceLine session={session} handle={only.handle} />}
+        {only !== undefined ? (
+          <PresenceLine session={session} handle={only.handle} />
+        ) : (
+          // A group gets a count where a person gets a presence, and the reason is the bar rather
+          // than the count: with nothing here the header was a line shorter for a group than for
+          // a conversation, so switching between the two moved the thread up and down under the
+          // reader. The size of a room is also the one fact about it that is true at a glance and
+          // worth a subtitle.
+          //
+          // `members` includes us — see `membersOf` — which is what makes "3 members" mean three
+          // people rather than three other people.
+          <span className="text-caption text-(--color-ink-muted)">
+            {members.length} {members.length === 1 ? "member" : "members"}
+          </span>
+        )}
       </div>
 
       {/*

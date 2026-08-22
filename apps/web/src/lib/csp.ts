@@ -74,7 +74,31 @@ export function csp(api: string): string {
     // other directive here allows `blob:`, which is why it is added to this one and not to
     // `default-src`.
     "img-src 'self' data: blob:",
+    // `media-src` exists for the audio player, and it is the one place in this application where
+    // bytes a peer chose reach a decoder without this code re-emitting them first.
+    //
+    // `lib/audio.ts` carries that argument in full. What belongs here is the narrower one: an
+    // `<audio>` element does not navigate. Bytes that are not a media stream raise an `error`
+    // event, never a document, so nothing on this path can become script on the origin holding
+    // the keys — which is the property `img-src blob:` is also relying on, one directive up.
+    //
+    // Without this line the player falls back to `default-src 'self'` and is blocked, silently:
+    // a blocked media element reports no reason, which is exactly how the `blob:`/`img-src`
+    // divergence this file was written to catch went unnoticed for as long as it did.
+    //
+    // No `'self'`: nothing in this build plays a media file served by this origin. A directive
+    // that lists only what is actually used is a directive that documents.
+    "media-src blob:",
     "object-src 'none'",
+    // Redundant today and deliberately written anyway: with no `worker-src` and no `child-src`,
+    // a worker falls back to `script-src`, which already resolves to this origin. What this line
+    // buys is that the fallback stops being load-bearing — the day somebody adds a source to
+    // `script-src`, it will not silently become a place workers may be loaded from.
+    //
+    // The PDF viewer is what makes this concrete: pdf.js parses in a worker, and it reaches for a
+    // `blob:` wrapper whenever it judges its `workerSrc` cross-origin. `lib/pdf.ts` hands it a
+    // same-origin `workerPort` precisely so that never happens; this is the second lock.
+    "worker-src 'self'",
     "base-uri 'none'",
     "frame-ancestors 'none'",
     "form-action 'self'",

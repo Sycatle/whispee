@@ -103,3 +103,56 @@ test("neither target ever allows a script source beyond this origin", () => {
     );
   }
 });
+
+/**
+ * `media-src` is the directive most likely to be widened by somebody solving a different problem
+ * — a remote sound, a notification tone, a streamed voice note — and the widening would not look
+ * dangerous. It is, in the narrow sense that matters here: this application never plays anything
+ * it did not decrypt itself, so a network origin in this directive means a media element pointing
+ * somewhere the rest of the design says it cannot point.
+ */
+test("media-src is blob: and nothing else, on both targets", () => {
+  for (const [target, policy] of [
+    ["web", csp(DESKTOP_API)],
+    ["desktop", desktopPolicy()],
+  ] as const) {
+    assert.deepEqual(
+      [...(parse(policy).get("media-src") ?? [])],
+      ["blob:"],
+      `${target} allows a media source other than the blob: urls this code mints itself`,
+    );
+  }
+});
+
+/**
+ * The PDF viewer parses in a worker. pdf.js falls back to wrapping its worker in a `blob:` when it
+ * decides the configured source is cross-origin, and that fallback is silent — it works, which is
+ * the problem. This pins the intent independently of `script-src`, which is what the directive
+ * would otherwise inherit from.
+ */
+test("workers come from this origin and nowhere else, on both targets", () => {
+  for (const [target, policy] of [
+    ["web", csp(DESKTOP_API)],
+    ["desktop", desktopPolicy()],
+  ] as const) {
+    assert.deepEqual(
+      [...(parse(policy).get("worker-src") ?? [])],
+      ["'self'"],
+      `${target} allows a worker source beyond this origin`,
+    );
+  }
+});
+
+/**
+ * Stated as its own assertion because the two comparison tests above would still pass if somebody
+ * added `media-src` to `DESKTOP_ONLY`. There is no transport argument for that: unlike `ipc:` and
+ * `asset:`, a media element behaves identically on both targets, so a difference here would be a
+ * difference nobody needs and one target would be playing something the other refuses.
+ */
+test("media-src is not among the differences the desktop target is allowed", () => {
+  assert.equal(
+    DESKTOP_ONLY["media-src"],
+    undefined,
+    "an allowance was added for media-src, which has no desktop transport to justify it",
+  );
+});

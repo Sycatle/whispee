@@ -167,8 +167,18 @@ export function fitWithin(
 export interface Preview {
   /** `blob:` URL of the canvas re-encoding. Never of the received bytes. */
   url: string;
+  /** Size of the re-encoding — what an `<img>` will report as its natural size. */
   width: number;
   height: number;
+  /**
+   * Size of the image that was decoded, before it was fitted.
+   *
+   * Carried because it is the only place it is still known: the bitmap is closed before this
+   * function returns, and the `<img>` downstream reports the re-encoding's size, not this one.
+   * Anything that tells a reader "this image is N × M" has to use these, or it states the size of
+   * our own thumbnail and calls it the file's.
+   */
+  source: { width: number; height: number };
 }
 
 /** Why a decode produced nothing. */
@@ -243,7 +253,12 @@ export async function decodePreview(
 
     return {
       ok: true,
-      preview: { url: URL.createObjectURL(encoded), width: size.width, height: size.height },
+      preview: {
+        url: URL.createObjectURL(encoded),
+        width: size.width,
+        height: size.height,
+        source: { width: bitmap.width, height: bitmap.height },
+      },
     };
   } finally {
     // Frees the decoded pixels without waiting for a collection that may never come while the

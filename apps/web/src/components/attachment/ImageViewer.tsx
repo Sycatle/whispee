@@ -55,7 +55,7 @@ function reasonFor(refusal: Refusal): string {
   }
 }
 
-export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
+export function ImageViewer({ blob, name, mode, onRefused, onMeta }: ViewerProps) {
   const [preview, setPreview] = useState<Preview | null>(null);
 
   // An unrevoked `blob:` URL keeps the decoded-derived pixels alive for the life of the document.
@@ -82,6 +82,9 @@ export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
 
       if (decoded.ok) {
         setPreview(decoded.preview);
+        // The decoded size, not the re-encoded one. `preview.source` exists precisely because
+        // this is the last point at which it is known.
+        onMeta?.(decoded.preview.source);
         return;
       }
 

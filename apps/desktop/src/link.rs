@@ -972,6 +972,63 @@ mod tests {
         );
     }
 
+    /// # Tests that open a real connection
+    ///
+    /// `#[ignore]` because they need the internet and a third party's uptime, neither of which a
+    /// unit test may depend on: a run that goes red because somebody else's site is down teaches
+    /// nothing and trains people to ignore red. Run them by hand with
+    /// `cargo test -p desktop --lib -- --ignored`.
+    ///
+    /// They exist because everything above tests the *decision* and none of it tests the path —
+    /// whether the pin, the timeout and the reader work against a server that was not written to
+    /// be agreeable. That is the half a browser cannot show either.
+    #[tokio::test]
+    #[ignore = "needs the network"]
+    async fn un_vrai_site_rend_son_titre() {
+        let preview = fetch_preview("https://example.com/")
+            .await
+            .expect("example.com answers");
+
+        assert_eq!(preview.host, "example.com");
+        assert_eq!(preview.title.as_deref(), Some("Example Domain"));
+    }
+
+    /// The address this whole module exists to keep out, against the real resolver and the real
+    /// stack rather than against a parsed string.
+    #[tokio::test]
+    #[ignore = "needs the network"]
+    async fn les_metadonnees_cloud_sont_refusees_sur_le_vrai_chemin() {
+        let refused = fetch_preview("https://169.254.169.254/latest/meta-data/")
+            .await
+            .expect_err("must be refused");
+
+        assert_eq!(refused, Refusal::Address.message());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the network"]
+    async fn cette_machine_est_refusee_sur_le_vrai_chemin() {
+        for local in ["https://127.0.0.1/", "https://[::1]/", "https://localhost/"] {
+            let refused = fetch_preview(local).await.expect_err("must be refused");
+            assert_eq!(refused, Refusal::Address.message(), "{local}");
+        }
+    }
+
+    /// Refused before a socket exists, which is why it needs no network — but it is here rather
+    /// than above so the whole refusal path is read in one place.
+    #[tokio::test]
+    async fn un_schema_hors_liste_blanche_ne_touche_jamais_le_reseau() {
+        for hostile in [
+            "http://example.com/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://example.com:8787/",
+        ] {
+            let refused = fetch_preview(hostile).await.expect_err("must be refused");
+            assert_eq!(refused, Refusal::Scheme.message(), "{hostile}");
+        }
+    }
+
     #[test]
     fn metadata_ne_confond_pas_meta_et_metadata() {
         let html = r#"<head><metadata property="og:title" content="wrong"><title>real</title></head>"#;

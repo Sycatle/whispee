@@ -60,7 +60,7 @@ import { addresses } from "@/lib/mention";
 import { compactNameOf, handleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
-import { layout, textOf } from "@/lib/thread";
+import { layout, textOf, unblocked } from "@/lib/thread";
 import { useRoving } from "@/lib/useRoving";
 import { useNavigate } from "@/routes/Router";
 import { useDetail } from "@/state/detail";
@@ -157,7 +157,21 @@ export function Messages({
    */
   const stuck = useRef(true);
 
-  const messages = view.messages.slice().sort((a, b) => a.seq - b.seq);
+  /*
+    Blocked accounts are dropped first, before anything reads the list.
+
+    Before the sort, before reactions are folded onto their targets, and before `layout` derives
+    the day headings and the turn grouping — all three would otherwise be computed on messages
+    that are never drawn. `thread.unblocked` states the whole argument; the visible half is that
+    filtering afterwards leaves a date standing above an empty day, and a turn that kept its
+    avatar and lost its message.
+
+    Folding reactions first would be the subtler mistake: a blocked account's thumb on a message
+    that *is* shown would already be attached to it, with nothing left to say whose it was. A
+    reaction is that person speaking too.
+  */
+  const blocked = new Set(session.blocked);
+  const messages = unblocked(view.messages, blocked).sort((a, b) => a.seq - b.seq);
 
   // Reactions are pulled out of the thread and attached to their target. An empty emoji removes
   // its author's reaction: the last state is what counts, not the accumulation.
@@ -424,7 +438,10 @@ export function Messages({
     ...EMOJIS.filter((emoji) => !session.preferences.recentEmojis.includes(emoji)),
   ].slice(0, 5);
 
-  const isTyping = session.typingIn(view);
+  // Blocked accounts are dropped here too. Hiding what somebody says and still drawing their face
+  // with three dots under it announces them at the very moment they are about to be hidden — and
+  // in a one-to-one it would be the only thing the blocked person could still put on screen.
+  const isTyping = session.typingIn(view).filter((account) => !blocked.has(account));
 
   // Wake-up on expiry.
   //

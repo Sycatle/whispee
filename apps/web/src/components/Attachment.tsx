@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { AttachmentViewer } from "@/components/attachment/AttachmentViewer";
 import { ImageViewer } from "@/components/attachment/ImageViewer";
+import { TextViewer } from "@/components/attachment/TextViewer";
 import type { AttachmentRef } from "@/lib/attachments";
 import { type ViewerKind, type ViewerProps, chooseViewer } from "@/lib/viewer";
 import { cn } from "@/ui/cn";
@@ -26,6 +27,7 @@ function formatSize(bytes: number): string {
  */
 const VIEWERS: Partial<Record<ViewerKind, (props: ViewerProps) => React.ReactNode>> = {
   image: ImageViewer,
+  text: TextViewer,
 };
 
 /**

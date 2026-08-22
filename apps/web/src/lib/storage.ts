@@ -138,6 +138,33 @@ interface StoredSession {
    */
   signalsAt?: number;
   /**
+   * When each of the other preferences was last decided, and by extension which removals happened.
+   *
+   * # Why the stamps are stored and not just sent
+   *
+   * They are the tombstones. A block lifted on the laptop is, on the phone, the *absence* of a
+   * block it still holds — and absence loses to any earlier decision that was recorded. Keeping
+   * the stamp of the removal is what makes the removal stick, so it has to survive a reload like
+   * the value it removed.
+   *
+   * `stamped.ts` states the rule in full, including why one stamp over a whole map silently loses
+   * edits made on two devices at once.
+   *
+   * # Why it grows, and how far
+   *
+   * One entry per key ever decided, including keys since removed. That is bounded by the number
+   * of distinct conversations and accounts an owner has ever pinned, muted, blocked or renamed —
+   * a set that grows with acquaintances rather than with time, and that is already the order of
+   * `verified` and `knownDevices` a few fields up.
+   */
+  prefStamps?: {
+    /** `discloseConversationName` and `vaultEnabled`, which move as one decision. */
+    scalars?: number;
+    flags?: Record<string, number>;
+    petnames?: Record<string, number>;
+    blocked?: Record<string, number>;
+  };
+  /**
    * Posting key per conversation, indexed by hex group id.
    *
    * # Why persist it
@@ -229,21 +256,37 @@ interface StoredSession {
    */
   searchCoverage?: Record<string, { from: number; to: number }>;
   /**
-   * Who is allowed to start a conversation with this account.
+   * Who would be allowed to start a conversation with this account, if anything enforced it.
    *
-   * Mirrors the column the server holds, so the interface can show the current setting without a
-   * round trip. **The server is the enforcement point**, not this field: a copy kept locally is a
-   * cache of a decision, never the decision itself.
+   * **Nothing does.** This said it mirrored a column the server holds and that the server was the
+   * enforcement point; there is no such column, no route, and no mention of a contact policy
+   * anywhere in `crates/`. The field is written, read back and tested, and changes nothing about
+   * who can reach this account. No screen offers it either.
+   *
+   * It is left here rather than deleted because the design it belongs to is sound and named
+   * elsewhere — `blocked` a few fields down explains that a local block is a courtesy to oneself
+   * without a server-side half, and this is that half. What was not acceptable was the comment:
+   * a placeholder that describes itself as enforced is worse than no placeholder, because it
+   * stops anybody from noticing the enforcement is missing.
+   *
+   * It does not travel between devices. Synchronising a setting that does nothing would spread
+   * the same false impression to more screens.
    */
   contactPolicy?: "open" | "known" | "closed";
   /**
    * Handles this device refuses to display.
    *
-   * Local, and therefore weak on purpose — it hides, it does not prevent. Anyone registered can
-   * still add anyone to a group and have envelopes delivered to them; blocking on this side means
-   * declining to read something that exists and is stored. That is why the screen offering it has
-   * to offer `contactPolicy` in the same breath: without the server-side half, a block is a
-   * courtesy to oneself rather than a barrier.
+   * Weak on purpose — it hides, it does not prevent. Anyone registered can still add anyone to a
+   * group and have envelopes delivered to them; blocking on this side means declining to read
+   * something that exists and is stored. That is why the screen offering it has to offer
+   * `contactPolicy` in the same breath: without the server-side half, a block is a courtesy to
+   * oneself rather than a barrier — and read that field, because the half in question is not
+   * built.
+   *
+   * No longer local to one device, though. It travels with the other preferences, per entry and
+   * with removals stamped, so that blocking somebody on a phone is not undone by a laptop that
+   * never heard about it. `stamped.ts` is where the arbitration lives, and why a single timestamp
+   * over the whole list would silently lose one of two blocks made at once.
    */
   blocked?: string[];
   /**

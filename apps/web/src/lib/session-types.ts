@@ -391,14 +391,22 @@ export class LogProofRefused extends Error {
  * in each reader — so three records are three places to forget one. They travel together and
  * they are read together.
  *
- * # What this does not solve: other devices
+ * # Other devices, which this used to leave unsolved
  *
- * These stay on the machine that set them. There is no per-account opaque storage on the server
- * to sync them through, and the two ways to invent one both cost something real: the vault
- * refuses a group the caller is not a member of, and a group of one's own devices would spend an
- * envelope per preference change — envelopes that retention eventually collects, so a device
- * left off long enough would silently drift. Pinning something on a laptop therefore does
- * nothing to a phone, and the settings screen has to say so rather than let it be discovered.
+ * These stayed on the machine that set them, and the argument against fixing it was that no
+ * per-account opaque storage existed to sync them through. That was true; it was also not the
+ * only shape available. They now ride the sealed control message an account's devices already
+ * exchange — no new storage, and no group of one's own devices to invent, because every device
+ * of an account is already a member of every one of its conversations.
+ *
+ * The cost that argument named is real and is paid: one envelope per conversation per change.
+ * What made it affordable is what does *not* travel — `recentEmojis` and `skinTone` move on
+ * nearly every message and are deliberately left behind, so the traffic is bounded by deliberate
+ * acts like pinning and muting rather than by typing.
+ *
+ * The retention worry it raised does not apply. A device that was off long enough to miss the
+ * envelope is caught up by the next announcement rather than by that one: what travels is the
+ * whole snapshot, not a delta, and it is re-sent at every epoch of every conversation.
  */
 export interface ConversationFlags {
   /** Sorted above the rest of the list, whatever its last activity. */

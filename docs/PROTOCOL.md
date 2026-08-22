@@ -253,7 +253,7 @@ single leading type byte:
 9  reserved        the friend system, not built
 10 membership      u8 event ‖ UTF-8 account  (joined | removed | left)
 11 handle          u64 BE milliseconds ‖ UTF-8 handle (≤ 32 bytes)
-12 signals         12-byte nonce ‖ AES-256-GCM (u64 BE milliseconds ‖ u8 bitfield)
+12 signals         12-byte nonce ‖ AES-256-GCM (u64 BE ms ‖ u8 bitfield ‖ UTF-8 JSON?)
 ```
 
 Types 2, 3, 4, 8, 11 and 12 are **protocol traffic**: they ride the encrypted channel because that is
@@ -329,7 +329,7 @@ the lie from mattering is that an account id is checkable against key material i
 credential — but a *handle* fetched at render time is checkable against nothing, and fetching it
 would hand the server a fresh opportunity to say who somebody is on every screen, forever.
 
-### 4.4 The signalling settings travel too, and are sealed a second time
+### 4.4 The settings and preferences travel too, and are sealed a second time
 
 Type 12 has the shape of types 8 and 11 — control, self-ordered, last-writer-wins on a clamped
 timestamp, for the reason those two give: `seq` is per conversation and these are per account, so
@@ -356,6 +356,32 @@ is carry an opaque message between devices that already share every conversation
 device from *displaying* a switch its account has already flipped. A device restored from the
 recovery phrase has no conversation and therefore no channel at all, which is why
 `GET /v1/accounts/{account}/devices` returns `presence_optout` — to its owner and to nobody else.
+
+#### The rest of the preferences, appended
+
+After the nine fixed bytes comes optional UTF-8 JSON, inside the same seal: the per-conversation
+flags (pinned, archived, muted, ephemeral), the petnames, the blocks, and the two account-wide
+switches for notification naming and the vault. Nothing after the head is a message from a device
+running the older build — a valid message with no preferences in it, which is not the same as a
+message asking to clear them.
+
+**Each entry carries its own timestamp, and removals are stamped rather than merely absent.** That
+is the part worth stating in a protocol document, because the obvious alternative is wrong in a way
+nothing reports: one timestamp over a *map* means that blocking one person on a laptop and another
+on a phone loses one of the two blocks, and that an unblock loses to the device that still holds
+the block. The stamp map is therefore also the tombstone set — a key stamped and absent from the
+values *is* the record of a removal — and it is persisted, because a tombstone lost at the next
+start lets a third device re-assert what was removed.
+
+What travels is a full snapshot, not a delta: a device that was off for a week is caught up by one
+message rather than by a chain of them it never received. It is bounded at sixteen kilobytes and
+refused rather than truncated past that, since half a preference set reads as a decision to clear
+the half that fell off.
+
+What deliberately does **not** travel: the interface language and the local search coverage, which
+are facts about a machine rather than an account, and the recent-emoji list and skin tone, which
+are account facts that change on nearly every message — syncing them would spend an envelope per
+conversation on somebody reaching for a thumbs-up.
 
 So the handle is believed exactly as much as a display name: a member may claim one they do not
 hold. That buys them nothing the display name did not already offer, and the ambiguity rule above

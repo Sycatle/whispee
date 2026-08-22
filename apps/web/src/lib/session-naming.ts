@@ -155,6 +155,21 @@ export class Names {
   }
 
   /**
+   * Replaces the whole set, after a merge with what another of our devices holds.
+   *
+   * Wholesale rather than key by key because the merge decides removals as well as additions, and
+   * applying only the additions would leave a petname somebody deleted on their phone sitting on
+   * their laptop — with the phone's tombstone unable to say so a second time.
+   *
+   * `clean` is not re-run: these strings were cleaned when they were typed, on a device holding
+   * the same key as this one. Running it again would be defence against ourselves at the cost of
+   * quietly rewriting a name its owner already approved.
+   */
+  replacePetnames(given: Record<string, string>): void {
+    this.given = { ...given };
+  }
+
+  /**
    * Takes in a name a peer declared about itself.
    *
    * `sanitize` runs here rather than where the bytes are decoded: a name from a peer is not less

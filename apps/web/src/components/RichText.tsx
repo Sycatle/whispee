@@ -1,6 +1,7 @@
 import { Fragment } from "react";
 
 import { CodeBlock } from "@/components/CodeBlock";
+import { LinkCard } from "@/components/LinkCard";
 import { LinkText } from "@/components/LinkText";
 import { MentionText } from "@/components/MentionText";
 import { Spoiler } from "@/components/Spoiler";
@@ -48,12 +49,24 @@ export function RichText({
   among,
   view,
   big = false,
+  cards = false,
 }: {
   text: string;
   /** The handles this thread can address. Anything else stays prose. */
   among: readonly string[];
   view: ConversationView;
   big?: boolean;
+  /**
+   * Whether a link in this text may offer to contact its site.
+   *
+   * **Opt-in, and the default is what enforces two of the three rules.** A preview built at the
+   * recipient discloses their IP to a server the sender chose, so it must never happen
+   * automatically and never anywhere nobody pressed anything — the rail, a quotation, a
+   * notification. Those places all render through this component, and none of them passes this,
+   * so none of them *can* produce a card. A comment asking people not to would not survive the
+   * next call site; a prop that has to be written does.
+   */
+  cards?: boolean;
 }) {
   const blocks = parse(text);
 
@@ -63,13 +76,46 @@ export function RichText({
     return <MentionText text={text} among={among} view={view} big={big} />;
   }
 
+  // The first link only, and never one that lives inside a fence — code is not an address
+  // somebody meant to publish. One rather than all of them because a card per link turns a
+  // message listing five into five requests, which is five disclosures for one press.
+  const target = cards ? firstLink(blocks) : null;
+
   return (
     <>
       {blocks.map((block, index) => (
         <BlockNode key={index} block={block} among={among} view={view} />
       ))}
+      {target !== null && <LinkCard url={target} />}
     </>
   );
+}
+
+/**
+ * The first link in the prose, or `null`.
+ *
+ * Only `paragraph` and `quote` carry `children`; a `code` block carries an opaque string and is
+ * skipped by the type rather than by a check — the same airtightness that keeps mentions and
+ * emoji out of a fence.
+ */
+function firstLink(blocks: readonly Block[]): string | null {
+  const walk = (nodes: readonly Inline[]): string | null => {
+    for (const node of nodes) {
+      if (node.kind === "link") return node.raw;
+      if ("children" in node) {
+        const nested = walk(node.children);
+        if (nested !== null) return nested;
+      }
+    }
+    return null;
+  };
+
+  for (const block of blocks) {
+    if (!("children" in block)) continue;
+    const found = walk(block.children);
+    if (found !== null) return found;
+  }
+  return null;
 }
 
 /** Whether a paragraph is one unmarked run — the case the fast path above exists for. */

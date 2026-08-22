@@ -81,6 +81,24 @@ test("presence tells absence apart from refusal", () => {
 });
 
 /**
+ * The stamp that orders the settings has to survive the round trip, and its absence has to
+ * survive it too.
+ *
+ * Absent means "older than anything", which is what lets the first announcement a device hears
+ * win — the right behaviour for an account upgrading from the era when these settings were
+ * per-device. A codec that turned absence into `0` would say the same thing by luck; one that
+ * dropped the field on the way back would make every device re-announce forever, since nothing
+ * would ever be newer than what it holds.
+ */
+test("the settings stamp survives, and so does its absence", () => {
+  const fresh = roundTrip(session());
+  assert.ok(!("signalsAt" in fresh));
+
+  assert.equal(roundTrip(session({ signalsAt: 1_700_000_000_000 })).signalsAt, 1_700_000_000_000);
+  assert.equal(roundTrip(session({ signalsAt: 0 })).signalsAt, 0);
+});
+
+/**
  * Bytes survive past 127.
  *
  * The encoding goes through `String.fromCharCode` then `btoa`: a byte handled as a UTF-16 code

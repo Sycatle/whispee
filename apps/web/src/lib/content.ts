@@ -145,6 +145,50 @@ const TYPE_MEMBERSHIP = 10;
  */
 const TYPE_HANDLE = 11;
 
+/**
+ * The signalling settings of an account, for its **own** devices: `u8 12 ‖ sealed`.
+ *
+ * # Why this travels at all
+ *
+ * `readReceipts` and `typingIndicator` used to be per-device, because they live in the local
+ * encrypted session and `lib/storage.ts` gives a good reason for keeping them out of the
+ * server's sight. The consequence was not good: `Session.acknowledge` runs per session, so an
+ * account that turned receipts off on one device kept sending them from another, and nothing on
+ * screen said so. A setting a forgotten laptop silently undoes is not a setting.
+ *
+ * There is no server-side answer available. The server cannot see receipts — that is the whole
+ * point of them being ordinary envelopes under sealed sender — so it cannot enforce anything
+ * about them. What it can carry is an opaque message, which is what this is.
+ *
+ * # Why the body is sealed and `profile` is not
+ *
+ * A display name is meant for the room. This is not: it is addressed to the other devices of one
+ * account, and it travels through the room only because that is where they meet. Peers must not
+ * read it — knowing somebody turned their read receipts off is exactly the lever the setting
+ * exists to remove, since a peer who can see the switch can ask for it to be flipped back.
+ *
+ * So the transport is the group and the confidentiality is `Account::device_sync_key`, which
+ * every device of an account derives from the seed and nobody else can. A peer sees a control
+ * message of a kind it ignores. It learns that *a* preference moved, never which.
+ *
+ * # What is inside
+ *
+ * `u64 BE milliseconds ‖ u8 bitfield`, sealed. The timestamp is in the clear text and not beside
+ * it: only our own devices order these, and they can all decrypt. The rest of the argument is
+ * `TYPE_PROFILE`'s, unchanged — control traffic is never stamped, and last-writer-wins still
+ * needs an order that `seq` cannot give, since `seq` is per conversation and this is per account.
+ *
+ * The clamp `TYPE_PROFILE` describes applies here too, and matters less: the sender is our own
+ * device. It costs one comparison and covers the device whose clock is simply wrong.
+ *
+ * # No length prefix
+ *
+ * Nothing follows the sealed blob, so the remainder of the buffer is its length. A `u16` in front
+ * would be a second statement of the same fact, and two statements of one fact eventually
+ * disagree.
+ */
+const TYPE_SIGNALS = 12;
+
 /** What happened to somebody's membership. The subject is `handle`; the actor is the sender. */
 export type MembershipEvent = "joined" | "removed" | "left";
 
@@ -160,7 +204,8 @@ export type Content =
   | { kind: "reply"; target: number; text: string }
   | { kind: "profile"; name: string; at: number }
   | { kind: "membership"; event: MembershipEvent; handle: string }
-  | { kind: "handle"; handle: string; at: number };
+  | { kind: "handle"; handle: string; at: number }
+  | { kind: "signals"; sealed: Uint8Array };
 
 /**
  * What a receipt attests.
@@ -268,7 +313,13 @@ export function isControl(body: Content): boolean {
     // A handle claim is control for all three of the same reasons, and carries its own timestamp
     // for the same one: `seq` is per conversation, a handle is per account, so two groups would
     // disagree about which claim came last.
-    body.kind === "handle"
+    body.kind === "handle" ||
+    // Signalling settings are control for all three reasons, and the third is the one that would
+    // bite: a settings announcement that moved the receipt cursor would be acknowledged, and the
+    // acknowledgement would be a message, and two devices would trade them forever. They carry
+    // their own timestamp for the reason the two above do — `seq` is per conversation, an
+    // account's settings are not.
+    body.kind === "signals"
   );
 }
 
@@ -312,6 +363,8 @@ function encodeBody(body: Content): Uint8Array {
       return encodeMembership(body.event, body.handle);
     case "handle":
       return encodeHandle(body.handle, body.at);
+    case "signals":
+      return encodeSignals(body.sealed);
   }
 }
 
@@ -436,6 +489,36 @@ export function encodeHandle(handle: string, at: number): Uint8Array {
  */
 const HANDLE_MAX_BYTES = 32;
 
+/**
+ * Wraps an already sealed settings blob. The sealing happens in `session.ts`, which holds the
+ * key; this module decodes bytes and has no business holding one.
+ */
+export function encodeSignals(sealed: Uint8Array): Uint8Array {
+  if (sealed.length < SEALED_SIGNALS_MIN_BYTES) throw new Error("settings blob too short");
+  if (sealed.length > SEALED_SIGNALS_MAX_BYTES) throw new Error("settings blob too long");
+
+  const out = new Uint8Array(1 + sealed.length);
+  out[0] = TYPE_SIGNALS;
+  out.set(sealed, 1);
+  return out;
+}
+
+/**
+ * A twelve-byte AES-GCM nonce and a sixteen-byte tag, so nothing shorter can be a sealed blob at
+ * all. Checked on both sides: on send because a caller that passed the plaintext by mistake would
+ * otherwise publish it, and on receive so that a truncated message fails here rather than three
+ * layers down in WebCrypto with an error that names nothing.
+ */
+const SEALED_SIGNALS_MIN_BYTES = 12 + 16;
+
+/**
+ * And a ceiling, because a decoder without one lets a hostile member decide how much memory this
+ * costs. The payload is nine bytes today; a hundred and twenty-eight leaves room for the fields
+ * that will follow — `conversationFlags`, `blocked`, and the rest of what does not sync yet —
+ * without leaving room for an attack.
+ */
+const SEALED_SIGNALS_MAX_BYTES = 12 + 16 + 128;
+
 export function encodeAttachment(ref: AttachmentRef): Uint8Array {
   const body = new TextEncoder().encode(JSON.stringify(ref));
   const out = new Uint8Array(1 + body.length);
@@ -547,6 +630,16 @@ function decodeBody(bytes: Uint8Array): Content {
       // know what a screen is; the receiving end in `session.ts` is what decides whether a claim
       // is well-formed enough to show.
       return { kind: "handle", handle: new TextDecoder().decode(handle), at };
+    }
+
+    case TYPE_SIGNALS: {
+      if (body.length < SEALED_SIGNALS_MIN_BYTES) throw new Error("truncated settings blob");
+      if (body.length > SEALED_SIGNALS_MAX_BYTES) throw new Error("oversized settings blob");
+
+      // Not opened here: this module has no key, and it is the receiving end in `session.ts`
+      // that knows whether the author is one of our own devices — which is the only case where
+      // opening it can succeed, and the only case where it means anything.
+      return { kind: "signals", sealed: body.slice() };
     }
 
     case TYPE_PROFILE: {

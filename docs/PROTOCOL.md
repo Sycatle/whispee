@@ -253,9 +253,10 @@ single leading type byte:
 9  reserved        the friend system, not built
 10 membership      u8 event ‖ UTF-8 account  (joined | removed | left)
 11 handle          u64 BE milliseconds ‖ UTF-8 handle (≤ 32 bytes)
+12 signals         12-byte nonce ‖ AES-256-GCM (u64 BE milliseconds ‖ u8 bitfield)
 ```
 
-Types 2, 3, 4, 8 and 11 are **protocol traffic**: they ride the encrypted channel because that is
+Types 2, 3, 4, 8, 11 and 12 are **protocol traffic**: they ride the encrypted channel because that is
 precisely what is wanted — a path the server carries without being able to read it — but they are
 not messages. `isControl` names them in one place, so a new control type does not have to be
 remembered on send *and* on receive.
@@ -327,6 +328,34 @@ The server holds the directory that maps handles to accounts and is free to lie 
 the lie from mattering is that an account id is checkable against key material inside the
 credential — but a *handle* fetched at render time is checkable against nothing, and fetching it
 would hand the server a fresh opportunity to say who somebody is on every screen, forever.
+
+### 4.4 The signalling settings travel too, and are sealed a second time
+
+Type 12 has the shape of types 8 and 11 — control, self-ordered, last-writer-wins on a clamped
+timestamp, for the reason those two give: `seq` is per conversation and these are per account, so
+two rooms would disagree about which change came last. It differs in one respect, and the
+difference is the whole design.
+
+**The body is encrypted again, under a key only the sender's own devices hold.** That key is
+`HKDF-SHA256(seed, "wac-device-sync-v1")`, derived like the vault key and independent of it. Peers
+carry the message and cannot open it; they learn that *a* preference moved, never which.
+
+That second seal is not decoration. The settings say whether an account emits read receipts and
+typing indicators, and knowing that somebody turned their read receipts off is precisely the lever
+the setting exists to remove — a peer who can see the switch can ask for it to be flipped back.
+
+The reason it travels at all is that these settings are a property of the account and used to be a
+property of the device. Acknowledgement runs per session, so an account that refused read receipts
+on one device kept sending them from another, with nothing on screen saying so. There is no
+server-side repair available: the server cannot see a receipt, which is the point of receipts
+being ordinary envelopes under sealed sender, so it can enforce nothing about them. What it can do
+is carry an opaque message between devices that already share every conversation.
+
+`presence` rides along for the screen only. The server is what records presence, so
+`accounts.presence_optout` remains the truth for it; the flag in this message keeps a second
+device from *displaying* a switch its account has already flipped. A device restored from the
+recovery phrase has no conversation and therefore no channel at all, which is why
+`GET /v1/accounts/{account}/devices` returns `presence_optout` — to its owner and to nobody else.
 
 So the handle is believed exactly as much as a display name: a member may claim one they do not
 hold. That buys them nothing the display name did not already offer, and the ambiguity rule above

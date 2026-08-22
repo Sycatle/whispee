@@ -205,3 +205,39 @@ test("a handle with an astral character survives the round trip", () => {
   const decoded = decode(encode({ kind: "membership", event: "removed", handle }));
   assert.deepEqual(decoded.body, { kind: "membership", event: "removed", handle });
 });
+
+test("a sealed settings blob round-trips untouched", () => {
+  const sealed = new Uint8Array(12 + 16 + 9).map((_, i) => i);
+  const decoded = decode(encode({ kind: "signals", sealed }));
+
+  assert.deepEqual(decoded, { body: { kind: "signals", sealed } });
+});
+
+test("settings are control, so they draw no bubble and move no receipt cursor", () => {
+  // The third of those three is what would bite: an acknowledged settings message would be
+  // acknowledged by a message, and two devices would trade acknowledgements forever.
+  assert.equal(isControl({ kind: "signals", sealed: new Uint8Array(28) }), true);
+});
+
+test("settings are never stamped, even when a time is passed", () => {
+  const sealed = new Uint8Array(28);
+  assert.deepEqual(encode({ kind: "signals", sealed }, 1_700_000_000_000), encode({ kind: "signals", sealed }));
+});
+
+test("a settings blob too short to be a sealed anything is refused on both sides", () => {
+  // Twelve bytes of nonce and sixteen of tag: nothing shorter can have been sealed at all, and
+  // catching it here is what keeps the failure from surfacing inside WebCrypto with no name on it.
+  assert.throws(() => encode({ kind: "signals", sealed: new Uint8Array(27) }));
+
+  const truncated = new Uint8Array(1 + 27);
+  truncated[0] = 12;
+  assert.throws(() => decode(truncated));
+});
+
+test("an oversized settings blob is refused rather than allocated", () => {
+  const huge = new Uint8Array(1 + 12 + 16 + 129);
+  huge[0] = 12;
+
+  assert.throws(() => decode(huge));
+  assert.throws(() => encode({ kind: "signals", sealed: new Uint8Array(12 + 16 + 129) }));
+});

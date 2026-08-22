@@ -25,7 +25,7 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Delivery service | Axum + Postgres, signed requests, nonces, rate limits, `envelopes` partitioned by `HASH(group_id)` |
 | Gateway | WebSocket, one connection for every group, dynamic subscription, catch-up by cursor |
 | Multi-instance fan-out | Postgres `LISTEN/NOTIFY` |
-| Receipts, typing, presence, reactions, replies | All four signals, with their settings |
+| Receipts, typing, presence, reactions, replies | All four signals, with their settings — account-wide, sealed between an account's own devices |
 | Mentions | `@handle` in the composer, the account on the wire, the current name on screen |
 | Attachments | Per-file AES-256-GCM key carried inside the MLS message, padded into doubling buckets |
 | One tab per account | An exclusive Web Lock, taken before anything is read — two tabs consume each other's message keys |

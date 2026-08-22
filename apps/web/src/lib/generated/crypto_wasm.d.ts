@@ -20,6 +20,12 @@ export class AccountKey {
      */
     attest(handle: string, device_id: string, auth_key: Uint8Array, mls_key: Uint8Array): Uint8Array;
     /**
+     * Symmetric key every device of the account shares, for the state they owe each other.
+     *
+     * Distinct from the vault key on purpose — see `Account::device_sync_key`.
+     */
+    deviceSyncKey(): Uint8Array;
+    /**
      * Seed to hand to a device being paired. **It is worth the whole account.**
      */
     exportSeed(): Uint8Array;
@@ -430,6 +436,7 @@ export interface InitOutput {
     readonly accountFingerprint: (a: number, b: number, c: number) => void;
     readonly accountId: (a: number, b: number, c: number) => void;
     readonly accountkey_attest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
+    readonly accountkey_deviceSyncKey: (a: number, b: number) => void;
     readonly accountkey_exportSeed: (a: number, b: number) => void;
     readonly accountkey_fingerprint: (a: number, b: number) => void;
     readonly accountkey_fromSeed: (a: number, b: number, c: number) => void;

@@ -26,6 +26,7 @@ import { Archive } from "./session-vault.ts";
 import { Lockbox, type LockKit } from "./session-lock.ts";
 import { LogWitness, type LogChecks } from "./session-log.ts";
 import { composeStored } from "./session-persist.ts";
+import { type SyncedSignals, importSyncKey, openSignals, sealSignals } from "./signal-sync.ts";
 import { fromBase64, toHex } from "./keys";
 import { changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
@@ -195,7 +196,23 @@ export class Session {
      * reverses it.
      */
     private signals: SignalSettings = { readReceipts: true, typingIndicator: true, presence: true },
+    /**
+     * When the settings above were last changed, on whichever device changed them.
+     *
+     * `undefined` reads as older than anything, so the first announcement a device hears wins.
+     * That is the right default for an account upgrading from the per-device era: whatever is on
+     * the device that speaks first becomes the account's, and one click changes it.
+     */
+    private signalsAt: number | undefined = undefined,
   ) {}
+
+  /**
+   * The key our own devices share, imported once.
+   *
+   * Derived on demand, like the vault key, and cached because every epoch of every conversation
+   * asks for it. `null` until first use; the derivation cannot fail for an account that exists.
+   */
+  private syncKey: CryptoKey | null = null;
 
   /**
    * May a notification name the conversation?
@@ -682,6 +699,7 @@ export class Session {
       TrustStore.hydrate(stored),
       // A missing `presence` means enabled: that is the default, the flag only records a refusal.
       { readReceipts: true, typingIndicator: true, ...stored.signals },
+      stored.signalsAt,
     );
 
     // Assigned after construction rather than passed in: the other entry points build a session
@@ -939,6 +957,7 @@ export class Session {
         vault: this.archive.snapshot(),
         trust: this.trust.snapshot(),
         signals: this.signals,
+        signalsAt: this.signalsAt,
         preferences: this.settings.snapshot(),
         names: this.names.snapshot(),
         log: this.witness.snapshot(),
@@ -975,6 +994,20 @@ export class Session {
    */
   async resolve(account: string): Promise<ResolvedAccount> {
     const resolved = await resolveAccount(this.api, this.crypto, account);
+
+    // Our own account is where presence is settled, and the only one this field is served for.
+    //
+    // It is the one signalling setting the sealed announcement cannot carry on its own: a device
+    // restored from the recovery phrase has no conversation yet, hence no channel, and would draw
+    // the switch in its default position for an account the server already stopped recording. The
+    // other two need no such repair — with no conversation there is nobody to emit them to.
+    if (account === this.accountId && resolved.presenceOptout !== undefined) {
+      const presence = !resolved.presenceOptout;
+      if (this.signals.presence !== presence) {
+        this.signals = { ...this.signals, presence };
+        await this.persist();
+      }
+    }
 
     // Attestations prove a device belongs to the account. They say nothing about the ACCOUNT
     // key, which we are discovering here for the first time — that is the hole the log closes.
@@ -2167,6 +2200,94 @@ export class Session {
     }
 
     this.signals[key] = value;
+    this.signalsAt = Date.now();
+    await this.persist();
+
+    // Told to our other devices immediately, rather than waiting for the next epoch of each
+    // conversation. An epoch can sit still for days in a quiet room, and a setting that takes
+    // days to reach the phone in your pocket is one the phone spends those days contradicting.
+    await this.announceSignalsEverywhere();
+  }
+
+  /**
+   * Tells our own devices the settings, in every conversation.
+   *
+   * # Why every conversation and not one
+   *
+   * There is no group that holds an account's devices and nothing else. They meet inside the
+   * conversations they share with other people — see `propagateOwnDevices` and the parity
+   * invariant it states — so "everywhere" is the only address available. A device that is in one
+   * conversation and not another does not exist; that is what parity means.
+   *
+   * # Why failure is swallowed
+   *
+   * The setting has already been applied and persisted locally when this runs. A conversation
+   * whose send fails is one whose other devices learn at the next epoch instead, which is the
+   * path they were on before this method existed. Letting the rejection through would report a
+   * network error for a switch that did move, on the device that moved it.
+   */
+  private async announceSignalsEverywhere(): Promise<void> {
+    for (const view of this.conversations.values()) {
+      try {
+        await this.emitSignals(view);
+      } catch (error) {
+        console.warn("settings announcement deferred", error);
+      }
+    }
+  }
+
+  /**
+   * Posts the settings to one conversation, sealed for our own devices.
+   *
+   * Silent in a room we are alone in: `peers` is every member of the tree except this device, so
+   * an empty one means there is no other device of ours to tell and no peer to carry the message
+   * for us. It costs an envelope and reaches nobody.
+   */
+  private async emitSignals(view: ConversationView): Promise<void> {
+    if (view.peers.length === 0) return;
+
+    const signals: SyncedSignals = {
+      readReceipts: this.signals.readReceipts,
+      typingIndicator: this.signals.typingIndicator,
+      // Absent means enabled, here as everywhere else: the flag only ever records a refusal.
+      presence: this.signals.presence !== false,
+      at: this.signalsAt ?? Date.now(),
+    };
+
+    const sealed = await sealSignals(await this.deviceSyncKey(), signals);
+    await this.sendContent(view, { kind: "signals", sealed });
+  }
+
+  /** The key our own devices share, imported once and kept. */
+  private async deviceSyncKey(): Promise<CryptoKey> {
+    this.syncKey ??= await importSyncKey(this.account.deviceSyncKey());
+    return this.syncKey;
+  }
+
+  /**
+   * Applies settings announced by another of our devices.
+   *
+   * Last writer wins on the **clamped** time, exactly as a profile does. The comparison is `>`
+   * and not `>=`: an announcement carrying the stamp we already hold is the periodic re-send of
+   * a state we agree on, and rewriting it would persist the session on every epoch of every
+   * conversation for no change.
+   *
+   * `presence` is applied to the local flag only. The server holds the truth for it — the column
+   * is what stops the recording — so this keeps the switch on this device honest about a decision
+   * taken elsewhere, and changes nothing about what is recorded.
+   */
+  private async absorbSignals(sealed: Uint8Array): Promise<void> {
+    const opened = await openSignals(await this.deviceSyncKey(), sealed, Date.now());
+    // Not ours to read, or a shape a later build of ours writes. Both are ordinary.
+    if (opened === null) return;
+    if (this.signalsAt !== undefined && opened.at <= this.signalsAt) return;
+
+    this.signals = {
+      readReceipts: opened.readReceipts,
+      typingIndicator: opened.typingIndicator,
+      presence: opened.presence,
+    };
+    this.signalsAt = opened.at;
     await this.persist();
   }
 
@@ -2537,6 +2658,15 @@ export class Session {
           for (const view of this.conversations.values()) touch(view);
         }
       }
+      // Settings announced by another of our own devices. The account comes from the MLS
+      // credential, as above, and the check is what makes this cheap: every peer in the room
+      // receives this message and would otherwise attempt a decryption certain to fail, once per
+      // conversation per epoch. The seal is what makes it *safe* — the check is only economy.
+      if (decode.kind === "signals" && incoming.sender === this.accountId) {
+        void this.absorbSignals(decode.sealed).catch((error: unknown) => {
+          console.warn("settings announcement not applied", error);
+        });
+      }
       return;
     }
 
@@ -2816,6 +2946,13 @@ export class Session {
     if (this.displayName !== undefined) {
       await this.sendContent(view, { kind: "profile", name: this.displayName, at });
     }
+
+    // And the signalling settings, for our own devices rather than for the room. Sent from here
+    // because the trigger is the same one: the epoch moves when somebody joins, and a device of
+    // ours that just joined is precisely who has never heard these. Unconditional, unlike the
+    // display name — there is no such thing as an account without settings, and a device that
+    // never hears them keeps the defaults, which is to say keeps emitting what its owner refused.
+    await this.emitSignals(view);
   }
 
   /**

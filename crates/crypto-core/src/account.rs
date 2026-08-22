@@ -38,6 +38,7 @@ const ENTROPY_BYTES: usize = 16;
 /// these constants rather than literals scattered around.
 const INFO_IDENTITY: &[u8] = b"wac-account-identity-v1";
 const INFO_VAULT: &[u8] = b"wac-vault-v1";
+const INFO_DEVICE_SYNC: &[u8] = b"wac-device-sync-v1";
 
 /// An account's root key.
 ///
@@ -200,6 +201,34 @@ impl Account {
         let mut key = [0u8; 32];
         Hkdf::<Sha256>::new(None, &self.seed)
             .expand(INFO_VAULT, &mut key)
+            .expect("32 bytes is a valid length for HKDF-SHA256");
+        key
+    }
+
+    /// Symmetric key shared by every device of the account, for state they owe each other.
+    ///
+    /// # What it is for
+    ///
+    /// The signalling settings — read receipts, typing indicator, presence — are a property of
+    /// the account, not of the laptop they were last toggled on. They travel as a control
+    /// message through the conversations the devices already share, which means peers carry
+    /// them. This key is what stops peers from reading them.
+    ///
+    /// That matters: knowing somebody turned their read receipts off is precisely the lever the
+    /// setting exists to remove. A peer who can see the switch can ask for it to be flipped back.
+    ///
+    /// # Why not the vault key
+    ///
+    /// It would work, and it would tie reading the settings to holding the backup key — two
+    /// unrelated powers, granted together for no reason beyond saving four lines. The `info`
+    /// string is what keeps them independent, and the invariant at the top of this file is the
+    /// whole argument for spending them.
+    ///
+    /// Like [`Self::vault_key`], derived on demand and never persisted.
+    pub fn device_sync_key(&self) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        Hkdf::<Sha256>::new(None, &self.seed)
+            .expand(INFO_DEVICE_SYNC, &mut key)
             .expect("32 bytes is a valid length for HKDF-SHA256");
         key
     }

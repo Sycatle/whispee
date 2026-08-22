@@ -215,9 +215,11 @@ export class Api {
   async listAccountDevices(account: string): Promise<{
     identityKey: Uint8Array;
     devices: AttestedDevice[];
+    presenceOptout?: boolean;
   }> {
     const body = await this.request<{
       identity_key: string;
+      presence_optout?: boolean;
       devices: {
         id: string;
         auth_key: string;
@@ -231,6 +233,9 @@ export class Api {
 
     return {
       identityKey: fromBase64(body.identity_key),
+      // Served for our own account and for nobody else's, so absent is the ordinary case and
+      // means "not ours to know", never "presence is on".
+      presenceOptout: body.presence_optout,
       devices: body.devices.map((device) => ({
         id: device.id,
         authKey: fromBase64(device.auth_key),

@@ -44,6 +44,16 @@ export interface ResolvedAccount {
   /** Active devices whose attestation was verified right here. */
   devices: AttestedDevice[];
   /**
+   * Whether the account has refused presence — present only when the account is our own.
+   *
+   * Unverifiable, like everything the server says here, and unlike the devices there is no
+   * attestation to check it against. That is tolerable because of what it is used for: keeping
+   * the switch on a freshly restored device honest about a decision taken on another one. A
+   * server that lied here would draw a switch in the wrong position and change nothing about what
+   * is recorded — the column it would be lying about is the same one it obeys.
+   */
+  presenceOptout?: boolean;
+  /**
    * Devices whose revocation was verified right here.
    *
    * Served by the server rather than hidden, so that omission stays distinguishable from
@@ -81,7 +91,7 @@ export async function resolveAccount(
   crypto: Crypto,
   account: string,
 ): Promise<ResolvedAccount> {
-  const { identityKey, devices } = await api.listAccountDevices(account);
+  const { identityKey, devices, presenceOptout } = await api.listAccountDevices(account);
 
   const verified: AttestedDevice[] = [];
   const revoked: AttestedDevice[] = [];
@@ -130,6 +140,7 @@ export async function resolveAccount(
     identityKey,
     fingerprint: crypto.accountFingerprint(identityKey),
     devices: verified,
+    presenceOptout,
     revoked,
     revokedKeys: revoked.map((device) => device.mlsKey),
     rejected,

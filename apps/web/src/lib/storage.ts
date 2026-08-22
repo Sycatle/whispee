@@ -114,10 +114,29 @@ interface StoredSession {
   /**
    * Signalling settings. Absent on earlier sessions, hence optional.
    *
-   * They live here and nowhere else: they are local preferences, and telling the server about
-   * them would amount to teaching it who refuses to be observed.
+   * They live here and nowhere else on the server's side: telling it about them would amount to
+   * teaching it who refuses to be observed. `presence` is the one exception, and it earns it —
+   * the server is what *records* presence, so a refusal it never hears is a refusal that changes
+   * nothing.
+   *
+   * Local, though, no longer means per-device. They are a property of the account, and a setting
+   * one forgotten laptop keeps undoing is not a setting; they now travel between our own devices
+   * as a sealed control message. See `lib/signal-sync.ts`.
    */
   signals?: SignalSettings;
+  /**
+   * When the settings above were last changed, by whichever of our devices changed them.
+   *
+   * Last-writer-wins needs an order, and `seq` cannot give one: it is per conversation while
+   * these are per account, so two rooms would disagree about which change came last. Kept beside
+   * the settings rather than inside them because it is not something the user agrees to emit —
+   * it is the bookkeeping that lets a device stay silent when what reaches it is older than what
+   * it already has.
+   *
+   * Absent on every session written before the settings started travelling, which reads as "older
+   * than anything" and lets the first announcement heard win.
+   */
+  signalsAt?: number;
   /**
    * Posting key per conversation, indexed by hex group id.
    *

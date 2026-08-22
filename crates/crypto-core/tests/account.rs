@@ -38,6 +38,18 @@ fn the_vault_key_is_distinct_from_the_identity_key() {
     assert_ne!(account.vault_key(), account.identity_key());
 }
 
+/// The device-sync key sits next to the vault key and must be independent of it and of the
+/// identity key: a peer who somehow obtained one must learn nothing about the others. Three
+/// distinct HKDF `info` strings are the whole mechanism, so this is the test that catches a
+/// copy-paste that left two of them equal.
+#[test]
+fn the_device_sync_key_is_distinct_from_the_other_two() {
+    let account = Account::from_phrase(PHRASE).unwrap();
+
+    assert_ne!(account.device_sync_key(), account.vault_key());
+    assert_ne!(account.device_sync_key(), account.identity_key());
+}
+
 #[test]
 fn two_generated_accounts_are_different() {
     let (a, phrase_a) = Account::generate().unwrap();
@@ -120,6 +132,7 @@ fn the_transferred_seed_rebuilds_an_equivalent_account() {
 
     assert_eq!(source.identity_key(), paired.identity_key());
     assert_eq!(source.vault_key(), paired.vault_key());
+    assert_eq!(source.device_sync_key(), paired.device_sync_key());
 
     let signature = paired.attest("alice", "tablet", &[3u8; 32], &[4u8; 32]).unwrap();
     let claim = attest::DeviceClaim {

@@ -2617,6 +2617,47 @@ async fn the_per_device_detail_is_only_served_to_its_owner() {
     );
 }
 
+/// Whether an account refuses presence is served to that account and to nobody else.
+///
+/// # Why it is served at all
+///
+/// The setting used to be write-only, so a device that was not there when it was written had no
+/// way to learn it. The other two signalling settings reach an account's devices as a sealed
+/// message inside the conversations they share; a device restored from the recovery phrase has no
+/// conversation, hence no channel, and would draw the switch "on" for an account the server has
+/// already stopped recording.
+///
+/// # Why it must not be served to anyone else
+///
+/// "Does this person refuse to be observed" is worth more to a stranger than to its owner. It is
+/// also exactly the fact the refusal exists to withhold, so leaking it would make the setting
+/// self-defeating.
+#[tokio::test]
+async fn the_presence_refusal_is_only_served_to_its_owner() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    let refuse = alice.post("/v1/presence/optout", serde_json::json!({ "optout": true })).await;
+    assert_eq!(refuse.status(), 200, "the refusal was not recorded");
+
+    let own: serde_json::Value =
+        alice.get(&format!("/v1/accounts/{}/devices", a.id)).await.json().await.unwrap();
+    assert_eq!(
+        own["presence_optout"], serde_json::json!(true),
+        "the owner cannot read back their own refusal",
+    );
+
+    let third_party: serde_json::Value =
+        bob.get(&format!("/v1/accounts/{}/devices", a.id)).await.json().await.unwrap();
+    assert!(
+        third_party["presence_optout"].is_null(),
+        "a stranger learns who refuses to be observed",
+    );
+}
+
 // ---------------------------------------------------------------- wake
 
 /// **The test that carries the property of the wake module.**

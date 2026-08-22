@@ -315,6 +315,21 @@ export function Messages({
   // running.
   const sent = useRef(view.outbox.length);
 
+  /**
+   * Whether the thread has been placed yet.
+   *
+   * Opening a conversation is not an arrival, and treating it as one is what made a thread scroll
+   * itself: the list mounts at the top, this effect runs for the first time, and the reader
+   * watches several screens of their own history slide past before it settles at the end they
+   * asked for. On a long thread that is a second of travel to arrive where the first frame should
+   * already have been.
+   *
+   * So the first run jumps and every later one may glide. The distinction is the same one the
+   * comment above draws about *whose* message arrived — a scroll animation is only ever worth
+   * showing when it carries meaning about a change, and the initial position carries none.
+   */
+  const placed = useRef(false);
+
   useEffect(() => {
     const mine = view.outbox.length > sent.current;
     sent.current = view.outbox.length;
@@ -322,8 +337,26 @@ export function Messages({
     if (!mine && !stuck.current) return;
 
     const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    bottom.current?.scrollIntoView({ behavior: still ? "auto" : "smooth" });
+    const first = !placed.current;
+    placed.current = true;
+
+    bottom.current?.scrollIntoView({ behavior: still || first ? "auto" : "smooth" });
   }, [visible.length, view.outbox.length]);
+
+  /**
+   * A different conversation is a different thread, and it has to be placed again.
+   *
+   * Without this, switching conversations keeps `placed` from the last one and the new thread
+   * glides in from the top exactly as it used to.
+   *
+   * `view.key` and not `view.groupId`: the group id is a `Uint8Array`, which a dependency array
+   * compares by reference. A poll that rebuilt the view would hand over an equal-but-different
+   * array, this effect would run, and the flag would be cleared on a thread that is already
+   * placed — putting the glide back on the next arrival. The key is the same bytes as a string.
+   */
+  useEffect(() => {
+    placed.current = false;
+  }, [view.key]);
 
   // "Read" means **shown to someone**. So it is decided here, in the component that renders the
   // thread — not in the poll loop, which runs even with the window closed.

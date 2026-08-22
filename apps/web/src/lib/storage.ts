@@ -256,21 +256,31 @@ interface StoredSession {
    */
   searchCoverage?: Record<string, { from: number; to: number }>;
   /**
-   * Who would be allowed to start a conversation with this account, if anything enforced it.
+   * Who may start a conversation with this account.
    *
-   * **Nothing does.** This said it mirrored a column the server holds and that the server was the
-   * enforcement point; there is no such column, no route, and no mention of a contact policy
-   * anywhere in `crates/`. The field is written, read back and tested, and changes nothing about
-   * who can reach this account. No screen offers it either.
+   * **A cache, and the only field here that is one.** The truth is `accounts.contact_policy` on
+   * the server, which refuses to write the `group_members` row rather than writing it and letting
+   * the client decline to read. That is what separates this from `blocked` a few fields down: one
+   * prevents, the other hides, and the difference is which party can act.
    *
-   * It is left here rather than deleted because the design it belongs to is sound and named
-   * elsewhere — `blocked` a few fields down explains that a local block is a courtesy to oneself
-   * without a server-side half, and this is that half. What was not acceptable was the comment:
-   * a placeholder that describes itself as enforced is worse than no placeholder, because it
-   * stops anybody from noticing the enforcement is missing.
+   * This comment used to describe that enforcement while nothing enforced it — no column, no
+   * route, no mention anywhere in `crates/`. It is worth saying that it was wrong for months and
+   * that nothing reported it: a placeholder describing itself as enforced is worse than no
+   * placeholder, because it stops anybody from noticing the enforcement is missing.
    *
-   * It does not travel between devices. Synchronising a setting that does nothing would spread
-   * the same false impression to more screens.
+   * # Why it does not travel with the other preferences
+   *
+   * They travel because the server must not know them. This one it already knows, because it acts
+   * on it — so a sealed copy between devices would be a second version of a fact that has an
+   * authority, and two versions of one fact eventually disagree. It is read back on resolve
+   * instead, and the server's answer wins outright.
+   *
+   * # `known` means what the server can check
+   *
+   * That the two accounts already share a group. Not that they have verified each other:
+   * verification is compared out of band and never reaches the server, and teaching it would hand
+   * it a finer map of who trusts whom than it already has. The screen says the relation in those
+   * words rather than saying "known" and letting each reader supply a meaning.
    */
   contactPolicy?: "open" | "known" | "closed";
   /**
@@ -278,10 +288,9 @@ interface StoredSession {
    *
    * Weak on purpose — it hides, it does not prevent. Anyone registered can still add anyone to a
    * group and have envelopes delivered to them; blocking on this side means declining to read
-   * something that exists and is stored. That is why the screen offering it has to offer
+   * something that exists and is stored. That is why the screen offering it offers
    * `contactPolicy` in the same breath: without the server-side half, a block is a courtesy to
-   * oneself rather than a barrier — and read that field, because the half in question is not
-   * built.
+   * oneself rather than a barrier. That half is built now, and the two sit on one screen.
    *
    * No longer local to one device, though. It travels with the other preferences, per entry and
    * with removals stamped, so that blocking somebody on a phone is not undone by a laptop that

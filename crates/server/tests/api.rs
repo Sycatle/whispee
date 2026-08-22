@@ -3901,3 +3901,206 @@ async fn renaming_mid_conversation_changes_nothing_about_it() {
         other => panic!("expected an application message, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------- contact policy
+
+/// Adds `subject`'s device to a fresh group, as `caller`. The status is the whole answer.
+async fn try_to_reach(caller: &Device, subject: &Device) -> reqwest::StatusCode {
+    let group_id = unique("group").into_bytes();
+
+    caller
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+            serde_json::json!({ "device_ids": [caller.id, subject.id] }),
+        )
+        .await
+        .status()
+}
+
+async fn set_policy(device: &Device, policy: &str) -> reqwest::StatusCode {
+    device.post("/v1/contact-policy", serde_json::json!({ "policy": policy })).await.status()
+}
+
+/// **The test that makes the setting exist.**
+///
+/// `blocked` hides what somebody says and lets it arrive; this refuses the arrival. Being added to
+/// a group is a row in `group_members`, so the server is the only party that can decline to write
+/// it — which is why this half could never have lived in the client, and why the client field
+/// spent months claiming a server that would enforce it.
+#[tokio::test]
+async fn a_closed_account_cannot_be_added_by_a_stranger() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    assert!(try_to_reach(&alice, &bob).await.is_success(), "open is the default");
+
+    assert_eq!(set_policy(&bob, "closed").await, 200);
+    assert_eq!(try_to_reach(&alice, &bob).await, 403);
+}
+
+/// The refusal must be indistinguishable from the one a non-member already gets.
+///
+/// A reply that said "this account is not accepting" would make the setting an oracle: anybody
+/// could learn anybody's policy by trying, which is a fact about a person published by the
+/// mechanism meant to protect them. Both paths answer `403` with no body to tell them apart.
+#[tokio::test]
+async fn a_refused_contact_looks_like_any_other_refusal() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+    let c = TestAccount::create(&server, &unique("carol")).await;
+    let carol = c.device(&server, "phone").await;
+
+    assert_eq!(set_policy(&bob, "closed").await, 200);
+    let closed = alice
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(unique("group").into_bytes())),
+            serde_json::json!({ "device_ids": [alice.id, bob.id] }),
+        )
+        .await;
+
+    // A group Carol is not in: the pre-existing refusal this one has to be confused with.
+    let group_id = unique("group").into_bytes();
+    alice
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+            serde_json::json!({ "device_ids": [alice.id] }),
+        )
+        .await;
+    let outsider = carol
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+            serde_json::json!({ "device_ids": [carol.id] }),
+        )
+        .await;
+
+    assert_eq!(closed.status(), outsider.status());
+    assert_eq!(closed.text().await.unwrap(), outsider.text().await.unwrap());
+}
+
+/// `known` means "already meets me somewhere else", which is the only relation this server can
+/// establish without being told anything new.
+#[tokio::test]
+async fn known_admits_an_account_already_met_and_refuses_the_rest() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+    let c = TestAccount::create(&server, &unique("carol")).await;
+    let carol = c.device(&server, "phone").await;
+
+    // Alice and Bob already meet somewhere.
+    assert!(try_to_reach(&alice, &bob).await.is_success());
+    assert_eq!(set_policy(&bob, "known").await, 200);
+
+    assert!(try_to_reach(&alice, &bob).await.is_success(), "an account already met was refused");
+    assert_eq!(try_to_reach(&carol, &bob).await, 403, "a stranger got in under `known`");
+}
+
+/// **The subtle one.** The group being created must not count as the meeting.
+///
+/// `add_members` inserts the caller before the policy runs, so a test that counted the group under
+/// construction would find the caller in it and admit everybody — the setting would enforce
+/// nothing while appearing to work, which is worse than not shipping it.
+#[tokio::test]
+async fn the_group_being_created_does_not_make_a_stranger_known() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    assert_eq!(set_policy(&bob, "known").await, 200);
+    assert_eq!(try_to_reach(&alice, &bob).await, 403);
+}
+
+/// An account must never lock its own devices out of its own conversations.
+///
+/// `propagateOwnDevices` adds them to every thread on every poll. A policy that applied to itself
+/// would break an account the moment it paired a second device, in a way nobody would think to
+/// test because nobody thinks of their own phone as a stranger.
+#[tokio::test]
+async fn a_closed_account_still_reaches_its_own_devices() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let phone = a.device(&server, "phone").await;
+    let tablet = a.device(&server, "tablet").await;
+
+    assert_eq!(set_policy(&phone, "closed").await, 200);
+    assert!(try_to_reach(&phone, &tablet).await.is_success());
+}
+
+/// Not retroactive, and it cannot be: the membership that matters is the MLS tree, which this
+/// server cannot read. Emptying a distribution list would break every conversation the account
+/// already had while leaving its members holding the keys.
+#[tokio::test]
+async fn closing_the_door_leaves_the_conversations_already_open() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    let group_id = unique("group").into_bytes();
+    assert!(
+        alice
+            .post(
+                &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+                serde_json::json!({ "device_ids": [alice.id, bob.id] }),
+            )
+            .await
+            .status()
+            .is_success()
+    );
+
+    assert_eq!(set_policy(&bob, "closed").await, 200);
+
+    // The existing group still carries both, and posting into it still works.
+    let posted = alice
+        .post(
+            &format!("/v1/groups/{}/envelopes", hex::encode(&group_id)),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode(b"still open") }),
+        )
+        .await;
+    assert!(posted.status().is_success(), "closing the door emptied a room already occupied");
+}
+
+/// A policy the schema would refuse must not reach the schema.
+#[tokio::test]
+async fn an_unknown_policy_is_refused_as_a_bad_request() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+
+    assert_eq!(set_policy(&alice, "sometimes").await, 400);
+}
+
+/// The policy is readable by its owner and by nobody else.
+///
+/// Sharper than for `presence_optout`: this answers "will this person accept a stranger", which is
+/// worth more to a stranger than to its owner — and publishing it would undo the care taken to
+/// make the refusal at `add_members` indistinguishable.
+#[tokio::test]
+async fn the_contact_policy_is_only_served_to_its_owner() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    assert_eq!(set_policy(&alice, "known").await, 200);
+
+    let own: serde_json::Value =
+        alice.get(&format!("/v1/accounts/{}/devices", a.id)).await.json().await.unwrap();
+    assert_eq!(own["contact_policy"], serde_json::json!("known"));
+
+    let third_party: serde_json::Value =
+        bob.get(&format!("/v1/accounts/{}/devices", a.id)).await.json().await.unwrap();
+    assert!(third_party["contact_policy"].is_null(), "a stranger learns who accepts strangers");
+}

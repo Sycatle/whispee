@@ -199,6 +199,45 @@ test("an unknown membership event is refused rather than drawn with a blank verb
   assert.throws(() => decode(forged), /unknown membership event/);
 });
 
+test("a call event round-trips, for each event", () => {
+  for (const event of ["invite", "ended", "missed"] as const) {
+    const body = { kind: "call", event, call: "9f2c41ab7d0e5638", seconds: 197 } as const;
+    assert.deepEqual(decode(encode(body)), { body });
+  }
+});
+
+test("a call event is not control: a missed call has to be visible", () => {
+  // Control would drop it from the thread, from the vault and from the unread count — which is
+  // to say, a call nobody answered would leave no trace at all.
+  assert.equal(isControl({ kind: "call", event: "missed", call: "9f2c", seconds: 0 }), false);
+});
+
+test("a call keeps its timestamp", () => {
+  const at = new Date("2024-03-04T12:00:00Z").getTime();
+  const decoded = decode(encode({ kind: "call", event: "ended", call: "9f2c", seconds: 61 }, at));
+
+  assert.equal(decoded.sentAt, at);
+  assert.deepEqual(decoded.body, { kind: "call", event: "ended", call: "9f2c", seconds: 61 });
+});
+
+test("a call longer than a day keeps its duration", () => {
+  // Seconds in a `u32`: the field overflows after a hundred and thirty-six years, which is the
+  // right kind of margin for a number that is only ever read as a duration.
+  const seconds = 60 * 60 * 30;
+  const decoded = decode(encode({ kind: "call", event: "ended", call: "9f2c", seconds }));
+
+  assert.deepEqual(decoded.body, { kind: "call", event: "ended", call: "9f2c", seconds });
+});
+
+test("an unknown call event is refused rather than drawn with a blank verb", () => {
+  const forged = new Uint8Array([13, 99, 0, 0, 0, 0, ...new TextEncoder().encode("9f2c")]);
+  assert.throws(() => decode(forged), /unknown call event/);
+});
+
+test("a truncated call event is refused rather than read past its end", () => {
+  assert.throws(() => decode(new Uint8Array([13, 0, 0, 0])), /truncated call event/);
+});
+
 test("a handle with an astral character survives the round trip", () => {
   // The subject is somebody else's handle: it is not our string to assume anything about.
   const handle = "dana\u{1F600}4417";

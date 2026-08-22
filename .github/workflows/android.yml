@@ -73,9 +73,14 @@ jobs:
       # `aarch64` covers most real devices; `armv7` and `x86` are old handsets and emulators
       # respectively. A debug APK needs neither. A release does — and it will get its own
       # workflow, where the spend is justified by an artefact that gets distributed.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
+      #
+      # The channel is `rust-toolchain.toml`'s and not `stable`: a build that compiles with
+      # whatever shipped that morning is not the build the pin exists to make reproducible. The
+      # target is added here rather than in the file because it belongs to this workflow alone.
+      - name: Toolchain
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-linux-android
 
       # The cache is a cost measure as much as a speed one: without it, every build recompiles
       # the entire Rust dependency tree under cross-compilation.

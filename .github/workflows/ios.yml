@@ -51,9 +51,12 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      # The channel is `rust-toolchain.toml`'s and not `stable`, for the reason the pin exists:
+      # a release built on two different days must produce the same bytes.
+      - name: Toolchain
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 
       # The cache counts double here: it saves minutes billed ten times over.
       - uses: Swatinem/rust-cache@v2

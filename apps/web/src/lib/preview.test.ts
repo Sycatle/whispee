@@ -131,7 +131,42 @@ test("an image past the viewer's ceiling is scaled to it, keeping its shape", ()
  * budget is what decides, at either size.
  */
 test("the pixel budget is not weakened by asking for the larger edge", () => {
-  assert.ok(!withinPixelBudget(6000, 5000));
-  assert.ok(fitWithin(6000, 5000, MAX_VIEWER_EDGE).width <= MAX_VIEWER_EDGE);
-  assert.ok(6000 * 5000 > MAX_PREVIEW_PIXELS);
+  // 10 000 squared is 100 megapixels: past the budget, and `fitWithin` would still bring its long
+  // edge down to `MAX_VIEWER_EDGE`. That is the point — the edge is not what refuses, the budget
+  // is, and asking for the larger edge buys no way around it.
+  //
+  // These numbers had to move when the ceiling went from 25 to 80 megapixels: 6000x5000 was over
+  // the old budget and sits comfortably inside the new one, so the assertion would have passed
+  // for the wrong reason had it been left alone.
+  assert.ok(!withinPixelBudget(10_000, 10_000));
+  assert.ok(fitWithin(10_000, 10_000, MAX_VIEWER_EDGE).width <= MAX_VIEWER_EDGE);
+  assert.ok(10_000 * 10_000 > MAX_PREVIEW_PIXELS);
+});
+
+/**
+ * The case that sent somebody looking for a bug in their own file.
+ *
+ * A 5016×5016 PNG — an ordinary export, 253 kB on the wire — is 25 160 256 pixels, which is 0.64%
+ * over the ceiling. It decoded perfectly; it was refused afterwards; and the refusal was reported
+ * with the wording for bytes that are not an image at all.
+ *
+ * Two things are wrong there and only one of them is the number. A ceiling has to sit somewhere
+ * and something will always be just past it, so the test that matters is the one that pins what
+ * the *reason* is.
+ */
+test("a full-resolution square photo is inside the budget", () => {
+  assert.ok(
+    withinPixelBudget(5016, 5016),
+    "a 25-megapixel export is the case the ceiling's own comment says it means to allow",
+  );
+  assert.ok(withinPixelBudget(6000, 4000), "a 24-megapixel camera frame");
+  assert.ok(withinPixelBudget(8000, 6000), "a 48-megapixel phone frame");
+});
+
+/** The ceiling still has to refuse the thing it exists for. */
+test("a decode bomb is still refused", () => {
+  assert.ok(!withinPixelBudget(30_000, 30_000), "900 megapixels");
+  assert.ok(!withinPixelBudget(65_535, 65_535), "the largest a PNG may declare");
+  assert.ok(!withinPixelBudget(0, 100), "a zero dimension is not an image");
+  assert.ok(!withinPixelBudget(-1, -1));
 });

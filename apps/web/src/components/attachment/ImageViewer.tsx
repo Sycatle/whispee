@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 
 import type { ViewerProps } from "@/lib/viewer";
 import {
+  MAX_PREVIEW_PIXELS,
   MAX_VIEWER_EDGE,
   type Preview,
+  type Refusal,
   decodePreview,
   mayAnimate,
   release,
@@ -28,6 +30,31 @@ import {
  * arrive without `Attachment.tsx` learning what any of them are. It knows `chooseViewer` said
  * "image" and nothing else — not `createImageBitmap`, not `blob:`, not the pixel ceiling.
  */
+/**
+ * What to tell somebody when there is no preview.
+ *
+ * The wording matters more than it looks. "This file does not decode as an image" is true of
+ * exactly one of these, and it was being said for all three — including for a valid photograph
+ * that was fractionally too large, which reads as the application calling somebody's own file
+ * corrupt. Each sentence now says whose problem it is and whether anything can be done.
+ */
+function reasonFor(refusal: Refusal): string {
+  switch (refusal.reason) {
+    case "undecodable":
+      return "This file does not decode as an image, whatever it says it is. It can only be downloaded.";
+    case "too-large": {
+      const megapixels = Math.round((refusal.width * refusal.height) / 1_000_000);
+      const ceiling = Math.round(MAX_PREVIEW_PIXELS / 1_000_000);
+      // The numbers are given because they are the only thing that makes this actionable: the
+      // file is fine, it is simply past what a preview will hold, and its author can say by how
+      // much rather than guessing.
+      return `This image is ${refusal.width}×${refusal.height} — ${megapixels} megapixels, past the ${ceiling} a preview holds. Download it to see it in full.`;
+    }
+    case "unavailable":
+      return "The preview could not be built here. The file itself is unaffected — download it to open it.";
+  }
+}
+
 export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
   const [preview, setPreview] = useState<Preview | null>(null);
 
@@ -49,16 +76,18 @@ export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
       // The component may have gone while the decode was in flight. Setting state on it would be
       // a warning; releasing a preview nobody will ever revoke would be a leak.
       if (!live) {
-        if (decoded !== null) release(decoded);
+        if (decoded.ok) release(decoded.preview);
         return;
       }
 
-      if (decoded === null) {
-        onRefused("This file does not decode as an image, whatever it says it is.");
+      if (decoded.ok) {
+        setPreview(decoded.preview);
         return;
       }
 
-      setPreview(decoded);
+      // Each reason gets its own sentence, because the file is at fault in only one of them and
+      // saying so when it is not sends somebody looking for a problem they do not have.
+      onRefused(reasonFor(decoded));
     });
 
     return () => {

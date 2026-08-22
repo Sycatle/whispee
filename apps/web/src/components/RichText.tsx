@@ -5,6 +5,7 @@ import { LinkCard } from "@/components/LinkCard";
 import { LinkText } from "@/components/LinkText";
 import { MentionText } from "@/components/MentionText";
 import { Spoiler } from "@/components/Spoiler";
+import { contactable } from "@/lib/link-preview";
 import { type Block, type Inline, parse } from "@/lib/markdown";
 import type { ConversationView } from "@/lib/session";
 import { cn } from "@/ui/cn";
@@ -76,9 +77,11 @@ export function RichText({
     return <MentionText text={text} among={among} view={view} big={big} />;
   }
 
-  // The first link only, and never one that lives inside a fence — code is not an address
-  // somebody meant to publish. One rather than all of them because a card per link turns a
-  // message listing five into five requests, which is five disclosures for one press.
+  // The first contactable link only, and never one that lives inside a fence — code is not an
+  // address somebody meant to publish. One rather than all of them because a card per link turns
+  // a message listing five into five requests, which is five disclosures for one press.
+  // `contactable` is what keeps a deceptive URL from being offered here after `LinkText` refused
+  // to make it clickable.
   const target = cards ? firstLink(blocks) : null;
 
   return (
@@ -101,7 +104,12 @@ export function RichText({
 function firstLink(blocks: readonly Block[]): string | null {
   const walk = (nodes: readonly Inline[]): string | null => {
     for (const node of nodes) {
-      if (node.kind === "link") return node.raw;
+      if (node.kind === "link") {
+        if (contactable(node.raw)) return node.raw;
+        // Keep looking: a message whose first link is deceptive may still carry an ordinary one,
+        // and the deceptive one must not shadow it.
+        continue;
+      }
       if ("children" in node) {
         const nested = walk(node.children);
         if (nested !== null) return nested;

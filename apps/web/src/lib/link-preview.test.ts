@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { looksMissing, previewAvailable } from "./link-preview.ts";
+import { contactable, looksMissing, previewAvailable } from "./link-preview.ts";
 
 /**
  * What is not covered here, and cannot be: whether a site is safe to contact. That decision is
@@ -52,4 +52,30 @@ test("an unrecognisable rejection is not absence", () => {
 test("nothing is available outside the desktop application", () => {
   assert.equal("__TAURI_INTERNALS__" in globalThis, false);
   assert.equal(previewAvailable(), false);
+});
+
+/**
+ * The gap this closes: `LinkText` refuses to make a deceptive URL clickable, and offering to
+ * contact the same URL would hand back what was withheld. The crafted ones are precisely the ones
+ * somebody wants fetched.
+ */
+test("a deceptive link is never offered for contact", () => {
+  assert.equal(contactable("https://google.com@evil.tld/"), false);
+  assert.equal(contactable("https://user:pw@evil.tld/"), false);
+  assert.equal(contactable("https://xn--80ak6aa92e.com/"), false);
+});
+
+/** The native side refuses everything but `https`, so a button on the rest cannot work. */
+test("only https is offered", () => {
+  assert.equal(contactable("http://example.com/"), false);
+  assert.equal(contactable("javascript:alert(1)"), false);
+  assert.equal(contactable("data:text/html,x"), false);
+  assert.equal(contactable("not a url"), false);
+});
+
+test("an ordinary link is offered", () => {
+  assert.equal(contactable("https://example.com/"), true);
+  assert.equal(contactable("https://en.wikipedia.org/wiki/A_(b)"), true);
+  // `www.` is completed to https by `classify`, so it qualifies.
+  assert.equal(contactable("www.example.com"), true);
 });

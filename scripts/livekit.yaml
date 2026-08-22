@@ -1,0 +1,30 @@
+# Media server configuration, for development only.
+#
+# The key and secret below are worthless: they mint tokens for a server listening on loopback.
+# A real deployment generates its own and puts them in `MEDIA_API_KEY` / `MEDIA_API_SECRET` on
+# the delivery service, which is the only thing that signs tokens.
+#
+# What this server can and cannot see is argued in `crates/server/src/call.rs`. The short of it:
+# it routes audio it cannot read, and it learns who shares a room with whom.
+port: 7880
+
+rtc:
+  # A narrow range, published on the host. Wide enough for a handful of concurrent calls on a
+  # development machine, small enough to be readable in `ss -ulpn`.
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: false
+
+# `dev_only_not_a_secret` matches the delivery service's `.env.example`, and is as worthless as
+# the database password beside it.
+keys:
+  whispee: dev_only_not_a_secret
+
+# The relay is reached through the credentials the delivery service mints, handed to the browser
+# with its access token. This server is not the one that hands them out — it does not hold the
+# secret and has no reason to.
+turn:
+  enabled: false
+
+logging:
+  level: info

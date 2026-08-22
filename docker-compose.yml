@@ -1,8 +1,13 @@
-# Development Postgres.
+# Development Postgres, and — behind a profile — the two services calls need.
 #
 # Port 55432 on the host: 5432 and 54322 are already taken on this machine, and a messaging
 # server that refuses to start because another project holds the port is a recurring waste of
 # time.
+#
+# `media` and `relay` carry `profiles: [calls]`, so `docker compose up -d` still brings up a
+# database and nothing else. That is the same discipline the server's own configuration follows:
+# a deployment that runs no media server keeps a fully working messenger, and running one has to
+# be asked for. Start them with `docker compose --profile calls up -d`.
 services:
   postgres:
     image: postgres:17-alpine
@@ -20,6 +25,38 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  # The media server. It routes audio between participants and can read none of it: every frame
+  # is encrypted under a key derived from the MLS epoch before it gets here. See
+  # `crates/server/src/call.rs` for what it *does* learn, which is not nothing.
+  #
+  # Host networking, because it terminates WebRTC: the media ports are a range negotiated per
+  # connection, and publishing a range through the Docker proxy costs more than it is worth on a
+  # development machine.
+  media:
+    image: livekit/livekit-server:latest
+    container_name: whispee_media
+    profiles: [calls]
+    network_mode: host
+    command: --config /etc/livekit.yaml --node-ip 127.0.0.1
+    volumes:
+      - ./scripts/livekit.yaml:/etc/livekit.yaml:ro
+
+  # The relay, for the connections that find no direct path — roughly one in six, and every one
+  # of them behind a carrier-grade NAT. It sees encrypted packets and their endpoints, which is
+  # the same view the media server has and no more.
+  #
+  # No account exists on it: credentials are minted per request by the delivery service, from the
+  # shared secret below, and expire in hours. Nothing to provision, nothing to revoke.
+  relay:
+    image: coturn/coturn:latest
+    container_name: whispee_relay
+    profiles: [calls]
+    network_mode: host
+    command: >
+      -n --realm=whispee.localhost --listening-port=3478
+      --use-auth-secret --static-auth-secret=dev_only_not_a_secret
+      --no-tls --no-dtls --no-cli --log-file=stdout
 
 volumes:
   pgdata:

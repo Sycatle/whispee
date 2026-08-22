@@ -17,12 +17,12 @@ import { IconButton } from "@/ui/IconButton";
 import { ProofStrip } from "@/ui/ProofStrip";
 import { useSession } from "@/state/SessionProvider";
 import { useNames } from "@/state/names";
+import { useDetail } from "@/state/detail";
 import { useReport } from "@/state/report";
 import { nameOf } from "@/lib/naming";
 import { MAX_CODE_POINTS, sanitize, validate } from "@/lib/display-name";
 import { Field } from "@/ui/Field";
 import { Input } from "@/ui/Input";
-import { useNavigate, useRoute } from "@/routes/Router";
 
 /**
  * The right column: who you are talking to, proved.
@@ -336,14 +336,13 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
 export function DetailPanel({ view }: { view: ConversationView }) {
   const session = useSession();
   const names = useNames();
-  const route = useRoute();
-  const navigate = useNavigate();
   const duo = useDuo();
   const trio = useTrio();
   const heading = useRef<HTMLHeadingElement>(null);
   const panel = useRef<HTMLElement>(null);
 
-  const wanted = route.kind === "conversation" ? route.detail?.handle : undefined;
+  const { detail, close: closeDetail } = useDetail();
+  const wanted = detail?.handle;
   // A group with no member singled out shows the roster; a one-to-one has exactly one person to
   // show and asking the user to pick them would be a click that means nothing.
   const focused =
@@ -354,9 +353,9 @@ export function DetailPanel({ view }: { view: ConversationView }) {
     (!session.isGroup(view) && view.accounts.length === 1 ? view.accounts[0] : undefined);
 
   const close = () => {
-    navigate({ kind: "conversation", key: view.key });
-    // After the route change, not before: at `duo` and above the toggle is still mounted, but
-    // React has not re-rendered it yet at the moment `navigate` returns.
+    closeDetail();
+    // After the state change, not before: at `duo` and above the toggle is still mounted, but
+    // React has not re-rendered it yet at the moment this returns.
     requestAnimationFrame(() => document.getElementById(INFO_TOGGLE_ID)?.focus());
   };
 

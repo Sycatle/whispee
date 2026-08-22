@@ -63,6 +63,7 @@ import { nextExpiry } from "@/lib/signals";
 import { layout, textOf } from "@/lib/thread";
 import { useRoving } from "@/lib/useRoving";
 import { useNavigate } from "@/routes/Router";
+import { useDetail } from "@/state/detail";
 import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
@@ -702,7 +703,7 @@ export function Messages({
 
                     Nothing here for our own turns: the card it would open is a verification
                     panel, and there is nothing to verify about the key this device holds. */}
-                <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
+                <AuthorMenu handle={authorOf(message)} mine={message.mine}>
                 {/* Marked only where the mark leads somewhere. `AuthorMenu` renders nothing of
                     its own for our own turns, so underlining our name on hover would promise a
                     menu that is not there — an affordance for an action that does not exist. */}
@@ -802,7 +803,7 @@ export function Messages({
                         message.mine && "flex-row-reverse",
                       )}
                     >
-                      <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
+                      <AuthorMenu handle={authorOf(message)} mine={message.mine}>
                         {/* A real button, because the underline promises one. It is the only tab
                             stop the pair adds, and it lands once per turn rather than once per
                             message — the name is drawn only when the speaker changes. */}
@@ -1259,16 +1260,15 @@ export function Messages({
  */
 function AuthorMenu({
   handle,
-  view,
   mine,
   children,
 }: {
   handle: string | null;
-  view: ConversationView;
   mine: boolean;
   children: ReactNode;
 }) {
   const navigate = useNavigate();
+  const { open: openDetail } = useDetail();
   const report = useReport();
   const names = useNames();
 
@@ -1291,7 +1291,7 @@ function AuthorMenu({
       ) : (
         <ContextMenu.Item
           icon="info"
-          onSelect={() => navigate({ kind: "conversation", key: view.key, detail: { handle } })}
+          onSelect={() => openDetail(handle)}
         >
           View full profile
         </ContextMenu.Item>

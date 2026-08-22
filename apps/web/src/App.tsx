@@ -14,6 +14,7 @@ import { addressedIn } from "@/lib/mention";
 import { countUnreadInTitle, createNotifier } from "@/lib/notifications";
 import { type ProposedMigration, Session, start } from "@/lib/session";
 import { RouterProvider, useNavigate } from "@/routes/Router";
+import { DetailProvider } from "@/state/detail";
 import { useNames } from "@/state/names";
 import { ReportProvider, useReport, useReported } from "@/state/report";
 import { Revision } from "@/state/revision";
@@ -554,10 +555,15 @@ function Frame({
         </Banner>
       )}
 
-      <Shell
-        onLock={relock}
-        onForget={() => void session.forget().then(() => location.reload())}
-      />
+      {/* Around the shell and no higher: the detail column belongs to a conversation, and
+          nothing outside the shell — the lock screen, onboarding, the migration notice — has one
+          to open. See `state/detail.tsx` for why it stopped being a route. */}
+      <DetailProvider>
+        <Shell
+          onLock={relock}
+          onForget={() => void session.forget().then(() => location.reload())}
+        />
+      </DetailProvider>
 
       {migration && (
         <MigrationBanner

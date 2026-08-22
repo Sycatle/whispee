@@ -60,10 +60,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # No `toolchain:` input on purpose: with a `rust-toolchain.toml` present, this action
-      # installs what that file pins. Naming a channel here would install a second toolchain and
-      # then not use it — and the pin is what makes the WebAssembly comparison reproducible.
-      - uses: dtolnay/rust-toolchain@master
+      # `rustup`, not `dtolnay/rust-toolchain`, and the difference is not a preference.
+      #
+      # That action takes `toolchain` as a **required** input and never reads
+      # `rust-toolchain.toml`; on `@master`, where no branch name supplies a default, its first
+      # step exits 1 in twenty milliseconds. This workflow ran twice that way and failed twice,
+      # under a comment claiming the file was being read — which is how a dead job looks like a
+      # decision. Naming the version here instead would put the pin in every job that needs a
+      # compiler, five of them across three workflows, all to be raised together.
+      #
+      # `rustup` is preinstalled on the runner and reads the file itself: channel, `clippy`, and
+      # the WebAssembly target all come from `rust-toolchain.toml`, which is what keeps the
+      # WebAssembly comparison reproducible.
+      - name: Toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -141,8 +151,10 @@ jobs:
           node-version: 22
           package-manager-cache: false
 
-      # The `wasm32-unknown-unknown` target comes from `rust-toolchain.toml`, like the channel.
-      - uses: dtolnay/rust-toolchain@master
+      # The `wasm32-unknown-unknown` target comes from `rust-toolchain.toml`, like the channel —
+      # `rustup` reads both. See the `rust` job for why this is not the action.
+      - name: Toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -171,7 +183,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@master
+      - name: Toolchain
+        run: rustup toolchain install
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked

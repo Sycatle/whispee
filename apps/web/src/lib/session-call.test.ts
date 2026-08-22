@@ -378,6 +378,42 @@ test("two devices of one person refusing are one person refusing", async () => {
 });
 
 /**
+ * **The other half of the same rule, and the half a real call of three broke on.**
+ *
+ * Counting refusals fixed the caller. It left the *ringing* devices counting too, and each of
+ * them waits on one account with a counter of one — so Bob's refusal reached Carol's phone and
+ * stopped it, which is the original bug moved one seat over. Worse in practice: Carol then
+ * refused on her way out, and the caller's counter reached two on a call nobody had turned down.
+ *
+ * Observed with three browsers: Alice called, Bob declined, Carol's phone stopped ringing
+ * mid-ring and Alice went idle.
+ */
+test("a ringing device ignores a refusal from somebody who is not the caller", async () => {
+  const h = harness();
+  h.calls.receive("group", "9f2c41ab", "alice");
+
+  h.calls.absorb("declined", "9f2c41ab", "bob-device", "our-device", "bob");
+  await settle();
+
+  assert.equal(h.calls.current().phase, "incoming", "Bob's refusal stopped Carol's phone");
+  assert.ok(
+    !h.signals.some((entry) => entry.startsWith("declined:")),
+    "and it made Carol refuse on Bob's behalf",
+  );
+});
+
+/** The caller giving up does end the ring: it is the one account a ringing device waits on. */
+test("a ringing device stops when the caller gives up", async () => {
+  const h = harness();
+  h.calls.receive("group", "9f2c41ab", "alice");
+
+  h.calls.absorb("left", "9f2c41ab", "alice-device", "our-device", "alice");
+  await settle();
+
+  assert.equal(h.calls.current().phase, "idle");
+});
+
+/**
  * A one-to-one is the case that already worked, and it has to keep working: with a single
  * correspondent, their refusal is the end of it and the caller should not sit through the full
  * ring timeout to find out.

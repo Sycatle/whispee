@@ -199,9 +199,9 @@ export class Calls {
     }
 
     this.placed = false;
-    // The person who rang is the one being waited on. The other members of a group may join or
-    // not; nothing about this device's ringing depends on them, and if the caller gives up, the
-    // silence timeout is what ends it here.
+    // A ringing device counts nobody: `from` is the one account it is waiting on, and `absorb`
+    // compares against it directly. The counter belongs to the caller, who is the only one with
+    // several people to hear back from.
     this.awaited = 1;
     this.declined = new Set();
     this.state = { ...IDLE, phase: "incoming", call, group, from, since: this.ports.now() };
@@ -294,6 +294,20 @@ export class Calls {
         // Only meaningful while nobody has connected: once in a room, the media layer is what
         // says who is present, and it says it from what it observes rather than from a claim.
         if (this.state.connectedAt !== 0) return;
+
+        // **A refusal only speaks for the person who made it, and only to the person waiting.**
+        //
+        // A ringing device is waiting on one account: the one that called it. Another guest
+        // saying no is news about that guest, not about whether this phone should stop ringing —
+        // and taking it as a reason to stop is how a call of three fell apart on the first
+        // refusal, with the two who had not answered yet both going quiet at once.
+        //
+        // The caller's own giving-up arrives here as `left` under the same account, and that one
+        // does end the ring.
+        if (!this.placed) {
+          if (account === this.state.from) void this.hang();
+          return;
+        }
 
         // **One refusal is not the end of a group call.** Bob saying no while Carol is still
         // ringing has to leave Carol ringing; ending it there would hang up on a person who was

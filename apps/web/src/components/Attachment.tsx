@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 
 import { AttachmentViewer } from "@/components/attachment/AttachmentViewer";
 import { AudioViewer } from "@/components/attachment/AudioViewer";
@@ -36,10 +36,26 @@ function formatSize(bytes: number): string {
  */
 const ENLARGEABLE: ReadonlySet<ViewerKind> = new Set<ViewerKind>(["image", "text", "pdf"]);
 
+/**
+ * The PDF viewer is loaded on demand, and it is the only one that is.
+ *
+ * pdf.js is several hundred kilobytes — larger than the rest of this application's JavaScript —
+ * and most conversations never open a PDF. `lazy` is what puts it in its own chunk; a static
+ * import would put it in the entry, where every visitor pays for it.
+ *
+ * That matters more here than it would elsewhere: the argument for the desktop build is that you
+ * can verify what you run, and a bundle that carries a document parser nobody asked for is a
+ * bigger thing to verify.
+ */
+const PdfViewer = lazy(() =>
+  import("@/components/attachment/PdfViewer").then((module) => ({ default: module.PdfViewer })),
+);
+
 const VIEWERS: Partial<Record<ViewerKind, (props: ViewerProps) => React.ReactNode>> = {
   image: ImageViewer,
   text: TextViewer,
   audio: AudioViewer,
+  pdf: PdfViewer,
 };
 
 /**
@@ -169,7 +185,11 @@ export function Attachment({
     // spaced, and `items-*` is what says which edge they hang from.
     <div className={cn("flex flex-col gap-tight", align === "end" ? "items-end" : "items-start")}>
       {Viewer !== undefined && opened !== null && (
-        <>
+        // Only the PDF viewer is lazy, but the boundary has to sit above whichever one is
+        // chosen: `kind` is not known until render, so there is no narrower place for it.
+        // `null` rather than a spinner — the row already carries one on the control that is
+        // working, and a second mark in the same place says the same thing twice.
+        <Suspense fallback={null}>
           {/* A picture is its own affordance: clicking it opens it, and an "Enlarge" link beside
               it would only say what the click already says. It still has to be a real `<button>`
               — a target only a pointer can reach is not a control.
@@ -222,7 +242,7 @@ export function Attachment({
               {(props) => <Viewer {...props} />}
             </AttachmentViewer>
           )}
-        </>
+        </Suspense>
       )}
 
       {/* Under a preview, the row is the picture and nothing else.

@@ -44,6 +44,18 @@ pub mod store;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Opening a link in the user's browser, and nothing else.
+        //
+        // Without it a link in a message does nothing at all on this target: the webview asks for
+        // a new window, the shell has no handler for that request, and it is refused with no
+        // error anybody sees. `components/LinkText.tsx` renders URLs as plain text on desktop for
+        // exactly that reason, and this is what lets it stop.
+        //
+        // What it widens is real and is bounded in `capabilities/default.json`: the page's
+        // JavaScript gains the ability to ask the operating system to open a URL. The scope there
+        // restricts that to `http` and `https`, so it cannot be turned into "open this file" or
+        // "run this program" — which is what an unscoped opener would be.
+        .plugin(tauri_plugin_opener::init())
         // This list must stay in sync with the commands declared in `commands.rs`: a command left
         // out here still compiles, and only fails when the webview invokes it at runtime.
         .invoke_handler(tauri::generate_handler![

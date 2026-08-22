@@ -308,7 +308,15 @@ export interface SignalSettings {
    * invite seeing without being seen.
    */
   readReceipts: boolean;
-  /** Emit the typing indicator. Receiving it stays possible: nothing to hide in going without. */
+  /**
+   * Emit — and therefore see — the typing indicator.
+   *
+   * A single flag for both directions, as for read receipts and presence, and it took the longest
+   * to get here. The argument for letting reception continue was that there is nothing to hide in
+   * going without. There is: an account that stops emitting while still receiving gains a one-way
+   * view of who hesitates before answering it, in every conversation, at no cost. That is an
+   * advantage over the people it talks to, not privacy from them. Signal makes the same call.
+   */
   typingIndicator: boolean;
   /**
    * Broadcast — and therefore see — presence.

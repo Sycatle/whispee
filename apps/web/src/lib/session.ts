@@ -47,6 +47,7 @@ import {
   fresh,
   openTyping,
   sealTyping,
+  showing,
   without,
 } from "./signals";
 import { LockedCipher } from "./cipher";
@@ -2049,12 +2050,10 @@ export class Session {
     return derive.deliveryStatus(view, seq, this.accountId, this.signals.readReceipts);
   }
 
-  /** Peers currently typing, expired ones excluded. */
+  /** Peers currently typing, expired ones excluded — and nobody at all when we do not emit. */
   typingIn(view: ConversationView): string[] {
     view.typing = fresh(view.typing, Date.now());
-    return [...new Set(view.typing.map((entry) => entry.handle))].filter(
-      (handle) => handle !== this.handle,
-    );
+    return showing(view.typing, this.accountId, this.signals.typingIndicator);
   }
 
   /**
@@ -2102,11 +2101,18 @@ export class Session {
     const view = this.conversations.get(toHex(groupId));
     if (!view) return;
 
-    const handle = await openTyping(this.client.signalKey(view.groupId), payload);
-    if (handle === undefined || handle === this.accountId) return;
+    // The setting cuts reception as well as emission, and it cuts it here rather than only at
+    // display: an indicator nobody will ever be shown has no business being recorded, and the
+    // shortest path to never showing it is never keeping it. `signals.showing` refuses it a
+    // second time, deliberately — the reciprocity has to hold even if one of the two is
+    // forgotten, which is the arrangement `acknowledge` and `statusOf` already use for receipts.
+    if (!this.signals.typingIndicator) return;
+
+    const account = await openTyping(this.client.signalKey(view.groupId), payload);
+    if (account === undefined || account === this.accountId) return;
 
     const now = Date.now();
-    view.typing = [...without(fresh(view.typing, now), handle), { handle, at: now }];
+    view.typing = [...without(fresh(view.typing, now), account), { account, at: now }];
   }
 
   /**

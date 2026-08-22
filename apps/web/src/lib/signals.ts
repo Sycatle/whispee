@@ -70,7 +70,21 @@ export const TYPING_TTL_MS = 3000;
 export const TYPING_DEBOUNCE_MS = 1500;
 
 export interface Typing {
-  handle: string;
+  /**
+   * Who is typing, as an **account id** — not a handle, whatever the wire format's history
+   * suggests.
+   *
+   * The field was called `handle` and held an account id, which is not a harmless discrepancy:
+   * `Session.typingIn` filtered these entries against `this.handle` and therefore never matched a
+   * single one, so a guard that reads as "never show ourselves typing" had been doing nothing
+   * since the account id replaced the handle in the credential. Nothing broke, because
+   * `absorbSignal` drops our own indicator before it is ever recorded — but a backstop that
+   * cannot fire is not a backstop, and the name was the whole reason nobody noticed.
+   *
+   * An account id is also the right unit here: every device of an account emits under it, so two
+   * of them typing at once collapse to one name on screen rather than two.
+   */
+  account: string;
   /** Local receipt timestamp, for expiry. */
   at: number;
 }
@@ -78,12 +92,12 @@ export interface Typing {
 /**
  * Seals a typing indicator under the epoch key.
  *
- * The handle travels **inside** the ciphertext. It is not authenticated — see the module header
- * — but it is not visible to the server either, which is the point that matters: the server sees
- * a deposit towards a group, not who made it.
+ * The account id travels **inside** the ciphertext. It is not authenticated — see the module
+ * header — but it is not visible to the server either, which is the point that matters: the
+ * server sees a deposit towards a group, not who made it.
  */
-export async function sealTyping(key: Uint8Array, handle: string): Promise<Uint8Array> {
-  const body = new TextEncoder().encode(handle);
+export async function sealTyping(key: Uint8Array, account: string): Promise<Uint8Array> {
+  const body = new TextEncoder().encode(account);
   const plaintext = new Uint8Array(1 + body.length);
   plaintext[0] = TYPE_TYPING;
   plaintext.set(body, 1);
@@ -131,6 +145,37 @@ export async function openTyping(
   }
 }
 
+/**
+ * Who is typing, as far as this device is willing to show.
+ *
+ * # Why `emitting` is a parameter
+ *
+ * It is the same flag that decides whether we send an indicator, and it is passed in rather than
+ * read from a settings module for the reason `receipts.statusOf` gives about its own: the
+ * reciprocity is a property of the call, so it belongs in the signature where a reader cannot
+ * miss it and a caller cannot forget it.
+ *
+ * `mine` is an **account id**, and the caller has to pass the right one — see `Typing.account`
+ * for what happened the last time it did not.
+ *
+ * # Why the setting cuts both directions
+ *
+ * It used to cut only emission, on the argument that there is nothing to hide in going without.
+ * There is: an account that stops emitting while still receiving gains a one-way view of who is
+ * hesitating before answering it, in every conversation, for free. That is an advantage over the
+ * people it is talking to, not privacy from them — and the read receipt next to it has refused
+ * exactly that trade since the beginning. Signal makes the same call for the same reason.
+ *
+ * The reception side cuts it too, in `Session.absorbSignal`, and the duplication is deliberate:
+ * the reciprocity must hold even if one of the two places is forgotten. This one is the backstop
+ * for anything already recorded when the switch moves.
+ */
+export function showing(typing: Typing[], mine: string, emitting: boolean): string[] {
+  if (!emitting) return [];
+
+  return [...new Set(typing.map((entry) => entry.account))].filter((account) => account !== mine);
+}
+
 /** Keeps only the indicators that have not expired. */
 export function fresh(typing: Typing[], now: number): Typing[] {
   return typing.filter((entry) => now - entry.at < TYPING_TTL_MS);
@@ -164,8 +209,8 @@ export function nextExpiry(typing: Typing[], now: number): number | undefined {
  * The risk of a "stopped typing" signal does not apply here: nothing is emitted, so nothing can be
  * lost. At worst we fail to switch it off, and expiry takes over.
  */
-export function without(typing: Typing[], handle: string): Typing[] {
-  return typing.filter((entry) => entry.handle !== handle);
+export function without(typing: Typing[], account: string): Typing[] {
+  return typing.filter((entry) => entry.account !== account);
 }
 
 /**

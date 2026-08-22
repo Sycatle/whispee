@@ -34,6 +34,14 @@ pub enum ApiError {
     #[error("too many requests")]
     TooManyRequests,
 
+    /// The deployment does not offer this, and no retry will change that.
+    ///
+    /// Distinct from `NotFound` for the reason `Gone` is: a 404 invites a client to look again
+    /// somewhere else, where this says the feature is absent from this server. A deployment
+    /// running no media server answers it to every call, and stays a working messenger.
+    #[error("not configured")]
+    Unavailable,
+
     #[error("storage error")]
     Database(#[from] sqlx::Error),
 }
@@ -48,6 +56,7 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Gone => StatusCode::GONE,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

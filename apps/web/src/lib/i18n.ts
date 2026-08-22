@@ -46,6 +46,11 @@ export interface Catalogue {
   "membership.preview.joined": string;
   "membership.preview.removed": string;
   "membership.preview.left": string;
+  "call.ended": string;
+  "call.missed": string;
+  "call.ringing": string;
+  "call.preview.ended": string;
+  "call.preview.missed": string;
 }
 
 export type Phrase = keyof Catalogue;
@@ -63,6 +68,13 @@ const en: Catalogue = {
   "membership.preview.joined": "{subject} joined",
   "membership.preview.removed": "{subject} was removed",
   "membership.preview.left": "{subject} left",
+  // `{duration}` is already formatted — see `spokenDuration`. Interpolating a number here would
+  // put the unit outside the catalogue, which is the half a translator most needs to move.
+  "call.ended": "Call · {duration}",
+  "call.missed": "Missed call",
+  "call.ringing": "{actor} called",
+  "call.preview.ended": "Call · {duration}",
+  "call.preview.missed": "Missed call",
 };
 
 const fr: Partial<Catalogue> = {
@@ -72,6 +84,11 @@ const fr: Partial<Catalogue> = {
   "membership.preview.joined": "{subject} a rejoint",
   "membership.preview.removed": "{subject} a été retiré",
   "membership.preview.left": "{subject} est parti",
+  "call.ended": "Appel · {duration}",
+  "call.missed": "Appel manqué",
+  "call.ringing": "{actor} a appelé",
+  "call.preview.ended": "Appel · {duration}",
+  "call.preview.missed": "Appel manqué",
 };
 
 const CATALOGUES: Record<string, Partial<Catalogue>> = { en, fr };

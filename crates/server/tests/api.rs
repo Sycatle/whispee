@@ -2271,6 +2271,86 @@ async fn forget_presence(pool: &sqlx::PgPool, device_id: &str) {
         .unwrap();
 }
 
+// ---------------------------------------------------------------- calls
+
+/// Asks for admission to a call, with the group MAC and without a device signature.
+async fn ask_for_call(
+    server: &TestServer,
+    group_id: &str,
+    posting_key: &[u8],
+    body: serde_json::Value,
+    nonce: [u8; 16],
+) -> reqwest::Response {
+    use hmac::{Hmac, Mac};
+
+    let payload = serde_json::to_vec(&body).unwrap();
+    let group = hex::decode(group_id).unwrap();
+    let message = attest::signal_message(&group, &nonce, &sha2::Sha256::digest(&payload)).unwrap();
+
+    let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(posting_key).unwrap();
+    mac.update(&message);
+
+    reqwest::Client::new()
+        .post(format!("{}/v1/groups/{group_id}/call/token", server.base_url))
+        .header("content-type", "application/json")
+        .header("x-group-nonce", BASE64_STANDARD.encode(nonce))
+        .header("x-group-mac", BASE64_STANDARD.encode(mac.finalize().into_bytes()))
+        .body(payload)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// **A deployment with no media server stays a working messenger.**
+///
+/// The answer is 503 and not 404, and the difference is what the client reads: a route that is
+/// missing invites a retry, a feature that is off tells it to hide the call button. This is the
+/// same discipline the push waker follows — see `crate::push`.
+#[tokio::test]
+async fn a_call_is_refused_when_no_media_server_is_configured() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let posting_key = [42u8; 32];
+    let group_id = group_with_key(&alice, &posting_key).await;
+
+    let asked = serde_json::json!({ "call": "9f2c41ab", "identity": "peer1" });
+    let response = ask_for_call(&server, &group_id, &posting_key, asked, [7u8; 16]).await;
+
+    assert_eq!(response.status(), 503, "an unconfigured deployment must say so, not fail");
+}
+
+/// **A token is admission to a room, so membership has to be proved to get one.**
+///
+/// The MAC is the proof, and it is the same one signals use. Without this, anybody able to name
+/// a group could join its calls — the room name is a digest, but a digest of two values the
+/// caller supplies.
+#[tokio::test]
+async fn a_call_without_the_group_mac_is_refused() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let posting_key = [42u8; 32];
+    let group_id = group_with_key(&alice, &posting_key).await;
+
+    let asked = serde_json::json!({ "call": "9f2c41ab", "identity": "peer1" });
+    let forged = ask_for_call(&server, &group_id, &[0u8; 32], asked, [8u8; 16]).await;
+
+    assert_eq!(forged.status(), 403, "a wrong MAC opened a call");
+}
+
+/// An identifier that is not a name is refused: it ends up in a room name and in a token.
+#[tokio::test]
+async fn a_call_identifier_that_is_not_a_name_is_refused() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let posting_key = [42u8; 32];
+    let group_id = group_with_key(&alice, &posting_key).await;
+
+    let asked = serde_json::json!({ "call": "../etc/passwd", "identity": "peer1" });
+    let response = ask_for_call(&server, &group_id, &posting_key, asked, [10u8; 16]).await;
+
+    assert_eq!(response.status(), 400);
+}
+
 /// **The test that protects sealed sender.**
 ///
 /// Anonymous posts and typing signals prove group membership with a MAC, not identity: the

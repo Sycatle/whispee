@@ -27,6 +27,24 @@
  * What it does guarantee is real: the key changes on every commit, so a removed member loses this
  * channel at the same instant as the rest.
  *
+ * # Why calls are here too, and where they are not
+ *
+ * A call needs both kinds of traffic, and the split follows the missing sender authentication
+ * above rather than any notion of importance.
+ *
+ * **The invitation is not in this channel.** "X is calling you" is a claim about who is speaking,
+ * and this channel cannot support one: any member could ring a group under somebody else's name.
+ * It travels as an ordinary MLS message instead — see `content.ts`, kind `call` — where the
+ * protocol authenticates its author. That also gives the missed-call entry and the call log for
+ * free, and it wakes a sleeping device by the same path a text message does, without telling the
+ * server it was a call.
+ *
+ * **Everything around the invitation is here**: that a device has started ringing, that one of
+ * them has answered, that somebody muted or left. Forging any of those changes nothing that
+ * matters — the participants of a call are whoever the media layer reports, not whoever claims to
+ * be there — and all of them are worthless a few seconds later, which is this channel's whole
+ * definition.
+ *
  * # How an indicator goes out
  *
  * Never through a stop signal — it could get lost, and the indicator would stay lit forever. Two
@@ -38,8 +56,16 @@
  *    an entry is stale is useless if nobody repaints. See `nextExpiry`.
  */
 
-/** What a signal carries. A single case, and the format says so explicitly. */
+/**
+ * What a signal carries.
+ *
+ * The leading byte was already there when typing was the only case, which is what makes adding a
+ * second one a non-event: a client that predates calls reads a type it does not know and returns
+ * `undefined`, which is the path an out-of-epoch signal already takes. No version negotiation, no
+ * flag day.
+ */
 const TYPE_TYPING = 0;
+const TYPE_CALL = 1;
 
 /**
  * How long a received indicator stays displayed.
@@ -90,17 +116,83 @@ export interface Typing {
 }
 
 /**
- * Seals a typing indicator under the epoch key.
+ * What a call frame says.
  *
- * The account id travels **inside** the ciphertext. It is not authenticated — see the module
- * header — but it is not visible to the server either, which is the point that matters: the
- * server sees a deposit towards a group, not who made it.
+ * None of these is load-bearing, and the naming tries to keep that visible: they are reports
+ * about a device, not instructions to one. Who is actually in a call is whoever the media layer
+ * reports; these only make the interface react before it can know.
+ *
+ *  * `ringing` — this device has started ringing. It is what turns "calling…" into "ringing…" on
+ *    the caller's screen, and nothing else depends on it.
+ *  * `accepted` — this device has taken the call. The other devices of the *same account* stop
+ *    ringing on it. Losing it leaves a phone ringing until the invitation expires, which is the
+ *    right way to fail.
+ *  * `declined` — this account has refused. The caller stops waiting instead of ringing out.
+ *  * `left` — this device is leaving. A courtesy: the media layer reports the departure anyway,
+ *    a second or two later.
+ *  * `muted` / `unmuted` — the microphone state. It goes through here rather than through the
+ *    media server's own participant metadata, which would hand that server one more thing about
+ *    a call it is only supposed to relay.
+ *  * `alive` — still in the call. It is what lets a ringing device give up on a caller that
+ *    vanished without ever managing to say so.
  */
-export async function sealTyping(key: Uint8Array, account: string): Promise<Uint8Array> {
-  const body = new TextEncoder().encode(account);
-  const plaintext = new Uint8Array(1 + body.length);
-  plaintext[0] = TYPE_TYPING;
-  plaintext.set(body, 1);
+export type CallEvent =
+  | "ringing"
+  | "accepted"
+  | "declined"
+  | "left"
+  | "muted"
+  | "unmuted"
+  | "alive";
+
+/** A call frame, as it travels on this channel. */
+export interface CallSignal {
+  kind: "call";
+  event: CallEvent;
+  /** Which call this is about. A device in no call, or in another one, ignores the frame. */
+  call: string;
+  /** Who emits, for display. Unauthenticated, like everything here. */
+  account: string;
+  /**
+   * Which device emits.
+   *
+   * Calls need this where typing did not. Every device of an account signals under one account
+   * id, which is exactly right for "somebody is typing" and exactly wrong for "one of your own
+   * devices has answered" — the frame that has to reach the *others*. Filtering our own frames
+   * by account would drop it.
+   */
+  device: string;
+}
+
+/** A typing frame. The account id is the unit — see {@link Typing.account}. */
+export interface TypingSignal {
+  kind: "typing";
+  account: string;
+}
+
+/** Everything this channel carries. */
+export type Signal = TypingSignal | CallSignal;
+
+/** Order of {@link CallEvent} on the wire. Append only: the index *is* the encoding. */
+const CALL_EVENTS: readonly CallEvent[] = [
+  "ringing",
+  "accepted",
+  "declined",
+  "left",
+  "muted",
+  "unmuted",
+  "alive",
+];
+
+/**
+ * Seals a signal under the epoch key.
+ *
+ * Everything but the type byte travels **inside** the ciphertext. None of it is authenticated —
+ * see the module header — but none of it is visible to the server either, which is the point that
+ * matters: the server sees a deposit towards a group, not who made it nor what it says.
+ */
+export async function sealSignal(key: Uint8Array, signal: Signal): Promise<Uint8Array> {
+  const plaintext = signal.kind === "typing" ? encodeTyping(signal) : encodeCall(signal);
 
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const material = await crypto.subtle.importKey("raw", bytes(key), "AES-GCM", false, [
@@ -122,11 +214,14 @@ export async function sealTyping(key: Uint8Array, account: string): Promise<Uint
  * An unreadable signal is the **normal** case, not an anomaly: the server relays without filtering
  * by epoch, so a signal sent just before a commit arrives after it, under a key that is no longer
  * the right one. Throwing here would surface an error on every change of group composition.
+ *
+ * A signal of an unknown type takes the same path, deliberately. A newer client adding a case is
+ * the same situation as an older epoch, from here: something we cannot read and must not report.
  */
-export async function openTyping(
+export async function openSignal(
   key: Uint8Array,
   payload: Uint8Array,
-): Promise<string | undefined> {
+): Promise<Signal | undefined> {
   if (payload.length < 12 + 16) return undefined;
 
   try {
@@ -138,11 +233,75 @@ export async function openTyping(
       await crypto.subtle.decrypt({ name: "AES-GCM", iv }, material, bytes(payload.subarray(12))),
     );
 
-    if (plaintext.length < 1 || plaintext[0] !== TYPE_TYPING) return undefined;
-    return new TextDecoder().decode(plaintext.subarray(1));
+    if (plaintext.length < 1) return undefined;
+    if (plaintext[0] === TYPE_TYPING) return decodeTyping(plaintext.subarray(1));
+    if (plaintext[0] === TYPE_CALL) return decodeCall(plaintext.subarray(1));
+    return undefined;
   } catch {
     return undefined;
   }
+}
+
+function encodeTyping(signal: TypingSignal): Uint8Array {
+  const body = new TextEncoder().encode(signal.account);
+  const out = new Uint8Array(1 + body.length);
+  out[0] = TYPE_TYPING;
+  out.set(body, 1);
+  return out;
+}
+
+function decodeTyping(body: Uint8Array): TypingSignal {
+  return { kind: "typing", account: new TextDecoder().decode(body) };
+}
+
+/**
+ * `[event][len call][call][len device][device][account]`.
+ *
+ * Two length-prefixed fields and a trailing one, which is the shape the rest of the codebase
+ * already uses. Lengths are single bytes because none of these three can approach 256: a call id
+ * and a device id are fixed-width hex, and an account id is a digest.
+ */
+function encodeCall(signal: CallSignal): Uint8Array {
+  const encoder = new TextEncoder();
+  const call = encoder.encode(signal.call);
+  const device = encoder.encode(signal.device);
+  const account = encoder.encode(signal.account);
+  const event = CALL_EVENTS.indexOf(signal.event);
+
+  const out = new Uint8Array(4 + call.length + device.length + account.length);
+  out[0] = TYPE_CALL;
+  out[1] = event;
+  out[2] = call.length;
+  out.set(call, 3);
+  out[3 + call.length] = device.length;
+  out.set(device, 4 + call.length);
+  out.set(account, 4 + call.length + device.length);
+  return out;
+}
+
+function decodeCall(body: Uint8Array): CallSignal | undefined {
+  if (body.length < 3) return undefined;
+
+  const event = CALL_EVENTS[body[0]];
+  // An event this build does not know: a newer client, treated exactly like an older epoch.
+  if (event === undefined) return undefined;
+
+  const callLength = body[1];
+  const deviceAt = 2 + callLength;
+  if (deviceAt >= body.length) return undefined;
+
+  const deviceLength = body[deviceAt];
+  const accountAt = deviceAt + 1 + deviceLength;
+  if (accountAt > body.length) return undefined;
+
+  const decoder = new TextDecoder();
+  return {
+    kind: "call",
+    event,
+    call: decoder.decode(body.subarray(2, deviceAt)),
+    device: decoder.decode(body.subarray(deviceAt + 1, accountAt)),
+    account: decoder.decode(body.subarray(accountAt)),
+  };
 }
 
 /**

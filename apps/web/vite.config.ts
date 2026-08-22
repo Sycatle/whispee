@@ -29,10 +29,11 @@ export default defineConfig(({ mode }) => ({
       transformIndexHtml: {
         order: "pre" as const,
         handler: (html: string) => {
-          const api =
-            loadEnv(mode, process.cwd(), "VITE_").VITE_API_URL ?? "http://127.0.0.1:8787";
+          const environment = loadEnv(mode, process.cwd(), "VITE_");
+          const api = environment.VITE_API_URL ?? "http://127.0.0.1:8787";
 
-          return html.replace("%CSP%", csp(api));
+          // Absent by default: a deployment with no media server must not carry its origin.
+          return html.replace("%CSP%", csp(api, environment.VITE_MEDIA_URL || undefined));
         },
       },
     },

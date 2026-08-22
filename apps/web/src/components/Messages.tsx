@@ -53,7 +53,7 @@ import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
 import { EmojiDrawer } from "@/components/EmojiPicker";
-import { dayLabel, timeOf } from "@/lib/datetime";
+import { dayLabel, spokenDuration, timeOf } from "@/lib/datetime";
 import { COMPOSER_ID } from "@/components/ids";
 import { say } from "@/lib/i18n";
 import { addresses } from "@/lib/mention";
@@ -585,6 +585,35 @@ export function Messages({
             and the arrow keys walk over it — it is a line of the conversation, and skipping it
             would make the thread jump for no reason the reader can see.
           */
+          /*
+            A call, drawn as the same centred line a membership change is.
+
+            Three events, two lines: the invitation is what the *caller* wrote when they started
+            ringing, and it is replaced by the conclusion when one arrives. They are not merged
+            here — an invitation whose conclusion never came, because the caller closed their
+            browser, still has to draw something, and "somebody called" is what happened.
+          */
+          if (message.content.kind === "call") {
+            const { event, seconds } = message.content;
+            const said =
+              event === "ended"
+                ? say("call.ended", { duration: spokenDuration(seconds) })
+                : event === "missed"
+                  ? say("call.missed", {})
+                  : say("call.ringing", { actor: nameOfAuthor(authorOf(message)) });
+
+            return (
+              <li
+                key={key}
+                data-row={key}
+                tabIndex={thread.at === key ? 0 : -1}
+                className="px-pane py-snug text-center focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)"
+              >
+                <span className="text-caption text-(--color-ink-muted)">{said}</span>
+              </li>
+            );
+          }
+
           if (message.content.kind === "membership") {
             const { event, handle } = message.content;
             const actor = authorOf(message);

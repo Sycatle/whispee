@@ -406,6 +406,22 @@ impl Client {
         Ok(self.conversation(group_id)?.signal_key(&self.identity)?)
     }
 
+    /// Symmetric key protecting one call's audio, for the current epoch.
+    ///
+    /// The media server routes the stream and cannot read it: the audio is encrypted frame by
+    /// frame under these bytes before it reaches the transport. Nothing is exchanged to obtain
+    /// them — every member derives the same key from the group state MLS already gave them.
+    ///
+    /// `call_id` separates two calls made in the same epoch. Reusing one call's id for another
+    /// would let the audio of the first decrypt inside the second.
+    ///
+    /// The key changes on every commit, and unlike the ephemeral channel that is not free here:
+    /// a call spanning an epoch change has to be handed the new key, or it goes silent.
+    #[wasm_bindgen(js_name = callKey)]
+    pub fn call_key(&self, group_id: &[u8], call_id: &[u8]) -> Result<Vec<u8>, JsError> {
+        Ok(self.conversation(group_id)?.call_key(&self.identity, call_id)?)
+    }
+
     /// The group's current epoch. Two members at different epochs cannot read each other:
     /// it is the first thing to look at when a message does not go through.
     #[wasm_bindgen(js_name = epoch)]

@@ -109,6 +109,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/groups/{group_id}/members", post(add_members))
         .route("/v1/groups/{group_id}/members/remove", post(remove_members))
         .route("/v1/groups/{group_id}/signals", post(post_signal))
+        .route("/v1/groups/{group_id}/call/token", post(call_token))
         .route(
             "/v1/groups/{group_id}/envelopes",
             post(post_envelope).get(fetch_envelopes),
@@ -222,6 +223,103 @@ async fn post_signal(
     hub.publish(Notice::Signal { group_id, payload: body.to_vec() });
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// What a client asks for when it wants to join a call.
+#[derive(Deserialize)]
+struct CallRequest {
+    /// Which call. It is the client's, not ours: it is derived from nothing we know.
+    call: String,
+    /// The name to appear under in the room.
+    ///
+    /// Chosen by the caller and **not verified**, which is deliberate rather than tolerated: the
+    /// route is authenticated by the group MAC precisely so that this server does not learn who
+    /// is placing a call, and checking the identity would be learning it. See `crate::call`.
+    identity: String,
+}
+
+/// Where to reach the call, and with what.
+#[derive(Serialize)]
+struct CallAdmission {
+    url: String,
+    token: String,
+    /// The relay, when there is one. A deployment reachable on a direct path needs none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay: Option<CallRelay>,
+}
+
+#[derive(Serialize)]
+struct CallRelay {
+    urls: Vec<String>,
+    username: String,
+    credential: String,
+}
+
+/// Hands out admission to a call's room.
+///
+/// # Why the group MAC, and not a signature
+///
+/// The same reason [`post_signal`] uses it: a signed request would tell this server which device
+/// is calling, in real time. The MAC proves membership of the group and nothing else — which is
+/// exactly the amount of proof handing out a room token requires.
+///
+/// Note what this does **not** hide, because the module header says it and it bears repeating
+/// here where the code is: this server still sees that a call is being joined, when, and towards
+/// which group. That is more than it learns from an envelope, and it is irreducible — somebody
+/// has to sign the token.
+///
+/// # Why 503 rather than 404 when unconfigured
+///
+/// A deployment running no media server is not missing this route, it is refusing the feature.
+/// The client reads the difference and hides the call button instead of retrying.
+async fn call_token(
+    State(pool): State<PgPool>,
+    State(media): State<Arc<crate::call::Media>>,
+    Path(group_id): Path<String>,
+    request: axum::extract::Request,
+) -> ApiResult<Json<CallAdmission>> {
+    let group_id = decode_group_id(&group_id)?;
+
+    // Owned extraction before the first `await`: see the note in `anonymous_body`.
+    let (nonce, mac) = {
+        let headers = request.headers();
+        let header = |name: &str| -> ApiResult<Vec<u8>> {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| BASE64_STANDARD.decode(value).ok())
+                .ok_or(ApiError::BadRequest("signal header missing or unreadable"))
+        };
+
+        (header(HEADER_NONCE)?, header(HEADER_MAC)?)
+    };
+
+    let body = axum::body::to_bytes(request.into_body(), MAX_SIGNAL_BYTES)
+        .await
+        .map_err(|_| ApiError::BadRequest("unreadable body"))?;
+
+    // The MAC covers the body, so the call id and the identity below are the ones a member
+    // asked for — not ones an intermediary substituted.
+    verify_signal(&pool, &group_id, &nonce, &mac, &body).await?;
+
+    let asked: CallRequest =
+        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("malformed call request"))?;
+
+    if !crate::call::acceptable(&asked.call, &asked.identity) {
+        return Err(ApiError::BadRequest("unusable call identifier"));
+    }
+
+    let sfu = media.sfu.as_ref().ok_or(ApiError::Unavailable)?;
+    let room = crate::call::room_name(&group_id, &asked.call);
+
+    Ok(Json(CallAdmission {
+        url: sfu.url.clone(),
+        token: sfu.token(&room, &asked.identity),
+        relay: media.relay.as_ref().map(|relay| {
+            let (username, credential) = relay.credential();
+            CallRelay { urls: relay.urls.clone(), username, credential }
+        }),
+    }))
 }
 
 /// Checks that an ephemeral signal comes from a group member, without learning which one.

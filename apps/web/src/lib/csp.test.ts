@@ -149,6 +149,29 @@ test("workers come from this origin and nowhere else, on both targets", () => {
  * `asset:`, a media element behaves identically on both targets, so a difference here would be a
  * difference nobody needs and one target would be playing something the other refuses.
  */
+/**
+ * A build with no media server must not carry its origin.
+ *
+ * The directive is the deployment's own attack surface: widening it for a host that will never
+ * be contacted is a permission granted for nothing, and it is granted to every deployment at
+ * once because it would live in the default.
+ */
+test("the media origin appears only when a build asks for one", () => {
+  const without = parse(csp(DESKTOP_API)).get("connect-src") ?? new Set();
+  const with_ = parse(csp(DESKTOP_API, "https://media.example")).get("connect-src") ?? new Set();
+
+  assert.ok(with_.has("wss://media.example"), "the signalling socket has no origin to reach");
+  // The HTTP form is not redundant, and this assertion is here because the first version of this
+  // test claimed it was. The SDK asks the media server over HTTP why a connection failed; without
+  // the origin, a call that breaks reports a vaguer reason than the browser has.
+  assert.ok(with_.has("https://media.example"), "a failed call cannot say why it failed");
+  assert.deepEqual(
+    [...with_].filter((source) => !source.includes("media.example")),
+    [...without],
+    "configuring a media server changed something other than the media origin",
+  );
+});
+
 test("media-src is not among the differences the desktop target is allowed", () => {
   assert.equal(
     DESKTOP_ONLY["media-src"],

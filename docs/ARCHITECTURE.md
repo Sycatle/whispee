@@ -22,7 +22,8 @@ integration tests. There is no smaller unit that can be understood on its own be
 Part of that was an accident of growth, and that part has been paid off. Nine slices now sit
 beside it — `conversation-view.ts`, `session-persist.ts`, `session-preferences.ts`,
 `session-naming.ts`, `session-trust.ts`, `session-presence.ts`, `session-vault.ts`,
-`session-lock.ts`, `session-log.ts` — about 1 550 lines carrying 95 tests between them. **None of
+`session-lock.ts`, `session-log.ts`, `session-call.ts` — about 1 550 lines carrying 95 tests
+between them. **None of
 that was reachable before.** `Session` has a private constructor and `open` calls `loadCrypto`,
 so nothing inside it can be instantiated by `node --test`: the largest file in the client was
 also the only untested one, and the mapping whose failure is silent — a field dropped on the way
@@ -69,7 +70,7 @@ crates/
   server/          Axum + PostgreSQL delivery service: routing, ordering, access control.
     migrations/    sqlx migrations, applied at process start.
     src/           Routes, signed-request auth, WebSocket gateway, fanout hub, rate limits,
-                   presence, the transparency log's server side, push.
+                   presence, the transparency log's server side, push, call admission.
     tests/         Integration tests: they drive a real server against a real database.
 apps/
   web/             Vite 7 + React 19 + Tailwind 4. Also the source of the desktop and mobile
@@ -260,6 +261,48 @@ A text typed into the composer in `apps/web`:
    `content.isControl()` keeps receipts out of both the thread and the vault, because a receipt
    that advanced the cursor would produce another receipt, and so on — ten envelopes in forty
    seconds, measured, for two people saying nothing.
+
+## A call, end to end
+
+Audio does not travel the path above, and the two places it diverges are the two places it costs
+something.
+
+1. **The invitation is an ordinary message.** `Session.placeCall` writes a `call`/`invite` through
+   `sendContent`, so it is padded, encrypted by MLS, ordered by the server and fanned out like a
+   text — and it wakes a sleeping device through `push::wake_detached` **without the server
+   learning it was a call**. It goes out *before* any media is attempted: the invitation is what
+   rings the far side, and making it wait on a media server would delay the ring rather than the
+   audio.
+
+   It is in the durable channel for one reason: "Alice is calling you" is a claim about who is
+   speaking, and the ephemeral channel is keyed to the group, so any member could make it about any
+   other. MLS authenticates the author.
+
+2. **Everything around it is ephemeral.** `ringing`, `accepted`, `declined`, `left`, `muted`,
+   `alive` go through the signal frame (`signals.ts`, type byte 1). None is load-bearing — who is
+   in a call is whoever the media layer reports — and both ends run their own timeouts, because a
+   frame saying "stop ringing" can be lost.
+
+3. **The key is derived, never sent.** `Conversation::call_key` exports
+   `"wac-call-key-v1"` with the call id as context. Every member computes the same 32 bytes from
+   the epoch. `Session.tickCall` re-derives them every few seconds and hands the media layer the
+   new ones when the epoch moved — deliberately on a timer rather than at each commit site, because
+   there are four of those and the one that gets forgotten is the one that leaves a removed member
+   listening.
+
+4. **Admission.** `POST /v1/groups/{id}/call/token`, authenticated by the group MAC like a signal.
+   `crates/server/src/call.rs` signs a token for a room named by a digest over the group and call
+   ids, under an identity the client derives from the call key. It answers 503 when the deployment
+   holds no media credentials, and the client hides the call button.
+
+5. **The media.** `lib/call.ts` is a port; `liveMedia()` is its only networked implementation and
+   is imported lazily — a user who never calls does not download the SDK. Frames are encrypted a
+   second time in a worker before the transport sees them. `session-call.ts` holds the state
+   machine and never learns what is behind the port, which is what makes it testable.
+
+**What this costs, and it is not nothing.** Sealed sender does not survive the media path: the
+server sees that a call is being joined and towards which group, and the media server sees who
+shared a room with whom, for how long. See `./THREAT-MODEL.md` § 4ter, which argues it in full.
 
 ## Where state lives, per platform
 

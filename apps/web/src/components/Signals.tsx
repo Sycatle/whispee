@@ -50,6 +50,7 @@
  */
 import { useMemo, useState } from "react";
 
+import { CALLS_CONFIGURED } from "@/lib/call";
 import { useReport } from "@/state/report";
 import { useBump, useRevision, useSession } from "@/state/SessionProvider";
 import { Field } from "@/ui/Field";
@@ -71,7 +72,7 @@ export function SignalSettings() {
   const [pending, setPending] = useState<Partial<typeof stored>>({});
   const settings = { ...stored, ...pending };
 
-  const toggle = (key: "readReceipts" | "typingIndicator" | "presence", value: boolean) => {
+  const toggle = (key: "readReceipts" | "typingIndicator" | "presence" | "calls", value: boolean) => {
     setPending((current) => ({ ...current, [key]: value }));
 
     const settle = () => {
@@ -147,6 +148,28 @@ export function SignalSettings() {
             />
           )}
         </Field>
+
+        {/*
+          Absent, not disabled, when this build knows of no media server: there is no setting to
+          make about a feature that cannot happen. Same argument as the call button in the
+          conversation bar, and the same constant.
+        */}
+        {CALLS_CONFIGURED ? (
+          <Field
+            label="Calls"
+            hint="Turning them off also stops you from placing one, and applies to every device you are signed in on. A call leaks more than a message: the server sees that you joined one and towards which conversation, and the media server sees who was in the room with you and for how long. Neither can hear anything — the audio is encrypted under a key derived from the conversation itself, which never leaves your devices."
+          >
+            {(control) => (
+              <Switch
+                id={control.id}
+                aria-describedby={control.describedBy}
+                label="Calls"
+                checked={settings.calls !== false}
+                onCheckedChange={(value) => toggle("calls", value)}
+              />
+            )}
+          </Field>
+        ) : null}
 
         {/*
           `text-(--color-ink-muted)` rather than an opacity on the ink: the muted token is already

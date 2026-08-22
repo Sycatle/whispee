@@ -189,6 +189,51 @@ const TYPE_HANDLE = 11;
  */
 const TYPE_SIGNALS = 12;
 
+/**
+ * A moment in a call: `u8 13 ‖ u8 event ‖ u32 BE seconds ‖ UTF-8 call id`.
+ *
+ * # Why a call touches the durable channel at all
+ *
+ * Almost everything a call needs is worthless a few seconds later, and `signals.ts` carries that
+ * traffic — nothing stored, nothing archived. Two moments are different, and both for the same
+ * reason: they are claims about **who**.
+ *
+ * The ephemeral channel is encrypted under a key the whole group shares, so it cannot say who
+ * emitted anything: any member could ring a group under somebody else's name. "Alice is calling
+ * you" is exactly that kind of claim, so it travels here, where MLS authenticates its author. The
+ * conclusion follows it for consistency — a fil that showed the ring but not the outcome would be
+ * worse than one showing neither.
+ *
+ * # What it buys on top
+ *
+ * The call log, and the missed call, with no extra machinery: they are messages, so they are
+ * ordered, archived and re-read like any other. And the wake-up comes for free — an invitation is
+ * an envelope, so `push::wake_detached` fires on it exactly as it does on a text, **without the
+ * server learning that this one was a call.**
+ *
+ * # Not control
+ *
+ * All three are meant to be seen. A call is an event in the conversation in the same sense a
+ * message is — which is precisely what "you have a missed call" means.
+ */
+const TYPE_CALL = 13;
+
+/**
+ * What happened to a call.
+ *
+ * `invite` and its conclusion are two envelopes sharing one call id, not one envelope amended:
+ * the invitation has to leave before anybody knows how the call will end. The display is what
+ * folds the pair back into a single line — see `conversation-view.ts`.
+ *
+ * `missed` and a `declined` refusal are deliberately the same event here. The difference is
+ * visible only to the person who refused, and reporting it to the caller would tell them they
+ * were turned down rather than merely unheard — an admission the protocol has no reason to
+ * extract from a device.
+ */
+export type CallEvent = "invite" | "ended" | "missed";
+
+const CALL_EVENTS: CallEvent[] = ["invite", "ended", "missed"];
+
 /** What happened to somebody's membership. The subject is `handle`; the actor is the sender. */
 export type MembershipEvent = "joined" | "removed" | "left";
 
@@ -203,6 +248,7 @@ export type Content =
   | { kind: "reaction"; target: number; emoji: string }
   | { kind: "reply"; target: number; text: string }
   | { kind: "profile"; name: string; at: number }
+  | { kind: "call"; event: CallEvent; call: string; seconds: number }
   | { kind: "membership"; event: MembershipEvent; handle: string }
   | { kind: "handle"; handle: string; at: number }
   | { kind: "signals"; sealed: Uint8Array };
@@ -265,6 +311,23 @@ export function encodeText(text: string): Uint8Array {
  * it as an **anchor** and asks the server to prove that its own log extends it. Carrying the
  * signature would suggest it serves some purpose here.
  */
+/**
+ * `u8 event ‖ u32 BE seconds ‖ call id`.
+ *
+ * The duration is fixed-width and always present, zero on an invitation and on a missed call. A
+ * variable field would have bought four bytes on the one message of the three that is not
+ * displayed with a duration next to it, and cost a length prefix to say so.
+ */
+export function encodeCall(event: CallEvent, call: string, seconds: number): Uint8Array {
+  const id = new TextEncoder().encode(call);
+  const out = new Uint8Array(1 + 1 + 4 + id.length);
+  out[0] = TYPE_CALL;
+  out[1] = CALL_EVENTS.indexOf(event);
+  new DataView(out.buffer).setUint32(2, Math.max(0, Math.trunc(seconds)), false);
+  out.set(id, 6);
+  return out;
+}
+
 /** `u8 event ‖ handle`. The handle is the subject; who did it is the sender of the message. */
 export function encodeMembership(event: MembershipEvent, handle: string): Uint8Array {
   const name = new TextEncoder().encode(handle);
@@ -359,6 +422,8 @@ function encodeBody(body: Content): Uint8Array {
       return encodeTargeted(TYPE_REPLY, body.target, body.text);
     case "profile":
       return encodeProfile(body.name, body.at);
+    case "call":
+      return encodeCall(body.event, body.call, body.seconds);
     case "membership":
       return encodeMembership(body.event, body.handle);
     case "handle":
@@ -597,6 +662,21 @@ function decodeBody(bytes: Uint8Array): Content {
       return bytes[0] === TYPE_REACTION
         ? { kind: "reaction", target, emoji: text }
         : { kind: "reply", target, text };
+    }
+
+    case TYPE_CALL: {
+      if (body.length < 5) throw new Error("truncated call event");
+
+      const event = CALL_EVENTS[body[0]];
+      // Same reasoning as the membership event below: an unknown verb draws a blank line.
+      if (event === undefined) throw new Error("unknown call event");
+
+      return {
+        kind: "call",
+        event,
+        seconds: new DataView(body.buffer, body.byteOffset).getUint32(1, false),
+        call: new TextDecoder().decode(body.subarray(5)),
+      };
     }
 
     case TYPE_MEMBERSHIP: {

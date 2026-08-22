@@ -194,6 +194,10 @@ fn reason(error: &ApiError) -> &'static str {
         }
         ApiError::Conflict(_) => "conflict",
         ApiError::TooManyRequests => "too many requests",
+        // No frame reaches this today — the feature it belongs to is an HTTP route. It is
+        // spelled out rather than swept into a catch-all so that adding one has to come back
+        // here and decide what a client should be told.
+        ApiError::Unavailable => "unavailable",
         ApiError::Database(err) => {
             tracing::error!(error = %err, "database error in the gateway");
             "internal error"

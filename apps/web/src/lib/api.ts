@@ -5,6 +5,7 @@
  * the path, the timestamp and the body digest: a signature captured on one endpoint is replayable
  * neither on another path nor with a modified body.
  */
+import type { Admission } from "./call";
 import type { DeviceCipher } from "./cipher";
 import { fromBase64, toBase64, toHex } from "./keys";
 import type { AttestedDevice } from "./wasm";
@@ -584,6 +585,43 @@ export class Api {
     });
 
     if (!response.ok) throw new ApiError(response.status, await response.text());
+  }
+
+  /**
+   * Asks for admission to a call's room.
+   *
+   * Authenticated by the **group MAC**, like a signal and an anonymous post, and for the same
+   * reason: a signed request would tell the server which device is placing a call, in real time.
+   * It still learns that a call is being joined and towards which group — see
+   * `crates/server/src/call.rs`, which does not pretend otherwise.
+   *
+   * A 503 means the deployment runs no media server. It is not an error to report: the client
+   * hides the call button instead.
+   */
+  async callAdmission(
+    groupId: Uint8Array,
+    call: string,
+    identity: string,
+    posting: { key: Uint8Array; mac: PostMac },
+  ): Promise<Admission | undefined> {
+    const payload = new TextEncoder().encode(JSON.stringify({ call, identity }));
+    const nonce = crypto.getRandomValues(new Uint8Array(16));
+    const mac = posting.mac(posting.key, groupId, nonce, payload);
+
+    const response = await fetch(`${BASE_URL}/v1/groups/${toHex(groupId)}/call/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-group-nonce": toBase64(nonce),
+        "x-group-mac": toBase64(mac),
+      },
+      body: buffer(payload),
+    });
+
+    if (response.status === 503) return undefined;
+    if (!response.ok) throw new ApiError(response.status, await response.text());
+
+    return (await response.json()) as Admission;
   }
 
   /**

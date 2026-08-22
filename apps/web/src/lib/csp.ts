@@ -48,8 +48,23 @@
  * No browser policy stands in the way — only the desktop app, whose code is packaged into the
  * installed binary, closes that path.
  */
-export function csp(api: string): string {
+export function csp(api: string, media?: string): string {
   const websocket = api.replace(/^http/, "ws");
+  // The media server is a second origin, and it is absent from most deployments: a build with no
+  // media server must not widen its policy for a host it will never contact. Empty rather than a
+  // default, so the directive is exactly as wide as the deployment is.
+  //
+  // **Both forms, and the HTTP one is not redundant.** The `ws://` origin carries the signalling
+  // socket, which is what a call needs to happen at all — that much was obvious and was all this
+  // line used to allow. The `http://` origin carries the request the SDK makes to ask the server
+  // *why* a connection failed. Blocking it does not break a working call; it makes a broken one
+  // report a vaguer reason than the browser actually has, at the one moment somebody is trying to
+  // find out what went wrong. That is precisely the class of omission this whole file exists to
+  // catch — see the note on `media-src`, which went unnoticed for the same reason.
+  //
+  // The audio itself travels over WebRTC, which no directive here can constrain — see
+  // `lib/call.ts` for what does.
+  const relay = media ? ` ${media} ${media.replace(/^http/, "ws")}` : "";
 
   return [
     "default-src 'self'",
@@ -59,7 +74,7 @@ export function csp(api: string): string {
     // Tailwind injects its styles at runtime. The residual risk of a CSS injection is nowhere
     // near that of a script.
     "style-src 'self' 'unsafe-inline'",
-    `connect-src 'self' ${api} ${websocket}`,
+    `connect-src 'self' ${api} ${websocket}${relay}`,
     // `blob:` is for image previews, and it is not a hole reopening.
     //
     // What a received image gets displayed as is a canvas re-encoding of what an image decoder

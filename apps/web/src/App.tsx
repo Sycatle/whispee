@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/app/Shell";
 import { ShortcutsProvider } from "@/app/Shortcuts";
+import { CallBar, IncomingCall } from "@/components/Call";
+import { ALIVE_INTERVAL_MS } from "@/lib/session-call";
 import { Unlock } from "@/components/Lock";
 import { preload } from "@/lib/emoji-sprite";
 import { MigrationBanner } from "@/components/Migration";
@@ -364,6 +366,25 @@ function Frame({
   }, [session, bump, report, relock]);
 
   /**
+   * The call's own heartbeat.
+   *
+   * Separate from the poll, and running at a different rate for a different reason: the poll
+   * exists so a quiet conversation still catches up, this exists so a ringing phone stops ringing
+   * and a departed participant is noticed. Thirty seconds would be four times too slow for both.
+   *
+   * Unconditional, and cheap when idle: `tickCall` returns immediately with no call in progress,
+   * and gating the interval on the call state would restart it every time that state changed.
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      session.tickCall();
+      bump();
+    }, ALIVE_INTERVAL_MS);
+
+    return () => clearInterval(timer);
+  }, [session, bump]);
+
+  /**
    * The emoji artwork, once, after the first paint.
    *
    * One request for the whole untoned set. It is not on the critical path — nothing on screen
@@ -552,11 +573,21 @@ function Frame({
           arrivals.length > 0 &&
           arrivals.every((message) => message.sender !== null && session.isBlocked(message.sender));
 
+        // A ringing call outranks everything else the batch could contain, including a mention:
+        // it is the one arrival that expires. Announcing it as "New message" would be announcing
+        // something the reader can attend to later, which is exactly what a call is not.
+        //
+        // It does not outrank the two refusals above, and that is deliberate. A muted
+        // conversation stays silent — a call that could ring a phone its owner explicitly
+        // silenced would make the mute a suggestion — and a batch from a blocked account raises
+        // nothing whatever it contains.
+        const ringing = session.callState().phase === "incoming";
+
         if (!silenced && !session.mutedIn(view)) {
           notifier.current?.arrived({
             conversation: key,
             ...(name ? { name } : {}),
-            ...(address ? { address } : {}),
+            ...(ringing ? { address: "call" as const } : address ? { address } : {}),
           });
         }
       }
@@ -596,6 +627,16 @@ function Frame({
           </p>
         </Banner>
       )}
+
+      {/*
+        The call, above the shell and outside it.
+
+        A call belongs to a conversation and outlives being in it: walking to another thread, or
+        to the settings screen, must not hang up. Mounted here it spans the window, sits above
+        every column, and survives every route.
+      */}
+      <CallBar />
+      <IncomingCall />
 
       {/* Around the shell and no higher: the detail column belongs to a conversation, and
           nothing outside the shell — the lock screen, onboarding, the migration notice — has one

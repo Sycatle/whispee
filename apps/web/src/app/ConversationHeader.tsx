@@ -3,6 +3,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { PresenceBadge, PresenceLine } from "@/components/Presence";
 import { membersOf } from "@/components/Conversation";
 import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
+import { CALLS_CONFIGURED } from "@/lib/call";
 import { useDuo, useTrio } from "@/lib/duo";
 import { nextExpiry } from "@/lib/signals";
 import { normalize, validate } from "@/lib/handle";
@@ -396,6 +397,26 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
           />
         </Tooltip>
       )}
+
+      {/*
+        The call button, first of the row, and absent rather than disabled when this build knows
+        of no media server. A disabled control says "not now"; there is no now in which a client
+        built without a media origin can reach one, and offering the gesture would be offering a
+        failure. See `CALLS_CONFIGURED`.
+
+        Also absent while a call is in progress: the bar above the thread is where a live call is
+        acted on, and a second entry point would let one person place two.
+      */}
+      {CALLS_CONFIGURED && session.callsAllowed() && session.callState().phase === "idle" ? (
+        <Tooltip label="Start a call">
+          <IconButton
+            label="Start a call"
+            icon={<Icon name="call" size={18} />}
+            onClick={() => void session.placeCall(view).then(bump)}
+            className="shrink-0"
+          />
+        </Tooltip>
+      ) : null}
 
       <Tooltip label="Conversation details">
         <IconButton

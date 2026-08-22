@@ -6,12 +6,19 @@ import {
   TYPING_TTL_MS,
   fresh,
   nextExpiry,
+  openSignal,
+  sealSignal,
   showing,
   without,
+  type CallEvent,
+  type Signal,
   type Typing,
 } from "./signals.ts";
 
 const T0 = 1_000_000;
+
+/** The epoch key, as far as this module is concerned: thirty-two bytes nobody else knows. */
+const KEY = new Uint8Array(32).fill(7);
 
 test("the send threshold never exceeds half the TTL", () => {
   // Beyond that, the last signal can expire before the next one: the indicator flickers.
@@ -95,6 +102,64 @@ test("our own indicator is never shown back to us", () => {
   // A handle passed where an account id belongs filters nothing — which is precisely what the
   // call site was doing before this change.
   assert.deepEqual(showing(typing, "@alice0539", true), [mine, theirs]);
+});
+
+test("a typing signal survives the round trip", async () => {
+  const sealed = await sealSignal(KEY, { kind: "typing", account: "a8f8e14c20e4efd8" });
+
+  assert.deepEqual(await openSignal(KEY, sealed), {
+    kind: "typing",
+    account: "a8f8e14c20e4efd8",
+  });
+});
+
+/**
+ * Every call event, in one pass.
+ *
+ * The event travels as its index in a list, so a reordering of that list silently reinterprets
+ * every frame in flight — a `left` read as `accepted`. Enumerating them here is what makes such a
+ * reordering fail rather than merely misbehave.
+ */
+test("every call event survives the round trip", async () => {
+  const events: CallEvent[] = [
+    "ringing",
+    "accepted",
+    "declined",
+    "left",
+    "muted",
+    "unmuted",
+    "alive",
+  ];
+
+  for (const event of events) {
+    const signal: Signal = {
+      kind: "call",
+      event,
+      call: "9f2c41ab7d0e5638",
+      device: "cc33453670c79bf3fa37635c08c8a677",
+      account: "a8f8e14c20e4efd81117d54bb95c96f2",
+    };
+
+    assert.deepEqual(await openSignal(KEY, await sealSignal(KEY, signal)), signal);
+  }
+});
+
+/**
+ * The wrong key is the **ordinary** case, not an anomaly: the server relays without filtering by
+ * epoch, so a signal sent just before a commit arrives after it. Throwing would raise an error on
+ * every change of group composition.
+ */
+test("a signal under another epoch's key reads as nothing, not as an error", async () => {
+  const sealed = await sealSignal(KEY, { kind: "typing", account: "alice" });
+  const other = new Uint8Array(32).fill(9);
+
+  assert.equal(await openSignal(other, sealed), undefined);
+});
+
+test("a truncated signal reads as nothing", async () => {
+  const sealed = await sealSignal(KEY, { kind: "typing", account: "alice" });
+
+  assert.equal(await openSignal(KEY, sealed.subarray(0, 20)), undefined);
 });
 
 test("one person typing from two devices is one person", () => {

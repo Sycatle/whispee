@@ -524,6 +524,41 @@ impl Conversation {
             .map_err(|e| CryptoError::Storage(format!("epoch secret export: {e}")))
     }
 
+    /// Symmetric key protecting one call's audio, derived from the current epoch's exporter
+    /// secret.
+    ///
+    /// # Why the media needs a key of its own
+    ///
+    /// The media server terminates the transport encryption — that is what lets it route a
+    /// stream to five people without holding five conversations. So the audio has to be
+    /// encrypted *before* it reaches that server, under a key the server never sees. That is
+    /// what these bytes are, and they are handed to the frame-level encryption the browser
+    /// exposes, never to the transport.
+    ///
+    /// # Why nothing is distributed
+    ///
+    /// Same reasoning as [`Self::signal_key`], and it is the whole argument for deriving rather
+    /// than agreeing: every member computes these bytes locally from state MLS already gave
+    /// them. A call therefore costs no key exchange, and the media server has no point at which
+    /// it could be asked to hand a key out — it is never in possession of one.
+    ///
+    /// # Why the call id is the context, not a separate label
+    ///
+    /// Two calls in the same epoch must not share a key: replaying one call's audio into
+    /// another would otherwise decrypt. The exporter's context field is exactly the mechanism
+    /// for that, and it keeps the label a constant, which is what makes the label auditable.
+    ///
+    /// # What it inherits from the epoch
+    ///
+    /// The key changes on every commit, so a member removed mid-call loses the audio at the
+    /// same instant they lose the messages. The caller has to *act* on that — the media layer
+    /// must be handed the new key at each epoch — but the property itself costs nothing here.
+    pub fn call_key(&self, identity: &Identity, call_id: &[u8]) -> Result<Vec<u8>> {
+        self.group
+            .export_secret(identity.provider.crypto(), "wac-call-key-v1", call_id, 32)
+            .map_err(|e| CryptoError::Storage(format!("epoch secret export: {e}")))
+    }
+
     /// The group identifier, to use as the routing key on the server side.
     pub fn id(&self) -> Vec<u8> {
         self.group.group_id().as_slice().to_vec()

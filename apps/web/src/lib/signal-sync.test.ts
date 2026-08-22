@@ -12,6 +12,7 @@ const SIGNALS = {
   readReceipts: false,
   typingIndicator: true,
   presence: false,
+  calls: true,
   at: NOW - 1000,
 };
 
@@ -28,16 +29,40 @@ test("the settings round-trip through the seal", async () => {
   assert.equal(opened?.preferences, undefined);
 });
 
-test("each of the three switches survives on its own", async () => {
+test("each of the four switches survives on its own", async () => {
   const key = await importSyncKey(KEY);
 
-  for (const field of ["readReceipts", "typingIndicator", "presence"] as const) {
-    const all = { readReceipts: true, typingIndicator: true, presence: true, at: NOW };
+  for (const field of ["readReceipts", "typingIndicator", "presence", "calls"] as const) {
+    const all = {
+      readReceipts: true,
+      typingIndicator: true,
+      presence: true,
+      calls: true,
+      at: NOW,
+    };
     const one = { ...all, [field]: false };
 
     // One bit per switch, and a bitfield is exactly where two of them get read into one place.
     assert.deepEqual((await openSignals(key, await sealSignals(key, one), NOW))?.signals, one);
   }
+});
+
+/**
+ * **The bit that reads backwards, and the test that says why.**
+ *
+ * A device built before calls existed announces a byte with every bit above the third clear, and
+ * it announces it whenever any *other* setting changes. Were the call bit to mean "on", that
+ * device would silently switch calls off across the account — a feature turned off by a client
+ * that has never heard of it.
+ */
+test("a settings byte from a client that predates calls leaves them on", async () => {
+  const key = await importSyncKey(KEY);
+  const before = { readReceipts: true, typingIndicator: true, presence: true, at: NOW };
+
+  // Exactly the byte such a client writes: the three bits it knows, and nothing else.
+  const opened = await openSignals(key, await sealSignals(key, { ...before, calls: true }), NOW);
+
+  assert.equal(opened?.signals.calls, true);
 });
 
 test("a peer cannot read the settings it carries", async () => {

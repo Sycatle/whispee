@@ -35,7 +35,8 @@ import {
   sealSignals,
 } from "./signal-sync.ts";
 import { merge, patchOf } from "./stamped.ts";
-import { fromBase64, toHex } from "./keys";
+// `fromHex` turns a call id back into the bytes the exporter takes as its context.
+import { fromBase64, fromHex, toHex } from "./keys";
 import { changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
 import type { SignalSettings, StoredSession } from "./storage";
@@ -50,13 +51,16 @@ import {
 } from "./persistence";
 import { isTauri } from "./platform";
 import { pending, record } from "./receipts";
+import { identityFor, liveMedia, type JoinOptions } from "./call";
+import { Calls, RING_TIMEOUT_MS, type CallState } from "./session-call";
 import {
   TYPING_DEBOUNCE_MS,
   fresh,
-  openTyping,
-  sealTyping,
+  openSignal,
+  sealSignal,
   showing,
   without,
+  type CallEvent as CallSignalEvent,
 } from "./signals";
 import { LockedCipher } from "./cipher";
 import { Gateway } from "./gateway";
@@ -210,7 +214,12 @@ export class Session {
      * make the other side's display incomprehensible. It is a product choice, and one click
      * reverses it.
      */
-    private signals: SignalSettings = { readReceipts: true, typingIndicator: true, presence: true },
+    private signals: SignalSettings = {
+      readReceipts: true,
+      typingIndicator: true,
+      presence: true,
+      calls: true,
+    },
     /**
      * When the settings above were last changed, on whichever device changed them.
      *
@@ -352,6 +361,171 @@ export class Session {
 
   /** Real-time session, when it is open. Its failure removes no feature. */
   private gateway?: Gateway;
+
+  /**
+   * Repaints the interface after something changed on its own.
+   *
+   * `Session` mutates in place and does not notify React — every other path bumps the revision
+   * counter from the call site that started the work. A call has no such call site: it changes
+   * when a participant joins, when a timer fires, when a connection drops. So the callback
+   * `startStream` is already given is kept, which is the same one for the same reason.
+   */
+  private repaint: () => void = () => {};
+
+  /** Built on first use: a session that never places a call never constructs one. */
+  private callSlice?: Calls;
+
+  /**
+   * The call this device is in, if any.
+   *
+   * Receives ports and no `Session` — the rule `docs/ARCHITECTURE.md` sets for a slice. What it
+   * does *not* do is contribute to the stored session: a call restored from disk is a call that
+   * ended while the page was closed. See `session-call.ts`.
+   */
+  private get calls(): Calls {
+    return (this.callSlice ??= new Calls({
+      media: liveMedia(),
+      now: () => Date.now(),
+      signal: (group, event, call) => {
+        void this.emitCallSignal(group, event, call).catch(() => {});
+      },
+      announce: async (group, event, call, seconds) => {
+        const view = this.conversations.get(group);
+        if (view) await this.sendContent(view, { kind: "call", event, call, seconds });
+      },
+      admit: (group, call) => this.admitToCall(group, call),
+      changed: () => this.repaint(),
+    }));
+  }
+
+  /** What the interface reads to draw a call. */
+  callState(): CallState {
+    return this.calls.current();
+  }
+
+  /**
+   * Whether this account takes calls.
+   *
+   * Absent means enabled — the flag only ever records a refusal, as for presence and for the same
+   * reason it matters here: a device that predates calls announces nothing for it.
+   */
+  callsAllowed(): boolean {
+    return this.signals.calls !== false;
+  }
+
+  /** Places a call in this conversation. */
+  placeCall(view: ConversationView): Promise<void> {
+    // The reciprocity, at the emitting end. An account that places calls while refusing to
+    // receive them asks of others exactly what it declines to give — the same trade the read
+    // receipt and the typing indicator have refused since they were written.
+    if (!this.callsAllowed()) return Promise.resolve();
+
+    // `accounts` is the people on the other side, us excluded — see `membersOf`. It is exactly
+    // the number of refusals it takes before there is nobody left to wait for, and the slice
+    // cannot work it out on its own: it holds a group id and nothing that knows what a group is.
+    return this.calls.place(view.key, this.accountId, view.accounts.length);
+  }
+
+  /** Answers a ringing call. */
+  acceptCall(): Promise<void> {
+    return this.calls.accept();
+  }
+
+  /** Refuses a ringing call, or hangs up on one in progress. */
+  hangCall(): Promise<void> {
+    return this.calls.hang();
+  }
+
+  /** Silences or restores the microphone. */
+  muteCall(muted: boolean): Promise<void> {
+    return this.calls.mute(muted);
+  }
+
+  /**
+   * The periodic tick: heartbeats, the two timeouts, and the key.
+   *
+   * # Why the key is re-derived here rather than at each commit
+   *
+   * Because there are several places a commit lands — sending one, applying somebody else's,
+   * being added, removing a member — and the one that gets forgotten is the one that leaves a
+   * removed member listening. Re-deriving from the current epoch and comparing costs one secret
+   * export every few seconds of a call, and cannot be forgotten anywhere.
+   *
+   * The comparison is what makes it cheap in the other direction: the media layer is only
+   * disturbed when the epoch actually moved.
+   */
+  tickCall(): void {
+    const state = this.callSlice?.current();
+    if (state && state.phase !== "idle") {
+      const view = this.conversations.get(state.group);
+      if (view) {
+        const key = this.client.callKey(view.groupId, fromHex(state.call));
+        if (!this.callKeyInUse || toHex(key) !== toHex(this.callKeyInUse)) {
+          this.callKeyInUse = key;
+          void this.calls.rekey(key).catch(() => {});
+        }
+      }
+    }
+
+    this.callSlice?.tick();
+  }
+
+  /** The key the live call was last handed, so a tick only disturbs it when the epoch moved. */
+  private callKeyInUse: Uint8Array | undefined;
+
+  /**
+   * Emits a call frame on the ephemeral channel.
+   *
+   * Nothing is stored, by us or by the server, which is the whole reason this traffic is not in
+   * the thread: a call emits one of these every few seconds, and the durable channel keeps what
+   * it carries for thirty days at minimum.
+   */
+  private async emitCallSignal(group: string, event: CallSignalEvent, call: string): Promise<void> {
+    const view = this.conversations.get(group);
+    if (!view) return;
+
+    const posting = this.signalPosting(view);
+    // Same abstention as the typing indicator: without a posting key we would have to sign, and
+    // the server would learn who is calling, in real time.
+    if (!posting) return;
+
+    const payload = await sealSignal(this.client.signalKey(view.groupId), {
+      kind: "call",
+      event,
+      call,
+      account: this.accountId,
+      device: this.deviceId,
+    });
+
+    await this.emitSignal(view.groupId, payload, posting);
+  }
+
+  /**
+   * Asks the server for admission, and derives the frame key.
+   *
+   * The key never leaves this device and is never sent to anybody: every member computes the
+   * same bytes from the MLS epoch. The identity is derived from it too — see `identityFor` in
+   * `call.ts` for why it is neither the device id nor a random string.
+   */
+  private async admitToCall(group: string, call: string): Promise<{ join: JoinOptions }> {
+    const view = this.conversations.get(group);
+    if (!view) throw new Error("that conversation is gone.");
+
+    const posting = this.signalPosting(view);
+    // A group with no posting key would have to be called for under a signature, telling the
+    // server who is calling whom in real time. That is the one thing this route is arranged not
+    // to do, so we refuse the call instead of quietly downgrading it.
+    if (!posting) throw new Error("this conversation cannot place a call.");
+
+    const key = this.client.callKey(view.groupId, fromHex(call));
+    const identity = await identityFor(key, this.deviceId);
+    const admission = await this.api.callAdmission(view.groupId, call, identity, posting);
+    if (!admission) throw new Error("this server does not carry calls.");
+
+    return {
+      join: { admission, key, onPeers: () => {}, onClosed: () => {} },
+    };
+  }
 
   /**
    * Last accepted log head.
@@ -769,7 +943,7 @@ export class Session {
       conversations,
       TrustStore.hydrate(stored),
       // A missing `presence` means enabled: that is the default, the flag only records a refusal.
-      { readReceipts: true, typingIndicator: true, ...stored.signals },
+      { readReceipts: true, typingIndicator: true, calls: true, ...stored.signals },
       stored.signalsAt,
       stored.prefStamps ?? {},
     );
@@ -2159,7 +2333,7 @@ export class Session {
     view.typingSentAt = now;
 
     const key = this.client.signalKey(view.groupId);
-    const payload = await sealTyping(key, this.accountId);
+    const payload = await sealSignal(key, { kind: "typing", account: this.accountId });
     await this.emitSignal(view.groupId, payload, posting);
   }
 
@@ -2173,18 +2347,33 @@ export class Session {
     const view = this.conversations.get(toHex(groupId));
     if (!view) return;
 
+    const signal = await openSignal(this.client.signalKey(view.groupId), payload);
+    if (signal === undefined) return;
+
+    if (signal.kind === "call") {
+      this.calls.absorb(
+        signal.event,
+        signal.call,
+        signal.device,
+        this.deviceId,
+        signal.account,
+      );
+      return;
+    }
+
     // The setting cuts reception as well as emission, and it cuts it here rather than only at
     // display: an indicator nobody will ever be shown has no business being recorded, and the
     // shortest path to never showing it is never keeping it. `signals.showing` refuses it a
     // second time, deliberately — the reciprocity has to hold even if one of the two is
     // forgotten, which is the arrangement `acknowledge` and `statusOf` already use for receipts.
     if (!this.signals.typingIndicator) return;
-
-    const account = await openTyping(this.client.signalKey(view.groupId), payload);
-    if (account === undefined || account === this.accountId) return;
+    if (signal.account === this.accountId) return;
 
     const now = Date.now();
-    view.typing = [...without(fresh(view.typing, now), account), { account, at: now }];
+    view.typing = [
+      ...without(fresh(view.typing, now), signal.account),
+      { account: signal.account, at: now },
+    ];
   }
 
   /**
@@ -2380,6 +2569,7 @@ export class Session {
       typingIndicator: this.signals.typingIndicator,
       // Absent means enabled, here as everywhere else: the flag only ever records a refusal.
       presence: this.signals.presence !== false,
+      calls: this.signals.calls !== false,
       at: this.signalsAt ?? Date.now(),
     };
 
@@ -2484,6 +2674,7 @@ export class Session {
         readReceipts: opened.signals.readReceipts,
         typingIndicator: opened.signals.typingIndicator,
         presence: opened.signals.presence,
+        calls: opened.signals.calls,
       };
       this.signalsAt = opened.signals.at;
       changed = true;
@@ -2662,6 +2853,9 @@ export class Session {
    */
   startStream(onChange: () => void): void {
     this.gateway?.close();
+    // Kept for the paths that change on their own: a participant joining a call, a ring timing
+    // out. See `repaint`.
+    this.repaint = onChange;
 
     this.gateway = new Gateway(
       this.api,
@@ -2983,6 +3177,37 @@ export class Session {
       // "now" for something received during a catch-up would date a week-old message to today.
       ...(sentAt === undefined ? {} : { sentAt }),
     });
+
+    // An invitation is a message like any other — which is what gives it MLS's authentication,
+    // the thread entry, and the wake-up, all three without the server learning it was a call.
+    // What is *not* like any other message is that it has to ring, and only while it is fresh:
+    // an invitation read during a catch-up describes a call that ended long ago.
+    if (
+      decode.kind === "call" &&
+      decode.event === "invite" &&
+      incoming.sender &&
+      incoming.sender !== this.accountId &&
+      sentAt !== undefined &&
+      Date.now() - sentAt < RING_TIMEOUT_MS &&
+      // The reciprocity, at the receiving end, and deliberately duplicated: it has to hold even
+      // if the emitting side is forgotten, which is the arrangement receipts and typing already
+      // use. The caller sees a call nobody answers, which is what a refused call looks like.
+      this.callsAllowed() &&
+      // **The one place blocking touches a call, and it is about who placed it.**
+      //
+      // A ring arrives without being asked for and interrupts whatever is on screen, which is
+      // exactly what blocking exists to stop. A blocked member sitting in a call somebody else
+      // placed is the opposite case and is deliberately left alone — see the argument at the
+      // track-attach site in `lib/call.ts`.
+      //
+      // A sender we cannot attribute is *not* blocked, the rule the other channels already
+      // follow: declining what cannot be named would refuse precisely the traffic nobody can
+      // account for. It costs little here — an anonymous invitation rings once, expires by
+      // itself in thirty seconds, and the group MAC already stops it coming from a non-member.
+      !this.isBlocked(incoming.sender)
+    ) {
+      this.calls.receive(view.key, decode.call, incoming.sender);
+    }
 
     touch(view);
 

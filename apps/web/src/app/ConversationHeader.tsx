@@ -6,7 +6,7 @@ import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
 import { useDuo, useTrio } from "@/lib/duo";
 import { nextExpiry } from "@/lib/signals";
 import { normalize, validate } from "@/lib/handle";
-import { compactNameOf, formatHandle, titleOf } from "@/lib/naming";
+import { formatHandle, titleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
@@ -18,7 +18,6 @@ import { IconButton } from "@/ui/IconButton";
 import { Input } from "@/ui/Input";
 import { Sheet } from "@/ui/Sheet";
 import { Tooltip } from "@/ui/Tooltip";
-import { Typing } from "@/ui/Typing";
 import { useNames } from "@/state/names";
 import { useDetail } from "@/state/detail";
 import { useReport } from "@/state/report";
@@ -321,28 +320,21 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
         <h1 className="truncate text-prose font-medium" data-epoch={String(view.epoch)}>
           {title}
         </h1>
-        {/*
-          "is typing…" wins over presence: typing implies being online, and showing both adds
-          noise without adding information. One-to-one only — in a group, "online" would not
-          say who it is talking about.
-        */}
-        {isTyping.length > 0 ? (
-          <span className="flex items-center gap-snug text-caption text-(--color-ink-muted)">
-            <Typing />
-            {/* The names stay in text. The dots carry it for the eye and announce nothing at all,
-                and in a group the sentence is the only thing that says *who* — which is exactly
-                what the badge on one avatar cannot express. */}
-            {isTyping.map((account) => compactNameOf(account, names, members)).join(", ")}
-          </span>
-        ) : (
-          // One person's presence under the title, and only where the title is that person. In a
-          // group — including one that removals have brought down to two — "last seen an hour
-          // ago" under a name that stands for several people says nothing the reader can use.
-          !group &&
-          view.accounts.length === 1 && (
-            <PresenceLine session={session} handle={view.accounts[0].handle} />
-          )
-        )}
+        {/* Presence, and only presence.
+ 
+            Typing used to take this line over — first as "is typing…", then briefly as dots and
+            a name. Both were saying a second time what the badge on the avatar beside them
+            already says, and the second telling cost the line that presence was using: the
+            subtitle flickered between "online" and something else every time somebody touched a
+            key.
+ 
+            The badge carries typing now. This says whether they are there, which is the question
+            it has always answered and the one nothing else on this bar answers.
+ 
+            One-to-one only. In a group — including one that removals have brought down to two —
+            "last seen an hour ago" under a name standing for several people says nothing a
+            reader can use. */}
+        {only !== undefined && <PresenceLine session={session} handle={only.handle} />}
       </div>
 
       {/*

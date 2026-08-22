@@ -342,6 +342,44 @@ export class Client {
         }
     }
     /**
+     * Symmetric key protecting one call's audio, for the current epoch.
+     *
+     * The media server routes the stream and cannot read it: the audio is encrypted frame by
+     * frame under these bytes before it reaches the transport. Nothing is exchanged to obtain
+     * them — every member derives the same key from the group state MLS already gave them.
+     *
+     * `call_id` separates two calls made in the same epoch. Reusing one call's id for another
+     * would let the audio of the first decrypt inside the second.
+     *
+     * The key changes on every commit, and unlike the ephemeral channel that is not free here:
+     * a call spanning an epoch change has to be handed the new key, or it goes silent.
+     * @param {Uint8Array} group_id
+     * @param {Uint8Array} call_id
+     * @returns {Uint8Array}
+     */
+    callKey(group_id, call_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(group_id, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(call_id, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.client_callKey(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Commits the pending proposals — typically a member's request to leave.
      * @param {Uint8Array} group_id
      * @returns {Uint8Array}

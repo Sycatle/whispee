@@ -94,6 +94,20 @@ export class Client {
      */
     applyPending(group_id: Uint8Array): Uint8Array;
     /**
+     * Symmetric key protecting one call's audio, for the current epoch.
+     *
+     * The media server routes the stream and cannot read it: the audio is encrypted frame by
+     * frame under these bytes before it reaches the transport. Nothing is exchanged to obtain
+     * them — every member derives the same key from the group state MLS already gave them.
+     *
+     * `call_id` separates two calls made in the same epoch. Reusing one call's id for another
+     * would let the audio of the first decrypt inside the second.
+     *
+     * The key changes on every commit, and unlike the ephemeral channel that is not free here:
+     * a call spanning an epoch change has to be handed the new key, or it goes silent.
+     */
+    callKey(group_id: Uint8Array, call_id: Uint8Array): Uint8Array;
+    /**
      * Commits the pending proposals — typically a member's request to leave.
      */
     commitPending(group_id: Uint8Array): Uint8Array;
@@ -447,6 +461,7 @@ export interface InitOutput {
     readonly accountkey_rotate: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint) => void;
     readonly accountkey_vaultKey: (a: number, b: number) => void;
     readonly client_applyPending: (a: number, b: number, c: number, d: number) => void;
+    readonly client_callKey: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly client_commitPending: (a: number, b: number, c: number, d: number) => void;
     readonly client_conversationIds: (a: number, b: number) => void;
     readonly client_create: (a: number, b: number, c: number) => void;

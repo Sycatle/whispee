@@ -1,5 +1,6 @@
 import { DeviceSettings } from "@/components/Devices";
 import { LockSettings } from "@/components/Lock";
+import { BlockedAccounts } from "@/components/Blocked";
 import { NoticeSettings } from "@/components/Notices";
 import { PairDevice } from "@/components/Pairing";
 import { ProfileSettings } from "@/components/Profile";
@@ -64,6 +65,7 @@ const GROUPS: { heading: string; entries: Entry[] }[] = [
       { section: "lock", label: "Lock", icon: <Icon name="lock" /> },
       { section: "receipts", label: "Receipts and indicators", icon: <Icon name="settings" /> },
       { section: "notifications", label: "Notifications", icon: <Icon name="notifications" /> },
+      { section: "blocked", label: "Blocked", icon: <Icon name="profile" /> },
     ],
   },
   {
@@ -80,6 +82,7 @@ export const TITLES: Record<SettingsSection, string> = {
   backup: "History backup",
   receipts: "Receipts and indicators",
   notifications: "Notifications",
+  blocked: "Blocked",
   appearance: "Appearance",
 };
 
@@ -153,6 +156,8 @@ function Section({ section }: { section: SettingsSection }) {
       return <SignalSettings />;
     case "notifications":
       return <NoticeSettings />;
+    case "blocked":
+      return <BlockedAccounts />;
     case "appearance":
       return <Appearance />;
   }

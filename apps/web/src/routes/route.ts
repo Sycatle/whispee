@@ -79,6 +79,7 @@ export const SETTINGS_SECTIONS = [
   "backup",
   "receipts",
   "notifications",
+  "blocked",
   "appearance",
 ] as const;
 

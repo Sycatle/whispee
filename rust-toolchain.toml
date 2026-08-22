@@ -14,7 +14,22 @@
 #
 # Raising this version is a deliberate act: regenerate the WebAssembly module in the same commit,
 # or the check will say so.
+#
+# # Why `rust-src` is in this list
+#
+# Nothing here compiles the standard library, so it looks like a component for people who debug
+# into `std`. It is not: it decides what the shipped `.wasm` contains.
+#
+# Generic code from the standard library is monomorphised into `crypto-wasm`, and the panic paths
+# it carries are resolved at build time. With `rust-src` present they resolve under the sysroot;
+# without it they keep the `/rustc/<commit-hash>` placeholder the compiler stamps in. Two machines
+# that disagree on this component produce two different binaries from the same source, and
+# `scripts/build-wasm.sh` cannot remap its way out of it — on the machine without the component
+# the string is already fixed inside the precompiled library, before any flag of ours applies.
+#
+# It was found by a CI runner disagreeing with a development machine that had installed the
+# component years ago for something else and never written it down.
 [toolchain]
 channel = "1.95.0"
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "rust-src"]
 targets = ["wasm32-unknown-unknown"]

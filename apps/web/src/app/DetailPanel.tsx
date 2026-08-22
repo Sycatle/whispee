@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useGroupAdmin } from "@/components/Group";
+import { ConversationSettings } from "@/components/ConversationSettings";
 import { MiniProfile } from "@/components/MiniProfile";
 import { ContextMenu } from "@/ui/ContextMenu";
 import { PresenceBadge, PresenceLine } from "@/components/Presence";
@@ -697,6 +698,21 @@ export function DetailPanel({ view }: { view: ConversationView }) {
           `session.typingIn(view)`'s decision and it needs the conversation, which this card does
           not have and should not acquire — it is about a person, not about a thread. */}
       {focused && <AccountDetail account={focused} typing={typingNow.includes(focused.handle)} />}
+
+      {/*
+        The thread's own settings, last, and in every state of this panel.
+
+        Gating them on `focused === undefined` was the first shape and it was wrong: a one-to-one
+        singles its one correspondent out automatically, so the settings would have been invisible
+        in the commonest conversation there is. A control that exists for groups and not for pairs
+        is not a control, it is a coincidence of layout.
+
+        Last rather than first because they are the least of what this column answers — who this
+        is, and whether they are who they say, come before whether the thread is pinned. And the
+        panel names itself "This conversation", which is what keeps it from reading as one more
+        thing about the person whose card it may be sitting under.
+      */}
+      <ConversationSettings view={view} />
 
       {/* The confirmations, mounted outside every menu — see `useGroupAdmin`. Nothing is drawn
           until one is asked for. */}

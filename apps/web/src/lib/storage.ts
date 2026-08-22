@@ -263,6 +263,13 @@ interface StoredSession {
    * the client decline to read. That is what separates this from `blocked` a few fields down: one
    * prevents, the other hides, and the difference is which party can act.
    *
+   * It governs membership, and therefore what is delivered. It is not a barrier every path
+   * consults: admission to a call proves possession of the group's posting key rather than
+   * membership, which is what keeps the server from learning who is calling. That is not a way
+   * around the policy — the posting key is handed out inside the group, and an account the server
+   * refuses never joins — but it is the reason the screen says the policy governs who may *add*
+   * you rather than claiming nothing can reach you.
+   *
    * This comment used to describe that enforcement while nothing enforced it — no column, no
    * route, no mention anywhere in `crates/`. It is worth saying that it was wrong for months and
    * that nothing reported it: a placeholder describing itself as enforced is worse than no

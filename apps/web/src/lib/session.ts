@@ -210,7 +210,12 @@ export class Session {
      * make the other side's display incomprehensible. It is a product choice, and one click
      * reverses it.
      */
-    private signals: SignalSettings = { readReceipts: true, typingIndicator: true, presence: true },
+    private signals: SignalSettings = {
+      readReceipts: true,
+      typingIndicator: true,
+      presence: true,
+      calls: true,
+    },
     /**
      * When the settings above were last changed, on whichever device changed them.
      *
@@ -769,7 +774,7 @@ export class Session {
       conversations,
       TrustStore.hydrate(stored),
       // A missing `presence` means enabled: that is the default, the flag only records a refusal.
-      { readReceipts: true, typingIndicator: true, ...stored.signals },
+      { readReceipts: true, typingIndicator: true, calls: true, ...stored.signals },
       stored.signalsAt,
       stored.prefStamps ?? {},
     );
@@ -2380,6 +2385,7 @@ export class Session {
       typingIndicator: this.signals.typingIndicator,
       // Absent means enabled, here as everywhere else: the flag only ever records a refusal.
       presence: this.signals.presence !== false,
+      calls: this.signals.calls !== false,
       at: this.signalsAt ?? Date.now(),
     };
 
@@ -2484,6 +2490,7 @@ export class Session {
         readReceipts: opened.signals.readReceipts,
         typingIndicator: opened.signals.typingIndicator,
         presence: opened.signals.presence,
+        calls: opened.signals.calls,
       };
       this.signalsAt = opened.signals.at;
       changed = true;

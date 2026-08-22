@@ -43,6 +43,7 @@ export interface SyncedSignals {
   readReceipts: boolean;
   typingIndicator: boolean;
   presence: boolean;
+  calls: boolean;
   /** When the device that sent this claims to have changed it. Clamped on receipt. */
   at: number;
 }
@@ -118,6 +119,18 @@ export const MAX_PREFERENCES_BYTES = 16 * 1024;
 const BIT_READ_RECEIPTS = 1;
 const BIT_TYPING = 2;
 const BIT_PRESENCE = 4;
+/**
+ * **This bit records a refusal, where the three above record a permission.**
+ *
+ * Not an inconsistency — a necessity. A device built before calls existed announces a byte with
+ * this bit clear, and it announces it every time it changes any other setting. Were the bit to
+ * mean "calls on", that device would silently turn calls off across the whole account, from a
+ * version of the client that has never heard of them.
+ *
+ * The same reasoning is why `SignalSettings.calls` is optional and absent means enabled, and why
+ * the server's own `presence_optout` column is named the way it is.
+ */
+const BIT_CALLS_OFF = 8;
 
 /**
  * How far ahead of our own clock a device's self-declared time may sit before we replace it.
@@ -154,7 +167,8 @@ export async function sealSignals(
   plaintext[8] =
     (signals.readReceipts ? BIT_READ_RECEIPTS : 0) |
     (signals.typingIndicator ? BIT_TYPING : 0) |
-    (signals.presence ? BIT_PRESENCE : 0);
+    (signals.presence ? BIT_PRESENCE : 0) |
+    (signals.calls ? 0 : BIT_CALLS_OFF);
   plaintext.set(tail, PLAINTEXT_LEN);
 
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
@@ -211,6 +225,9 @@ export async function openSignals(
     readReceipts: (flags & BIT_READ_RECEIPTS) !== 0,
     typingIndicator: (flags & BIT_TYPING) !== 0,
     presence: (flags & BIT_PRESENCE) !== 0,
+    // Inverted, and it is the bit's own doc that says why: the flag records a refusal, so a byte
+    // from a device that has never heard of calls reads as "on" rather than silencing them.
+    calls: (flags & BIT_CALLS_OFF) === 0,
     at: clamp(declared),
   };
 

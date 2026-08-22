@@ -372,6 +372,19 @@ export interface SignalSettings {
    * Absent means enabled: presence is the default, this flag only records a refusal.
    */
   presence?: boolean;
+  /**
+   * Accept — and therefore be able to place — calls.
+   *
+   * A single flag for both directions, as for the three above, and here the reciprocity argument
+   * is the plainest of the four: an account that places calls while refusing to receive them is
+   * asking of others exactly what it declines to give.
+   *
+   * Absent means enabled, like presence: this flag only ever records a refusal. That matters more
+   * than for the others because it also decides what an *older* device announces — one that
+   * predates calls emits nothing for this field, and a default of "off" would let it turn calls
+   * off across an account every time it synchronised.
+   */
+  calls?: boolean;
 }
 
 /**

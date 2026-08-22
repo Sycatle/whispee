@@ -68,7 +68,11 @@ export function MiniProfile({
     >
       <div className="flex w-64 max-w-full flex-col items-start gap-snug">
         <div className="flex items-center gap-snug">
-          <PresenceBadge session={session} handle={handle}>
+          <PresenceBadge
+            session={session}
+            handle={handle}
+            typing={session.typingIn(view).includes(handle)}
+          >
             <Avatar seed={seed} label={name.primary} size="lg" className="shrink-0" />
           </PresenceBadge>
           <div className="flex min-w-0 flex-col">

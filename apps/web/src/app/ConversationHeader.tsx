@@ -1,12 +1,14 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 
-import { PresenceLine } from "@/components/Presence";
+import { PresenceBadge, PresenceLine } from "@/components/Presence";
 import { membersOf } from "@/components/Conversation";
 import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
 import { useDuo, useTrio } from "@/lib/duo";
+import { nextExpiry } from "@/lib/signals";
 import { normalize, validate } from "@/lib/handle";
 import { compactNameOf, formatHandle, titleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
+import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
 import { cn } from "@/ui/cn";
 import { Field } from "@/ui/Field";
@@ -16,6 +18,7 @@ import { IconButton } from "@/ui/IconButton";
 import { Input } from "@/ui/Input";
 import { Sheet } from "@/ui/Sheet";
 import { Tooltip } from "@/ui/Tooltip";
+import { Typing } from "@/ui/Typing";
 import { useNames } from "@/state/names";
 import { useDetail } from "@/state/detail";
 import { useReport } from "@/state/report";
@@ -108,7 +111,39 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
   const members = membersOf(view, session.accountId);
   const title = titleOf(view, names, members, group ? session.accountId : undefined);
 
+  /**
+   * The person on the other side, when there is exactly one.
+   *
+   * The same test the presence line below has always used, lifted out because the avatar needs
+   * it too: a face, a badge and a "last seen" all mean something about *somebody*, and a group
+   * has nobody for them to be about.
+   */
+  const only = !group && view.accounts.length === 1 ? view.accounts[0] : undefined;
+
   const isTyping = session.typingIn(view);
+
+  /**
+   * Repaint when the oldest indicator expires.
+   *
+   * `Messages.tsx` has had this since typing existed; this file did not, and the bug it caused
+   * was quiet. Nothing re-renders when somebody *stops* typing — there is no "stopped" signal by
+   * design (`lib/signals.ts`: a stop can be lost and leave the indicator lit), so the only thing
+   * that ends it is local expiry, and expiry is a moment in time rather than an event. The header
+   * therefore kept saying "is typing" until something else happened to re-render it — a poll, or
+   * a keystroke in the thread.
+   *
+   * Read from `view.typing` and not from `typingIn`: this is the raw expiry clock, not the
+   * question of what may be shown. The two differ when the reciprocity rule hides an indicator
+   * that is nonetheless still ticking.
+   */
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const delay = nextExpiry(view.typing, Date.now());
+    if (delay === undefined) return;
+
+    const timer = setTimeout(() => setTick((n) => n + 1), delay);
+    return () => clearTimeout(timer);
+  });
 
   /**
    * Everybody in this conversation except us.
@@ -245,6 +280,35 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
         read each other at all: it is the first thing to check when a message fails to
         arrive, and finding it any other way means instrumenting the WebAssembly module.
       */}
+      {/* The face, and the second way into the detail column.
+ 
+          The bar named a conversation and showed nothing of it. Every other place this person
+          appears — the rail, the thread, a mention — draws them; the one screen devoted to them
+          did not, so the header was the only view of a conversation with nobody in it.
+ 
+          It is the same control as the info button rather than a decoration: an avatar in a bar
+          that opens nothing is a thing people click at and give up on. The button keeps the
+          accessible name, and this is `tabIndex={-1}` for the reason `Messages.tsx` gives about
+          the author's face — two tab stops onto one destination is one arrival too many. */}
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-hidden="true"
+        onClick={toggleDetail}
+        className="shrink-0 cursor-pointer"
+      >
+        {only === undefined ? (
+          // A group has no one face and no one presence. The mosaic says how many, and a badge
+          // on it would have to pick somebody to be about — which is the same reason the presence
+          // line below is one-to-one only.
+          <Avatar seed={view.key} members={members} label={title} size="md" />
+        ) : (
+          <PresenceBadge session={session} handle={only.handle} typing={isTyping.length > 0}>
+            <Avatar seed={only.fingerprint} label={title} size="md" />
+          </PresenceBadge>
+        )}
+      </button>
+
       <div className="min-w-0 flex-1">
         {/* `<h1>`, because an open thread is what this page is about. The document used to start
             at `<h2>` the moment a conversation was opened: the only `<h1>` in the shell lived in
@@ -263,9 +327,12 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
           say who it is talking about.
         */}
         {isTyping.length > 0 ? (
-          <span className="text-caption text-(--color-ink-muted)">
-            {isTyping.map((handle) => compactNameOf(handle, names, members)).join(", ")}{" "}
-            {isTyping.length > 1 ? "are typing" : "is typing"}…
+          <span className="flex items-center gap-snug text-caption text-(--color-ink-muted)">
+            <Typing />
+            {/* The names stay in text. The dots carry it for the eye and announce nothing at all,
+                and in a group the sentence is the only thing that says *who* — which is exactly
+                what the badge on one avatar cannot express. */}
+            {isTyping.map((account) => compactNameOf(account, names, members)).join(", ")}
           </span>
         ) : (
           // One person's presence under the title, and only where the title is that person. In a

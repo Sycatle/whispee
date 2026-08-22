@@ -291,6 +291,44 @@
   }
 }
 
+/* The one keyframe animation in this project, and why it is allowed to be the first.
+ *
+ * Everything else here is a transition: a change of state, played once, from what the element was
+ * to what it now is. That covers menus, panels, toasts and every hover — which is why the note
+ * above can insist on two durations and no keyframes at all.
+ *
+ * Somebody typing is not a change of state. It is a *condition that persists*, and it lasts
+ * exactly as long as they keep typing — which no transition can express, because a transition
+ * ends. Three dots that rise in turn say "still happening" in a way a static mark cannot, and
+ * that is the whole information being carried.
+ *
+ * 1.2s and not one of the two tokens, for the same reason: those are the speeds at which
+ * something *arrives*, and this never arrives. It is a pulse, and at 90ms it would be a flicker.
+ *
+ * # Reduced motion stops it, and must not remove it
+ *
+ * `animation: none` leaves three dots sitting still, which still reads as "typing" beside an
+ * avatar and still occupies the same box. Hiding them instead would take the information away
+ * from precisely the people who asked for less movement, not less content — the mistake this
+ * codebase avoids elsewhere by collapsing durations rather than dropping transitions.
+ *
+ * The dots are also duplicated as text for a screen reader; see `ui/Typing.tsx`. An animation
+ * announces nothing at all. */
+@keyframes typing-dot {
+  /* Flat for most of the cycle: the rest is what makes the rise read as a beat rather than as a
+     wobble. A sine-like ease over the whole period looks like the dots are floating. */
+  0%,
+  70%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  35% {
+    transform: translateY(-25%);
+    opacity: 1;
+  }
+}
+
 /* Spacing.
  *
  * Everything is a multiple of `--spacing`, which stays at Tailwind's 0.25rem — restated rather

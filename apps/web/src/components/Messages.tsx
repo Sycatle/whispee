@@ -70,6 +70,7 @@ import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
 import { cn } from "@/ui/cn";
+import { Typing } from "@/ui/Typing";
 import { membersOf } from "@/components/Conversation";
 import { MentionText } from "@/components/MentionText";
 import { MiniProfile } from "@/components/MiniProfile";
@@ -1221,10 +1222,40 @@ export function Messages({
         woken by the timer above.
       */}
       {isTyping.length > 0 && (
-        <p className="px-pane pb-tight text-caption text-(--color-ink-muted)" aria-live="polite">
-          {isTyping.map((handle) => compactNameOf(handle, names, members)).join(", ")}{" "}
-          {isTyping.length > 1 ? "are typing" : "is typing"}…
-        </p>
+        // The lane and the same padding as a row, so the faces land in the column every other
+        // face is in. It reads as a turn beginning rather than as a notice under the thread —
+        // which is what it is.
+        <div className="flex items-center px-pane pb-tight" aria-live="polite">
+          <div className={cn(LANE, "flex items-center")}>
+            {/* At most three, and the rest counted. Four faces in a lane sized for one is a row
+                that grows sideways out of the column; the number says the same thing in the space
+                of a glyph. Overlapped rather than spaced, for the same reason. */}
+            {isTyping.slice(0, 3).map((account, index) => (
+              <Avatar
+                key={account}
+                seed={seedOf(account)}
+                label={compactNameOf(account, names, members)}
+                size="sm"
+                className={index === 0 ? undefined : "-ml-2"}
+              />
+            ))}
+            {isTyping.length > 3 && (
+              <span className="ml-tight text-caption text-(--color-ink-muted)">
+                +{isTyping.length - 3}
+              </span>
+            )}
+          </div>
+
+          <Typing size="md" className="text-(--color-ink-muted)" />
+
+          {/* The dots are an animation: no role, no name, nothing announced. This is the whole of
+              what a screen reader gets, and it is why the sentence survives the redesign — see
+              the note in `ui/Typing.tsx`. */}
+          <span className="sr-only">
+            {isTyping.map((account) => compactNameOf(account, names, members)).join(", ")}{" "}
+            {isTyping.length > 1 ? "are typing" : "is typing"}
+          </span>
+        </div>
       )}
     </>
   );

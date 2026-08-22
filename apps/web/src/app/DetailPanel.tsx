@@ -231,7 +231,7 @@ function Petname({ handle }: { handle: string }) {
   );
 }
 
-function AccountDetail({ account }: { account: ResolvedAccount }) {
+function AccountDetail({ account, typing }: { account: ResolvedAccount; typing: boolean }) {
   const session = useSession();
   const names = useNames();
   const [comparing, setComparing] = useState(false);
@@ -248,7 +248,11 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
   return (
     <>
       <section className="flex flex-col items-center gap-snug p-pane text-center">
-        <PresenceBadge session={session} handle={account.handle}>
+        <PresenceBadge
+          session={session}
+          handle={account.handle}
+          typing={typing}
+        >
           <Avatar
             seed={account.fingerprint}
             label={name.primary}
@@ -343,6 +347,10 @@ export function DetailPanel({ view }: { view: ConversationView }) {
 
   const { detail, close: closeDetail } = useDetail();
   const wanted = detail?.handle;
+
+  // Through `typingIn` and never off `view.typing`: the indicator is reciprocal, and only that
+  // call knows whether this device has kept the right to see other people's.
+  const typingNow = session.typingIn(view);
   // A group with no member singled out shows the roster; a one-to-one has exactly one person to
   // show and asking the user to pick them would be a click that means nothing.
   const focused =
@@ -525,7 +533,11 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                   type="button"
                   className="flex w-full items-center gap-snug rounded-control p-snug text-left text-body hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
                 >
-                  <PresenceBadge session={session} handle={account.handle}>
+                  <PresenceBadge
+                    session={session}
+                    handle={account.handle}
+                    typing={typingNow.includes(account.handle)}
+                  >
                     <Avatar
                       seed={account.fingerprint}
                       label={name.primary}
@@ -585,7 +597,10 @@ export function DetailPanel({ view }: { view: ConversationView }) {
         </section>
       )}
 
-      {focused && <AccountDetail account={focused} />}
+      {/* Passed in rather than read here: whether an indicator may be shown is
+          `session.typingIn(view)`'s decision and it needs the conversation, which this card does
+          not have and should not acquire — it is about a person, not about a thread. */}
+      {focused && <AccountDetail account={focused} typing={typingNow.includes(focused.handle)} />}
 
       {/* The confirmations, mounted outside every menu — see `useGroupAdmin`. Nothing is drawn
           until one is asked for. */}

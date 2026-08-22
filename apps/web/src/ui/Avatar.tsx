@@ -44,13 +44,26 @@ import { ProofStrip } from "@/ui/ProofStrip";
  * placeholder at all.
  */
 
-export type AvatarSize = "micro" | "sm" | "md" | "lg";
+export type AvatarSize = "micro" | "sm" | "md" | "ml" | "lg";
 
 /** Pixel sizes, and whether the box is tall enough for a 24 px strip to sit under it. */
 const SIZES: Record<AvatarSize, { box: number; strip: boolean; text: string }> = {
   micro: { box: 20, strip: false, text: "text-[0.6rem]" },
   sm: { box: 24, strip: false, text: "text-[0.65rem]" },
   md: { box: 32, strip: true, text: "text-xs" },
+  /**
+   * The step between "an icon beside a name" and "a portrait".
+   *
+   * `md` at 32px reads as a mark next to something else; `lg` at 64px dominates a 288px column.
+   * 40 is the size `components/Messages.tsx` has been faking from a call site since the thread
+   * gained one avatar per author — its comment says plainly that adding a step here is the right
+   * fix, and this is that step. That override can go the next time somebody is in the file.
+   *
+   * `strip: false`, unlike `md` and `lg`. The proof strip belongs where verification is the
+   * subject; under a face in a row of names it is a pattern nobody reads, and it is the reason
+   * `Messages.tsx` reached for `sm` and resized it rather than taking `md`.
+   */
+  ml: { box: 40, strip: false, text: "text-sm" },
   lg: { box: 64, strip: true, text: "text-xl" },
 };
 

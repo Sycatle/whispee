@@ -259,6 +259,20 @@ function Petname({ handle }: { handle: string }) {
  *
  * Unblocking has no such cost. It restores what was there and announces itself by the thread
  * filling back in.
+ *
+ * # The sentence below stops being true when calls land
+ *
+ * It promises that blocking hides what someone says. Once audio calls exist a blocked account's
+ * **voice** still reaches you, in a group call somebody else placed — decided on purpose: the
+ * guard is on who *placed* the call, never on who is in it, because cutting a voice out of a
+ * conversation several people are holding breaks it for the person who did the cutting and costs
+ * the blocked person nothing.
+ *
+ * It will need to say "hides what someone **writes**", and to add that the voice still comes
+ * through in a call they did not place. Both halves — exact and incomplete is worse than too
+ * broad here, since somebody who blocks and then hears that voice concludes the feature failed
+ * rather than that one channel is beyond it. The same note sits on `components/Blocked.tsx`,
+ * which carries the same promise in its own words.
  */
 function Blocking({ account }: { account: ResolvedAccount }) {
   const session = useSession();

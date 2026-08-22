@@ -15,10 +15,11 @@ rtc:
   port_range_end: 50100
   use_external_ip: false
 
-# `dev_only_not_a_secret` matches the delivery service's `.env.example`, and is as worthless as
-# the database password beside it.
+# As worthless as the database password beside it, and thirty-two characters long because the
+# media server refuses anything shorter — it logs the refusal and carries on with the key, which
+# is the kind of half-failure worth not shipping into a development default.
 keys:
-  whispee: dev_only_not_a_secret
+  whispee: dev_only_not_a_secret_padded_32ch
 
 # The relay is reached through the credentials the delivery service mints, handed to the browser
 # with its access token. This server is not the one that hands them out — it does not hold the

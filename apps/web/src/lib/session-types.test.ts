@@ -6,6 +6,7 @@ import {
   disclosesName,
   flagsOf,
   freshPreferences,
+  isBlocked,
   isMuted,
   type ConversationFlags,
 } from "./session-types.ts";
@@ -49,4 +50,13 @@ test("only an explicit refusal keeps a conversation out of the vault", () => {
   assert.equal(archivesToVault({}), true);
   assert.equal(archivesToVault({ archiveToVault: true }), true);
   assert.equal(archivesToVault({ archiveToVault: false }), false);
+});
+
+test("blocking is a list of accounts, and an empty one blocks nobody", () => {
+  const preferences = freshPreferences();
+  assert.equal(isBlocked(preferences, "mallory"), false);
+
+  preferences.blocked = ["mallory"];
+  assert.equal(isBlocked(preferences, "mallory"), true);
+  assert.equal(isBlocked(preferences, "alice"), false);
 });

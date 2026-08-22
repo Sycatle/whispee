@@ -529,7 +529,30 @@ function Frame({
           owner explicitly silenced, by typing one handle. Silence has to mean silence, or it is a
           suggestion.
         */
-        if (!session.mutedIn(view)) {
+        /*
+          Nothing from somebody we have declined to read.
+
+          Judged on the authors of what actually arrived, not on the membership of the room: in a
+          group, a blocked member must not be able to raise a notice, and the other members must
+          go on raising them. A conversation-level test would have made blocking one person in a
+          busy group silence everybody, which is a different feature nobody asked for.
+
+          Our own messages are skipped for the same reason `addressedIn` skips them — an arrival
+          is what somebody else said. Without that, catching up on a thread we posted to would be
+          judged on an author who cannot be blocked, and the notice would fire from a room where
+          the only other speaker is blocked.
+        */
+        const arrivals = view.messages.filter((message) => message.seq > before && !message.mine);
+        // `arrivals.length > 0` is not defensive noise: `every` on an empty list is `true`, and
+        // without it a batch of nothing but our own messages would read as a batch of blocked
+        // ones. A sender we could not attribute is likewise *not* blocked — sealed sender means
+        // some arrivals have no author to decline, and declining what cannot be named would
+        // silence the very messages nobody can account for.
+        const silenced =
+          arrivals.length > 0 &&
+          arrivals.every((message) => message.sender !== null && session.isBlocked(message.sender));
+
+        if (!silenced && !session.mutedIn(view)) {
           notifier.current?.arrived({
             conversation: key,
             ...(name ? { name } : {}),

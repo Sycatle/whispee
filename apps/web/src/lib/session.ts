@@ -133,6 +133,7 @@ import {
   disclosesName,
   flagsOf,
   freshSignalState,
+  isBlocked,
   isMuted,
   touch,
   type Preferences,
@@ -2284,6 +2285,22 @@ export class Session {
    */
   disclosesNameIn(view: ConversationView): boolean {
     return disclosesName(this.flagsIn(view), this.settings.discloseConversationName);
+  }
+
+  /**
+   * Have we declined to read this account?
+   *
+   * Blocking hides and does not prevent — see `isBlocked`. What it does today is decide that an
+   * arrival from this account does not interrupt anybody; hiding it on screen is the other half,
+   * and it lives where the screens are.
+   */
+  isBlocked(account: string): boolean {
+    return isBlocked(this.settings.value, account);
+  }
+
+  /** The accounts declined, for a screen that lists them so they can be undone. */
+  get blocked(): readonly string[] {
+    return this.settings.value.blocked;
   }
 
   /** Signalling settings, as they apply right now. */

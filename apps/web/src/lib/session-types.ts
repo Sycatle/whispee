@@ -528,6 +528,24 @@ export function flagsOf(preferences: Preferences, key: string): ConversationFlag
 }
 
 /**
+ * Is this account one we have declined to read?
+ *
+ * A list rather than a set on disk, because it round-trips through JSON and because it is short —
+ * the number of people somebody has blocked, not the number they have met. The linear scan is
+ * paid once per arrival, against a list that is empty for almost every account.
+ *
+ * # What blocking is, and is not
+ *
+ * It hides. It does not prevent: anyone registered can still add anyone to a group and have
+ * envelopes delivered to them, so this is a decision to decline something that exists and is
+ * stored. `storage.ts` says so at the field, and names `contactPolicy` as the server-side half
+ * that would prevent — the half that is not built.
+ */
+export function isBlocked(preferences: Preferences, account: string): boolean {
+  return preferences.blocked.includes(account);
+}
+
+/**
  * Is this conversation silenced at `now`?
  *
  * The stored value is the moment silence ends, not a boolean, and that is what lets "mute for an

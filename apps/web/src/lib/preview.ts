@@ -45,12 +45,34 @@
 /**
  * Largest bitmap accepted for a preview, in pixels.
  *
- * 25 megapixels covers a full-resolution photo from any phone or consumer camera, which is what
- * people actually send. Above it, a file is a scan, a poster, or a deliberate decode bomb —
- * and for all three a download link is the better answer than a thumbnail nobody asked to wait
- * for. At four bytes a pixel this bounds the retained bitmap at roughly 100 MB.
+ * # It was 25 megapixels, and that was too close to what people send
+ *
+ * The old value was chosen to cover "a full-resolution photo from any phone or consumer camera".
+ * It did not: a 5016×5016 export is 25 160 256 pixels, 0.64% over, and it was refused — with the
+ * wording reserved for bytes that are not an image at all. Somebody went looking for a fault in
+ * their own file, which is the cost of a ceiling that sits where ordinary content lands.
+ *
+ * # Why moving it is cheap, and what actually bounds memory
+ *
+ * Not this number. Two other things do, and they are the reason this can be raised without buying
+ * a proportional risk:
+ *
+ *   - What is **retained** is the canvas re-encoding, bounded by `MAX_PREVIEW_EDGE` — a few
+ *     hundred kilobytes whatever the source was. The full bitmap is closed before this function
+ *     returns, on every path.
+ *   - What is **allocated** is the decode, and this check happens *after* it. That limitation is
+ *     stated at the top of this file and it has not changed: no browser API reports an image's
+ *     dimensions without decoding it. So the peak was never something this number prevented.
+ *
+ * What the ceiling does buy is refusing to *scale and re-encode* something absurd, and refusing it
+ * before `drawImage` spends time on it. That is a real cost and worth bounding — but it is bounded
+ * against decode bombs, not against photographs.
+ *
+ * 80 megapixels is chosen to sit clear of both. A 48-megapixel phone frame and a 61-megapixel
+ * full-frame camera are both comfortably inside; a gigapixel panorama and a 30 000² zip bomb are
+ * both outside, by an order of magnitude rather than by a percent.
  */
-export const MAX_PREVIEW_PIXELS = 25_000_000;
+export const MAX_PREVIEW_PIXELS = 80_000_000;
 
 /**
  * Longest edge of the preview actually kept, in CSS pixels.
@@ -149,13 +171,30 @@ export interface Preview {
   height: number;
 }
 
+/** Why a decode produced nothing. */
+export type Refusal =
+  /** The bytes are not a raster image this browser can decode, whatever they claim to be. */
+  | { reason: "undecodable" }
+  /** A real image, decoded, and past `MAX_PREVIEW_PIXELS`. Its size is reported so it can be said. */
+  | { reason: "too-large"; width: number; height: number }
+  /** The browser refused a 2D context, or refused to encode the canvas. Not about the file. */
+  | { reason: "unavailable" };
+
+/** Either the re-encoding, or why there is none. */
+export type Decoded = { ok: true; preview: Preview } | ({ ok: false } & Refusal);
+
 /**
  * Decodes a decrypted attachment and re-encodes what the decoder produced.
  *
- * Returns `null` — never throws — for everything that is not a still raster image this code can
- * hold: bytes that do not decode, an image over the pixel ceiling, a canvas the browser refuses
- * to give a 2D context for. The single return value keeps the caller's fallback to one branch,
- * and there is nothing to tell the three cases apart with that a user could act on differently.
+ * Never throws. It used to return `null` for every failure, on the argument that there was
+ * "nothing to tell the three cases apart with that a user could act on differently" — and that
+ * argument was wrong in the one case that turned up in practice.
+ *
+ * A 5016×5016 export decoded perfectly and was refused for being 0.64% over the pixel ceiling,
+ * and the caller, having only `null`, said the file did not decode as an image. It did. Somebody
+ * went looking for a fault in their own file. The reason is reported now because saying the wrong
+ * one is worse than saying nothing, and because these three genuinely differ: one is about the
+ * bytes, one is about their size, and one is not about the file at all.
  *
  * The canvas is created but **never inserted into the document**, and the bitmap is closed on
  * every path: the decoded pixels exist for the duration of this call and no longer. The only
@@ -170,18 +209,20 @@ export async function decodePreview(
   blob: Blob,
   /** Longest edge of the re-encoding. `MAX_VIEWER_EDGE` for a full-screen look. */
   maxEdge: number = MAX_PREVIEW_EDGE,
-): Promise<Preview | null> {
+): Promise<Decoded> {
   let bitmap: ImageBitmap;
 
   try {
     bitmap = await createImageBitmap(blob);
   } catch {
     // Not a raster image, or a corrupt one. Either way there is nothing safe to show.
-    return null;
+    return { ok: false, reason: "undecodable" };
   }
 
   try {
-    if (!withinPixelBudget(bitmap.width, bitmap.height)) return null;
+    if (!withinPixelBudget(bitmap.width, bitmap.height)) {
+      return { ok: false, reason: "too-large", width: bitmap.width, height: bitmap.height };
+    }
 
     const size = fitWithin(bitmap.width, bitmap.height, maxEdge);
     const canvas = document.createElement("canvas");
@@ -189,7 +230,7 @@ export async function decodePreview(
     canvas.height = size.height;
 
     const context = canvas.getContext("2d");
-    if (context === null) return null;
+    if (context === null) return { ok: false, reason: "unavailable" };
 
     context.drawImage(bitmap, 0, 0, size.width, size.height);
 
@@ -198,9 +239,12 @@ export async function decodePreview(
     const encoded = await new Promise<Blob | null>((resolve) => {
       canvas.toBlob(resolve, "image/png");
     });
-    if (encoded === null) return null;
+    if (encoded === null) return { ok: false, reason: "unavailable" };
 
-    return { url: URL.createObjectURL(encoded), width: size.width, height: size.height };
+    return {
+      ok: true,
+      preview: { url: URL.createObjectURL(encoded), width: size.width, height: size.height },
+    };
   } finally {
     // Frees the decoded pixels without waiting for a collection that may never come while the
     // conversation stays open.

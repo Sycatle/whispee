@@ -35,6 +35,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+import { classify } from "./link.ts";
+
 import { fromBase64 } from "./keys.ts";
 import { isTauri } from "./platform.ts";
 
@@ -82,6 +84,26 @@ export function looksMissing(reason: unknown): boolean {
   ).toLowerCase();
 
   return text.includes("not found") && text.includes("command");
+}
+
+/**
+ * Whether a link is one this application is willing to offer to contact.
+ *
+ * Narrower than "is a link", on two counts, and both of them close a gap rather than tidy up:
+ *
+ *   - **A deceptive link is not offered.** `lib/link.ts` refuses the click on a URL carrying
+ *     userinfo, punycode or mixed scripts, because the text says one host and the request goes to
+ *     another. Refusing the click while offering to contact the same URL would hand back exactly
+ *     what was withheld — and it is the crafted ones somebody most wants fetched.
+ *   - **Only `https`.** `apps/desktop/src/link.rs` refuses anything else before a socket exists,
+ *     so a button on an `http://` link is a button that cannot work. An affordance for an action
+ *     that always fails is worse than no affordance.
+ *
+ * `classify` returning `null` covers the rest: a scheme outside the whitelist, or no host.
+ */
+export function contactable(raw: string): boolean {
+  const link = classify(raw);
+  return link !== null && link.deception === null && link.href.startsWith("https://");
 }
 
 /**

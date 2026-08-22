@@ -414,6 +414,35 @@ device from *displaying* a switch its account has already flipped. A device rest
 recovery phrase has no conversation and therefore no channel at all, which is why
 `GET /v1/accounts/{account}/devices` returns `presence_optout` — to its owner and to nobody else.
 
+### 4.5 The contact policy is enforced, not merely stored
+
+`accounts.contact_policy` holds `open`, `known` or `closed`, set through `POST /v1/contact-policy`
+by the signing device — never by naming an account, so nobody can close somebody else's door — and
+read back on `GET /v1/accounts/{account}/devices`, to its owner alone.
+
+It is applied in `add_members`, before any row is written. Being added to a group *is* a row in
+`group_members`, so the server is the only party that can decline it. That is what separates this
+from the local block list, which lets the envelope arrive and declines to read it.
+
+**The refusal is deliberately indistinguishable.** A closed account answers `403` with the same
+body a non-member already receives when it tries to add to a group it is not in. A reply naming
+the reason would make the setting an oracle: anybody could learn anybody's policy by trying, which
+is a fact about a person published by the mechanism meant to protect them.
+
+**`known` means "already shares a group", and the group being created does not count.** The route
+inserts the caller before the check runs, so counting the group under construction would find the
+caller inside it and admit everybody — the setting would enforce nothing while appearing to work.
+It also does not mean *verified*: that comparison happens out of band between two people and never
+reaches the server, and teaching it would hand it a finer map of who trusts whom than it holds.
+
+**An account always reaches its own devices**, whatever its policy. They are added to every
+conversation on every poll, and a policy that applied to itself would break an account the moment
+it paired a second device.
+
+**It is not retroactive.** `closed` refuses new additions and removes nobody from a group they are
+already in. No column could do otherwise: the membership that matters is the MLS tree, which this
+server cannot read.
+
 #### The rest of the preferences, appended
 
 After the nine fixed bytes comes optional UTF-8 JSON, inside the same seal: the per-conversation

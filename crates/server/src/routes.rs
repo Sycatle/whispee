@@ -90,6 +90,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/gateway", get(crate::gateway::handler))
         .route("/v1/presence", post(read_presence))
         .route("/v1/presence/optout", post(set_presence_optout))
+        .route("/v1/contact-policy", post(set_contact_policy))
         .route("/v1/push/token", post(set_push_token))
         .route("/v1/push/forget", post(forget_push_token))
         .route("/v1/accounts/{account}/devices", get(list_account_devices))
@@ -860,6 +861,18 @@ struct AccountDevices {
     /// parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     presence_optout: Option<bool>,
+    /// Who may start a conversation with this account, **served to the owner only**.
+    ///
+    /// Read back for the reason `presence_optout` is: a device restored from the recovery phrase
+    /// has never been told, and a screen that drew "Anyone" for an account the server is already
+    /// refusing on behalf of would be lying in the direction that matters.
+    ///
+    /// Owner only, and here the reason is sharper than for presence. This answers "will this
+    /// person accept a stranger", which is worth more to a stranger than to its owner — and
+    /// publishing it would undo the refusal the `Forbidden` at `add_members` is careful to keep
+    /// indistinguishable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contact_policy: Option<String>,
 }
 
 /// Lists an account's devices, with their attestations.
@@ -876,12 +889,13 @@ async fn list_account_devices(
     Path(account): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<AccountDevices>> {
-    let found: Option<(Vec<u8>, bool)> =
-        sqlx::query_as("SELECT identity_key, presence_optout FROM accounts WHERE id = $1")
-            .bind(&account)
-            .fetch_optional(&pool)
-            .await?;
-    let (identity_key, presence_optout) = found.ok_or(ApiError::NotFound)?;
+    let found: Option<(Vec<u8>, bool, String)> = sqlx::query_as(
+        "SELECT identity_key, presence_optout, contact_policy FROM accounts WHERE id = $1",
+    )
+    .bind(&account)
+    .fetch_optional(&pool)
+    .await?;
+    let (identity_key, presence_optout, contact_policy) = found.ok_or(ApiError::NotFound)?;
 
     // Revoked devices are served TOO, with their certificate. Hiding them would leave the
     // client unable to tell a revocation from an omission — and omission is precisely what this
@@ -906,6 +920,7 @@ async fn list_account_devices(
         account,
         identity_key: BASE64_STANDARD.encode(identity_key),
         presence_optout: owner.then_some(presence_optout),
+        contact_policy: owner.then_some(contact_policy),
         devices: rows
             .into_iter()
             .map(
@@ -1627,6 +1642,41 @@ async fn add_members(
         }
     }
 
+    /*
+      The contact policy, and the only place it can be applied.
+
+      Being added to a group is a transport act — a row in this table — so the server is the only
+      party that can decline to write it. That is what separates this from `blocked`, which lets
+      the envelopes arrive and declines to read them; `storage.ts` has named this half as the one
+      that would prevent, and until now it did not exist.
+
+      Refused as `Forbidden` and nothing more specific. A reply that said "this account is not
+      accepting" would make the setting an oracle: anybody could learn anybody's policy by trying
+      to add them, which is a fact about a person, published by the mechanism meant to protect
+      them. `Forbidden` is what this route already answers to a non-member, so a probe cannot tell
+      a closed door from a group it is not in.
+
+      All or nothing, before any insert. A partial add would leave the caller's MLS tree naming
+      devices the distribution list does not carry — the welcome would be encrypted for somebody
+      who never receives it, and the conversation would be broken in a way that looks like a
+      network fault.
+    */
+    // Read inside the transaction rather than through `caller_account`, which takes the pool: the
+    // membership rows this decision is about are being written in here, and a check made against
+    // a different snapshot than the insert is a check that can disagree with it.
+    let caller: (String,) = sqlx::query_as("SELECT account FROM devices WHERE id = $1")
+        .bind(&signed.device_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(ApiError::Forbidden)?;
+    let caller = caller.0;
+
+    for device_id in &payload.device_ids {
+        if !may_contact(&mut tx, &caller, device_id, &group_id).await? {
+            return Err(ApiError::Forbidden);
+        }
+    }
+
     sqlx::query(
         "INSERT INTO group_members (group_id, device_id)
          SELECT $1, * FROM UNNEST($2::text[])
@@ -2315,6 +2365,106 @@ struct OptoutRequest {
 ///
 /// It is honoured on write, in `presence::touch`: nothing is recorded. A setting that merely
 /// filtered on read would leave the server keeping the register anyway.
+#[derive(Deserialize)]
+struct ContactPolicyRequest {
+    policy: String,
+}
+
+/// Sets who may start a conversation with the calling account.
+///
+/// The account comes from the signing device and never from a parameter, as everywhere else here:
+/// a route that took the account as input would let anybody close anybody's door.
+async fn set_contact_policy(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
+    let payload: ContactPolicyRequest = signed.json()?;
+
+    // Validated here as well as in the schema. The constraint is the backstop; this is what turns
+    // a typo into a 400 the caller can read rather than a 500 out of Postgres.
+    if !matches!(payload.policy.as_str(), "open" | "known" | "closed") {
+        return Err(ApiError::BadRequest("unknown contact policy"));
+    }
+
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    sqlx::query("UPDATE accounts SET contact_policy = $2 WHERE id = $1")
+        .bind(&account)
+        .bind(&payload.policy)
+        .execute(&pool)
+        .await?;
+
+    Ok(())
+}
+
+/// May `caller` add this device to `group_id`?
+///
+/// # Why the current group is excluded from the test
+///
+/// `known` means "already meets this account somewhere else". `add_members` creates the group and
+/// inserts the caller *before* this runs, so a test that counted the group being built would find
+/// the caller in it and answer yes to everybody — the setting would enforce nothing, and it would
+/// look like it worked, which is worse than not shipping it.
+///
+/// # Why this reads `group_members` and learns nothing
+///
+/// That table is the server's own, and "do these two accounts meet somewhere" is a question it
+/// could answer at any moment without being asked. Enforcing the policy therefore costs no new
+/// knowledge; the only new fact is the policy, which is the fact its owner is asking the server
+/// to act on.
+async fn may_contact(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    caller: &str,
+    device_id: &str,
+    group_id: &[u8],
+) -> ApiResult<bool> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT d.account, a.contact_policy
+         FROM devices d JOIN accounts a ON a.id = d.account
+         WHERE d.id = $1",
+    )
+    .bind(device_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    // A device this server has never heard of. Not our refusal to make: the insert below does
+    // nothing with it anyway, and answering "forbidden" here would turn this route into a test
+    // for whether a device id exists.
+    let Some((account, policy)) = row else {
+        return Ok(true);
+    };
+
+    // Our own devices, always. `propagateOwnDevices` adds them to every conversation, and an
+    // account whose policy locked its own phone out of its own threads would be unusable in a way
+    // nobody would think to test.
+    if account == caller {
+        return Ok(true);
+    }
+
+    match policy.as_str() {
+        "open" => Ok(true),
+        "closed" => Ok(false),
+        "known" => {
+            let shared: Option<(i32,)> = sqlx::query_as(
+                "SELECT 1
+                 FROM group_members mine
+                 JOIN devices d_mine ON d_mine.id = mine.device_id
+                 JOIN group_members theirs ON theirs.group_id = mine.group_id
+                 JOIN devices d_theirs ON d_theirs.id = theirs.device_id
+                 WHERE d_mine.account = $1 AND d_theirs.account = $2 AND mine.group_id <> $3
+                 LIMIT 1",
+            )
+            .bind(caller)
+            .bind(&account)
+            .bind(group_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+
+            Ok(shared.is_some())
+        }
+        // Unreachable while the schema constraint holds. Refusing rather than allowing is the
+        // direction to fail in, for a setting whose whole purpose is to refuse.
+        _ => Ok(false),
+    }
+}
+
 async fn set_presence_optout(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
     let payload: OptoutRequest = signed.json()?;
     let account = caller_account(&pool, &signed.device_id).await?;

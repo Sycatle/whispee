@@ -55,6 +55,21 @@ async function signingPayload(
   return payload;
 }
 
+/**
+ * Who may start a conversation with an account.
+ *
+ * Three values and the middle one is the one to read carefully: `known` means "already shares a
+ * group with me", because that is the only relation the **server** can establish. It is not
+ * "verified" — verification is compared out of band and lives in the client, and teaching the
+ * server who verified whom would hand it a finer social graph than it already has, to enforce a
+ * rule it can enforce more coarsely without.
+ */
+export type ContactPolicy = "open" | "known" | "closed";
+
+export function isContactPolicy(value: unknown): value is ContactPolicy {
+  return value === "open" || value === "known" || value === "closed";
+}
+
 export class Api {
   constructor(
     /**
@@ -217,10 +232,12 @@ export class Api {
     identityKey: Uint8Array;
     devices: AttestedDevice[];
     presenceOptout?: boolean;
+    contactPolicy?: ContactPolicy;
   }> {
     const body = await this.request<{
       identity_key: string;
       presence_optout?: boolean;
+      contact_policy?: string;
       devices: {
         id: string;
         auth_key: string;
@@ -237,6 +254,10 @@ export class Api {
       // Served for our own account and for nobody else's, so absent is the ordinary case and
       // means "not ours to know", never "presence is on".
       presenceOptout: body.presence_optout,
+      // Narrowed rather than cast. The column is constrained in the schema, so a value outside the
+      // three is this server saying something no version of it should — and reading it as a policy
+      // would apply a rule nobody wrote.
+      contactPolicy: isContactPolicy(body.contact_policy) ? body.contact_policy : undefined,
       devices: body.devices.map((device) => ({
         id: device.id,
         authKey: fromBase64(device.auth_key),
@@ -447,6 +468,16 @@ export class Api {
   /** Stops or resumes broadcasting presence. Reciprocal: opting out means ceasing to see. */
   setPresenceOptout(optout: boolean): Promise<void> {
     return this.request("POST", "/v1/presence/optout", { optout });
+  }
+
+  /**
+   * Sets who may start a conversation with this account.
+   *
+   * The account is never a parameter: the server reads it from the signing device, so this cannot
+   * close somebody else's door.
+   */
+  setContactPolicy(policy: ContactPolicy): Promise<void> {
+    return this.request("POST", "/v1/contact-policy", { policy });
   }
 
   /** Groups where the server declared us a member — how a Welcome gets discovered. */

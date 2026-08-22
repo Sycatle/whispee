@@ -8,7 +8,7 @@
 import { normalize as normalizeHandle, validate as validateHandle } from "./handle";
 import * as mention from "./mention";
 import { type ResolvedAccount, resolveAccount } from "./account";
-import { Api, ApiError, type PostMac } from "./api";
+import { Api, ApiError, type ContactPolicy, type PostMac } from "./api";
 import type { MembershipEvent } from "./content";
 import { deviceNameCandidates, detectDeviceKind } from "./device";
 import { type PairingCode, decodePairingCode } from "./pairing";
@@ -1248,6 +1248,16 @@ export class Session {
     // restored from the recovery phrase has no conversation yet, hence no channel, and would draw
     // the switch in its default position for an account the server already stopped recording. The
     // other two need no such repair — with no conversation there is nobody to emit them to.
+    // The contact policy is the server's decision, so the server's answer wins outright — there
+    // is no merge to do and no local value worth defending. It is cached only so a screen can draw
+    // the current setting without a round trip.
+    if (account === this.accountId && resolved.contactPolicy !== undefined) {
+      if (this.settings.value.contactPolicy !== resolved.contactPolicy) {
+        this.settings.update((preferences) => (preferences.contactPolicy = resolved.contactPolicy));
+        await this.persist();
+      }
+    }
+
     if (account === this.accountId && resolved.presenceOptout !== undefined) {
       const presence = !resolved.presenceOptout;
       if (this.signals.presence !== presence) {
@@ -2490,6 +2500,33 @@ export class Session {
   /** The accounts declined, for a screen that lists them so they can be undone. */
   get blocked(): readonly string[] {
     return this.settings.value.blocked;
+  }
+
+  /**
+   * Who may start a conversation with this account, as far as this device has been told.
+   *
+   * `open` until the server has been asked, which is the column's own default. A device restored
+   * from the recovery phrase reads it back on its first resolve — the setting is not carried by
+   * the sealed message the other preferences travel in, because it is not ours to carry: the
+   * server holds it and the server enforces it, and a copy that disagreed would just be a screen
+   * drawing the wrong word next to a door already held shut.
+   */
+  get contactPolicy(): ContactPolicy {
+    return this.settings.value.contactPolicy ?? "open";
+  }
+
+  /**
+   * Changes who may start a conversation with this account.
+   *
+   * The server first, then the local cache — and only if the server agreed. The opposite order
+   * would leave a screen showing a door somebody believes is shut and the server is holding open,
+   * which is the one direction this setting must never fail in.
+   */
+  async setContactPolicy(policy: ContactPolicy): Promise<void> {
+    await this.api.setContactPolicy(policy);
+
+    this.settings.update((preferences) => (preferences.contactPolicy = policy));
+    await this.persist();
   }
 
   /** Signalling settings, as they apply right now. */

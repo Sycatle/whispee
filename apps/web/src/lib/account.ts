@@ -26,7 +26,7 @@
  * verification is only an early filter, never a guarantee. All the protection rests on this file
  * doing the work again.
  */
-import type { Api } from "./api";
+import type { ContactPolicy, Api } from "./api";
 import type { AttestedDevice, Crypto } from "./wasm";
 
 export interface ResolvedAccount {
@@ -53,6 +53,14 @@ export interface ResolvedAccount {
    * is recorded — the column it would be lying about is the same one it obeys.
    */
   presenceOptout?: boolean;
+  /**
+   * Who may start a conversation with this account — present only when the account is our own.
+   *
+   * A cache of a decision the **server** enforces, which is what separates it from every other
+   * preference here: the client cannot apply it, and a client that disagreed with the column would
+   * simply be drawing the wrong word next to a door the server is already holding shut.
+   */
+  contactPolicy?: ContactPolicy;
   /**
    * Devices whose revocation was verified right here.
    *
@@ -91,7 +99,8 @@ export async function resolveAccount(
   crypto: Crypto,
   account: string,
 ): Promise<ResolvedAccount> {
-  const { identityKey, devices, presenceOptout } = await api.listAccountDevices(account);
+  const { identityKey, devices, presenceOptout, contactPolicy } =
+    await api.listAccountDevices(account);
 
   const verified: AttestedDevice[] = [];
   const revoked: AttestedDevice[] = [];
@@ -141,6 +150,7 @@ export async function resolveAccount(
     fingerprint: crypto.accountFingerprint(identityKey),
     devices: verified,
     presenceOptout,
+    contactPolicy,
     revoked,
     revokedKeys: revoked.map((device) => device.mlsKey),
     rejected,

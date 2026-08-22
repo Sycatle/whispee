@@ -26,6 +26,9 @@
  * account id pasted from somewhere is not a person anybody recognises. Blocking belongs where the
  * person is.
  */
+import { useId } from "react";
+
+import type { ContactPolicy } from "@/lib/api";
 import { compactNameOf, handleOf } from "@/lib/naming";
 import { useNames } from "@/state/names";
 import { useBump, useRevision, useSession } from "@/state/SessionProvider";
@@ -53,6 +56,118 @@ import { Panel } from "@/ui/Panel";
  * where the decision is made; this one is where the sentence lives, and whoever rewrites the
  * sentence has no reason to go and read a media layer.
  */
+/**
+ * Who may start a conversation with this account.
+ *
+ * # Why this sits above the block list and not in its own screen
+ *
+ * They are the two halves of one question, and the block list's own copy has always said so:
+ * blocking hides what somebody says and lets it arrive, and this is the half that declines the
+ * arrival. Separating them would leave each screen explaining the other.
+ *
+ * # Why the server holds this one
+ *
+ * Being added to a group is a row in a table the server maintains, so the server is the only party
+ * that can decline to write it. That is not a convenience — it is what makes this the *only*
+ * setting in this application whose truth is not local. `storage.ts` named it as the missing half
+ * for as long as it was missing, and described it as enforced while nothing enforced it.
+ *
+ * # What "people you already share a group with" does not mean
+ *
+ * Verified. The server cannot see a verification — it is compared out of band, between two people,
+ * and telling the server who has verified whom would hand it a finer map of who trusts whom than
+ * it already has. So the middle option means what the server can actually check, and the copy says
+ * that in those words rather than saying "known" and letting each reader supply their own meaning.
+ */
+function ContactPolicySetting() {
+  const session = useSession();
+  const report = useReport();
+  const bump = useBump();
+  useRevision();
+
+  const current = session.contactPolicy;
+  // Unique per mount, so two of these on one screen would not share a radio group or an id.
+  const group = useId();
+
+  const choose = (policy: ContactPolicy) => {
+    session
+      .setContactPolicy(policy)
+      .then(() => {
+        bump();
+        report.done("Saved.");
+      })
+      .catch((failure: unknown) => {
+        report.error(failure instanceof Error ? failure.message : String(failure));
+      });
+  };
+
+  return (
+    <Panel
+      title="Who can start a conversation"
+      description="This one is enforced by the server: it declines to add you, rather than delivering and hiding. It applies to new conversations only — the ones you are already in are untouched, and no setting could change that, since the membership that matters is inside the encryption."
+    >
+      <fieldset className="space-y-snug">
+        <legend className="sr-only">Who can start a conversation with you</legend>
+        {/*
+          The hint is described-by and not part of the label, which is not a lint concession.
+          A label wrapping both makes the accessible name the whole paragraph, so choosing between
+          three options means hearing three explanations read out in full before the third can be
+          compared with the first. The name is what distinguishes; the hint is what qualifies.
+        */}
+        {POLICIES.map((option) => (
+          <div key={option.value} className="flex items-start gap-snug">
+            <input
+              id={`${group}-${option.value}`}
+              aria-describedby={`${group}-${option.value}-hint`}
+              type="radio"
+              name={group}
+              value={option.value}
+              checked={current === option.value}
+              onChange={() => choose(option.value)}
+              className="mt-1 accent-(--color-accent)"
+            />
+            <span className="min-w-0">
+              <label htmlFor={`${group}-${option.value}`} className="block text-body touch:min-h-11">
+                {option.label}
+              </label>
+              <span
+                id={`${group}-${option.value}-hint`}
+                className="block text-caption text-(--color-ink-muted)"
+              >
+                {option.hint}
+              </span>
+            </span>
+          </div>
+        ))}
+      </fieldset>
+    </Panel>
+  );
+}
+
+/**
+ * The three, with the middle one spelled out rather than named.
+ *
+ * "Known" is a word every reader completes differently, and most complete it as "verified" — which
+ * is precisely what the server cannot see. The label says the relation the server actually checks.
+ */
+const POLICIES: { value: ContactPolicy; label: string; hint: string }[] = [
+  {
+    value: "open",
+    label: "Anyone",
+    hint: "Anybody who knows your handle can open a conversation with you.",
+  },
+  {
+    value: "known",
+    label: "People you already share a group with",
+    hint: "The server can check that you already meet somewhere. It cannot check that you have verified each other — that comparison happens between the two of you and never reaches it.",
+  },
+  {
+    value: "closed",
+    label: "Nobody new",
+    hint: "Nobody can add you to a conversation you are not already in. Your existing conversations keep working.",
+  },
+];
+
 export function BlockedAccounts() {
   const session = useSession();
   const names = useNames();
@@ -77,6 +192,9 @@ export function BlockedAccounts() {
   };
 
   return (
+    <>
+      <ContactPolicySetting />
+
     <Panel
       title="Blocked"
       description="Blocking hides what someone says, on every device you are signed in on. It does not stop them sending: their messages are still delivered and stored, and they are never told."
@@ -112,5 +230,6 @@ export function BlockedAccounts() {
         </ul>
       )}
     </Panel>
+    </>
   );
 }

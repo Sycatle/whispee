@@ -1,12 +1,14 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 
-import { PresenceLine } from "@/components/Presence";
+import { PresenceBadge, PresenceLine } from "@/components/Presence";
 import { membersOf } from "@/components/Conversation";
 import { DETAIL_PANEL_ID, INFO_TOGGLE_ID } from "@/app/DetailPanel";
 import { useDuo, useTrio } from "@/lib/duo";
+import { nextExpiry } from "@/lib/signals";
 import { normalize, validate } from "@/lib/handle";
-import { compactNameOf, formatHandle, titleOf } from "@/lib/naming";
+import { formatHandle, titleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
+import { Avatar } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
 import { cn } from "@/ui/cn";
 import { Field } from "@/ui/Field";
@@ -108,7 +110,39 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
   const members = membersOf(view, session.accountId);
   const title = titleOf(view, names, members, group ? session.accountId : undefined);
 
+  /**
+   * The person on the other side, when there is exactly one.
+   *
+   * The same test the presence line below has always used, lifted out because the avatar needs
+   * it too: a face, a badge and a "last seen" all mean something about *somebody*, and a group
+   * has nobody for them to be about.
+   */
+  const only = !group && view.accounts.length === 1 ? view.accounts[0] : undefined;
+
   const isTyping = session.typingIn(view);
+
+  /**
+   * Repaint when the oldest indicator expires.
+   *
+   * `Messages.tsx` has had this since typing existed; this file did not, and the bug it caused
+   * was quiet. Nothing re-renders when somebody *stops* typing — there is no "stopped" signal by
+   * design (`lib/signals.ts`: a stop can be lost and leave the indicator lit), so the only thing
+   * that ends it is local expiry, and expiry is a moment in time rather than an event. The header
+   * therefore kept saying "is typing" until something else happened to re-render it — a poll, or
+   * a keystroke in the thread.
+   *
+   * Read from `view.typing` and not from `typingIn`: this is the raw expiry clock, not the
+   * question of what may be shown. The two differ when the reciprocity rule hides an indicator
+   * that is nonetheless still ticking.
+   */
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const delay = nextExpiry(view.typing, Date.now());
+    if (delay === undefined) return;
+
+    const timer = setTimeout(() => setTick((n) => n + 1), delay);
+    return () => clearTimeout(timer);
+  });
 
   /**
    * Everybody in this conversation except us.
@@ -245,6 +279,35 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
         read each other at all: it is the first thing to check when a message fails to
         arrive, and finding it any other way means instrumenting the WebAssembly module.
       */}
+      {/* The face, and the second way into the detail column.
+ 
+          The bar named a conversation and showed nothing of it. Every other place this person
+          appears — the rail, the thread, a mention — draws them; the one screen devoted to them
+          did not, so the header was the only view of a conversation with nobody in it.
+ 
+          It is the same control as the info button rather than a decoration: an avatar in a bar
+          that opens nothing is a thing people click at and give up on. The button keeps the
+          accessible name, and this is `tabIndex={-1}` for the reason `Messages.tsx` gives about
+          the author's face — two tab stops onto one destination is one arrival too many. */}
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-hidden="true"
+        onClick={toggleDetail}
+        className="shrink-0 cursor-pointer"
+      >
+        {only === undefined ? (
+          // A group has no one face and no one presence. The mosaic says how many, and a badge
+          // on it would have to pick somebody to be about — which is the same reason the presence
+          // line below is one-to-one only.
+          <Avatar seed={view.key} members={members} label={title} size="md" />
+        ) : (
+          <PresenceBadge session={session} handle={only.handle} typing={isTyping.length > 0}>
+            <Avatar seed={only.fingerprint} label={title} size="md" />
+          </PresenceBadge>
+        )}
+      </button>
+
       <div className="min-w-0 flex-1">
         {/* `<h1>`, because an open thread is what this page is about. The document used to start
             at `<h2>` the moment a conversation was opened: the only `<h1>` in the shell lived in
@@ -254,27 +317,43 @@ export function ConversationHeader({ view }: { view: ConversationView }) {
             same size as the messages under it — so the one piece of text saying *which
             conversation this is* had no more weight than any line inside it. One step up the
             scale, which is enough to be found without turning the bar into a banner. */}
-        <h1 className="truncate text-prose font-medium" data-epoch={String(view.epoch)}>
+        {/* `leading-tight`: the two lines are one block — a name and what that name is doing —
+            and the default leading set for prose put enough air between them to read as two
+            separate things stacked in a bar. */}
+        <h1
+          className="truncate text-prose leading-tight font-medium"
+          data-epoch={String(view.epoch)}
+        >
           {title}
         </h1>
-        {/*
-          "is typing…" wins over presence: typing implies being online, and showing both adds
-          noise without adding information. One-to-one only — in a group, "online" would not
-          say who it is talking about.
-        */}
-        {isTyping.length > 0 ? (
-          <span className="text-caption text-(--color-ink-muted)">
-            {isTyping.map((handle) => compactNameOf(handle, names, members)).join(", ")}{" "}
-            {isTyping.length > 1 ? "are typing" : "is typing"}…
-          </span>
+        {/* Presence, and only presence.
+ 
+            Typing used to take this line over — first as "is typing…", then briefly as dots and
+            a name. Both were saying a second time what the badge on the avatar beside them
+            already says, and the second telling cost the line that presence was using: the
+            subtitle flickered between "online" and something else every time somebody touched a
+            key.
+ 
+            The badge carries typing now. This says whether they are there, which is the question
+            it has always answered and the one nothing else on this bar answers.
+ 
+            One-to-one only. In a group — including one that removals have brought down to two —
+            "last seen an hour ago" under a name standing for several people says nothing a
+            reader can use. */}
+        {only !== undefined ? (
+          <PresenceLine session={session} handle={only.handle} />
         ) : (
-          // One person's presence under the title, and only where the title is that person. In a
-          // group — including one that removals have brought down to two — "last seen an hour
-          // ago" under a name that stands for several people says nothing the reader can use.
-          !group &&
-          view.accounts.length === 1 && (
-            <PresenceLine session={session} handle={view.accounts[0].handle} />
-          )
+          // A group gets a count where a person gets a presence, and the reason is the bar rather
+          // than the count: with nothing here the header was a line shorter for a group than for
+          // a conversation, so switching between the two moved the thread up and down under the
+          // reader. The size of a room is also the one fact about it that is true at a glance and
+          // worth a subtitle.
+          //
+          // `members` includes us — see `membersOf` — which is what makes "3 members" mean three
+          // people rather than three other people.
+          <span className="text-caption text-(--color-ink-muted)">
+            {members.length} {members.length === 1 ? "member" : "members"}
+          </span>
         )}
       </div>
 

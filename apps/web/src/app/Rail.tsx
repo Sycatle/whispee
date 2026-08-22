@@ -510,7 +510,15 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                         inferences instead of informing. `PresenceBadge` renders its child
                         untouched when there is nobody to report on, so the group needs no
                         branch here. */}
-                    <PresenceBadge session={session} handle={only?.handle ?? ""}>
+                    {/* Typing shows on the row without opening the thread, which is most of the
+                        point of putting it here. Read through `typingIn` and never off
+                        `view.typing`: the indicator is reciprocal, and only that call knows
+                        whether this device is allowed to see it. */}
+                    <PresenceBadge
+                      session={session}
+                      handle={only?.handle ?? ""}
+                      typing={session.typingIn(view).length > 0}
+                    >
                       <Avatar
                         seed={only?.fingerprint ?? (only ? undefined : view.key)}
                         // The faces in the room rather than a shape standing for it. Falls back

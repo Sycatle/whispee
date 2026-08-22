@@ -70,6 +70,7 @@ import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
 import { cn } from "@/ui/cn";
+import { Typing } from "@/ui/Typing";
 import { membersOf } from "@/components/Conversation";
 import { MentionText } from "@/components/MentionText";
 import { MiniProfile } from "@/components/MiniProfile";
@@ -314,6 +315,21 @@ export function Messages({
   // running.
   const sent = useRef(view.outbox.length);
 
+  /**
+   * Whether the thread has been placed yet.
+   *
+   * Opening a conversation is not an arrival, and treating it as one is what made a thread scroll
+   * itself: the list mounts at the top, this effect runs for the first time, and the reader
+   * watches several screens of their own history slide past before it settles at the end they
+   * asked for. On a long thread that is a second of travel to arrive where the first frame should
+   * already have been.
+   *
+   * So the first run jumps and every later one may glide. The distinction is the same one the
+   * comment above draws about *whose* message arrived — a scroll animation is only ever worth
+   * showing when it carries meaning about a change, and the initial position carries none.
+   */
+  const placed = useRef(false);
+
   useEffect(() => {
     const mine = view.outbox.length > sent.current;
     sent.current = view.outbox.length;
@@ -321,8 +337,26 @@ export function Messages({
     if (!mine && !stuck.current) return;
 
     const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    bottom.current?.scrollIntoView({ behavior: still ? "auto" : "smooth" });
+    const first = !placed.current;
+    placed.current = true;
+
+    bottom.current?.scrollIntoView({ behavior: still || first ? "auto" : "smooth" });
   }, [visible.length, view.outbox.length]);
+
+  /**
+   * A different conversation is a different thread, and it has to be placed again.
+   *
+   * Without this, switching conversations keeps `placed` from the last one and the new thread
+   * glides in from the top exactly as it used to.
+   *
+   * `view.key` and not `view.groupId`: the group id is a `Uint8Array`, which a dependency array
+   * compares by reference. A poll that rebuilt the view would hand over an equal-but-different
+   * array, this effect would run, and the flag would be cleared on a thread that is already
+   * placed — putting the glide back on the next arrival. The key is the same bytes as a string.
+   */
+  useEffect(() => {
+    placed.current = false;
+  }, [view.key]);
 
   // "Read" means **shown to someone**. So it is decided here, in the component that renders the
   // thread — not in the poll loop, which runs even with the window closed.
@@ -1221,10 +1255,40 @@ export function Messages({
         woken by the timer above.
       */}
       {isTyping.length > 0 && (
-        <p className="px-pane pb-tight text-caption text-(--color-ink-muted)" aria-live="polite">
-          {isTyping.map((handle) => compactNameOf(handle, names, members)).join(", ")}{" "}
-          {isTyping.length > 1 ? "are typing" : "is typing"}…
-        </p>
+        // The lane and the same padding as a row, so the faces land in the column every other
+        // face is in. It reads as a turn beginning rather than as a notice under the thread —
+        // which is what it is.
+        <div className="flex items-center px-pane pb-tight" aria-live="polite">
+          <div className={cn(LANE, "flex items-center")}>
+            {/* At most three, and the rest counted. Four faces in a lane sized for one is a row
+                that grows sideways out of the column; the number says the same thing in the space
+                of a glyph. Overlapped rather than spaced, for the same reason. */}
+            {isTyping.slice(0, 3).map((account, index) => (
+              <Avatar
+                key={account}
+                seed={seedOf(account)}
+                label={compactNameOf(account, names, members)}
+                size="sm"
+                className={index === 0 ? undefined : "-ml-2"}
+              />
+            ))}
+            {isTyping.length > 3 && (
+              <span className="ml-tight text-caption text-(--color-ink-muted)">
+                +{isTyping.length - 3}
+              </span>
+            )}
+          </div>
+
+          <Typing size="md" className="text-(--color-ink-muted)" />
+
+          {/* The dots are an animation: no role, no name, nothing announced. This is the whole of
+              what a screen reader gets, and it is why the sentence survives the redesign — see
+              the note in `ui/Typing.tsx`. */}
+          <span className="sr-only">
+            {isTyping.map((account) => compactNameOf(account, names, members)).join(", ")}{" "}
+            {isTyping.length > 1 ? "are typing" : "is typing"}
+          </span>
+        </div>
       )}
     </>
   );

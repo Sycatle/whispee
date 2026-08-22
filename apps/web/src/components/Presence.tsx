@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 import type { Session } from "@/lib/session";
 import { describePresence, isOnline } from "@/lib/presence";
 import { cn } from "@/ui/cn";
+import { Typing } from "@/ui/Typing";
 
 /**
  * Presence, as a badge on the corner of the face it belongs to.
@@ -42,10 +43,21 @@ import { cn } from "@/ui/cn";
 export function PresenceBadge({
   session,
   handle,
+  typing = false,
   children,
 }: {
   session: Session;
   handle: string;
+  /**
+   * Whether this person is typing right now.
+   *
+   * Passed in rather than read here, and that is not laziness. Whether an indicator may be shown
+   * at all is `session.typingIn(view)`'s decision — it is reciprocal, so somebody who turned
+   * their own indicator off does not get to see other people's — and that question needs a
+   * conversation, which a badge does not have. A badge that read the typing map directly would
+   * quietly show what the setting says to hide.
+   */
+  typing?: boolean;
   children: ReactNode;
 }) {
   // Our own account never appears in the presence map: nothing broadcasts a device's activity
@@ -60,50 +72,39 @@ export function PresenceBadge({
   return (
     <span className="relative inline-flex">
       {children}
-      {known && (
+      {/* Typing is drawn even when presence is not.
+ 
+          The two answer different questions, and only one of them can be unknown: presence is
+          something the other side chooses to broadcast, while typing is something we were just
+          told. Somebody who has turned presence off and is typing has no dot and does say so —
+          suppressing the dots because the dot is missing would hide a fact we hold behind the
+          absence of one we do not. */}
+      {(known || typing) && (
         <>
           <span
             aria-hidden="true"
             className={cn(
-              "pointer-events-none absolute -right-0.5 -bottom-0.5 size-2.5 rounded-pill",
-              "ring-2 ring-(--color-surface)",
-              online ? "bg-(--color-ok)" : "bg-(--color-ink-muted)",
+              "pointer-events-none absolute -right-0.5 -bottom-0.5 flex items-center justify-center",
+              "rounded-pill ring-2 ring-(--color-surface)",
+              // One box in two shapes rather than two elements swapped: the width is what
+              // changes, so the badge grows out of the dot and settles back into it instead of
+              // one thing vanishing as another appears at the same corner.
+              "transition-[width,background-color] duration-(--duration-quick) ease-out",
+              "motion-reduce:transition-none",
+              typing
+                ? "h-2.5 w-[1.375rem] bg-(--color-accent) text-(--color-accent-ink)"
+                : "size-2.5",
+              !typing && (online ? "bg-(--color-ok)" : "bg-(--color-ink-muted)"),
             )}
-          />
-          {/* The word, for whoever cannot see the colour — and the two states have to be named,
-              since the only thing separating them on screen is a hue. */}
-          <span className="sr-only">{online ? "online" : "offline"}</span>
+          >
+            {typing && <Typing />}
+          </span>
+          {/* The word, for whoever cannot see the colour — and the states have to be named, since
+              the only thing separating them on screen is a hue or a shape. */}
+          <span className="sr-only">{typing ? "typing" : online ? "online" : "offline"}</span>
         </>
       )}
     </span>
-  );
-}
-
-/**
- * "Online" dot, no text.
- *
- * Kept for the rows that have no avatar to put a ring on — a bare list entry, a member line.
- * `PresenceRing` is the form to reach for wherever there is a face.
- *
- * Nothing at all when the account is not fresh: a grey dot would ask the eye to tell two shades
- * apart in a list, in order to say "offline" when we do not always know that. No dot is both
- * more honest and more readable.
- */
-export function PresenceDot({ session, handle }: { session: Session; handle: string }) {
-  if (!isOnline(session.presenceOf(handle), session.presenceClock)) return null;
-
-  // A name on a bare `<span>` names an element whose role is `generic`, which ARIA forbids
-  // naming and most screen readers drop on the floor: the dot was silent. `PresenceRing` above
-  // already had the right shape — the mark is decoration, the word is text.
-  return (
-    <>
-      <span
-        aria-hidden="true"
-        className="inline-block size-2 shrink-0 rounded-pill bg-(--color-ok)"
-        title="online"
-      />
-      <span className="sr-only">online</span>
-    </>
   );
 }
 

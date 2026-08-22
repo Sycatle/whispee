@@ -27,16 +27,22 @@ import { Tooltip } from "@/ui/Tooltip";
  * `rel="noreferrer"` removes the referrer. Nothing removes the address. This is written here
  * rather than shown to the reader, because a caveat on every link is a caveat nobody reads.
  *
- * # Under Tauri, a plain `target="_blank"` does nothing at all
+ * # Under Tauri the link is opened by the system, not by the webview
  *
- * `apps/desktop/capabilities/default.json` grants `core:default` and no opener, so the webview's
- * request for a new window is refused: the link does not open and reports nothing. Rather than
- * ship a control that silently fails on one target, the desktop build renders the URL as text —
- * the same treatment a deceptive link gets, for a different reason.
+ * A plain `target="_blank"` does nothing there: the webview asks the shell for a new window and
+ * the shell refuses, with no error anybody sees. So the desktop build asks the operating system
+ * instead, through `tauri-plugin-opener`.
  *
- * Wiring the opener plugin is the fix and it is a decision of its own: it widens what the page's
- * JavaScript can reach, on a shell whose configuration says in as many words that keeping that
- * surface small is the point of the application.
+ * That widens what the page's JavaScript can reach, on a shell whose configuration says in as
+ * many words that keeping that surface small is the point of the application — so it is bounded
+ * where such things are bounded: `capabilities/default.json` scopes the permission to `http` and
+ * `https`. Unscoped, "open a URL" means "open what the system knows how to open", which includes
+ * files and executables. Scoped, the worst a hostile message obtains is sending somebody to a web
+ * page, which is what a link is.
+ *
+ * The click is still a click on an `<a>` with a real `href`, with the default prevented. Keeping
+ * the anchor is not decoration: it is what puts the destination in the status bar, what makes
+ * "copy link" work, and what a screen reader announces as a link.
  */
 export function LinkText({ raw }: { raw: string }) {
   const link = classify(raw);
@@ -57,10 +63,6 @@ export function LinkText({ raw }: { raw: string }) {
     );
   }
 
-  if (isTauri()) {
-    return <span className="underline decoration-dotted underline-offset-2">{raw}</span>;
-  }
-
   return (
     <a
       href={link.href}
@@ -69,6 +71,19 @@ export function LinkText({ raw }: { raw: string }) {
       // `window.opener` and can navigate it somewhere else. `nofollow ugc` says what this link is
       // — content somebody sent — to anything that reads the markup.
       rel="noopener noreferrer nofollow ugc"
+      onClick={(event) => {
+        if (!isTauri()) return;
+
+        // The webview would refuse the new window and report nothing, so the system is asked
+        // instead. The import is dynamic because this module is in the web bundle too, where the
+        // plugin is dead weight — `lib/platform.ts` explains why there is one bundle and not two.
+        event.preventDefault();
+        void import("@tauri-apps/plugin-opener")
+          .then((opener) => opener.openUrl(link.href))
+          // Nothing is shown on failure. The link is still selectable and still copyable, and a
+          // toast about a browser that would not start is a toast about somebody else's machine.
+          .catch(() => {});
+      }}
       className="text-(--color-accent) underline underline-offset-2"
     >
       {raw}

@@ -43,6 +43,7 @@ zeroize.workspace = true
 # where it would come from — after several minutes of compilation, and with a message about
 # permissions rather than dependencies.
 tauri-plugin-biometric = "2"
+tauri-plugin-opener = "2.5.4"
 
 
 [features]

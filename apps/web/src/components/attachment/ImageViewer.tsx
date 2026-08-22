@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 
 import type { ViewerProps } from "@/lib/viewer";
-import { type Preview, decodePreview, mayAnimate, release } from "@/lib/preview";
+import {
+  MAX_VIEWER_EDGE,
+  type Preview,
+  decodePreview,
+  mayAnimate,
+  release,
+} from "@/lib/preview";
 
 /**
  * A received image, shown as pixels this code drew.
@@ -36,7 +42,10 @@ export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
   useEffect(() => {
     let live = true;
 
-    void decodePreview(blob).then((decoded) => {
+    // The size asked for is the whole difference between the two modes. Decoding the bubble's
+    // 1280px and then scaling it up would show larger pixels and no more picture — detail that
+    // was never decoded cannot be revealed by magnifying what was.
+    void decodePreview(blob, mode === "full" ? MAX_VIEWER_EDGE : undefined).then((decoded) => {
       // The component may have gone while the decode was in flight. Setting state on it would be
       // a warning; releasing a preview nobody will ever revoke would be a leak.
       if (!live) {
@@ -59,7 +68,10 @@ export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
     // the parent, and depending on it would decode the same image again on every keystroke
     // anywhere in the thread. The linter does not ask for it — it is a callback prop, not
     // reactive state — so there is no suppression here to go stale.
-  }, [blob]);
+    //
+    // `mode` is in it, and has to be: opening the viewer on an image already shown inline is
+    // exactly the moment the larger decode is wanted.
+  }, [blob, mode]);
 
   if (preview === null) return null;
 
@@ -79,9 +91,12 @@ export function ImageViewer({ blob, name, mode, onRefused }: ViewerProps) {
           setPreview(null);
           onRefused("The preview could not be shown here. The file itself is unaffected.");
         }}
+        // `max-h-screen` and not `max-h-full` on the full path: the wrapper around this is what
+        // the zoom transform is applied to, so a height bounded by the *parent* would fight the
+        // scale instead of being magnified by it.
         className={
           mode === "full"
-            ? "mx-auto h-auto max-h-full max-w-full object-contain"
+            ? "mx-auto h-auto max-h-screen max-w-full object-contain"
             : "h-auto max-w-full rounded-bubble"
         }
       />

@@ -168,6 +168,46 @@ export function liveMedia(): Media {
         // Audio has to be attached to an element to be heard. Nothing is rendered: an `<audio>`
         // element with no controls is the browser's own way of playing a stream, and giving React
         // a node to own would tie the sound to a component's lifetime rather than the call's.
+        //
+        // **Every track is attached, including one from an account the user has blocked, and
+        // that is decided rather than missed.**
+        //
+        // Blocking closes the channels that reach somebody without being asked for: the thread,
+        // the typing indicator, notifications, and the ring. A group call is not one of them.
+        // Joining is a deliberate act — the room is entered on purpose, by somebody who can see
+        // who is in it — so what happens inside it is not content arriving unbidden, and blocking
+        // has no claim over it.
+        //
+        // The line is there, and it is worth naming because it is the one to reason from: **what
+        // arrives without being asked for is filtered; what is walked into is not.**
+        //
+        // So the test is on **who placed the call**, never on who is in it. An invitation from a
+        // blocked account is refused in `session.ts` and never rings — that one arrives unbidden,
+        // and it is the whole of the exception. A blocked member sitting in a call somebody else
+        // placed is not: this device chose to enter that room. Same if they join after us, or if
+        // the person who called leaves and they stay; the question was settled when the ring was
+        // answered, and re-asking it mid-call would end a conversation under its participants for
+        // a reason none of them could see.
+        //
+        // Filtering here would also cost the wrong person. Muting one voice in a conversation
+        // several people are holding breaks it for the one who muted — the others answer somebody
+        // this device cannot hear, and the thread of what is being said is lost. The blocked
+        // member loses nothing. A measure whose whole effect lands on the person who took it is
+        // not protection, it is a penalty for having used the feature.
+        //
+        // Nothing is given up on confidentiality by this: that member holds the epoch key
+        // legitimately, being in the group at all is what the call is derived from, and removing
+        // them from the group is the action that actually ends their access — see
+        // `Session.tickCall`.
+        //
+        // **One debt this decision creates, and it is owed to the reader of another screen.** The
+        // blocking control says "hides what someone says", which stopped being true the moment
+        // calls existed: a blocked member's voice arrives in a call somebody else placed. That
+        // wording lives outside this branch, so it cannot be fixed here — it has to change to
+        // "hides what someone writes", plus a line saying their voice still carries in a call
+        // they did not place, at the same time as the ring guard lands in `session.ts`. A control
+        // describing an effect it does not have is the defect this whole comment exists to avoid
+        // creating.
         .on(RoomEvent.TrackSubscribed, (track) => {
           if (track.kind === Track.Kind.Audio) track.attach();
           announce();

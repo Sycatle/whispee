@@ -54,9 +54,17 @@ export function csp(api: string, media?: string): string {
   // media server must not widen its policy for a host it will never contact. Empty rather than a
   // default, so the directive is exactly as wide as the deployment is.
   //
-  // Only the signalling socket is covered by this. The audio itself travels over WebRTC, which
-  // no directive here can constrain — see `lib/call.ts` for what does.
-  const relay = media ? ` ${media.replace(/^http/, "ws")}` : "";
+  // **Both forms, and the HTTP one is not redundant.** The `ws://` origin carries the signalling
+  // socket, which is what a call needs to happen at all — that much was obvious and was all this
+  // line used to allow. The `http://` origin carries the request the SDK makes to ask the server
+  // *why* a connection failed. Blocking it does not break a working call; it makes a broken one
+  // report a vaguer reason than the browser actually has, at the one moment somebody is trying to
+  // find out what went wrong. That is precisely the class of omission this whole file exists to
+  // catch — see the note on `media-src`, which went unnoticed for the same reason.
+  //
+  // The audio itself travels over WebRTC, which no directive here can constrain — see
+  // `lib/call.ts` for what does.
+  const relay = media ? ` ${media} ${media.replace(/^http/, "ws")}` : "";
 
   return [
     "default-src 'self'",

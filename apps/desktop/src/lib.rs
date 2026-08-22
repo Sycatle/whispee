@@ -34,6 +34,7 @@
 
 pub mod cipher;
 pub mod commands;
+pub mod link;
 pub mod store;
 
 /// Starts the application.

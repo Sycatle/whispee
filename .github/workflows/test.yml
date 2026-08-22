@@ -63,7 +63,87 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Which of the jobs below the change can actually affect.
+  #
+  # The Rust jobs are the expensive ones — a Postgres service, a release build of the whole
+  # workspace including Tauri, and the system libraries the webview needs — and a change that
+  # touches only `apps/web` cannot alter their answer. Paying forty minutes to be told again
+  # that the cryptography still compiles is the spend `test.yml` argues against everywhere else.
+  #
+  # **A path filter is a claim that the skipped job had nothing to say, and that claim has to be
+  # true.** Two ways it was false here, both fixed rather than accepted:
+  #
+  #   - The only `vite build` in this workflow lived in the `rust` job, because
+  #     `generate_context!()` reads `frontendDist` at compile time. Skipping `rust` on a web-only
+  #     change would therefore have removed the sole bundler check from the entire run — the
+  #     `web` job runs `typecheck`, `lint` and `test`, and none of them bundle. That build now
+  #     runs in `web`, where it belongs, so what the filter drops is genuinely redundant.
+  #   - `verify-wasm.sh` compares a **committed binary** against its source. A commit that
+  #     touches only `apps/web/public/crypto_wasm_bg.wasm` changes no Rust at all and is exactly
+  #     the case that check exists for, so the artefacts it reads are in the filter alongside the
+  #     crate that produces them.
+  #
+  # The workflow file is in every pattern: a change to the filter must be able to prove itself.
+  # And anything that is not a pull request — a push to `main`, a dispatch — runs everything,
+  # because there is no base to diff against and the safe answer is the complete one.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      wasm: ${{ steps.filter.outputs.wasm }}
+      audit: ${{ steps.filter.outputs.audit }}
+
+    steps:
+      # `fetch-depth: 0`, because the diff is against the base commit and a shallow clone does
+      # not contain it. The failure without it is `git diff` exiting on an unknown revision,
+      # which would fail the run rather than silently skip — but a filter that cannot fail open
+      # is worth having anyway.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BASE:-}" ]; then
+            echo "Not a pull request: no base to diff against, so everything runs."
+            { echo "rust=true"; echo "wasm=true"; echo "audit=true"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed=$(git diff --name-only "$BASE" HEAD)
+          echo "Changed files:"
+          echo "$changed" | sed 's/^/  /'
+
+          # `grep -q` alone would abort the step under `set -e` when a pattern does not match,
+          # which is the ordinary case here rather than an error.
+          touched() { echo "$changed" | grep -qE "$1" && echo true || echo false; }
+
+          always='^\.github/workflows/test\.yml$'
+
+          # `apps/desktop` is a workspace member, so its Rust and its `tauri.conf.json` both
+          # reach the compiler.
+          rust=$(touched "$always|^crates/|^apps/desktop/|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^scripts/")
+
+          # The crate, the scripts that build and compare it, and the three committed artefacts
+          # the comparison reads.
+          wasm=$(touched "$always|^crates/crypto-wasm/|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^scripts/(build|verify)-wasm\.sh$|^apps/web/public/crypto_wasm_bg\.wasm$|^apps/web/src/lib/generated/crypto_wasm\.(js|d\.ts)$")
+
+          # `cargo audit` reads `Cargo.lock` and nothing else. Advisories that appear without
+          # this repository changing are reported by the scheduled path, not by this one.
+          audit=$(touched "$always|^Cargo\.lock$")
+
+          echo "rust=$rust wasm=$wasm audit=$audit"
+          { echo "rust=$rust"; echo "wasm=$wasm"; echo "audit=$audit"; } >> "$GITHUB_OUTPUT"
+
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -123,6 +203,11 @@ jobs:
       # reads `frontendDist` **at compile time** and panics in the proc macro if the directory is
       # absent. So `apps/web/dist` is a prerequisite for compiling the workspace, not an artefact
       # of it — which is easy to miss, because a developer's tree always happens to have one.
+      #
+      # The `web` job builds one too, and the duplication is deliberate rather than an oversight:
+      # there it is the check, here it is a build input. Sharing one through an artefact would
+      # make this job wait on that one to compile Rust, which is the coupling `changes` exists to
+      # remove.
       #
       # `vite build` rather than `pnpm run build`: that script runs `tsc --noEmit` first, and the
       # `web` job already does. `VITE_API_URL` is left unset on purpose — it is frozen into the
@@ -199,10 +284,29 @@ jobs:
         working-directory: apps/web
         run: pnpm test
 
+      # The bundle, and it is not decoration.
+      #
+      # `typecheck`, `lint` and `test` all read the source; none of them resolve an import,
+      # follow a dynamic `import()` into its own chunk, or run the CSS pipeline. A dependency
+      # that only exists at build time — `pdfjs-dist` reaching for a worker through
+      # `new URL(..., import.meta.url)`, an asset expected under `public/` — breaks here and
+      # nowhere else.
+      #
+      # It ran before, but inside the `rust` job, as a prerequisite for
+      # `tauri::generate_context!()` rather than as a check of its own. That was fine while
+      # `rust` ran on every pull request; it stopped being fine the moment `changes` learned to
+      # skip it, because a web-only change would then have been the one kind of change whose
+      # bundle nobody built. `rust` still builds its own, for the reason its comment gives.
+      - name: Build
+        working-directory: apps/web
+        run: pnpm exec vite build
+
   # Separate from `rust` because it needs the WebAssembly target and `wasm-pack`, and because its
   # failure means something different: not "a test broke" but "what ships is not what the source
   # says".
   wasm:
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -251,6 +355,8 @@ jobs:
   # and still coloured the pull request — exactly the blocking this comment argues against. The
   # command swallows its own exit code instead, and the report stays in the log where it is read.
   audit:
+    needs: changes
+    if: needs.changes.outputs.audit == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

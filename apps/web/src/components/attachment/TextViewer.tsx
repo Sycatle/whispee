@@ -67,7 +67,9 @@ export function TextViewer({ blob, name, mode, onRefused }: ViewerProps) {
   return (
     <div
       className={cn(
-        "w-full overflow-x-auto rounded-control bg-(--color-surface-sunken) p-gutter",
+        // `text-left` for the reason `CodeBlock.tsx` gives at length: a mirrored own turn
+        // inherits `text-align` into this element, and a file's indentation is content.
+        "w-full overflow-x-auto rounded-control bg-(--color-surface-sunken) p-gutter text-left",
         // Inline it is a glance, full screen it is the file. Bounded either way: a thousand lines
         // in a thread would push the conversation off the screen, which is the same argument the
         // image thumbnail makes one file over.

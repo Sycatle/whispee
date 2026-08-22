@@ -48,7 +48,15 @@ export function CodeBlock({ code, lang }: { code: string; lang: string | null })
         <span className="text-caption text-(--color-ink-muted)">{lang}</span>
       )}
 
-      <pre className="overflow-x-auto rounded-control bg-(--color-surface-sunken) p-gutter">
+      {/* `text-left`, and it is not defensive styling.
+          `Messages.tsx` mirrors the sender's own turns to the right, and `text-align` inherits
+          straight through this element: the block rendered with `def` and `return` pinned to the
+          right edge and the four spaces of indentation on the *outside* of the line, where they
+          are invisible. Prose reads the same either way, which is the whole point of the
+          mirroring; code does not, because its leading whitespace is part of what it means.
+          The block itself still sits on the side the turn puts it — only its contents are
+          pinned. */}
+      <pre className="overflow-x-auto rounded-control bg-(--color-surface-sunken) p-gutter text-left">
         <code className="font-mono text-caption">
           {tokens.map((token, index) => (
             // The index is the position in a list derived from the text: two identical tokens are

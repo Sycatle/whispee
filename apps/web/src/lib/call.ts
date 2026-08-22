@@ -214,6 +214,26 @@ export function liveMedia(): Media {
         });
 
       await room.connect(options.admission.url, options.admission.token);
+
+      // **This line is what makes the call end-to-end encrypted, and it is not implied by the
+      // `e2ee` option above.**
+      //
+      // Passing `e2ee` to the constructor builds the key provider, loads the worker and accepts
+      // every key handed to it. It does not encrypt anything: the SDK only sets the local
+      // participant's encryption type when this is called, so without it the frames reach the
+      // media server in the clear and the derived key does nothing at all. Nothing reports the
+      // difference — the call connects, the audio is heard, and every key rotation appears to
+      // work, because none of it is in the media path.
+      //
+      // That is exactly how it was found: a member removed from the group mid-call went on
+      // hearing it for forty seconds. See `docs/THREAT-MODEL.md` for what this line is
+      // load-bearing for; the short of it is everything this module claims.
+      //
+      // **After `connect` and before publishing.** Before connecting, the local participant has
+      // no identity yet and the SDK skips enabling its cryptor; after publishing, turning it on
+      // republishes every track, which drops the audio it has just started carrying.
+      await room.setE2EEEnabled(true);
+
       await room.localParticipant.setMicrophoneEnabled(true);
 
       announce();

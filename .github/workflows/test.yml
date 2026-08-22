@@ -92,6 +92,27 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev
 
+      # And the frontend, for the same reason one step further: `tauri::generate_context!()`
+      # reads `frontendDist` **at compile time** and panics in the proc macro if the directory is
+      # absent. So `apps/web/dist` is a prerequisite for compiling the workspace, not an artefact
+      # of it — which is easy to miss, because a developer's tree always happens to have one.
+      #
+      # `vite build` rather than `pnpm run build`: that script runs `tsc --noEmit` first, and the
+      # `web` job already does. `VITE_API_URL` is left unset on purpose — it is frozen into the
+      # bundle and the CSP, which matters for something installed and not at all for a bundle
+      # that exists so a macro can find a directory.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Build the frontend Tauri compiles against
+        working-directory: apps/web
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm exec vite build
+
       # No `cargo fmt --check`.
       #
       # This tree is formatted by hand and deliberately: rustfmt wants to rejoin lines that were

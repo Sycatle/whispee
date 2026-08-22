@@ -4,6 +4,7 @@ import { AttachmentViewer } from "@/components/attachment/AttachmentViewer";
 import { ImageViewer } from "@/components/attachment/ImageViewer";
 import type { AttachmentRef } from "@/lib/attachments";
 import { type ViewerKind, type ViewerProps, chooseViewer } from "@/lib/viewer";
+import { cn } from "@/ui/cn";
 import { Icon } from "@/ui/Icon";
 import { Spinner } from "@/ui/Spinner";
 
@@ -60,9 +61,21 @@ const VIEWERS: Partial<Record<ViewerKind, (props: ViewerProps) => React.ReactNod
 export function Attachment({
   attachment,
   onOpen,
+  align = "start",
 }: {
   attachment: AttachmentRef;
   onOpen: () => Promise<Blob>;
+  /**
+   * Which edge the rows hang from.
+   *
+   * A prop and not a selector reaching in from `Messages.tsx`. That is how it was done first —
+   * `[&_button.flex]:justify-end` on the row — and it worked for exactly one of the four things
+   * in here: `text-right` is inherited and reaches text nodes, but the file name and the preview
+   * are a flex button and an image, and both stayed against the left edge of a right-aligned
+   * message. A component that has to be styled from outside by guessing at its markup is a
+   * component that is styled wrongly the first time its markup changes.
+   */
+  align?: "start" | "end";
 }) {
   const [busy, setBusy] = useState(false);
   // Whether the open blob is filling the screen or sitting under the message. One flag and not a
@@ -75,6 +88,9 @@ export function Attachment({
   const [refused, setRefused] = useState<string | null>(null);
 
   const kind = chooseViewer(attachment.mime, attachment.name);
+  // True once something is actually on screen for this file. Not `opened !== null` alone: a
+  // viewer that refused sets `refused` and unmounts, and the name has to come back with it.
+  const shown = opened !== null && refused === null;
   const Viewer = kind === null ? undefined : VIEWERS[kind];
   const offer = Viewer !== undefined && opened === null && refused === null;
 
@@ -134,7 +150,9 @@ export function Attachment({
   };
 
   return (
-    <div className="space-y-tight">
+    // A flex column rather than `space-y-*`, because the rows have to be aligned as well as
+    // spaced, and `items-*` is what says which edge they hang from.
+    <div className={cn("flex flex-col gap-tight", align === "end" ? "items-end" : "items-start")}>
       {Viewer !== undefined && opened !== null && (
         <>
           {/* A picture is its own affordance: clicking it opens it, and an "Enlarge" link beside
@@ -184,12 +202,31 @@ export function Attachment({
         </>
       )}
 
+      {/* The file name is the label until there is a picture, and stops being one after.
+ 
+          Under a preview it says nothing the image does not already say, and it says it in the
+          most prominent line of the row — a thread of photographs became a list of file names
+          with pictures attached. So once something is shown, this collapses to the action and the
+          size, and the name lives on where it is still doing work: as the image's `alt`, which is
+          the only description of the picture anything here has, and as the viewer's title.
+ 
+          What does not collapse is the download itself. `lib/preview.ts` states the rule and the
+          reason — a preview is a look at the file, not the file: one frame of an animation, no
+          colour profile, no metadata. Hiding the way to the real bytes because a thumbnail
+          rendered would be the wrong half of this change. */}
       <button
         type="button"
         onClick={download}
         disabled={busy}
         aria-busy={busy}
-        className="flex items-center gap-snug text-left underline disabled:opacity-60"
+        // Named for a screen reader in both shapes. With the name hidden, "Download" on its own
+        // in a thread of five attachments announces five identical buttons.
+        aria-label={shown ? `Download ${attachment.name}` : undefined}
+        className={cn(
+          "flex items-center gap-snug underline disabled:opacity-60",
+          align === "end" ? "text-right" : "text-left",
+          shown && "text-caption text-(--color-ink-muted)",
+        )}
       >
         {/* The paperclip was a literal 📎, drawn by whatever emoji font the platform ships: blue
             on Windows, flat grey on Linux, and a tofu box in a container with no emoji font at
@@ -199,7 +236,7 @@ export function Attachment({
             the label does not move when the download starts — and the busy mark lands on the
             control that is actually working. */}
         {busy ? <Spinner /> : <Icon name="attach" />}
-        <span className="break-all">{attachment.name}</span>
+        <span className="break-all">{shown ? "Download" : attachment.name}</span>
       </button>
 
       {offer && (

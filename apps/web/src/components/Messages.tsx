@@ -765,25 +765,31 @@ export function Messages({
                 </div>
                 </AuthorMenu>
 
-                {/* `max-w-measure`: the lane holds the text, and text has a width past which it
-                    stops being comfortable to read. See `--container-measure` in `index.css`.
+                {/* Two ceilings, and the smaller one wins.
+ 
+                    `--container-measure` is the reading one: text has a width past which it stops
+                    being comfortable, and that does not change with the layout around it.
+ 
+                    Two thirds is the *mirroring* one, and it exists because of the axis. An
+                    alignment says whose turn this is by which side it hangs from, and it can only
+                    say that if the other side is visibly empty. A turn allowed to fill the pane
+                    reaches both walls at once and the asymmetry disappears exactly when the
+                    message is long enough for somebody to have to look. On a narrow pane the
+                    measure never binds, so without this the mirroring would quietly stop working
+                    on the window where it is needed most.
+ 
+                    `min()` rather than a choice between them: on a wide pane the measure is the
+                    tighter of the two and stays in charge, on a narrow one the fraction is.
+ 
                     On the lane rather than on the paragraph, so the name, the hour, the quoted
                     reply and the reactions all stop at the same edge — a column, not a ragged
                     stack of differently-bounded pieces. */}
                 <div
                   className={cn(
-                    "min-w-0 max-w-measure flex-1",
+                    "min-w-0 max-w-[min(66%,var(--container-measure))] flex-1",
                     // prose ragged-left when it hangs off a right-hand avatar.
                     message.mine && "text-right",
-                    // `text-right` reaches text nodes and not flex containers, and an
-                    // attachment's rows are full-width flex — they stay left without this.
-                    //
-                    // Reaching into a child component's markup from here is coupling, and it is
-                    // written down as such rather than left to be discovered: the honest fix is
-                    // an `align` prop on `Attachment`. It is deferred because that component is
-                    // being restructured for the text, audio and PDF viewers, and adding the
-                    // prop now would mean adding it twice.
-                    message.mine && "[&_button.flex]:justify-end",
+
                   )}
                 >
                   {/* The name is announced once per turn, not once per line: a burst of three
@@ -872,6 +878,7 @@ export function Messages({
                         <Attachment
                           attachment={attachment}
                           onOpen={() => session.openAttachment(view, attachment)}
+                          align={message.mine ? "end" : "start"}
                         />
                       ) : spoken !== null ? (
                         <MentionText text={spoken} among={members} view={view} big />

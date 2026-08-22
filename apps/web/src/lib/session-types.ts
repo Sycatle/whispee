@@ -526,3 +526,45 @@ export function freshPreferences(): Preferences {
 export function flagsOf(preferences: Preferences, key: string): ConversationFlags {
   return preferences.conversations[key] ?? {};
 }
+
+/**
+ * Is this conversation silenced at `now`?
+ *
+ * The stored value is the moment silence ends, not a boolean, and that is what lets "mute for an
+ * hour" exist without anything having to run a timer and come back for it. The comparison happens
+ * where a notification would fire, so a mute simply stops applying — nothing to schedule, and
+ * nothing left behind if the device was asleep when it lapsed.
+ *
+ * A mute in the past is not muted, and a mute exactly at `now` has ended: the boundary belongs to
+ * the side that makes a lapsed mute lapse rather than linger.
+ */
+export function isMuted(flags: ConversationFlags, now: number): boolean {
+  return flags.mutedUntil !== undefined && flags.mutedUntil > now;
+}
+
+/**
+ * May a notification name this conversation?
+ *
+ * Three states, and the middle one is the whole reason this is a function. An absent flag means
+ * "follow the account setting", which is not `false`: turning the account-wide setting on must not
+ * reveal the name of the one conversation somebody marked as the one to stay quiet about, and
+ * turning it off must not leave a per-conversation `true` shouting.
+ */
+export function disclosesName(flags: ConversationFlags, accountWide: boolean): boolean {
+  return flags.discloseName ?? accountWide;
+}
+
+/**
+ * Should messages from this conversation be deposited in the vault?
+ *
+ * Only an explicit `false` opts out, for the reason `vaultEnabled` gives about itself one layer
+ * up: absence is "never asked", and treating it as a refusal would cut backup off for every
+ * conversation that predates the flag.
+ *
+ * The account-wide switch is not consulted here. It is enforced by `Archive` itself, which holds
+ * no key when the vault is off — so a conversation that says `true` against an account that says
+ * no still deposits nothing.
+ */
+export function archivesToVault(flags: ConversationFlags): boolean {
+  return flags.archiveToVault !== false;
+}

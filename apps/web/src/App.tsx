@@ -489,7 +489,10 @@ function Frame({
           user turned off for the other.
         */
         const among = view.accounts.map((account) => account.handle);
-        const name = session.discloseConversationName
+        // Per conversation, falling back to the account setting. The three states are the point:
+        // an absent flag follows the account, and only an explicit one overrides it in either
+        // direction — see `Session.disclosesNameIn`.
+        const name = session.disclosesNameIn(view)
           ? view.accounts.map((account) => compactNameOf(account.handle, names, among)).join(", ")
           : undefined;
 
@@ -512,11 +515,27 @@ function Frame({
           session.accountId,
         ]);
 
-        notifier.current?.arrived({
-          conversation: key,
-          ...(name ? { name } : {}),
-          ...(address ? { address } : {}),
-        });
+        /*
+          Muting silences the notification and nothing else.
+
+          The unread count still moves, the title still counts it, and the thread still shows the
+          line as unread — because muting is a decision about being interrupted, not a decision to
+          stop being told. A mute that also hid the count would be indistinguishable from having
+          read the conversation, and the person who muted a busy group would lose the one signal
+          that tells them to go back to it.
+
+          Being addressed does not override it. It is tempting — a mention is the case people say
+          they want to hear about — but it hands anybody in the group a way to ring a phone its
+          owner explicitly silenced, by typing one handle. Silence has to mean silence, or it is a
+          suggestion.
+        */
+        if (!session.mutedIn(view)) {
+          notifier.current?.arrived({
+            conversation: key,
+            ...(name ? { name } : {}),
+            ...(address ? { address } : {}),
+          });
+        }
       }
     }
 

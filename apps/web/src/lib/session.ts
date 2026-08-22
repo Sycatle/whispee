@@ -129,7 +129,11 @@ export {
 import { isAccountId } from "./chain";
 import {
   StoredSessionTooOld,
+  archivesToVault,
+  disclosesName,
+  flagsOf,
   freshSignalState,
+  isMuted,
   touch,
   type Preferences,
   type ConversationFlags,
@@ -2247,6 +2251,41 @@ export class Session {
     if (this.settings.noteEmoji(emoji)) await this.persist();
   }
 
+  /**
+   * The flags of one conversation, as they apply right now.
+   *
+   * Read through here rather than off `preferences.conversations` so that "no entry" and "an
+   * entry with nothing set" are the same answer at every call site — `flagsOf` collapses them,
+   * and a caller that indexed the record directly would have to remember to.
+   */
+  flagsIn(view: ConversationView): ConversationFlags {
+    return flagsOf(this.settings.value, view.key);
+  }
+
+  /**
+   * Is this conversation silenced right now?
+   *
+   * The stored value is the moment silence ends, not a boolean, which is what lets "mute for an
+   * hour" exist without anything having to run a timer and come back. The comparison happens at
+   * the moment a notification would fire, so a mute simply stops applying, with nothing to
+   * schedule and nothing to clean up if the device is asleep when it lapses.
+   */
+  mutedIn(view: ConversationView, now = Date.now()): boolean {
+    return isMuted(this.flagsIn(view), now);
+  }
+
+  /**
+   * May a notification name *this* conversation?
+   *
+   * Three states, and the middle one is the point: an absent per-conversation flag means "follow
+   * the account setting", which is not the same as `false`. Turning the account-wide setting on
+   * must not silently reveal the name of the one conversation somebody had marked as the one to
+   * stay quiet about — and turning it off must not leave a per-conversation `true` shouting.
+   */
+  disclosesNameIn(view: ConversationView): boolean {
+    return disclosesName(this.flagsIn(view), this.settings.discloseConversationName);
+  }
+
   /** Signalling settings, as they apply right now. */
   signalSettings(): SignalSettings {
     return { ...this.signals };
@@ -2561,7 +2600,28 @@ export class Session {
     // Same order as the poll, for the same reason: the write goes first, and the upload after.
     // See `pollOnce`.
     await this.persist();
-    await this.archive.store(this.api, view.groupId, [message]);
+    await this.deposit(view, [message]);
+  }
+
+  /**
+   * Deposits messages in the vault, unless this conversation was told not to.
+   *
+   * # Why the check is here and not at each call site
+   *
+   * There are two, one for what we send and one for what arrives, and a per-conversation opt-out
+   * honoured at one of them would be an opt-out that archives half the thread. Which half depends
+   * on who talks more, so it would look like it worked.
+   *
+   * # What it does not do
+   *
+   * Remove what is already deposited. `ConversationFlags.archiveToVault` says so, and the screen
+   * that offers it has to say so too: turning it off stops future deposits and leaves the past
+   * where it is, on a server, under a key derived from a phrase that does not rotate.
+   */
+  private async deposit(view: ConversationView, messages: Message[]): Promise<void> {
+    if (!archivesToVault(this.flagsIn(view))) return;
+
+    await this.archive.store(this.api, view.groupId, messages);
   }
 
   /**
@@ -2760,7 +2820,7 @@ export class Session {
       // nothing here can skip the persist — but that is a property of the archive, not of this
       // loop, and a caller that persists after a network call depends on a guarantee it does
       // not hold. The ratchet and the cursor reach the disk before anything else can fail.
-      await this.archive.store(this.api, view.groupId, view.messages.slice(before));
+      await this.deposit(view, view.messages.slice(before));
 
       // Resolving accounts is cosmetic and goes over the network: it comes after, and its failure
       // must undo nothing.

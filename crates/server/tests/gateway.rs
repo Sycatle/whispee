@@ -9,7 +9,8 @@ mod common;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use common::{
-    Device, TestAccount, TestServer, open_socket, read_frame, send_frame, session, start, unique,
+    Device, Frame, TestAccount, TestServer, next_frame, open_socket, read_frame, send_frame,
+    session, start, unique,
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -236,7 +237,24 @@ async fn a_revoked_device_has_its_session_closed() {
     assert!(account.revoke(&phone, &tablet.id).await.status().is_success());
 
     send_frame(&mut socket, serde_json::json!({ "op": "heartbeat" })).await;
-    assert_eq!(read_frame(&mut socket).await.unwrap()["op"], "error");
+
+    // Matched rather than unwrapped, because this assertion has failed twice in CI and the panic
+    // could not say why. `None` covered two different stories — the session closed before the
+    // frame was read, or nothing arrived within the deadline on a loaded runner — and they call
+    // for opposite fixes. Neither reproduced locally, so the next failure has to carry its own
+    // evidence.
+    match next_frame(&mut socket).await {
+        Frame::Text(frame) => {
+            assert_eq!(frame["op"], "error");
+            // The reason, and not merely the shape. Both paths that end a revoked session — the
+            // server's tick and this heartbeat — must say the same thing; one of them used to say
+            // nothing at all, and a test that only checked `op` would not have noticed.
+            assert_eq!(frame["reason"], "session revoked");
+        }
+        Frame::Closed => panic!("closed without a word: the revocation was never explained"),
+        Frame::Timeout => panic!("nothing arrived within the deadline: the runner, not the server"),
+    }
+
     assert!(read_frame(&mut socket).await.is_none(), "the session must be closed, not merely warned");
 }
 

@@ -35,7 +35,21 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 sysroot="$(rustc --print sysroot)"
 
+# The standard library needs two mappings, not one, and they must land on the same name.
+#
+# Its paths take one of two forms depending on whether the `rust-src` component is installed.
+# Without it — a CI runner, a fresh machine — the precompiled std keeps the placeholder rustc
+# stamped into it, `/rustc/<commit-hash>/library/...`. With it, they resolve to the local
+# checkout under the sysroot instead. Remapping only the sysroot fixes the second and leaves the
+# first, which is precisely how the first CI run still reported a mismatch after the paths were
+# supposedly pinned: same source, same toolchain, two spellings of the same file.
+#
+# Both are rewritten to `/rust` so the two spellings converge. The commit hash is read from the
+# compiler rather than written down, since it moves with every release.
+commit_hash="$(rustc -vV | sed -n 's/^commit-hash: //p')"
+
 RUSTFLAGS="--remap-path-prefix=$cargo_home/registry=/registry \
---remap-path-prefix=$sysroot=/rust \
+--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rust \
+--remap-path-prefix=/rustc/$commit_hash=/rust \
 --remap-path-prefix=$root=/build" \
   wasm-pack build --target web --release --out-dir "$out" "$root/crates/crypto-wasm"

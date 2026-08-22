@@ -77,6 +77,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # `apps/desktop` is a workspace member, so `--workspace` compiles Tauri whether or not the
+      # change being tested touches it, and Tauri links against the system's webview. Without
+      # these, `glib-sys`'s build script fails on `pkg-config` and takes the whole job with it —
+      # before a single test runs.
+      #
+      # The alternative was excluding the desktop crates from the command. It was refused: the
+      # one bug this repository has found in that code was five commands missing from
+      # `generate_handler!`, which compiled cleanly and failed at runtime, and dropping it from
+      # CI is how the next one of those gets missed too.
+      - name: Tauri's system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
       # No `cargo fmt --check`.
       #
       # This tree is formatted by hand and deliberately: rustfmt wants to rejoin lines that were
@@ -171,14 +186,25 @@ jobs:
   # changing, and a job that turns red on someone else's publication blocks unrelated work while
   # teaching nothing. What is wanted is the notification, read by a person who decides.
   #
-  # The ones known at the time of writing are on the OpenMLS crypto path, through
-  # `openmls_rust_crypto` -> `hpke-rs` -> `libcrux-*`, and none of them can be fixed from here:
-  # the fixed versions are `0.0.x` releases that Cargo does not treat as compatible, so they need
-  # `hpke-rs` to bump. Recorded in `docs/THREAT-MODEL.md` rather than silenced here.
+  # Seven are reported the first time this job actually runs. Six are the OpenMLS crypto path,
+  # through `openmls_rust_crypto` -> `hpke-rs` -> `libcrux-*`, and none of them can be fixed from
+  # here: the fixed versions are `0.0.x` releases that Cargo does not treat as compatible, so they
+  # need `hpke-rs` to bump. Recorded in `docs/THREAT-MODEL.md` rather than silenced here.
+  #
+  # The seventh is RUSTSEC-2023-0071 against `rsa`, and it is worth knowing why it is not the
+  # same kind of finding. `cargo audit` reads `Cargo.lock`, not the dependency graph that is
+  # actually built: `rsa` is there through `sqlx-mysql`, a driver this workspace does not enable
+  # and does not compile — `cargo tree -i rsa --target all` prints nothing. It is a real entry in
+  # the lockfile and inert in every artefact shipped. The rest of the output is `unmaintained`
+  # warnings on the GTK crates Tauri pulls in.
+  #
+  # `continue-on-error` was doing none of that. It stops a failing job from failing what depends
+  # on it; the job's own conclusion stays `failure`, so the advisories still turned the run red
+  # and still coloured the pull request — exactly the blocking this comment argues against. The
+  # command swallows its own exit code instead, and the report stays in the log where it is read.
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v5
@@ -190,4 +216,4 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Advisories
-        run: cargo audit
+        run: cargo audit || true

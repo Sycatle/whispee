@@ -104,8 +104,24 @@ export function AudioViewer({ blob, name, onRefused }: ViewerProps) {
 
   if (url === null) return null;
 
+  /* A width in `rem`, not `w-full`, and the difference is the whole reason this player was
+     usable in a mockup and 24 pixels wide in the thread.
+  
+     `Messages.tsx` lays an author's turns out in a column with `items-end` or `items-start`,
+     so that the lane hugs the side the sender is on. Both are `align-items` values other than
+     `stretch`, which means every child of that column is sized to its **content** rather than
+     to the column. A percentage width inside it is therefore circular — it resolves against a
+     parent whose width is resolving against it — and the browser settles on the intrinsic
+     minimum. For a `<canvas>` or an `<img>` that minimum is the real thing and everything
+     looks fine, which is why this survived review; for `<audio>` it is the width of nothing,
+     and the control collapsed to a sliver with no play button in it.
+  
+     `min()` rather than a bare `22rem` so a narrow window still gets a player that fits the
+     lane instead of one that overflows it.
+   */
+
   return (
-    <div className="flex flex-col gap-tight">
+    <div className="flex w-[min(22rem,100%)] flex-col gap-tight">
       {/* `jsx-a11y/media-has-caption` asks for a `<track>`, and it is right to ask.
  
           There is none to give. A caption track is authored alongside the media, and this file
@@ -138,6 +154,8 @@ export function AudioViewer({ blob, name, onRefused }: ViewerProps) {
         // The platform's own controls rather than buttons of our own: they come with the
         // keyboard, the screen reader, the system shortcuts and the output device picker, none of
         // which would be rebuilt as well here.
+        // `w-full` is meaningful again here: the wrapper above now has a definite width for it
+        // to be a percentage of.
         className="w-full max-w-full"
       />
 

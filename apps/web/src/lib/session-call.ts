@@ -117,6 +117,12 @@ export class Calls {
   private room: Call | undefined;
   /** When the last sign of life from the far side arrived. */
   private heard = 0;
+  /**
+   * Whether this device placed the call it is in.
+   *
+   * It decides one thing only: who writes the conclusion to the thread. See {@link hang}.
+   */
+  private placed = false;
   // Assigned in the body rather than declared as a parameter property: the test runner strips
   // types without transforming, and a parameter property is a transform.
   private ports: CallPorts;
@@ -146,6 +152,7 @@ export class Calls {
     if (this.busy()) return;
 
     const call = newCallId();
+    this.placed = true;
     this.state = { ...IDLE, phase: "dialling", call, group, from, since: this.ports.now() };
     this.ports.changed();
 
@@ -172,6 +179,7 @@ export class Calls {
       return;
     }
 
+    this.placed = false;
     this.state = { ...IDLE, phase: "incoming", call, group, from, since: this.ports.now() };
     this.heard = this.ports.now();
     this.ports.signal(group, "ringing", call);
@@ -193,17 +201,33 @@ export class Calls {
    * One verb for both, because the difference is entirely in what is written to the thread and
    * the caller of this method has no way of knowing which applies. What it must never do is ask
    * the interface to decide.
+   *
+   * # Only the device that placed the call writes the conclusion
+   *
+   * The thread is shared, so a line written by one member is read by all of them: a rule of
+   * "whoever was connected writes it" draws one line per participant, and a two-person call ends
+   * up ending twice. That is not a hypothesis — it is what the first call between two browsers
+   * put in both threads.
+   *
+   * So the caller writes it, and it is the same device in every case the line has to cover: the
+   * call nobody took, the call that ran and ended, the call the other side hung up on. A callee
+   * that hangs up first still produces one, through the caller's own media layer reporting the
+   * room going empty.
+   *
+   * What this gives up is the call whose *caller* disappears — a closed browser, a lost network
+   * — which then ends with no line at all. That is a thread missing a conclusion rather than a
+   * thread stating one twice, and the second is the error a reader cannot make sense of.
    */
   async hang(): Promise<void> {
     const { phase, group, call, connectedAt } = this.state;
     if (phase === "idle") return;
 
+    const placed = this.placed;
     this.ports.signal(group, phase === "incoming" ? "declined" : "left", call);
     await this.close();
 
-    // Who writes the conclusion: whoever was connected, or the caller of a call nobody took. A
-    // refusal writes nothing — the caller's own `missed` covers it, and two conclusions for one
-    // call would draw two lines in the thread.
+    if (!placed) return;
+
     if (connectedAt !== 0) {
       const seconds = Math.round((this.ports.now() - connectedAt) / 1000);
       await this.ports.announce(group, "ended", call, seconds);
@@ -355,6 +379,7 @@ export class Calls {
   private async close(): Promise<void> {
     const room = this.room;
     this.room = undefined;
+    this.placed = false;
     this.state = IDLE;
     this.ports.changed();
 

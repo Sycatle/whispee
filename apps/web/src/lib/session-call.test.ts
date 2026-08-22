@@ -239,6 +239,47 @@ test("hanging up twice is a thing interfaces do", async () => {
   assert.deepEqual(h.announced, ["invite", "ended"], "the second hang-up wrote a second line");
 });
 
+/**
+ * **The test that keeps one call to one line in the thread.**
+ *
+ * The thread is shared: a conclusion written by the device that answered is read by the device
+ * that called, beside the one it wrote itself. The rule this pins down — only the caller writes
+ * it — is what the first call between two browsers showed to be missing, with both threads
+ * ending the same call twice.
+ */
+test("a call that was answered rather than placed writes no conclusion", async () => {
+  const h = harness();
+  h.calls.receive("group", "9f2c41ab", "bob");
+  await h.calls.accept();
+  h.observe(["peer-1"]);
+
+  h.advance(65_000);
+  await h.calls.hang();
+
+  assert.equal(h.calls.current().phase, "idle");
+  assert.deepEqual(h.announced, [], "the callee wrote a second conclusion for one call");
+  assert.ok(h.signals.some((entry) => entry.startsWith("left:")), "the caller was left waiting");
+});
+
+/**
+ * The same, for the hang-up nobody asked for: the media layer reporting an empty room.
+ *
+ * It is the path a callee takes when the caller hangs up first, and it is the common one — so a
+ * rule that only held for the button would still double every call that ends normally.
+ */
+test("a callee whose room empties writes no conclusion either", async () => {
+  const h = harness();
+  h.calls.receive("group", "9f2c41ab", "bob");
+  await h.calls.accept();
+  h.observe(["peer-1"]);
+
+  h.observe([]);
+  await settle();
+
+  assert.equal(h.calls.current().phase, "idle");
+  assert.deepEqual(h.announced, []);
+});
+
 test("a frame about another call is ignored", async () => {
   const h = harness();
   await h.calls.place("group", "alice");

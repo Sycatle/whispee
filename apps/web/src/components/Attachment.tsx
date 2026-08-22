@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { AttachmentViewer } from "@/components/attachment/AttachmentViewer";
+import { AudioViewer } from "@/components/attachment/AudioViewer";
 import { ImageViewer } from "@/components/attachment/ImageViewer";
 import { TextViewer } from "@/components/attachment/TextViewer";
 import type { AttachmentRef } from "@/lib/attachments";
@@ -25,9 +26,20 @@ function formatSize(bytes: number): string {
  * every viewer's own refusal falls back to. Audio, text and PDF land here one commit at a time,
  * and nothing else in this file changes when they do.
  */
+/**
+ * Kinds a bigger frame does something for.
+ *
+ * A picture and a document gain from the room — detail that a thumbnail cannot hold, a page that
+ * wants a page's width. A text file gains a little and is included for it. Sound gains nothing:
+ * the player is the same player, and offering to enlarge it promises a difference that does not
+ * arrive.
+ */
+const ENLARGEABLE: ReadonlySet<ViewerKind> = new Set<ViewerKind>(["image", "text", "pdf"]);
+
 const VIEWERS: Partial<Record<ViewerKind, (props: ViewerProps) => React.ReactNode>> = {
   image: ImageViewer,
   text: TextViewer,
+  audio: AudioViewer,
 };
 
 /**
@@ -178,13 +190,20 @@ export function Attachment({
           ) : (
             <>
               <Viewer blob={opened} name={attachment.name} mode="inline" onRefused={refuse} />
-              <button
-                type="button"
-                onClick={() => setFull(true)}
-                className="text-caption text-(--color-ink-muted) underline"
-              >
-                Open full screen
-              </button>
+              {/* Not offered for sound. A screen's worth of a media player is a media player with
+                  more space around it: there is nothing a bigger frame reveals, and a control
+                  that opens onto no difference is a control that teaches people to distrust the
+                  others. `ENLARGEABLE` is the list of kinds where the frame changes what can be
+                  read — the same distinction `AttachmentViewer` draws for the zoom. */}
+              {ENLARGEABLE.has(kind!) && (
+                <button
+                  type="button"
+                  onClick={() => setFull(true)}
+                  className="text-caption text-(--color-ink-muted) underline"
+                >
+                  Open full screen
+                </button>
+              )}
             </>
           )}
 

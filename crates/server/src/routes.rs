@@ -1660,6 +1660,20 @@ async fn add_members(
       devices the distribution list does not carry — the welcome would be encrypted for somebody
       who never receives it, and the conversation would be broken in a way that looks like a
       network fault.
+
+      # What this governs, and what it does not
+
+      Membership, and therefore delivery. It is *not* a barrier every path consults, and the one
+      that does not is `call_token`: admission to a call proves possession of the group's posting
+      key, by the same MAC as an ephemeral signal, and never reads this table. That is deliberate —
+      it is what keeps the server from learning who is calling — and it is not a way around this
+      check, because the posting key is handed out inside the group. An account this route refuses
+      never joins, so never receives it.
+
+      What remains is an account that already held the key and no longer should: a former member,
+      until the epoch turns. It can still obtain a token, and finds a room it cannot read — the
+      frame key comes from the current MLS epoch's exporter, which it no longer has. The protection
+      there is MLS's, as it is everywhere else in this project, and not this column's.
     */
     // Read inside the transaction rather than through `caller_account`, which takes the pool: the
     // membership rows this decision is about are being written in here, and a check made against

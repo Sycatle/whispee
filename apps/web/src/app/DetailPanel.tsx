@@ -260,19 +260,13 @@ function Petname({ handle }: { handle: string }) {
  * Unblocking has no such cost. It restores what was there and announces itself by the thread
  * filling back in.
  *
- * # The sentence below stops being true when calls land
+ * # What it hides, and the one thing it does not
  *
- * It promises that blocking hides what someone says. Once audio calls exist a blocked account's
- * **voice** still reaches you, in a group call somebody else placed — decided on purpose: the
- * guard is on who *placed* the call, never on who is in it, because cutting a voice out of a
- * conversation several people are holding breaks it for the person who did the cutting and costs
- * the blocked person nothing.
- *
- * It will need to say "hides what someone **writes**", and to add that the voice still comes
- * through in a call they did not place. Both halves — exact and incomplete is worse than too
- * broad here, since somebody who blocks and then hears that voice concludes the feature failed
- * rather than that one channel is beyond it. The same note sits on `components/Blocked.tsx`,
- * which carries the same promise in its own words.
+ * It hides what somebody writes — messages, typing, notifications — and not their voice. A blocked
+ * account cannot make the phone ring; one already sitting in a call somebody else placed is heard.
+ * Cutting that voice would break the conversation for the person who did the cutting while costing
+ * the blocked person nothing, so the test is on who *placed* the call and never on who is in the
+ * room. `components/Blocked.tsx` carries the same promise and the same qualification.
  */
 function Blocking({ account }: { account: ResolvedAccount }) {
   const session = useSession();
@@ -308,8 +302,8 @@ function Blocking({ account }: { account: ResolvedAccount }) {
       <SectionTitle>Blocking</SectionTitle>
       <p className="text-caption text-(--color-ink-muted)">
         {blocked
-          ? `You are not shown what ${name} says. Their messages are still delivered and stored — this hides them, it does not stop them.`
-          : `Hides what someone says, on every device you are signed in on. It does not stop them sending: their messages are still delivered and stored, and they are not told.`}
+          ? `You are not shown what ${name} writes. Their messages are still delivered and stored — this hides them, it does not stop them — and you will still hear them in a call somebody else placed.`
+          : `Hides what someone writes — their messages, their typing, their notifications — on every device you are signed in on. It does not stop them sending, and it does not hide their voice: they cannot call you, but you will hear them in a call somebody else placed.`}
       </p>
 
       {blocked ? (

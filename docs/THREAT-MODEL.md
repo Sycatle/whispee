@@ -345,7 +345,19 @@ five conversations — so the audio is encrypted a **second** time before it rea
 frame by frame, under `export_secret(..., "wac-call-key-v1", call_id, 32)`. Every member derives
 those bytes from the current MLS epoch; nothing is exchanged, so neither the delivery service nor
 the media server is ever in possession of a key, and neither can be asked for one. A member removed
-mid-call loses the audio at the same commit that costs them the messages.
+mid-call loses the audio, and does not lose it at the same instant they lose the messages.
+
+> **A removed member keeps hearing the call for about half a minute.** Measured, with three
+> browsers and a tone per participant: the removal commits, and the audio stops in both
+> directions roughly twenty-seven seconds later. Two delays add up. The client re-derives the
+> call key on a five-second timer rather than at each commit site — `Session.tickCall`, which
+> argues its own case — and the media SDK then goes on decrypting with the keys already in its
+> ring for some twenty seconds before it gives up on them. The removed participant also stays in
+> the media room throughout, publishing audio nobody can read.
+>
+> So the guarantee is eventual, not immediate, and the messages and the audio do not stop
+> together. For a removal made because somebody must stop hearing *now*, half a minute is the
+> number to plan around.
 
 What leaks is who was talking to whom, and for how long:
 

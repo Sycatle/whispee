@@ -56,7 +56,25 @@ compare() {
   else
     echo "  MISMATCH  $3"
     status=1
+    diagnose "$1" "$2"
   fi
+}
+
+# A mismatch used to report only that one had happened, and the advice below could do no better
+# than list three things that might have moved. On a CI runner, where nobody can open the two
+# files, that is a dead end: the rebuilt copy lives in a scratch directory that is deleted when
+# the job ends.
+#
+# So say what differs. Sizes first, because a few kilobytes apart and byte-identical-but-for-a-
+# few-strings are different problems, then the strings each side has and the other does not —
+# which is how the absolute build paths were found. Capped, because these are megabyte files and
+# a log is not a diff viewer.
+diagnose() {
+  echo "            rebuilt   $(wc -c <"$1") bytes"
+  echo "            committed $(wc -c <"$2") bytes"
+  command -v strings >/dev/null || return 0
+  diff <(strings -n 8 "$1" | sort -u) <(strings -n 8 "$2" | sort -u) \
+    | grep -E '^[<>]' | head -20 | sed 's/^/            /' || true
 }
 
 echo "Comparing against the committed artefacts:"

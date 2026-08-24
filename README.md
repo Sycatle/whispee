@@ -69,15 +69,18 @@ docker compose up -d
 cp .env.example .env
 
 # 3. Server — listens on 127.0.0.1:8787. The script loads .env, which the
-#    server does not do itself, and gives the branch its own database.
+#    server does not do itself, and gives the branch its own database and port.
 ./scripts/dev-server.sh
 
-# 4. Client, in a second terminal.
-cd apps/web
-pnpm install
-pnpm run wasm        # builds crypto-core to WASM and copies it into public/
-pnpm run dev         # http://localhost:5173
+# 4. Client, in a second terminal. `wasm` builds crypto-core to WebAssembly
+#    and copies it into public/.
+(cd apps/web && pnpm install && pnpm run wasm)
+./scripts/dev-web.sh  # http://localhost:5173, pointed at the server above
 ```
+
+Both launchers derive their ports from the branch checked out, so two branches can run at
+once: `main` keeps 8787 and 5173, the next branch takes 8788 and 5174. See
+[docs/BUILD.md](docs/BUILD.md).
 
 Tests are run in release, always:
 

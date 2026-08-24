@@ -35,8 +35,8 @@ Host port 55432 avoids colliding with a system Postgres (5432) or a local Supaba
 | Variable | Default | Effect |
 |---|---|---|
 | `DATABASE_URL` | none — the server refuses to start without it | Postgres connection string |
-| `SERVER_ADDR` | `127.0.0.1:8787` | Listen address |
-| `ALLOWED_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,tauri://localhost,http://tauri.localhost` | CORS allow-list |
+| `SERVER_ADDR` | `127.0.0.1:8787` | Listen address. Derived per branch in development, see below |
+| `ALLOWED_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,tauri://localhost,http://tauri.localhost` | CORS allow-list. Derived per branch in development |
 | `THROTTLE_PER_MINUTE` | `60` | Per-address limit on the four routes that cannot be authenticated |
 | `CLAIM_QUOTA_PER_MINUTE` | `5` | Per caller-target pair limit on KeyPackage consumption |
 | `VITE_API_URL` | `http://127.0.0.1:8787` | **Build-time**, web side. See below |
@@ -58,22 +58,47 @@ set -a && . ./.env && set +a
 
 ```sh
 docker compose up -d              # PostgreSQL 17, host port 55432
-./scripts/dev-server.sh           # listens on 127.0.0.1:8787
+./scripts/dev-server.sh           # listens on 127.0.0.1:8787, on main
 ```
 
-`dev-server.sh` loads `.env` — falling back to `.env.example`, since a fresh worktree has no
-`.env` at all — and points `DATABASE_URL` at a database named after the branch checked out:
-`feat/audio-calls` gets `whispee_feat_audio_calls`, created on first run. `main` keeps the
-default `whispee`, so a plain checkout is unaffected.
+### A database and a port per branch
 
-That split exists because migrations are per branch and the container is not. Two branches in
-flight each add an `0018_`, the first one run leaves its version row behind, and sqlx then
-refuses to start the other — `Migrate(VersionMissing(18))`, the database being ahead of the code
-in a direction the code cannot undo. The only recovery was to drop the volume, which destroys
-every other checkout's data along with the offending row.
+`scripts/dev-env.sh` loads `.env` — falling back to `.env.example`, since a fresh worktree has
+no `.env` at all — and derives everything a checkout needs from one index it assigns to the
+branch. `main` holds index 0 — the defaults named in the variable table above — and every other
+branch takes the lowest free one:
 
-`cargo run -p server` still works when `DATABASE_URL` is already exported; the script only
-arranges the environment before it.
+| | `main` | index 1 | index 2 |
+|---|---|---|---|
+| Database | `whispee` | `whispee_<branch>` | `whispee_<branch>` |
+| `SERVER_ADDR` | `127.0.0.1:8787` | `127.0.0.1:8788` | `127.0.0.1:8789` |
+| Web client | `5173` | `5174` | `5175` |
+
+The indices live in `whispee-dev-ports`, next to the shared `.git` so that every worktree reads
+the same file. Delete it to start the numbering over; nothing else reads it.
+
+Two separate collisions make this worth a script. **The database**, because migrations are per
+branch and the container is not: two branches in flight each add an `0018_`, the first one run
+leaves its version row behind, and sqlx then refuses to start the other —
+`Migrate(VersionMissing(18))`, the database being ahead of the code in a direction the code
+cannot undo. The only recovery was to drop the volume, which destroys every other checkout's
+data along with the offending row.
+
+**The ports**, because four values have to agree before a client reaches a server at all:
+`SERVER_ADDR`, the client's `VITE_API_URL`, the CSP computed from it, and the server's
+`ALLOWED_ORIGINS`. Move one and the browser refuses the request before sending it — "Failed to
+fetch", no server log, no cause named. `dev-env.sh` emits all four together, which is why the
+client has a launcher of its own rather than a documented `pnpm run dev`.
+
+Run `scripts/dev-env.sh` by hand to see what a branch resolves to; it prints shell `export`
+lines and changes nothing else. `cargo run -p server` still works in a shell that has evaluated
+them.
+
+**`cargo tauri dev` does not follow.** `apps/desktop/tauri.conf.json` pins `devUrl` to port 5173
+and repeats the CSP by hand for `127.0.0.1:8787`; that duplication is deliberate and guarded by
+`csp.test.ts` (see the header of `apps/web/src/lib/csp.ts`). The desktop shell therefore only
+runs against index 0, unless you edit that configuration for the session. Widening a security
+policy for a development convenience is not a trade worth making.
 
 Migrations in `crates/server/migrations/` are applied by the process at startup, along with
 creating the transparency log's signing key on first run and backfilling accounts that predate
@@ -106,8 +131,17 @@ pnpm install
 pnpm run wasm                     # see below — this is not just a compile
 pnpm run build                    # tsc --noEmit, then vite build
 pnpm run preview
-pnpm run dev                      # dev server on port 5173
 ```
+
+The dev server has a launcher, because its port and the API origin it is built against are
+assigned per branch — see *A database and a port per branch* above:
+
+```sh
+./scripts/dev-web.sh              # from the repository root
+```
+
+`pnpm run dev` still works and keeps port 5173 with the default API origin, which is correct on
+`main` and wrong anywhere else.
 
 ### What `pnpm run wasm` actually does
 

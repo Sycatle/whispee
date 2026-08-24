@@ -43,6 +43,20 @@ export default defineConfig(({ mode }) => ({
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
 
+  server: {
+    // The port belongs to the branch, not to Vite: `scripts/dev-env.sh` hands out one per
+    // branch so that several checkouts can run at once, and starts the server with a matching
+    // `ALLOWED_ORIGINS`. Unset — a plain `pnpm run dev` — keeps the historical 5173.
+    port: Number(process.env.WEB_PORT) || 5173,
+
+    // **`strictPort` is the point of the pair.** Vite's default on a taken port is to slide to
+    // the next free one, silently. That port is in nobody's CORS list and in no CSP, so the
+    // client comes up looking healthy and every request dies as "Failed to fetch" — the failure
+    // mode `src/lib/csp.ts` describes, arrived at by convenience rather than by misconfiguration.
+    // Refusing to start says which port is taken, which is a sentence somebody can act on.
+    strictPort: true,
+  },
+
   build: {
     // **The setting that justifies the whole migration.** Vite injects a small inline polyfill
     // for `modulepreload` by default; leaving it would reintroduce exactly the inline script we

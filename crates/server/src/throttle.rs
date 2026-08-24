@@ -336,6 +336,9 @@ pub struct Limits {
     pub throttle: Throttle,
     pub claims: Claims,
     pub writes: Writes,
+    /// Ceiling on stored bytes per account. See [`crate::storage`], which explains why a total
+    /// and a rate cannot be the same mechanism.
+    pub storage: crate::storage::Quota,
 }
 
 impl Limits {
@@ -344,6 +347,7 @@ impl Limits {
             throttle: Throttle::from_environment(),
             claims: Claims::from_environment(),
             writes: Writes::from_environment(),
+            storage: crate::storage::Quota::from_environment(),
         }
     }
 
@@ -357,6 +361,7 @@ impl Limits {
             throttle: Throttle::per_minute(0),
             claims: Claims::per_minute(0),
             writes: Writes::per_minute(0),
+            storage: crate::storage::Quota::bytes(0),
         }
     }
 }

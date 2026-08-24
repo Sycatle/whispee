@@ -23,6 +23,7 @@ pub mod log;
 pub mod presence;
 pub mod push;
 pub mod routes;
+pub mod storage;
 pub mod stream;
 pub mod throttle;
 
@@ -55,6 +56,11 @@ pub struct AppState {
     /// messages in a minute and has no business uploading a hundred attachments in one. See
     /// `throttle::Writes` for each number and for what none of them solve.
     pub writes: Arc<throttle::Writes>,
+    /// Ceiling on what one account may keep on this server.
+    ///
+    /// Separate from `writes` because it bounds a total rather than a rate: see [`storage`] for
+    /// why no quota keyed on time can stand in for it.
+    pub storage: Arc<storage::Quota>,
     /// What wakes sleeping devices.
     ///
     /// [`push::Silent`] by default, and that is a design choice, not a placeholder: a deployment
@@ -102,6 +108,12 @@ impl FromRef<AppState> for Arc<call::Media> {
 impl FromRef<AppState> for Arc<throttle::Claims> {
     fn from_ref(state: &AppState) -> Self {
         state.claims.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<storage::Quota> {
+    fn from_ref(state: &AppState) -> Self {
+        state.storage.clone()
     }
 }
 
@@ -552,6 +564,7 @@ pub fn app_with_waker(
         throttle: Arc::new(limits.throttle),
         claims: Arc::new(limits.claims),
         writes: Arc::new(limits.writes),
+        storage: Arc::new(limits.storage),
         // The default is `Silent`, set by `app_with`: wiring up Apple or Google requires secrets
         // a deployment must provide knowingly, after reading what the wake-up leaks.
         push,

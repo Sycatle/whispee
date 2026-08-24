@@ -404,12 +404,67 @@ pub async fn purge_once(pool: &PgPool) -> Result<Purged, sqlx::Error> {
     .await?
     .rows_affected();
 
-    let attachments = sqlx::query(&format!(
-        "DELETE FROM attachments WHERE created_at < now() - interval '{ATTACHMENT_RETENTION_DAYS} days'"
+    // Deleted inside a transaction that also gives the bytes back, and `RETURNING` rather than
+    // `rows_affected` because the credit needs to know **whose** bytes left — the deletion is the
+    // only moment that is knowable. Aggregated in SQL so a purge of ten thousand rows does not
+    // bring them all back over the wire to be summed in Rust.
+    let mut tx = pool.begin().await?;
+
+    let credited: Vec<(Option<String>, i64, i64)> = sqlx::query_as(&format!(
+        "WITH gone AS (
+             DELETE FROM attachments
+              WHERE created_at < now() - interval '{ATTACHMENT_RETENTION_DAYS} days'
+          RETURNING account, octet_length(payload) AS bytes
+         )
+         SELECT account, SUM(bytes)::bigint, count(*)::bigint FROM gone GROUP BY account"
     ))
-    .execute(pool)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for (account, bytes, _) in &credited {
+        // `None` is an attachment uploaded before `0019`: it was never charged to anybody, so
+        // there is nobody to credit. The migration says why those rows are not retrofitted.
+        if let Some(account) = account {
+            crate::storage::credit(&mut tx, account, *bytes).await?;
+        }
+    }
+
+    // Still the number of rows, unchanged: the log line this feeds is read for one thing only,
+    // which is noticing that a retention rule has started biting harder than expected. Turning it
+    // into a byte count would silently change what an operator has been watching.
+    let attachments: u64 = credited.iter().map(|(_, _, rows)| *rows as u64).sum();
+
+    // The attachments of the groups about to be deleted, credited before the cascade can take
+    // them. `DELETE FROM groups` cascades into `attachments`, and a cascade runs no application
+    // code: those bytes would stay charged to their uploader for ever, on a group that no longer
+    // exists. This is the exact drift the reconciliation test in `tests/storage.rs` watches for.
+    //
+    // The `WHERE` repeats the group deletion's own conditions rather than referring to it, and
+    // the two must be edited together: attachments credited here for a group that then survives
+    // would be a credit for bytes still stored.
+    let doomed: Vec<(Option<String>, i64)> = sqlx::query_as(&format!(
+        "WITH gone AS (
+             DELETE FROM attachments a
+              WHERE NOT EXISTS (SELECT 1 FROM group_members m WHERE m.group_id = a.group_id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM envelopes e
+                    WHERE e.group_id = a.group_id
+                      AND e.created_at >= now() - interval '{ENVELOPE_RETENTION_DAYS} days'
+                )
+          RETURNING a.account, octet_length(a.payload) AS bytes
+         )
+         SELECT account, SUM(bytes)::bigint FROM gone GROUP BY account"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for (account, bytes) in &doomed {
+        if let Some(account) = account {
+            crate::storage::credit(&mut tx, account, *bytes).await?;
+        }
+    }
+
+    tx.commit().await?;
 
     // Last, so the two counters above report what the retention rules deleted rather than what a
     // cascade happened to carry off with a group.

@@ -198,6 +198,11 @@ fn reason(error: &ApiError) -> &'static str {
         // spelled out rather than swept into a catch-all so that adding one has to come back
         // here and decide what a client should be told.
         ApiError::Unavailable => "unavailable",
+        // Same case as above, and the same reason for spelling it out: the storage ceiling is
+        // enforced on the HTTP write routes, and no frame this socket carries stores anything.
+        // The wording stays distinct from "too many requests" all the same — a client that
+        // learns "full" must not go on retrying as it would on a rate limit.
+        ApiError::InsufficientStorage => "storage full",
         ApiError::Database(err) => {
             tracing::error!(error = %err, "database error in the gateway");
             "internal error"

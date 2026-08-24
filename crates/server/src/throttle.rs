@@ -38,8 +38,10 @@
 //! **What this does not do is stop a disk from filling.** Nothing keyed on time can: the quotas
 //! turn "fill the disk this afternoon" into "fill the disk over a fortnight", which buys an
 //! operator the chance to notice. The bound that actually closes it is a stored-bytes quota per
-//! account, which this server does not have. Saying the rate limit solves storage would be the
-//! comfortable lie.
+//! account, and it now exists — in [`crate::storage`], keyed on the account rather than on the
+//! device, covering the vault and attachments. It is a different mechanism bounding a different
+//! quantity, which is why it is a different module: saying a rate limit solves storage would be
+//! the comfortable lie, and so would folding the two into one number.
 //!
 //! **And what it bounds in `envelopes` is a rate, not a total.** The table is no longer
 //! unbounded — `crate::purge_once` deletes an envelope once it is both older than thirty days
@@ -49,10 +51,16 @@
 //! writing five hundred messages a day still holds fifteen thousand envelopes, forever, and the
 //! quota is what stops that number being chosen by an attacker rather than by the conversation.
 //!
-//! The bound that is still missing is the same one as above, and it is now the more pressing of
-//! the two: a stored-bytes quota per account. The history vault is deliberately never purged —
-//! it is what makes deleting envelopes acceptable — so it has inherited the role of this
-//! server's unbounded store, held back only by ten writes per minute per device.
+//! **Envelopes are the half [`crate::storage`] does not cover**, and the reason is not an
+//! oversight: a sealed post carries no device id, so the account behind it cannot be charged
+//! without recording the sender of every post — which is the register sealed sender removed. The
+//! answer is anonymous byte tokens, specified in
+//! `docs/specs/2026-08-24-posting-allowance.md` and not implemented. Until then this rate limit
+//! is what stands in front of `envelopes`, and the steady state above is what bounds it.
+//!
+//! The history vault, which is deliberately never purged and had inherited the role of this
+//! server's unbounded store, is bounded now — by the ceiling in [`crate::storage`], not by the
+//! ten writes a minute below, which never could.
 //!
 //! # What this does not close
 //!
@@ -128,11 +136,12 @@ pub const DEFAULT_VAULT_WRITES_PER_MINUTE: u32 = 10;
 /// Set from the human action, which is picking a batch of photographs and sending them at once:
 /// thirty in a minute is a generous version of that and nothing a person exceeds by accident.
 ///
-/// **This is the one number that is uncomfortable and should be read as such.** An attachment
-/// may be `MAX_ATTACHMENT_BYTES` — twenty-five mebibytes — so thirty a minute is three quarters
-/// of a gibibyte a minute in the worst case. That is a bound and it is a bad one; it exists
-/// because unbounded is worse, not because it is sufficient. What would make it sufficient is a
-/// stored-bytes quota per account, which is a different mechanism and is not here.
+/// **This number was the uncomfortable one, and it is the ceiling behind it that fixed that.** An
+/// attachment may be `MAX_ATTACHMENT_BYTES` — twenty-five mebibytes — so thirty a minute is three
+/// quarters of a gibibyte a minute in the worst case. As a bound on storage that was a bad one,
+/// and it existed because unbounded was worse rather than because it sufficed. What makes it
+/// sufficient is [`crate::storage`]: the burst is still allowed, and it stops at the account's
+/// ceiling. This limit now bounds what it is good at bounding, which is the rate.
 pub const DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE: u32 = 30;
 
 /// Default quota for envelope posts, per device and per minute.
@@ -391,6 +400,9 @@ pub struct Limits {
     pub claims: Claims,
     pub recovery: Recovery,
     pub writes: Writes,
+    /// Ceiling on stored bytes per account. See [`crate::storage`], which explains why a total
+    /// and a rate cannot be the same mechanism.
+    pub storage: crate::storage::Quota,
 }
 
 impl Limits {
@@ -400,6 +412,7 @@ impl Limits {
             claims: Claims::from_environment(),
             recovery: Recovery::from_environment(),
             writes: Writes::from_environment(),
+            storage: crate::storage::Quota::from_environment(),
         }
     }
 
@@ -414,6 +427,7 @@ impl Limits {
             claims: Claims::per_minute(0),
             recovery: Recovery::per_minute(0),
             writes: Writes::per_minute(0),
+            storage: crate::storage::Quota::bytes(0),
         }
     }
 }

@@ -23,6 +23,7 @@ pub mod log;
 pub mod presence;
 pub mod push;
 pub mod routes;
+pub mod storage;
 pub mod stream;
 pub mod throttle;
 
@@ -62,6 +63,11 @@ pub struct AppState {
     /// server, and — because a failed lookup names no account — the only bound on guessing that
     /// exists online at all.
     pub recovery: Arc<throttle::Recovery>,
+    /// Ceiling on what one account may keep on this server.
+    ///
+    /// Separate from `writes` because it bounds a total rather than a rate: see [`storage`] for
+    /// why no quota keyed on time can stand in for it.
+    pub storage: Arc<storage::Quota>,
     /// What wakes sleeping devices.
     ///
     /// [`push::Silent`] by default, and that is a design choice, not a placeholder: a deployment
@@ -109,6 +115,12 @@ impl FromRef<AppState> for Arc<call::Media> {
 impl FromRef<AppState> for Arc<throttle::Claims> {
     fn from_ref(state: &AppState) -> Self {
         state.claims.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<storage::Quota> {
+    fn from_ref(state: &AppState) -> Self {
+        state.storage.clone()
     }
 }
 
@@ -224,8 +236,10 @@ const ENVELOPE_RETENTION_DAYS: u32 = 30;
 ///
 /// What it does not solve: it is a count, not a size. Five hundred envelopes carrying 25 MiB
 /// attachment descriptors and five hundred carrying "ok" occupy the same slot in this rule. The
-/// bound that would answer that is a stored-bytes quota per account, which `throttle` names and
-/// this server still does not have.
+/// bytes those descriptors point at are bounded — [`crate::storage`] charges an attachment to
+/// whoever uploaded it — but the envelopes themselves are not counted anywhere, and cannot be
+/// until a sealed post can be charged without naming its sender. See
+/// `docs/specs/2026-08-24-posting-allowance.md`.
 const ENVELOPE_MIN_TAIL: i64 = 500;
 
 /// Age past which an attachment is deleted, whatever the state of its envelope.
@@ -405,12 +419,67 @@ pub async fn purge_once(pool: &PgPool) -> Result<Purged, sqlx::Error> {
     .await?
     .rows_affected();
 
-    let attachments = sqlx::query(&format!(
-        "DELETE FROM attachments WHERE created_at < now() - interval '{ATTACHMENT_RETENTION_DAYS} days'"
+    // Deleted inside a transaction that also gives the bytes back, and `RETURNING` rather than
+    // `rows_affected` because the credit needs to know **whose** bytes left — the deletion is the
+    // only moment that is knowable. Aggregated in SQL so a purge of ten thousand rows does not
+    // bring them all back over the wire to be summed in Rust.
+    let mut tx = pool.begin().await?;
+
+    let credited: Vec<(Option<String>, i64, i64)> = sqlx::query_as(&format!(
+        "WITH gone AS (
+             DELETE FROM attachments
+              WHERE created_at < now() - interval '{ATTACHMENT_RETENTION_DAYS} days'
+          RETURNING account, octet_length(payload) AS bytes
+         )
+         SELECT account, SUM(bytes)::bigint, count(*)::bigint FROM gone GROUP BY account"
     ))
-    .execute(pool)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for (account, bytes, _) in &credited {
+        // `None` is an attachment uploaded before `0019`: it was never charged to anybody, so
+        // there is nobody to credit. The migration says why those rows are not retrofitted.
+        if let Some(account) = account {
+            crate::storage::credit(&mut tx, account, *bytes).await?;
+        }
+    }
+
+    // Still the number of rows, unchanged: the log line this feeds is read for one thing only,
+    // which is noticing that a retention rule has started biting harder than expected. Turning it
+    // into a byte count would silently change what an operator has been watching.
+    let attachments: u64 = credited.iter().map(|(_, _, rows)| *rows as u64).sum();
+
+    // The attachments of the groups about to be deleted, credited before the cascade can take
+    // them. `DELETE FROM groups` cascades into `attachments`, and a cascade runs no application
+    // code: those bytes would stay charged to their uploader for ever, on a group that no longer
+    // exists. This is the exact drift the reconciliation test in `tests/storage.rs` watches for.
+    //
+    // The `WHERE` repeats the group deletion's own conditions rather than referring to it, and
+    // the two must be edited together: attachments credited here for a group that then survives
+    // would be a credit for bytes still stored.
+    let doomed: Vec<(Option<String>, i64)> = sqlx::query_as(&format!(
+        "WITH gone AS (
+             DELETE FROM attachments a
+              WHERE NOT EXISTS (SELECT 1 FROM group_members m WHERE m.group_id = a.group_id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM envelopes e
+                    WHERE e.group_id = a.group_id
+                      AND e.created_at >= now() - interval '{ENVELOPE_RETENTION_DAYS} days'
+                )
+          RETURNING a.account, octet_length(a.payload) AS bytes
+         )
+         SELECT account, SUM(bytes)::bigint FROM gone GROUP BY account"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for (account, bytes) in &doomed {
+        if let Some(account) = account {
+            crate::storage::credit(&mut tx, account, *bytes).await?;
+        }
+    }
+
+    tx.commit().await?;
 
     // Last, so the two counters above report what the retention rules deleted rather than what a
     // cascade happened to carry off with a group.
@@ -566,6 +635,7 @@ pub fn app_with_waker(
         claims: Arc::new(limits.claims),
         writes: Arc::new(limits.writes),
         recovery: Arc::new(limits.recovery),
+        storage: Arc::new(limits.storage),
         // The default is `Silent`, set by `app_with`: wiring up Apple or Google requires secrets
         // a deployment must provide knowingly, after reading what the wake-up leaks.
         push,

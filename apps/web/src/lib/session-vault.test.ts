@@ -122,3 +122,50 @@ test("a failed archive is swallowed, because the message is already delivered", 
   // conversation over a copy of it.
   await archive.store(api, GROUP, [said(1, "hi")]);
 });
+
+/**
+ * Refuses every archive with the status given.
+ *
+ * The refusal is shaped rather than imported: `api.ts` cannot be loaded under `node --test`,
+ * whose strip-only mode rejects the constructor parameter property `ApiError` is built on. What
+ * `Archive` reads is the status, and that is what this hands it.
+ */
+function refusing(status: number): VaultApi {
+  return {
+    fetchVault() {
+      return Promise.resolve([]);
+    },
+    storeVault() {
+      return Promise.reject(Object.assign(new Error("refused"), { status }));
+    },
+  } as unknown as VaultApi;
+}
+
+test("a full vault is remembered, not swallowed", async () => {
+  const archive = await Archive.open(() => KEY);
+
+  await archive.store(refusing(507), GROUP, [said(1, "hi")]);
+
+  // The user has to be told: retrying never clears a ceiling, and a silent failure leaves them
+  // believing their history is being archived while nothing is.
+  assert.equal(archive.full, true);
+});
+
+test("a transient failure is not a full vault", async () => {
+  const archive = await Archive.open(() => KEY);
+
+  await archive.store(refusing(503), GROUP, [said(1, "hi")]);
+
+  assert.equal(archive.full, false);
+});
+
+test("a successful store clears the flag", async () => {
+  const archive = await Archive.open(() => KEY);
+
+  await archive.store(refusing(507), GROUP, [said(1, "hi")]);
+  assert.equal(archive.full, true);
+
+  await archive.store(server(), GROUP, [said(2, "still here")]);
+
+  assert.equal(archive.full, false);
+});

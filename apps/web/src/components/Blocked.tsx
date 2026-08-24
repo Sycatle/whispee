@@ -37,25 +37,21 @@ import { Button } from "@/ui/Button";
 import { Panel } from "@/ui/Panel";
 
 /**
- * # This copy stops being true when calls land, and nothing here will notice
+ * # What it hides, and the one thing it does not
  *
- * It says blocking hides what someone says. Once audio calls exist that is incomplete, and the
- * incompleteness was decided on purpose: a blocked account's **voice** still reaches you in a
- * group call that somebody else placed. The guard is on who *placed* the call — an invitation
- * arrives unasked and interrupts — and never on who is in it, because filtering a voice out of a
- * conversation several people are holding breaks it for the person who did the filtering, while
- * costing the blocked person nothing.
+ * It hides what somebody **writes**: their messages leave the thread, their typing indicator is
+ * dropped, and their arrivals raise no notification. It does not hide their **voice**. A blocked
+ * account cannot make the phone ring — a call they place is refused before anything is drawn —
+ * but one already sitting in a call somebody else placed is heard.
  *
- * So this paragraph will need to become "hides what someone **writes**", plus a line saying the
- * voice still comes through in a call they did not place. Both halves: exact and incomplete is
- * worse than too broad, because somebody who blocks and then hears that voice concludes the whole
- * feature failed rather than that one channel is out of its reach.
+ * That is decided rather than missing. Cutting a voice out of a conversation several people are
+ * holding breaks it for the person who did the cutting, while costing the blocked person nothing:
+ * the others go on answering somebody they can hear and the reader cannot. The test is therefore
+ * on who *placed* the call, never on who is in the room.
  *
- * The note exists because the failure is silent — the same reason `content.ts` writes down that
- * byte 9 is reserved. There is a matching one at the track-attachment point in the calls work,
- * where the decision is made; this one is where the sentence lives, and whoever rewrites the
- * sentence has no reason to go and read a media layer.
- */
+ * Both halves of that have to be on screen. "Hides what someone writes" alone is exact and
+ * incomplete, and incomplete is the worse failure here: somebody who blocks and then hears that
+ * voice concludes the whole feature failed, rather than that one channel is outside its reach.
 /**
  * Who may start a conversation with this account.
  *
@@ -104,7 +100,7 @@ function ContactPolicySetting() {
   return (
     <Panel
       title="Who can start a conversation"
-      description="This one is enforced by the server: it declines to add you, rather than delivering and hiding. It applies to new conversations only — the ones you are already in are untouched, and no setting could change that, since the membership that matters is inside the encryption."
+      description="This one is enforced by the server: it declines to put you in the conversation, rather than delivering and hiding. It governs who may add you, and so what reaches you. It applies to new conversations only — the ones you are already in are untouched, and no setting could change that, since the membership that matters is inside the encryption."
     >
       <fieldset className="space-y-snug">
         <legend className="sr-only">Who can start a conversation with you</legend>
@@ -197,7 +193,7 @@ export function BlockedAccounts() {
 
     <Panel
       title="Blocked"
-      description="Blocking hides what someone says, on every device you are signed in on. It does not stop them sending: their messages are still delivered and stored, and they are never told."
+      description="Blocking hides what someone writes, on every device you are signed in on: their messages, their typing, their notifications. It does not stop them sending — their messages are still delivered and stored, and they are never told — and it does not hide their voice: they cannot call you, but you will hear them in a call somebody else placed."
     >
       {blocked.length === 0 ? (
         <p className="text-body text-(--color-ink-muted)">

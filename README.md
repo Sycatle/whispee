@@ -68,8 +68,9 @@ docker compose up -d
 # 2. Configuration. The committed defaults point at that container.
 cp .env.example .env
 
-# 3. Server — listens on 127.0.0.1:8787.
-cargo run -p server
+# 3. Server — listens on 127.0.0.1:8787. The script loads .env, which the
+#    server does not do itself, and gives the branch its own database.
+./scripts/dev-server.sh
 
 # 4. Client, in a second terminal.
 cd apps/web

@@ -58,8 +58,22 @@ set -a && . ./.env && set +a
 
 ```sh
 docker compose up -d              # PostgreSQL 17, host port 55432
-cargo run -p server               # listens on 127.0.0.1:8787
+./scripts/dev-server.sh           # listens on 127.0.0.1:8787
 ```
+
+`dev-server.sh` loads `.env` — falling back to `.env.example`, since a fresh worktree has no
+`.env` at all — and points `DATABASE_URL` at a database named after the branch checked out:
+`feat/audio-calls` gets `whispee_feat_audio_calls`, created on first run. `main` keeps the
+default `whispee`, so a plain checkout is unaffected.
+
+That split exists because migrations are per branch and the container is not. Two branches in
+flight each add an `0018_`, the first one run leaves its version row behind, and sqlx then
+refuses to start the other — `Migrate(VersionMissing(18))`, the database being ahead of the code
+in a direction the code cannot undo. The only recovery was to drop the volume, which destroys
+every other checkout's data along with the offending row.
+
+`cargo run -p server` still works when `DATABASE_URL` is already exported; the script only
+arranges the environment before it.
 
 Migrations in `crates/server/migrations/` are applied by the process at startup, along with
 creating the transparency log's signing key on first run and backfilling accounts that predate
@@ -70,12 +84,19 @@ the old version will refuse the new one. There is no in-place fix; the database 
 recreated:
 
 ```sh
-docker compose down -v && docker compose up -d
+docker exec whispee_pg dropdb -U whispee whispee_<branch>   # this branch only
+docker compose down -v && docker compose up -d              # every branch
 ```
 
-The `-v` matters — without it the volume survives and so does the old checksum. This is not
-hypothetical maintenance advice: two migrations were renamed to `0009_partitioning.sql` and
-`0010_replay_protection.sql`, so any database created before that rename needs exactly this.
+Prefer the first: with a database per branch, only the branch whose migration changed needs
+recreating, and `dev-server.sh` recreates it on the next run. The second is the blunt version.
+The `-v` matters there — without it the volume survives and so does the old checksum — but it
+takes every other checkout's database with it, which is a thing to do knowingly rather than out
+of habit.
+
+This is not hypothetical maintenance advice: two migrations were renamed to
+`0009_partitioning.sql` and `0010_replay_protection.sql`, so any database created before that
+rename needs exactly this.
 
 ## Web client
 

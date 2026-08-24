@@ -1002,6 +1002,17 @@ export class Session {
   }
 
   /**
+   * Has this account run out of room on the server?
+   *
+   * Set when an archive comes back refused for want of space, cleared by the next one that gets
+   * through. It is read by the backup screen, which has to say it: a ceiling that fails silently
+   * leaves somebody believing their history is being kept when it stopped being.
+   */
+  get vaultFull(): boolean {
+    return this.archive.full;
+  }
+
+  /**
    * Turns the vault back on after an explicit shutdown.
    *
    * Messages **already exchanged** will not be archived: their MLS keys are destroyed, and

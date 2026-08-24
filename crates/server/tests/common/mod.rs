@@ -14,6 +14,7 @@ use base64::prelude::BASE64_STANDARD;
 use crypto_core::Account;
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
+use server::storage::Quota;
 use server::throttle::{Claims, Limits, Throttle, Writes};
 use sqlx::PgPool;
 
@@ -72,6 +73,33 @@ async fn pool() -> PgPool {
 pub async fn start_with_throttle(quota: u32) -> TestServer {
     start_with(pool().await, Limits { throttle: Throttle::per_minute(quota), ..Limits::off() })
         .await
+}
+
+/// Test server with an enforced storage ceiling, in bytes.
+///
+/// The rate limits stay off: setting up an account, a device and a group consumes several
+/// writes, and the two bounds have nothing to do with each other.
+pub async fn start_with_storage_quota(bytes: i64) -> TestServer {
+    start_with(pool().await, Limits { storage: Quota::bytes(bytes), ..Limits::off() }).await
+}
+
+/// An account, one of its devices, and a group that device is a member of.
+///
+/// The storage tests need exactly this and nothing more. Copying the set-up into each of them
+/// would make a change to registration a change to every one of them.
+pub async fn account_with_group(server: &TestServer, who: &str) -> (TestAccount, Device, Vec<u8>) {
+    let account = TestAccount::create(server, &unique(who)).await;
+    let device = account.device(server, &unique("device")).await;
+    let group_id = unique("group").into_bytes();
+
+    device
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+            serde_json::json!({ "device_ids": [device.id] }),
+        )
+        .await;
+
+    (account, device, group_id)
 }
 
 /// Test server with an enforced KeyPackage claim quota.

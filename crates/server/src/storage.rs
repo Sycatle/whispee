@@ -80,20 +80,26 @@ impl Quota {
 /// both pass. A quota that fails under concurrency is a quota an attacker meets by opening a
 /// second connection, which is not a quota. The condition rides on the `UPDATE` itself, so
 /// PostgreSQL's row lock serialises the two.
+///
+/// # Why a disabled ceiling still moves the counter
+///
+/// Because the counter is bookkeeping and the ceiling is enforcement, and only the second one is
+/// switched off by `0`. Returning early would leave a deployment that runs unlimited with every
+/// counter at zero, so the day it sets a ceiling it would start from a fiction — each account
+/// handed a full allowance on top of everything it already stores. That is the same mistake the
+/// migration's backfill exists to avoid, and it would be reintroduced here for the sake of one
+/// skipped statement. The ceiling is therefore expressed as `$3 = 0 OR …` rather than as a
+/// branch, which keeps it one statement in both modes.
 pub async fn charge(
     tx: &mut PgTransaction<'_>,
     quota: &Quota,
     account: &str,
     bytes: i64,
 ) -> Result<bool, sqlx::Error> {
-    if quota.unlimited() {
-        return Ok(true);
-    }
-
     let affected = sqlx::query::<Postgres>(
         "UPDATE account_storage
             SET bytes = bytes + $1
-          WHERE account = $2 AND bytes + $1 <= $3",
+          WHERE account = $2 AND ($3 = 0 OR bytes + $1 <= $3)",
     )
     .bind(bytes)
     .bind(account)

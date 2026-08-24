@@ -1818,38 +1818,42 @@ async fn store_vault(
     let blobs: Vec<Vec<u8>> =
         payload.entries.iter().map(|e| decode_b64(&e.payload)).collect::<ApiResult<_>>()?;
 
-    // The bytes charged are the bytes stored, computed from the decoded blobs and not from the
-    // request: base64 is a third larger, and charging for the encoding would make the ceiling
-    // depend on the transport rather than on the disk.
-    //
-    // Known imprecision, stated rather than left to be found: `ON CONFLICT DO NOTHING` means a
-    // re-uploaded entry is charged without being stored, so two devices of one account archiving
-    // the same conversation pay twice for one row. Charging what was actually inserted means
-    // `RETURNING` and a debit afterwards, which reintroduces exactly the read-then-write race the
-    // single statement exists to avoid. The overcharge is bounded by the client's own
-    // deduplication, and it is credited nowhere.
-    let charged: i64 = blobs.iter().map(|blob| blob.len() as i64).sum();
-
     let mut tx = pool.begin().await?;
 
-    // Before the insert and inside its transaction: a refusal must cost the database nothing, and
-    // an insert that fails afterwards must not leave the account charged for bytes it does not
-    // hold.
-    if !crate::storage::charge(&mut tx, &quota, &account, charged).await? {
-        return Err(ApiError::InsufficientStorage);
-    }
-
-    sqlx::query(
+    // Insert first, charge what the insert actually stored.
+    //
+    // The order looks wrong and is not. `ON CONFLICT DO NOTHING` means a re-uploaded entry is not
+    // stored, and charging before the insert would charge for it anyway — two devices of one
+    // account archiving the same conversation would pay twice for one row, and the counter would
+    // drift above what the tables hold, permanently, since nothing credits an overcharge.
+    // `RETURNING` names the rows that were really written.
+    //
+    // Nothing races: both statements are in one transaction, the charge is still the single
+    // conditional `UPDATE` that makes the ceiling safe under concurrency, and a refusal returns
+    // before the commit, so the insert goes with it. What it costs is that a doomed write does
+    // its insert before being refused — the disk is untouched either way, only the work is
+    // wasted, and paying that on the rare refusal buys an exact counter on every acceptance.
+    //
+    // The bytes are the stored ones, not the request's: base64 is a third larger, and charging
+    // for the encoding would make the ceiling depend on the transport rather than on the disk.
+    let stored: Vec<(i32,)> = sqlx::query_as(
         "INSERT INTO vault_entries (account, group_id, seq, payload)
          SELECT $1, $2, * FROM UNNEST($3::bigint[], $4::bytea[])
-         ON CONFLICT DO NOTHING",
+         ON CONFLICT DO NOTHING
+         RETURNING octet_length(payload)",
     )
     .bind(&account)
     .bind(&group_id)
     .bind(&seqs)
     .bind(&blobs)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
+
+    let charged: i64 = stored.iter().map(|(bytes,)| *bytes as i64).sum();
+
+    if !crate::storage::charge(&mut tx, &quota, &account, charged).await? {
+        return Err(ApiError::InsufficientStorage);
+    }
 
     tx.commit().await?;
 

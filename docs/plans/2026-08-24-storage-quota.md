@@ -708,7 +708,7 @@ and, replacing the bare `sqlx::query(…).execute(&pool)`:
     tx.commit().await?;
 ```
 
-Note the known imprecision, and write it into the comment above `charged`: `ON CONFLICT DO NOTHING` means a re-uploaded entry is charged without being stored. Two devices of one account archiving the same conversation therefore pay twice for one row. Correcting it means `RETURNING` the rows actually inserted and charging afterwards, which reintroduces the read-then-write race the single statement exists to avoid. The overcharge is bounded by the client's own deduplication and is credited nowhere — say so rather than leaving a reader to find it.
+**Corrected during execution, and the plan was wrong here.** It first said to charge before the insert and to accept that `ON CONFLICT DO NOTHING` charges a re-uploaded entry without storing it. That overcharge is not bounded by anything that credits it, so the counter drifts above the tables permanently — and `api.rs` already deposits the same entry twice in `depositing_into_the_vault_is_idempotent`, so the reconciliation test of Task 6 catches it. The order is therefore insert-then-charge, with `RETURNING octet_length(payload)` naming the rows actually written. Nothing races: both statements are in one transaction, the charge is still the single conditional `UPDATE`, and a refusal returns before the commit so the insert goes with it. The cost is that a doomed write does its insert before being refused, which is work wasted on the rare refusal in exchange for an exact counter on every acceptance.
 
 - [ ] **Step 4: Run tests to verify they pass**
 

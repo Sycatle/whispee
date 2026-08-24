@@ -41,6 +41,23 @@ import * as vault from "./vault.ts";
 /** What this needs from the delivery service. `vault.ts` states the shape; this only names it. */
 export type VaultApi = vault.VaultApi;
 
+/**
+ * Was this refusal a full account rather than a passing failure?
+ *
+ * Read off the status rather than off the error's class: importing `api.ts` here would drag the
+ * HTTP layer into the session layer, and `node --test` cannot load it at all — its strip-only mode
+ * rejects the constructor parameter property `ApiError` is built on. 507 is the contract, stated
+ * on both sides of the wire, and it is what this reads.
+ */
+function refusedForRoom(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    (error as { status: unknown }).status === 507
+  );
+}
+
 export class Archive {
   /**
    * The key the entries are sealed under, or `null` when the vault is off.
@@ -143,18 +160,34 @@ export class Archive {
   }
 
   /**
+   * True when the server refused an archive for want of room.
+   *
+   * The other failures stay swallowed, and rightly: a delivered message whose backup is late is
+   * not a problem, and the next send retries it. A ceiling is different in kind — retrying never
+   * clears it, and a user who is not told believes their history is being archived while nothing
+   * is. That belief is what this flag exists to prevent.
+   */
+  full = false;
+
+  /**
    * Archives the messages just read or sent, if the vault is on.
    *
    * A failed archive must not block the conversation: the message is already delivered, only the
    * backup is missing, and it will be retried on the next send. Hence the swallowed error — the
-   * one place in this file where failing quietly is the right answer.
+   * one place in this file where failing quietly is the right answer, and `full` above is the one
+   * refusal that is not.
    */
   async store(api: VaultApi, groupId: Uint8Array, messages: Message[]): Promise<void> {
     if (!this.key || messages.length === 0) return;
 
     try {
       await vault.store(api, this.key, groupId, messages);
+      this.full = false;
     } catch (error) {
+      if (refusedForRoom(error)) {
+        this.full = true;
+        return;
+      }
       console.warn("archiving deferred", error);
     }
   }

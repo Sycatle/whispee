@@ -1192,6 +1192,14 @@ async fn an_attachment_transits_without_being_readable() {
     assert_eq!(received.bytes().await.unwrap().as_ref(), ENCRYPTED);
 
     // And nothing of the file is kept in the clear server-side: no name, no type, no key.
+    //
+    // The count is a canary rather than an assertion about the schema: it fires on any column
+    // added to this table, so nobody widens what the server keeps about a file without coming
+    // here and saying why. It has fired once, for `account` — the uploader, added by
+    // `0019_storage_quota.sql` so that the heaviest write this server accepts can be charged to
+    // somebody. That is a metadata leak, it is argued in the migration and listed in
+    // `docs/THREAT-MODEL.md`, and it says nothing about the file itself. The loop below is what
+    // guards the file, and it is unchanged.
     let columns: Vec<(String,)> = sqlx::query_as(
         "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'attachments'",
     )
@@ -1199,7 +1207,7 @@ async fn an_attachment_transits_without_being_readable() {
     .await
     .unwrap();
     let names: Vec<String> = columns.into_iter().map(|(c,)| c).collect();
-    assert_eq!(names.len(), 4, "unexpected columns on attachments: {names:?}");
+    assert_eq!(names.len(), 5, "unexpected columns on attachments: {names:?}");
     for forbidden in ["name", "filename", "mime", "content_type", "key"] {
         assert!(!names.iter().any(|c| c == forbidden), "{forbidden} must not be stored");
     }

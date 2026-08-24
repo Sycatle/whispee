@@ -77,6 +77,7 @@ export const SETTINGS_SECTIONS = [
   "pairing",
   "lock",
   "backup",
+  "recovery",
   "receipts",
   "notifications",
   "blocked",

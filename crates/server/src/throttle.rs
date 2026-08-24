@@ -97,6 +97,23 @@ pub const DEFAULT_PER_MINUTE: u32 = 60;
 /// victim — an attack that still works: the limit would look set without preventing anything.
 pub const DEFAULT_CLAIMS_PER_MINUTE: u32 = 5;
 
+/// Default quota for recovery lookups, per address and per minute.
+///
+/// **The narrowest quota in this module, and the one carrying the most weight.** Every other
+/// limit here bounds a table's growth; this one bounds guessing. A recovery lookup is a password
+/// attempt, and it is the *only* bound on password attempts that exists — a failed lookup names
+/// no account (see `migrations/0018_recovery_escrow.sql`), so there is nothing to lock out after
+/// N tries and no per-account counter to keep.
+///
+/// Three a minute is generous for the human action, which is typing one password on the worst
+/// day of your life and mistyping it twice.
+///
+/// What it does not do, stated because the number invites the opposite conclusion: it does not
+/// make a weak password safe. An attacker who obtains the table skips this route entirely and
+/// grinds the ciphertext offline, where the only cost is Argon2id's. This limit closes the
+/// online door; the offline one is closed by the password and by nothing else.
+pub const DEFAULT_RECOVERY_LOOKUPS_PER_MINUTE: u32 = 3;
+
 /// Default quota for KeyPackage top-ups, per device and per minute.
 ///
 /// A top-up is a background action, not an interactive one: the client replenishes when its
@@ -147,6 +164,13 @@ const _: () = assert!(
         && DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE > DEFAULT_VAULT_WRITES_PER_MINUTE
         && DEFAULT_VAULT_WRITES_PER_MINUTE > DEFAULT_KEY_PACKAGES_PER_MINUTE
 );
+
+/// The recovery quota is below every write quota, and that ordering is not aesthetic.
+///
+/// Those bound rows; this bounds guesses at a secret. Any edit that lets recovery lookups outrun
+/// the cheapest write has stopped treating a password attempt as more expensive than a message,
+/// and should fail the build rather than the review.
+const _: () = assert!(DEFAULT_RECOVERY_LOOKUPS_PER_MINUTE < DEFAULT_KEY_PACKAGES_PER_MINUTE);
 
 /// Past this many tracked addresses, stale entries are swept.
 ///
@@ -253,6 +277,36 @@ impl Claims {
     }
 }
 
+/// Limit on recovery lookups, per address.
+///
+/// # Why not simply reuse [`Throttle`], which already counts addresses
+///
+/// Because the open routes' quota is sixty a minute, set from what it takes to grow a table
+/// inconveniently, and reusing it here would allow sixty password guesses a minute against an
+/// escrow. The number would look set and would bound the wrong quantity — the same mistake
+/// [`Claims`] exists to prevent, in the one place where the quantity being bounded is a secret
+/// rather than a row count.
+///
+/// A distinct type rather than a second [`Throttle`] field, so wiring the wrong quota onto this
+/// route does not compile.
+pub struct Recovery(Throttle);
+
+impl Recovery {
+    pub fn per_minute(quota: u32) -> Self {
+        Self(Throttle::per_minute(quota))
+    }
+
+    /// Quota read from `RECOVERY_QUOTA_PER_MINUTE`, or
+    /// [`DEFAULT_RECOVERY_LOOKUPS_PER_MINUTE`].
+    pub fn from_environment() -> Self {
+        Self::per_minute(quota("RECOVERY_QUOTA_PER_MINUTE", DEFAULT_RECOVERY_LOOKUPS_PER_MINUTE))
+    }
+
+    pub fn allows(&self, address: &str) -> bool {
+        self.0.allows(address)
+    }
+}
+
 
 /// Which table a write lands in.
 ///
@@ -344,6 +398,7 @@ impl Writes {
 pub struct Limits {
     pub throttle: Throttle,
     pub claims: Claims,
+    pub recovery: Recovery,
     pub writes: Writes,
     /// Ceiling on stored bytes per account. See [`crate::storage`], which explains why a total
     /// and a rate cannot be the same mechanism.
@@ -355,6 +410,7 @@ impl Limits {
         Self {
             throttle: Throttle::from_environment(),
             claims: Claims::from_environment(),
+            recovery: Recovery::from_environment(),
             writes: Writes::from_environment(),
             storage: crate::storage::Quota::from_environment(),
         }
@@ -369,6 +425,7 @@ impl Limits {
         Self {
             throttle: Throttle::per_minute(0),
             claims: Claims::per_minute(0),
+            recovery: Recovery::per_minute(0),
             writes: Writes::per_minute(0),
             storage: crate::storage::Quota::bytes(0),
         }

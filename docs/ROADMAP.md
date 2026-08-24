@@ -206,6 +206,12 @@ omission:
   crypto call asynchronous.
 - **Device secrets sit in a plaintext file** on the native side, `0600`. Real protection at rest
   means Keychain and Keystore, which needs per-platform native code.
+- **The recovery escrow is a knowing downgrade, not a solved problem.** A password that gets an
+  account back with no device left can only work by putting the account key on the server,
+  encrypted, where its holder can attack the password offline. It is off by default and the screen
+  argues against itself before offering the field. The thing that would actually close it is a
+  rate-limiting hardware enclave — Signal's SVR — which a self-hosted deployment cannot be asked
+  to run. The passkey factor has no such cost and is the one to prefer where it works.
 - **No backups, no post-quantum, no account deletion.** The last is deliberate: an append-only
   log cannot drop an entry, and shrinking the log is precisely what gossip reports as an attack.
 - **The web will always ship its own weakness**: the server delivers the JavaScript and can

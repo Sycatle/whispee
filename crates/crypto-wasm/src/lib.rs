@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 
+use crypto_core::escrow;
 use crypto_core::lock::derive_unlock_key;
 use crypto_core::pairing::{PairingOffer, seal};
 use crypto_core::{Account, Conversation, Identity, Incoming};
@@ -931,4 +932,117 @@ pub fn seal_pairing(
 #[wasm_bindgen(js_name = deriveUnlockKey)]
 pub fn derive_unlock_key_js(password: &str, salt: &[u8]) -> Result<Vec<u8>, JsError> {
     Ok(derive_unlock_key(password, salt).map_err(to_js)?.to_vec())
+}
+
+/// A recovery secret, stretched into the two keys it produces.
+///
+/// Held as an opaque handle rather than returned as bytes, so the sealing key never reaches
+/// JavaScript. The page can ask for the lookup value — the one deliberately handed to the
+/// server — and can seal and open through it, and that is the whole surface.
+///
+/// It is not a `CryptoKey`: WebAssembly linear memory is reachable by the page's own scripts,
+/// which `apps/web/src/lib/cipher.ts` already says of the MLS keys. What this buys is that the
+/// key is not *passed around* as a value, which is what makes it end up in a log.
+#[wasm_bindgen(js_name = RecoveryFactor)]
+pub struct RecoveryFactorJs {
+    inner: escrow::Factor,
+}
+
+#[wasm_bindgen(js_class = RecoveryFactor)]
+impl RecoveryFactorJs {
+    /// What the server stores and what a recovery request presents: `SHA-256(lookup key)`.
+    #[wasm_bindgen(js_name = lookupId)]
+    pub fn lookup_id(&self) -> Vec<u8> {
+        self.inner.lookup_id().to_vec()
+    }
+}
+
+fn escrow_kind(kind: &str) -> Result<escrow::Kind, JsError> {
+    escrow::Kind::parse(kind).map_err(to_js)
+}
+
+/// The KDF parameters this build seals with, encoded for storage.
+///
+/// Handed to the server verbatim and fed back at recovery. They are covered by the seal's AAD,
+/// so a server that rewrites them produces a decryption failure rather than a weaker
+/// derivation.
+#[wasm_bindgen(js_name = escrowParams)]
+pub fn escrow_params(kind: &str) -> Result<Vec<u8>, JsError> {
+    Ok(escrow::Params::current(escrow_kind(kind)?).encode().to_vec())
+}
+
+/// Stretches a recovery password.
+///
+/// **Argon2id, 256 MiB, four passes — several seconds, and it freezes the calling thread.**
+/// Run it from a Worker, or the interface stops responding for the duration.
+///
+/// Four times the local lock's memory cost, because the two are paid at different rates: the
+/// lock runs on every unlock, this runs once on a restore. What it is standing in front of is
+/// also different — the lock protects one device's disk, this protects a ciphertext the server
+/// holds and can grind at leisure.
+#[wasm_bindgen(js_name = derivePasswordFactor)]
+pub fn derive_password_factor_js(
+    handle: &str,
+    password: &str,
+    params: &[u8],
+) -> Result<RecoveryFactorJs, JsError> {
+    let params = escrow::Params::decode(params).map_err(to_js)?;
+    Ok(RecoveryFactorJs {
+        inner: escrow::derive_password_factor(handle, password, &params).map_err(to_js)?,
+    })
+}
+
+/// Turns a WebAuthn PRF output into a recovery factor.
+///
+/// Cheap on purpose: these thirty-two bytes come from the authenticator, not from a human.
+/// Stretching a uniform secret would cost seconds and buy nothing.
+#[wasm_bindgen(js_name = derivePrfFactor)]
+pub fn derive_prf_factor_js(prf_output: &[u8]) -> Result<RecoveryFactorJs, JsError> {
+    Ok(RecoveryFactorJs { inner: escrow::derive_prf_factor(prf_output).map_err(to_js)? })
+}
+
+/// Seals the account seed for recovery. **These bytes are worth the whole account.**
+#[wasm_bindgen(js_name = sealEscrow)]
+pub fn seal_escrow(
+    seed: &[u8],
+    factor: &RecoveryFactorJs,
+    account: &str,
+    kind: &str,
+    params: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let seed: [u8; 64] =
+        seed.try_into().map_err(|_| JsError::new("seed of unexpected length"))?;
+    let decoded = escrow::Params::decode(params).map_err(to_js)?;
+    escrow::seal(&seed, &factor.inner, account, escrow_kind(kind)?, &decoded).map_err(to_js)
+}
+
+/// Opens a sealed escrow and returns the seed.
+///
+/// A wrong password, a tampered ciphertext and a substituted account all produce the same
+/// error. Distinguishing them would tell the caller which of the three it got wrong, and the
+/// only caller who does not already know is an attacker.
+#[wasm_bindgen(js_name = openEscrow)]
+pub fn open_escrow(
+    sealed: &[u8],
+    factor: &RecoveryFactorJs,
+    account: &str,
+    kind: &str,
+    params: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let decoded = escrow::Params::decode(params).map_err(to_js)?;
+    Ok(escrow::open(sealed, &factor.inner, account, escrow_kind(kind)?, &decoded)
+        .map_err(to_js)?
+        .to_vec())
+}
+
+
+/// Draws a passphrase from the BIP-39 English word list.
+///
+/// See `crypto_core::escrow::generate_passphrase` for why this is offered beside a password
+/// field at all. **It is not the recovery phrase and must never be shown as one**: twelve words
+/// from this list *are* an account, six are a password that opens an escrow, and they look
+/// identical on screen.
+#[wasm_bindgen(js_name = generatePassphrase)]
+pub fn generate_passphrase(words: u32) -> Result<String, JsError> {
+    escrow::generate_passphrase(words as usize).map_err(to_js)
 }

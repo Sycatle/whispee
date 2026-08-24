@@ -27,6 +27,14 @@ export class ApiError extends Error {
 }
 
 /**
+ * Which secret opens a recovery escrow.
+ *
+ * Mirrors `crypto_core::escrow::Kind` and the `kind` column's CHECK constraint. A union type
+ * rather than a bare string, so a third name cannot appear on one side only.
+ */
+export type RecoveryKind = "password" | "passkey";
+
+/**
  * The message signed by every request.
  *
  * The nonce is what makes the message unique when everything else is identical. Without it, two
@@ -371,6 +379,80 @@ export class Api {
 
     const body = (await response.json()) as { payload: string };
     return fromBase64(body.payload);
+  }
+
+  /**
+   * Deposits, or replaces, one recovery factor for this account.
+   *
+   * The server is being handed the account seed, encrypted. That is not a normal upload — see
+   * `escrow.ts` for what it costs and why nothing here happens unless the user asked.
+   */
+  setRecovery(factor: {
+    kind: RecoveryKind;
+    lookup: Uint8Array;
+    params: Uint8Array;
+    sealed: Uint8Array;
+  }): Promise<{ kind: RecoveryKind }> {
+    return this.request("POST", "/v1/recovery", {
+      kind: factor.kind,
+      lookup: toBase64(factor.lookup),
+      params: toBase64(factor.params),
+      sealed: toBase64(factor.sealed),
+    });
+  }
+
+  /** Which recovery factors this account has, for a settings screen. Never the blobs. */
+  listRecovery(): Promise<{ kind: RecoveryKind; created_at: number }[]> {
+    return this.request("GET", "/v1/recovery");
+  }
+
+  /** Removes a recovery factor. Removing one that is not there is a success. */
+  forgetRecovery(kind: RecoveryKind): Promise<{ forgotten: number }> {
+    return this.request("POST", "/v1/recovery/forget", { kind });
+  }
+
+  /**
+   * Collects the escrow named by a lookup value. **Unsigned**, and it has to be: the caller has
+   * lost every device, so there is no key left to sign with.
+   *
+   * Returns `null` on 404, which the server answers both to a lookup that names nothing and to
+   * a wrong secret — it genuinely cannot tell them apart, and the caller must not pretend to.
+   * Surfacing that as "wrong password" is right; surfacing it as "no such account" is a
+   * statement this response does not support.
+   *
+   * `POST` rather than `GET`, for the reason `presence` is: the lookup stays out of the URL,
+   * hence out of every access log between here and the server. It is derived from the password.
+   */
+  static async claimRecovery(lookup: Uint8Array): Promise<{
+    account: string;
+    handle: string | null;
+    kind: RecoveryKind;
+    params: Uint8Array;
+    sealed: Uint8Array;
+  } | null> {
+    const response = await fetch(`${BASE_URL}/v1/recovery/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lookup: toBase64(lookup) }),
+    });
+
+    if (response.status === 404) return null;
+    if (!response.ok) throw new ApiError(response.status, await response.text());
+
+    const body = (await response.json()) as {
+      account: string;
+      handle: string | null;
+      kind: RecoveryKind;
+      params: string;
+      sealed: string;
+    };
+    return {
+      account: body.account,
+      handle: body.handle,
+      kind: body.kind,
+      params: fromBase64(body.params),
+      sealed: fromBase64(body.sealed),
+    };
   }
 
   /** Deposits encrypted messages into the account's vault. */

@@ -8,7 +8,8 @@
 import { normalize as normalizeHandle, validate as validateHandle } from "./handle";
 import * as mention from "./mention";
 import { type ResolvedAccount, resolveAccount } from "./account";
-import { Api, ApiError, type ContactPolicy, type PostMac } from "./api";
+import { Api, ApiError, type ContactPolicy, type PostMac, type RecoveryKind } from "./api";
+import { enablePasskeyRecovery, enablePasswordRecovery } from "./escrow";
 import type { MembershipEvent } from "./content";
 import { deviceNameCandidates, detectDeviceKind } from "./device";
 import { type PairingCode, decodePairingCode } from "./pairing";
@@ -653,6 +654,40 @@ export class Session {
     return Session.attach(crypto, account, await Api.resolveHandle(handle), handle);
   }
 
+  /**
+   * Attaches this device to an account whose seed came out of a recovery escrow.
+   *
+   * # Why nothing is verified here, and why that is not an omission
+   *
+   * The other two paths take the account id from the directory and let the registration below
+   * be the check: a wrong id means the server verifies our attestation against a key we do not
+   * hold, and refuses. This path does not need even that. The account id is **inside the AAD of
+   * the seal** (`crates/crypto-core/src/escrow.rs`), so a server that served one account's
+   * ciphertext under another's name produced a decryption failure before this function was
+   * reached. Getting here at all means the id and the seed were sealed together by somebody
+   * holding both.
+   *
+   * The handle is the one value here the server is free to be wrong about, and it is the one
+   * that matters least — it is an alias, checked against nothing, and
+   * `docs/specs/2026-08-21-account-identity.md` already says the displayed handle is never to be
+   * trusted from a directory read.
+   *
+   * # What this does not restore
+   *
+   * The conversations. Exactly as with {@link restoreFromPhrase}: they are MLS groups this
+   * device is not a member of, and only a device already in them can add it. What recovery
+   * genuinely gives back is the account — the ability to be attested, to attest, to rotate — and
+   * the history vault, whose key derives from the seed that just came back.
+   */
+  static async restoreFromEscrow(
+    accountId: string,
+    handle: string,
+    seed: Uint8Array,
+  ): Promise<Session> {
+    const crypto = await loadCrypto();
+    return Session.attach(crypto, crypto.AccountKey.fromSeed(seed), accountId, handle);
+  }
+
   /** Registers a device under an account whose key we already hold. */
   private static async attach(
     crypto: Crypto,
@@ -1035,6 +1070,66 @@ export class Session {
   async disableVault(): Promise<void> {
     this.archive.disable();
     await this.stampScalars();
+  }
+
+  /**
+   * Which recovery factors this account has. Never the ciphertexts.
+   *
+   * A fetch rather than a field: this device is not the only one that can add or remove a
+   * factor, so a cached answer would let a settings screen report a password that another
+   * device turned off half an hour ago.
+   */
+  listRecovery(): Promise<{ kind: RecoveryKind; created_at: number }[]> {
+    return this.api.listRecovery();
+  }
+
+  /**
+   * Seals the account seed under a password and hands the ciphertext to the server.
+   *
+   * # What the caller is agreeing to on the user's behalf
+   *
+   * Until this runs, the server has never held the account seed in any form. Afterwards it holds
+   * it encrypted, which means anybody who obtains the database can attack the password offline,
+   * for as long as they like, and win the account **and** the whole history vault. `escrow.ts`
+   * states it at length; the screen calling this has to state it too, before the field.
+   *
+   * **Blocks the calling thread** — Argon2id at 256 MiB, measured at 1.1 s in this WebAssembly
+   * build on a desktop and several times that on a phone. That cost is the only thing standing
+   * between a stolen database and this account, so it is not negotiable, and the interface owes
+   * the user a sentence rather than a spinner.
+   *
+   * The handle is the derivation's salt, which is why {@link renameHandle} throws the factor
+   * away: a renamed account's password stops matching its own escrow.
+   */
+  async enablePasswordRecovery(password: string): Promise<void> {
+    await enablePasswordRecovery(
+      this.api,
+      this.accountId,
+      this.handle,
+      password,
+      this.account.exportSeed(),
+    );
+  }
+
+  /**
+   * Creates a passkey and seals the account seed under the secret it yields.
+   *
+   * Returns `false` when the authenticator will not do the PRF extension — an ordinary answer on
+   * plenty of machines, and the caller's move is to offer the password instead of reporting a
+   * failure.
+   *
+   * Unlike the password factor this one costs nothing in guessability: the key is 32 uniform
+   * bytes from the authenticator, so the offline attack above does not apply to it. What it
+   * costs instead is written in `passkey.ts` — it is bound to this origin, and it dies with the
+   * authenticator if that authenticator does not sync.
+   */
+  enablePasskeyRecovery(): Promise<boolean> {
+    return enablePasskeyRecovery(this.api, this.accountId, this.handle, this.account.exportSeed());
+  }
+
+  /** Removes a recovery factor. Removing one that is not there is a success. */
+  async forgetRecovery(kind: RecoveryKind): Promise<void> {
+    await this.api.forgetRecovery(kind);
   }
 
   /**
@@ -1937,6 +2032,12 @@ export class Session {
    * **all the already archived history becomes permanently unreadable**. While the vault was
    * optional, whoever rotated their key knew they had one; that is no longer true, and the
    * interface has to say so before offering the button.
+   *
+   * A fourth, since recovery escrows exist: **the server destroys them as part of the rotation**
+   * (`rotate_account` in `crates/server/src/routes.rs`), because they hold the seed that has just
+   * been abandoned — a ciphertext still openable by whoever knew the old password, of a key the
+   * rotation existed to get away from. Neither this device nor the server can re-seal one: that
+   * needs the user's password, and the settings screen has to ask for it again.
    *
    * Returns the new recovery phrase. The old one is worthless.
    */
@@ -3438,6 +3539,30 @@ export class Session {
     if (wanted === this.handle) return;
 
     await this.api.renameAccount(this.accountId, wanted);
+
+    // **The password escrow does not survive a rename, and is removed rather than left broken.**
+    //
+    // Its Argon2id salt is derived from the handle — it has to be, because the salt must be
+    // computable before the lookup that would fetch it (see `crates/crypto-core/src/escrow.rs`).
+    // So after a rename the owner's password produces a different lookup and a different key:
+    // the row stops answering and would never open again.
+    //
+    // What is left behind if it is not deleted is the worst of both: a ciphertext of the account
+    // seed, sitting on the server, useless to its owner and still grindable by whoever takes the
+    // database. Deleting it converts a silent, permanent liability into a visible loss the
+    // settings screen can report and the user can redo in a minute.
+    //
+    // Re-sealing here is not an option: it needs the password, which this session has never held
+    // and must not start holding in order to make a rename tidier.
+    //
+    // The passkey factor is untouched — its key comes from the authenticator, and no part of it
+    // knows what this account is called.
+    await this.api.forgetRecovery("password").catch((error: unknown) => {
+      // A rename that succeeded must not be reported as a failure because the cleanup did not.
+      // The consequence of the miss is a dead row, which the settings screen will show as a
+      // password factor that no longer works — visible, and re-settable.
+      console.warn("password recovery not cleared after rename", error);
+    });
 
     // `handle` is `readonly` on the instance and this is the one operation that changes it. The
     // cast is confined here rather than the field being widened: every other site in this file

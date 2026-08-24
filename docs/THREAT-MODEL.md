@@ -24,7 +24,8 @@ What the design actually tries to keep:
 | **Account identity key (AIK)** | derived from a twelve-word BIP-39 phrase; every device of the account holds the seed |
 | **Device authentication key** | non-extractable in IndexedDB on the web; signs every HTTP request |
 | **MLS signature and group state** | per device, in the local store, encrypted at rest behind the local lock |
-| **Recovery phrase** | the only restoration path, and — since the history vault is on by default — the key to all archived history |
+| **Recovery phrase** | a restoration path, and — since the history vault is on by default — the key to all archived history |
+| **Recovery escrow** | **opt-in, off by default.** The account seed, sealed under a password or a WebAuthn PRF secret, *on the server*. The one asset in this table the server holds a copy of. See § 2.2.2 |
 | **Group membership decisions** | who is in a group, and who may change that |
 | **The truth about which devices belong to an account** | attestations, signed by the account, verified by every client |
 
@@ -69,6 +70,9 @@ authenticates *membership*, not identity. Cannot read the ephemeral signal paylo
   `the_welcome_exposes_identities_but_never_the_content`. The server already knows those identities
   from `devices` and `group_members`, so the leak adds nothing to what it knows — but it is real.
 - **vault volume** — how many messages each account archives, and when.
+- **the recovery escrow of any account that set one up**, and with it the ability to attack that
+  account's recovery password offline. See § 2.2.2 — this is the only entry in this list that is
+  not a metadata leak but a copy of a secret, and it exists only where a user asked for it.
 - **attachment sizes**, to an order of magnitude: they now go into the same doubling buckets as
   messages, with a top bucket just under the server's 25 MiB ceiling.
 - `created_at` on envelopes, which the retention purge now reads. It was kept for years for a purge
@@ -97,6 +101,40 @@ claim here, only an owned trade-off and its price. What bounds it:
   noted, rather than filtering at read time. It is reciprocal, like read receipts — no longer
   broadcasting your presence also means no longer seeing others', or it would let someone see
   without being seen.
+
+#### 2.2.2 What a recovery escrow hands the operator
+
+Without one — which is the default — the account seed has **never been on this server in any
+form**. The phrase is generated on a device, shown once, and never transmitted. An operator with
+the whole database holds unreadable envelopes and public keys, and no path to an account.
+
+A user who enables the password factor changes that for their own account, knowingly. The server
+then holds `AES-256-GCM(seed)` under `Argon2id(password, salt = SHA-256(domain ‖ handle),
+256 MiB, t=4)`. The operator can attack that password **offline**: no rate limit, no clock, no
+need to touch the user's hardware. Winning yields the account seed, hence the account, hence —
+since `wac-vault-v1` derives from the same seed — every row of that account's `vault_entries`,
+retroactively.
+
+Argon2id's memory cost is what stands in the way, and it is a factor rather than a barrier. The
+online route is bounded at three attempts a minute per address (`throttle::Recovery`) and that
+bound is irrelevant to this adversary, who never calls it.
+
+**The passkey factor does not carry this.** Its key is 32 uniform bytes from an authenticator, so
+there is nothing to grind; a stolen database yields nothing about it. Its cost is elsewhere: it is
+bound to the deployment's origin and it dies with an authenticator that does not sync.
+
+Three properties bound the feature rather than the adversary, and are stated because they are easy
+to assume and wrong:
+
+- **An escrow cannot be enumerated.** The row is named by `SHA-256` of a key from the same
+  expensive derivation, so a wrong password and an account with no escrow return the same 404.
+  The operator reading the table still sees which accounts have one — this closes the *network*
+  oracle, not the database.
+- **Nothing locks after N attempts.** A failed lookup names no account, so there is nothing to
+  lock. That is the price of the previous property.
+- **A rotation destroys the escrow, and a rename destroys the password one.** The first because
+  the sealed seed is the one being rotated away from; the second because the handle is the salt.
+  Both are enforced rather than documented — see `docs/specs/2026-08-22-recovery-escrow.md`.
 
 ### 2.3 The server operator, malicious
 
@@ -176,9 +214,15 @@ after five minutes without the user, in the foreground as well as in the backgro
 re-locking drops the interface's state, not the key: it stays in the WebAssembly module's memory
 until the tab closes.
 
-The lock is **not a recovery factor**: forgetting it loses nothing permanently, since the
-twelve-word phrase remains the only restoration path. Making it a second vault factor would double
-the loss surface for no gain against a server that never sees it.
+The lock is **not a recovery factor**: forgetting it loses nothing permanently, since the phrase
+still restores the account. Making it a second vault factor would double the loss surface for no
+gain against a server that never sees it.
+
+That last clause is exactly what a recovery escrow gives up, and it is why the two are separate
+mechanisms with separate passwords and separate floors rather than one password doing both jobs.
+The lock's password guards one device's disk against somebody holding that disk; an escrow
+password guards a ciphertext the server holds, against somebody who never has to leave their
+chair. Sharing a secret between the two would silently promote the weaker requirement.
 
 ---
 
@@ -423,6 +467,7 @@ The full table, in order of real importance. Nothing here is softened.
 | **The vault is bounded; envelopes are not, and the reason is sealed sender** | `vault_entries` is deliberately never purged, so it had inherited the growth problem `envelopes` used to have. A per-account ceiling now bounds it, charged on write and credited when a purge deletes. `envelopes` keeps only the retention purge's steady state: a sealed post carries no device id, so charging the account behind it would mean recording the sender of every post — precisely what sealed sender removes. Anonymous byte tokens close it; they are specified and not built. |
 | **The server records who uploaded which attachment** | Charging an upload to its uploader means keeping the uploader. The server always learned it — an upload is a signed request — but it did not store it; now it does, per attachment and per group. What it buys: the heaviest write this server accepts is bounded per person instead of against a ceiling one member could exhaust for a whole group. Rows uploaded before the quota carry no owner, and age out under the attachment retention. |
 | **Compromised account** | A device added by an account whose phrase has leaked is duly attested, hence indistinguishable from a legitimate addition. The application signals it; only the user can say whether they own that device. |
+| **Recovery escrow** | Opt-in and off by default. Enabling the password factor puts the account seed on the server, encrypted, where the operator can attack it offline — and the history vault goes with it. There is no version of a memorable-secret recovery that does not do this; what closes it is a rate-limiting hardware enclave, which a self-hosted deployment cannot be asked to run. The passkey factor has no such cost and is offered first. § 2.2.2 |
 | **History vault** | It removes forward secrecy from the history: a leak of the phrase becomes retroactively total. It is **on by default**, with the counterpart stated on the recovery-phrase screen and restated in the present tense in the settings, where it remains switchable. |
 | **Orphan history** | After recovery by phrase, the vault is readable but the corresponding groups appear nowhere: the client only knows the conversations its MLS state carries a trace of. The promise "survives the loss of every device" is therefore not yet kept. Keeping it would require a route listing archived groups and read-only conversations. |
 | **Rotation and vault** | Rotating the account key makes already-archived history permanently unreadable. The rotation screen announces it; nothing allows re-encrypting it. |

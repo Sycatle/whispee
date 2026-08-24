@@ -18,7 +18,7 @@ use crate::auth::Signed;
 use crate::error::{ApiError, ApiResult};
 use crate::presence;
 use crate::stream::{Hub, Notice};
-use crate::throttle::{Writes, Written};
+use crate::throttle::{Recovery, Writes, Written};
 
 /// Cap on the number of KeyPackages published in one request. Without it, a single device can
 /// fill the database on its own.
@@ -27,6 +27,11 @@ const MAX_KEY_PACKAGES_PER_REQUEST: usize = 100;
 /// A device row as served: id, auth key, MLS key, attestation. Named so that the query
 /// signatures stay readable.
 type DeviceRow = (String, Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// One escrow row as the claim route reads it: account, live handle, kind, parameters, sealed
+/// seed. Named for the reason the two above are — the tuple is unreadable inline, and clippy
+/// says so.
+type EscrowRow = (String, Option<String>, String, Vec<u8>, Vec<u8>);
 
 /// A device and its revocation state, as served to clients.
 type RevocableDeviceRow =
@@ -58,11 +63,21 @@ const MAX_ENVELOPES_PER_PAGE: i64 = 200;
 /// **Account creation is what justifies the whole thing.** It writes to the transparency log,
 /// whose entries cannot be taken back without breaking the consistency proofs. See
 /// `crate::throttle` for what the limit closes, and for what it does not.
+///
+/// **`recovery/claim` is the fifth, and it is here for a different reason.** The others precede
+/// an identity; this one *follows the loss of every device that held one*. A caller recovering an
+/// account has no key to sign with — that is the situation being answered — so no amount of
+/// design makes it authenticable.
+///
+/// It carries a second, far narrower limit of its own on top of the address quota, because what
+/// it bounds is not table growth but password guessing. See `throttle::Recovery`, and
+/// `migrations/0018_recovery_escrow.sql` for why a failed attempt cannot be counted per account.
 pub fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/accounts", post(create_account))
         .route("/v1/devices", post(register_device))
         .route("/v1/pairings/{pairing_id}", post(deposit_pairing).get(claim_pairing))
+        .route("/v1/recovery/claim", post(claim_recovery))
         .with_state(state)
 }
 
@@ -103,6 +118,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/log/consistency", get(log_consistency))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
         .route("/v1/vault/{group_id}", post(store_vault).get(fetch_vault))
+        .route("/v1/recovery", get(list_recovery).post(set_recovery))
+        .route("/v1/recovery/forget", post(forget_recovery))
         .route("/v1/key-packages", post(publish_key_packages))
         .route("/v1/key-packages/stock", get(key_package_stock))
         .route("/v1/key-packages/{device_id}/claim", post(claim_key_package))
@@ -1214,6 +1231,20 @@ async fn rotate_account(
     crate::log::append(&mut tx, &account, &new_identity_key, Some((&rotation, payload.rotated_at)))
         .await?;
 
+    // **The escrow goes with the old seed.** Rotation is the answer to a stolen device, and a
+    // stolen device holds the seed; leaving the escrow behind would leave the thing being
+    // rotated away from sitting on the server, openable by a password the thief may also have
+    // watched being typed. There is no partial version of this: the ciphertext is of the *old*
+    // seed and it is worthless to its owner the moment the key moves.
+    //
+    // The client is expected to re-post a factor afterwards. It is not done here because it
+    // cannot be: sealing needs the new seed and the user's password, neither of which the
+    // server has ever held.
+    sqlx::query("DELETE FROM recovery_escrows WHERE account = $1")
+        .bind(&account)
+        .execute(&mut *tx)
+        .await?;
+
     // The other devices' KeyPackages go with the old key: they carry credentials nobody can
     // tie back to the account any more, and would be used to add those devices to new groups.
     // The caller's are kept — it is about to re-attest.
@@ -1912,6 +1943,259 @@ async fn fetch_vault(
             .map(|(seq, payload)| VaultRow { seq, payload: BASE64_STANDARD.encode(payload) })
             .collect(),
     ))
+}
+
+/// Length of a lookup value: `SHA-256` of the client's lookup key.
+const RECOVERY_LOOKUP_LEN: usize = 32;
+
+/// Length of the encoded KDF parameters. See `crypto_core::escrow::Params`.
+const RECOVERY_PARAMS_LEN: usize = 13;
+
+/// Length of a sealed escrow: a 12-byte nonce, the 64-byte seed, a 16-byte GCM tag.
+///
+/// Fixed, and checked rather than merely expected. A variable-length blob under a
+/// caller-chosen key is a storage channel, and this is the one table whose rows are written by
+/// a caller and read back by an unauthenticated route.
+const RECOVERY_SEALED_LEN: usize = 92;
+
+#[derive(Deserialize)]
+struct SetRecovery {
+    /// `password` or `passkey`.
+    kind: String,
+    /// `SHA-256` of the lookup key, base64. Names the row; the pre-image stays on the client.
+    lookup: String,
+    /// Encoded KDF parameters, base64. Opaque here, covered by the seal's AAD there.
+    params: String,
+    /// The sealed account seed, base64.
+    sealed: String,
+}
+
+fn decode_exact(value: &str, expected: usize, what: &'static str) -> ApiResult<Vec<u8>> {
+    let bytes = decode_b64(value)?;
+    if bytes.len() != expected {
+        return Err(ApiError::BadRequest(what));
+    }
+    Ok(bytes)
+}
+
+/// Validates the escrow kind against the same two names the schema allows.
+///
+/// Checked here rather than left to the CHECK constraint: a violated constraint surfaces as a
+/// database error, which this server deliberately turns into a 500 with no detail. A caller
+/// sending a typo deserves to be told it was a bad request.
+fn recovery_kind(kind: &str) -> ApiResult<&str> {
+    match kind {
+        "password" | "passkey" => Ok(kind),
+        _ => Err(ApiError::BadRequest("unknown recovery kind")),
+    }
+}
+
+/// Deposits, or replaces, one recovery factor for the caller's account.
+///
+/// # What the server is being handed
+///
+/// The account seed, encrypted. Nothing else on this server is that: envelopes are unreadable
+/// *and* worthless without the MLS state, where this is the root secret itself, sitting still
+/// under a key derived from a password. `migrations/0018_recovery_escrow.sql` states the whole
+/// cost; it is not repeated here, but it is the reason this route exists at all only when the
+/// user asked for it.
+///
+/// The server verifies lengths and the caller's identity and nothing more. It cannot check that
+/// the ciphertext holds what the client says it holds, and there is no version of this route
+/// where it could.
+///
+/// # Why one factor of each kind, and not many
+///
+/// A second password is a second guess for an attacker and a forgotten one for its owner. The
+/// `UNIQUE (account, kind)` constraint says so; the delete below is what makes *replacing* a
+/// password work rather than colliding with it.
+async fn set_recovery(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Json<serde_json::Value>> {
+    let payload: SetRecovery = signed.json()?;
+    let kind = recovery_kind(&payload.kind)?;
+
+    let lookup = decode_exact(&payload.lookup, RECOVERY_LOOKUP_LEN, "lookup of invalid length")?;
+    let params =
+        decode_exact(&payload.params, RECOVERY_PARAMS_LEN, "escrow parameters of invalid length")?;
+    let sealed = decode_exact(&payload.sealed, RECOVERY_SEALED_LEN, "escrow of invalid length")?;
+
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    let mut tx = pool.begin().await?;
+
+    // The old row goes first, in the same transaction: replacing a password changes the lookup,
+    // so an upsert keyed on `lookup` would leave the previous one behind — a second, stale
+    // password that still opens the account and that its owner believes they have changed.
+    sqlx::query("DELETE FROM recovery_escrows WHERE account = $1 AND kind = $2")
+        .bind(&account)
+        .bind(kind)
+        .execute(&mut *tx)
+        .await?;
+
+    let inserted = sqlx::query(
+        "INSERT INTO recovery_escrows (lookup, account, kind, params, sealed)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (lookup) DO NOTHING",
+    )
+    .bind(&lookup)
+    .bind(&account)
+    .bind(kind)
+    .bind(&params)
+    .bind(&sealed)
+    .execute(&mut *tx)
+    .await?;
+
+    // `DO NOTHING` rather than `DO UPDATE`: the surviving conflict is a lookup that belongs to
+    // **another** account, and overwriting it would let a caller who guessed it — or collided
+    // with it — destroy someone else's only way back in. A 409 is a refusal the caller can act
+    // on by choosing a different password; a silent overwrite is not.
+    if inserted.rows_affected() == 0 {
+        return Err(ApiError::Conflict("this recovery secret is already in use"));
+    }
+
+    tx.commit().await?;
+
+    Ok(Json(serde_json::json!({ "kind": kind })))
+}
+
+#[derive(Serialize)]
+struct RecoveryFactor {
+    kind: String,
+    created_at: i64,
+}
+
+/// Lists the caller's recovery factors, without the blobs.
+///
+/// For a settings screen that has to say what is switched on. The ciphertext is deliberately
+/// absent: an authenticated device already holds the seed, so serving it here would add a way
+/// to get the escrow that the recovery route's rate limit does not cover.
+async fn list_recovery(
+    State(pool): State<PgPool>,
+    signed: Signed,
+) -> ApiResult<Json<Vec<RecoveryFactor>>> {
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    // `EXTRACT(EPOCH …)` rather than a timestamp type, as everywhere else in this file: no
+    // date library is in the tree, and the wire format for a time here is Unix seconds.
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT kind, EXTRACT(EPOCH FROM created_at)::BIGINT
+         FROM recovery_escrows WHERE account = $1 ORDER BY kind",
+    )
+    .bind(&account)
+    .fetch_all(&pool)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter().map(|(kind, created_at)| RecoveryFactor { kind, created_at }).collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ForgetRecovery {
+    kind: String,
+}
+
+/// Removes one recovery factor.
+///
+/// Idempotent: forgetting a factor that is not there is a success. The alternative — a 404 —
+/// would turn "make sure this is off" into a call the client has to special-case, and would
+/// report a failure for a state the caller asked for and now has.
+async fn forget_recovery(
+    State(pool): State<PgPool>,
+    signed: Signed,
+) -> ApiResult<Json<serde_json::Value>> {
+    let payload: ForgetRecovery = signed.json()?;
+    let kind = recovery_kind(&payload.kind)?;
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    let removed = sqlx::query("DELETE FROM recovery_escrows WHERE account = $1 AND kind = $2")
+        .bind(&account)
+        .bind(kind)
+        .execute(&pool)
+        .await?;
+
+    Ok(Json(serde_json::json!({ "forgotten": removed.rows_affected() })))
+}
+
+#[derive(Deserialize)]
+struct ClaimRecovery {
+    /// `SHA-256` of the lookup key, base64.
+    lookup: String,
+}
+
+#[derive(Serialize)]
+struct ClaimedRecovery {
+    account: String,
+    /// The account's current handle, or `null` if it holds none.
+    ///
+    /// Served because a recovering client needs it and cannot derive it: the handle is an alias
+    /// the server keeps, not something the seed produces. A client is right not to trust it —
+    /// `docs/specs/2026-08-21-account-identity.md` says the displayed handle is never re-fetched
+    /// from the server — but the account id beside it *is* checkable against the recovered key,
+    /// and that check is what makes the pair safe to use.
+    handle: Option<String>,
+    kind: String,
+    params: String,
+    sealed: String,
+}
+
+/// Serves one escrow to whoever can name it. **Unauthenticated, by necessity.**
+///
+/// # Why this cannot require a signature
+///
+/// The caller has lost every device. There is no key left to sign with; that is the situation
+/// this route answers. The authentication is therefore inside the request rather than around
+/// it: naming the row already requires having done the expensive derivation, which requires
+/// the password.
+///
+/// # What the answers say, and what they refuse to say
+///
+/// A wrong lookup and an account with no escrow are the same 404. So this is not an oracle for
+/// which accounts exist, which have recovery enabled, or whether a password was close. Nothing
+/// in the response distinguishes "there is no such row" from "you guessed wrong", because the
+/// server genuinely cannot tell them apart — it holds a hash and compares it.
+///
+/// # The bound, and what it does not bound
+///
+/// Two limits stack: the address quota every open route carries, and `throttle::Recovery`'s
+/// far narrower one. Together they close the **online** door to guessing. They do nothing about
+/// the offline one: an attacker holding `recovery_escrows` never calls this route at all. That
+/// asymmetry is the feature's central cost and it is written down in the migration.
+async fn claim_recovery(
+    State(pool): State<PgPool>,
+    State(recovery): State<Arc<Recovery>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Json(payload): Json<ClaimRecovery>,
+) -> ApiResult<Json<ClaimedRecovery>> {
+    // Counted before the lookup, so a refusal costs the database nothing — and so that the
+    // quota bounds attempts rather than successes.
+    if !recovery.allows(&format!("recovery:{}", peer.ip())) {
+        return Err(ApiError::TooManyRequests);
+    }
+
+    let lookup = decode_exact(&payload.lookup, RECOVERY_LOOKUP_LEN, "lookup of invalid length")?;
+
+    // One query, joined: a second round trip for the handle would take a different amount of
+    // time depending on whether the first found anything, which is the timing side of the
+    // indistinguishability this route is built for.
+    let row: Option<EscrowRow> = sqlx::query_as(
+        "SELECT e.account, h.handle, e.kind, e.params, e.sealed
+         FROM recovery_escrows e
+         LEFT JOIN handles h ON h.account = e.account AND h.released_at IS NULL
+         WHERE e.lookup = $1",
+    )
+    .bind(&lookup)
+    .fetch_optional(&pool)
+    .await?;
+
+    let (account, handle, kind, params, sealed) = row.ok_or(ApiError::NotFound)?;
+
+    Ok(Json(ClaimedRecovery {
+        account,
+        handle,
+        kind,
+        params: BASE64_STANDARD.encode(params),
+        sealed: BASE64_STANDARD.encode(sealed),
+    }))
 }
 
 #[derive(Deserialize)]

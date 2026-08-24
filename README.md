@@ -35,6 +35,7 @@ not their equal and does not try to be.
 | Audio calls | 1-to-1 and group, through a media server that cannot hear them — frames encrypted under a key derived from the MLS epoch. Off unless a deployment configures one, and it leaks more than a message does: see [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) § 4ter |
 | Local lock | Argon2id (64 MiB, 3 passes), unlock key → master key indirection, re-locks when left alone |
 | History vault | On by default, encrypted under a key derived from the recovery phrase |
+| Storage quota | 256 MiB per account by default, charged on vault writes and attachment uploads, credited back when a purge deletes. Envelopes are outside it: charging a sealed post would mean naming its sender — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Web, desktop | Vite 7 + React 19; Tauri 2 wraps the same build |
 | Reproducible, signed releases | `scripts/release.sh`, `scripts/verify-release.sh` |
 

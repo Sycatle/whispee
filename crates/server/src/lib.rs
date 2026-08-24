@@ -223,8 +223,10 @@ const ENVELOPE_RETENTION_DAYS: u32 = 30;
 ///
 /// What it does not solve: it is a count, not a size. Five hundred envelopes carrying 25 MiB
 /// attachment descriptors and five hundred carrying "ok" occupy the same slot in this rule. The
-/// bound that would answer that is a stored-bytes quota per account, which `throttle` names and
-/// this server still does not have.
+/// bytes those descriptors point at are bounded — [`crate::storage`] charges an attachment to
+/// whoever uploaded it — but the envelopes themselves are not counted anywhere, and cannot be
+/// until a sealed post can be charged without naming its sender. See
+/// `docs/specs/2026-08-24-posting-allowance.md`.
 const ENVELOPE_MIN_TAIL: i64 = 500;
 
 /// Age past which an attachment is deleted, whatever the state of its envelope.

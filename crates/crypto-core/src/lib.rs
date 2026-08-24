@@ -10,6 +10,7 @@
 pub mod account;
 pub mod conversation;
 pub mod error;
+pub mod escrow;
 pub mod identity;
 pub mod lock;
 pub mod pairing;

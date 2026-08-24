@@ -55,6 +55,13 @@ pub struct AppState {
     /// messages in a minute and has no business uploading a hundred attachments in one. See
     /// `throttle::Writes` for each number and for what none of them solve.
     pub writes: Arc<throttle::Writes>,
+    /// Ceiling on recovery lookups, counted per address.
+    ///
+    /// Separate for a different reason from the three above: they bound how fast a table grows,
+    /// this one bounds how fast a password can be guessed. It is the narrowest quota in the
+    /// server, and — because a failed lookup names no account — the only bound on guessing that
+    /// exists online at all.
+    pub recovery: Arc<throttle::Recovery>,
     /// What wakes sleeping devices.
     ///
     /// [`push::Silent`] by default, and that is a design choice, not a placeholder: a deployment
@@ -108,6 +115,12 @@ impl FromRef<AppState> for Arc<throttle::Claims> {
 impl FromRef<AppState> for Arc<throttle::Writes> {
     fn from_ref(state: &AppState) -> Self {
         state.writes.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<throttle::Recovery> {
+    fn from_ref(state: &AppState) -> Self {
+        state.recovery.clone()
     }
 }
 
@@ -552,6 +565,7 @@ pub fn app_with_waker(
         throttle: Arc::new(limits.throttle),
         claims: Arc::new(limits.claims),
         writes: Arc::new(limits.writes),
+        recovery: Arc::new(limits.recovery),
         // The default is `Silent`, set by `app_with`: wiring up Apple or Google requires secrets
         // a deployment must provide knowingly, after reading what the wake-up leaks.
         push,

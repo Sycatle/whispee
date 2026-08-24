@@ -14,7 +14,7 @@ use base64::prelude::BASE64_STANDARD;
 use crypto_core::Account;
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
-use server::throttle::{Claims, Limits, Throttle, Writes};
+use server::throttle::{Claims, Limits, Recovery, Throttle, Writes};
 use sqlx::PgPool;
 
 /// Keeps each test's data apart.
@@ -88,6 +88,15 @@ pub async fn start_with_claim_quota(quota: u32) -> TestServer {
 /// and mixing the two bounds would make a refusal impossible to attribute.
 pub async fn start_with_write_quota(quota: u32) -> TestServer {
     start_with(pool().await, Limits { writes: Writes::per_minute(quota), ..Limits::off() }).await
+}
+
+/// Test server with an enforced recovery-lookup quota.
+///
+/// The other limits stay disabled: setting up the escrow costs signed and open requests, and a
+/// refusal has to be attributable to the one bound under test.
+pub async fn start_with_recovery_quota(quota: u32) -> TestServer {
+    start_with(pool().await, Limits { recovery: Recovery::per_minute(quota), ..Limits::off() })
+        .await
 }
 
 /// A wake emitter that keeps whatever it is handed.

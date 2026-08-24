@@ -104,6 +104,11 @@ async fn no_counter_disagrees_with_the_rows_it_counts() {
 }
 
 /// A vault write moves the counter by the bytes stored, not by the size of the request.
+///
+/// Run against `start()`, whose ceiling is disabled — which is the point as much as the figure
+/// is: `0` switches off enforcement, never the bookkeeping. A deployment that runs unlimited and
+/// sets a ceiling later must not start from zero, or every account gets a full allowance on top
+/// of what it already stores.
 #[tokio::test]
 async fn a_vault_write_is_charged_to_its_owner() {
     let server = start().await;
@@ -116,6 +121,26 @@ async fn a_vault_write_is_charged_to_its_owner() {
     // 1000 and not 1336: base64 is a third larger, and charging for the encoding would make the
     // ceiling depend on the transport rather than on the disk.
     assert_eq!(counter(&server.pool, &alice.id).await, 1000);
+}
+
+/// Re-depositing an entry charges nothing the second time.
+///
+/// `ON CONFLICT DO NOTHING` skips the row, and two devices of one account archiving the same
+/// conversation is the ordinary case rather than an edge one. Charging before the insert would
+/// charge for a row that was not written, and nothing credits an overcharge — the counter would
+/// climb above the tables for good. This is why the insert comes first and the charge follows it
+/// inside the same transaction.
+#[tokio::test]
+async fn a_repeated_deposit_is_charged_once() {
+    let server = start().await;
+    let (alice, device, group) = account_with_group(&server, "alice").await;
+
+    let path = format!("/v1/vault/{}", hex::encode(&group));
+    device.post(&path, vault_body(1, 1000)).await;
+    device.post(&path, vault_body(1, 1000)).await;
+
+    assert_eq!(counter(&server.pool, &alice.id).await, 1000, "the same row was charged twice");
+    assert_eq!(counter(&server.pool, &alice.id).await, actually_stored(&server.pool, &alice.id).await);
 }
 
 /// A write past the ceiling is refused with 507, stores nothing, and charges nothing.

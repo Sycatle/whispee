@@ -59,7 +59,7 @@ async fn an_account_gets_an_empty_counter() {
     assert_eq!(bytes, 0);
 }
 
-/// Deleting the account takes its counter with it.
+/// Deleting the account takes its counter with it. (Replaced during execution: see below.)
 #[tokio::test]
 async fn deleting_an_account_removes_its_counter() {
     let server = start().await;
@@ -109,6 +109,12 @@ async fn the_backfill_matches_what_is_stored() {
     let _ = alice;
 }
 ```
+
+**Corrected during execution.** The deletion test could not be written as an exercise: this
+server has no way to delete an account. A raw `DELETE FROM accounts` sets `handles.account` to
+null through that table's own cascade, and `tombstones_are_unowned` refuses it — a handle without
+an owner must be a tombstone. `docs/ROADMAP.md` says the same from the other end. The cascade is
+therefore asserted out of `information_schema` rather than exercised, and the test says why.
 
 - [ ] **Step 2: Run test to verify it fails**
 

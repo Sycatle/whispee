@@ -56,25 +56,34 @@ async fn an_account_gets_an_empty_counter() {
     assert_eq!(counter(&server.pool, &alice.id).await, 0);
 }
 
-/// Deleting the account takes its counter with it.
+/// The counter is declared to go with the account, and that declaration is what is checked.
+///
+/// Not exercised, and the reason is the interesting part: **this server has no way to delete an
+/// account.** A raw `DELETE FROM accounts` sets `handles.account` to null by its own cascade and
+/// is refused by `tombstones_are_unowned` — a handle without an owner has to be a tombstone, and
+/// this one is not. `docs/ROADMAP.md` states the same thing from the other end: an append-only
+/// transparency log cannot drop an entry, so deletion is not offered.
+///
+/// What can still go wrong is a later migration recreating this table without the cascade, and
+/// that is what this reads out of the schema. The day account deletion exists, this test becomes
+/// a real one.
 #[tokio::test]
-async fn deleting_an_account_removes_its_counter() {
+async fn the_counter_is_declared_to_go_with_its_account() {
     let server = start().await;
-    let alice = TestAccount::create(&server, &unique("alice")).await;
 
-    sqlx::query("DELETE FROM accounts WHERE id = $1")
-        .bind(&alice.id)
-        .execute(&server.pool)
-        .await
-        .unwrap();
+    let (rule,): (String,) = sqlx::query_as(
+        "SELECT rc.delete_rule::text
+           FROM information_schema.referential_constraints rc
+           JOIN information_schema.table_constraints tc
+             ON tc.constraint_name = rc.constraint_name
+            AND tc.constraint_schema = rc.constraint_schema
+          WHERE tc.table_name = 'account_storage' AND tc.constraint_type = 'FOREIGN KEY'",
+    )
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
 
-    let row: Option<(i64,)> = sqlx::query_as("SELECT bytes FROM account_storage WHERE account = $1")
-        .bind(&alice.id)
-        .fetch_optional(&server.pool)
-        .await
-        .unwrap();
-
-    assert!(row.is_none(), "the counter outlived the account it belongs to");
+    assert_eq!(rule, "CASCADE", "a counter would outlive the account it belongs to");
 }
 
 /// The backfill agrees with what is actually stored.

@@ -468,6 +468,14 @@ async fn create_account(
     .execute(&mut *tx)
     .await?;
 
+    // Its storage counter, in the same transaction as the account. The row has to exist before
+    // the first write, because charging is an `UPDATE` whose `WHERE` carries the ceiling — see
+    // `crate::storage` for why that cannot be an upsert.
+    sqlx::query("INSERT INTO account_storage (account) VALUES ($1) ON CONFLICT DO NOTHING")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+
     // The account and its log entry in the **same** transaction. A key published without an
     // inclusion proof would be rejected by every client: the account would exist without being
     // reachable, and nothing would say why.
@@ -1779,6 +1787,7 @@ async fn caller_account(pool: &PgPool, device_id: &str) -> ApiResult<String> {
 async fn store_vault(
     State(pool): State<PgPool>,
     State(writes): State<Arc<Writes>>,
+    State(quota): State<Arc<crate::storage::Quota>>,
     Path(group_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -1809,6 +1818,27 @@ async fn store_vault(
     let blobs: Vec<Vec<u8>> =
         payload.entries.iter().map(|e| decode_b64(&e.payload)).collect::<ApiResult<_>>()?;
 
+    // The bytes charged are the bytes stored, computed from the decoded blobs and not from the
+    // request: base64 is a third larger, and charging for the encoding would make the ceiling
+    // depend on the transport rather than on the disk.
+    //
+    // Known imprecision, stated rather than left to be found: `ON CONFLICT DO NOTHING` means a
+    // re-uploaded entry is charged without being stored, so two devices of one account archiving
+    // the same conversation pay twice for one row. Charging what was actually inserted means
+    // `RETURNING` and a debit afterwards, which reintroduces exactly the read-then-write race the
+    // single statement exists to avoid. The overcharge is bounded by the client's own
+    // deduplication, and it is credited nowhere.
+    let charged: i64 = blobs.iter().map(|blob| blob.len() as i64).sum();
+
+    let mut tx = pool.begin().await?;
+
+    // Before the insert and inside its transaction: a refusal must cost the database nothing, and
+    // an insert that fails afterwards must not leave the account charged for bytes it does not
+    // hold.
+    if !crate::storage::charge(&mut tx, &quota, &account, charged).await? {
+        return Err(ApiError::InsufficientStorage);
+    }
+
     sqlx::query(
         "INSERT INTO vault_entries (account, group_id, seq, payload)
          SELECT $1, $2, * FROM UNNEST($3::bigint[], $4::bytea[])
@@ -1818,8 +1848,10 @@ async fn store_vault(
     .bind(&group_id)
     .bind(&seqs)
     .bind(&blobs)
-    .execute(&pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(Json(serde_json::json!({ "stored": seqs.len() })))
 }
@@ -2104,6 +2136,7 @@ struct AttachmentUploaded {
 async fn upload_attachment(
     State(pool): State<PgPool>,
     State(writes): State<Arc<Writes>>,
+    State(quota): State<Arc<crate::storage::Quota>>,
     Path(group_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<AttachmentUploaded>> {
@@ -2127,13 +2160,26 @@ async fn upload_attachment(
         return Err(ApiError::BadRequest("empty attachment"));
     }
 
+    // Recorded, not merely known: charging the uploader means keeping who they were. That is a
+    // metadata leak the migration and `docs/THREAT-MODEL.md` both state, and it is what buys the
+    // heaviest write this server accepts a personal bound.
+    let account = caller_account(&pool, &signed.device_id).await?;
+    let mut tx = pool.begin().await?;
+
+    if !crate::storage::charge(&mut tx, &quota, &account, signed.body.len() as i64).await? {
+        return Err(ApiError::InsufficientStorage);
+    }
+
     let (id,): (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO attachments (group_id, payload) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO attachments (group_id, account, payload) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(&group_id)
+    .bind(&account)
     .bind(signed.body.as_ref())
-    .fetch_one(&pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(Json(AttachmentUploaded { id: id.to_string() }))
 }

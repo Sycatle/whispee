@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ShowPairingCode, usePairingOffer } from "@/components/Pairing";
+import { RecoverWithSecret } from "@/components/Recover";
 import { ApiError } from "@/lib/api";
 import {
   MAX_CODE_POINTS as MAX_NAME_LENGTH,
@@ -19,7 +20,7 @@ import { cn } from "@/ui/cn";
 import { displayNameMessage } from "@/ui/displayNameMessage";
 import { handleMessage } from "@/ui/handleMessage";
 
-type Mode = "create" | "restore" | "pair";
+type Mode = "create" | "restore" | "pair" | "recover";
 
 /**
  * How many alternatives the screen offers before it stops offering.
@@ -70,8 +71,13 @@ const MODES: { mode: Mode; name: string; what: string }[] = [
     what: "Joins an account you are still signed in to somewhere else. No phrase to type.",
   },
   {
+    mode: "recover",
+    name: "Recover with a secret",
+    what: "Uses the password or passkey an account set up for this. Nothing else to have.",
+  },
+  {
     mode: "restore",
-    name: "Recover an account",
+    name: "Recover with the phrase",
     what: "Rebuilds an account from its twelve words, once every device is gone.",
   },
 ];
@@ -273,6 +279,13 @@ export function Onboarding({
 
   if (mode === "pair") {
     return <PairThisDevice onReady={onReady} onError={onError} onCancel={() => setMode("create")} />;
+  }
+
+  // Like `pair`, this replaces the screen rather than reshaping the form: it asks for a handle
+  // for a different reason than the form does — there it names an account to claim or resolve,
+  // here it is the key derivation's salt — and the passkey half of it asks for nothing at all.
+  if (mode === "recover") {
+    return <RecoverWithSecret onReady={onReady} onCancel={() => setMode("create")} />;
   }
 
   return (

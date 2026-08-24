@@ -70,6 +70,41 @@ export const MIN_LENGTH = 12;
 const MIN_GUESSES_LOG10 = 10;
 
 /**
+ * What a password has to clear, and for which job.
+ *
+ * # Why there are two, and why the second is stricter
+ *
+ * The local lock guards state at rest on **one device**, against somebody holding that device.
+ * Forgetting it costs nothing — the twelve-word phrase still restores the account — and the
+ * attacker has to obtain the disk before the guessing even starts.
+ *
+ * A recovery escrow is the opposite on every count. Its ciphertext sits on the server, so an
+ * attacker who obtains the database is *already* at the guessing stage, with no time limit and
+ * no need to touch anybody's hardware. What it opens is not one device's cache but the account
+ * seed, and with it every archived message. And there is no phrase behind it to make forgetting
+ * survivable in the other direction either: the escrow is what somebody chose *instead of*
+ * keeping the phrase.
+ *
+ * Sixteen characters and 10^14 guesses. The exponent is four orders above the lock's, which is
+ * roughly what four extra characters of real entropy buy — the point is not the precise number
+ * but that a password protecting a server-held blob must not pass on the strength that protects
+ * a laptop's cache.
+ */
+export interface Policy {
+  minLength: number;
+  minGuessesLog10: number;
+}
+
+/** The local lock's floor. See `lock.ts`. */
+export const LOCK_POLICY: Policy = {
+  minLength: MIN_LENGTH,
+  minGuessesLog10: MIN_GUESSES_LOG10,
+};
+
+/** The recovery escrow's floor. See `escrow.ts` for what it is standing in front of. */
+export const ESCROW_POLICY: Policy = { minLength: 16, minGuessesLog10: 14 };
+
+/**
  * Fallback list, used only when the estimator cannot be loaded.
  *
  * This is not the policy — the policy is zxcvbn's dictionaries, which are thirty thousand
@@ -158,14 +193,18 @@ function estimator() {
  * first verdict to arrive a moment late, and must ignore a verdict for a password that has since
  * changed.
  */
-export async function check(password: string, userInputs: string[] = []): Promise<Verdict> {
+export async function check(
+  password: string,
+  userInputs: string[] = [],
+  policy: Policy = LOCK_POLICY,
+): Promise<Verdict> {
   // Length first, and before loading anything: it is the one rule that holds whatever the
   // estimator thinks, and it spares a 900 KB fetch to tell someone their four characters are
   // short.
-  if (password.length < MIN_LENGTH) {
+  if (password.length < policy.minLength) {
     return {
       ok: false,
-      reason: `At least ${MIN_LENGTH} characters. Length is what actually protects you — not uppercase letters or digits.`,
+      reason: `At least ${policy.minLength} characters. Length is what actually protects you — not uppercase letters or digits.`,
       guessesLog10: null,
       advice: "",
     };
@@ -178,7 +217,7 @@ export async function check(password: string, userInputs: string[] = []): Promis
     return degraded(password);
   }
 
-  if (estimate.guessesLog10 < MIN_GUESSES_LOG10) {
+  if (estimate.guessesLog10 < policy.minGuessesLog10) {
     return {
       ok: false,
       // The number is stated rather than a colour shown: "weak" invites the user to add a `!` and

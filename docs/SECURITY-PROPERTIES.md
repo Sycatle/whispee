@@ -270,7 +270,51 @@ to be done.
 
 ---
 
-## 8. Metadata resistance
+## 8. Account recovery
+
+**Claim, in two parts, because the two factors do not claim the same thing.**
+
+**The passkey factor**: the account seed is sealed under 32 uniform bytes produced by a WebAuthn
+authenticator's PRF extension. An adversary holding the entire database learns nothing about it
+and has nothing to guess. This is a full claim.
+
+**The password factor**: the account seed is sealed under `Argon2id(password, 256 MiB, t = 4)` and
+the ciphertext is stored on the server. **This is deliberately not claimed to resist an adversary
+who obtains that ciphertext.** It resists guessing at the cost of one Argon2id evaluation per
+attempt, which is a factor and not a barrier, and the property it actually delivers is: *an
+attacker who has the database recovers the account if and only if they guess the password.*
+
+The floor enforced on that password is stricter than the local lock's — sixteen characters, and a
+zxcvbn estimate above 10^14 guesses — for a reason worth stating rather than tuning: the lock's
+password guards one disk against somebody holding that disk, and forgetting it costs nothing
+because the phrase still works. This one guards a ciphertext an attacker holds forever, and it is
+what somebody chose *instead of* keeping the phrase.
+
+**Not claimed, and each of these is a design consequence rather than a gap:**
+
+- **No protection against the server operator.** They hold the ciphertext by construction. The
+  online rate limit (three claims a minute per address) is irrelevant to them; they never call the
+  route. Closing this needs a rate-limiting hardware enclave, which a self-hosted deployment
+  cannot be required to run.
+- **No account lockout.** A failed claim names no account — that is what stops the route being an
+  enumeration oracle — so there is nothing to lock after N attempts. The two properties are the
+  same property seen from two sides.
+- **No protection of the vault separately from the account.** The vault key derives from the same
+  seed, so an escrow that opens the account opens the archive with it.
+- **No claim about a passkey's availability.** Whether it survives losing this device depends on
+  the provider's sync, which the application cannot observe and does not report.
+- **Recovery does not restore conversations.** It restores the account and the vault. MLS
+  membership can only be granted by a device already in the group — the same limit the phrase
+  path has always had.
+
+Pinned by `crypto-core`'s escrow tests (a substituted account, kind or parameter set fails to
+open; parameters below the floor are refused before Argon2 runs) and by
+`server/tests/recovery.rs` (a wrong secret is indistinguishable from an absent escrow; a rotation
+destroys the escrow; the quota bites).
+
+---
+
+## 9. Metadata resistance
 
 **Claim.** Two mechanisms, and both are real.
 
@@ -332,7 +376,7 @@ call. See [`./THREAT-MODEL.md`](./THREAT-MODEL.md#4ter-calls-leak-more-than-mess
 
 ---
 
-## 9. Distribution integrity
+## 10. Distribution integrity
 
 **Claim.** On the web, the server delivers the JavaScript on every load and can deliver a hostile
 version; no browser policy opposes that. The desktop application closes that path by packing the
@@ -357,7 +401,7 @@ machines has not been measured.
 
 ---
 
-## 10. What has never been verified
+## 11. What has never been verified
 
 Stated here so it is not inferred from silence.
 
@@ -375,6 +419,10 @@ Stated here so it is not inferred from silence.
 - **The native storage migration has never been run end to end**, and it cannot be covered by the
   existing harness (`node --test`, no DOM, no IndexedDB, no IPC). It is the code that runs once per
   installation and whose failure is irreversible.
+- **The WebAuthn PRF path has never been exercised against a real authenticator here.** It is
+  written against the specification and the browsers' documented behaviour, including the case
+  where an authenticator reports `prf.enabled` at creation and returns no output until an
+  assertion. That fallback in particular has never run on hardware that takes it.
 - **Mobile has not been built here.** Tauri 2 targets iOS and Android from the same codebase, but
   that requires the Android SDK and, for iOS, a macOS machine. A mobile webview will not match
   native on gestures and notifications in any case.

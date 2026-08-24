@@ -90,8 +90,8 @@ is "no replay as long as the database has not collapsed".
 
 ### 1.5 Unauthenticated routes
 
-Four routes cannot be authenticated by definition — account creation, device registration, pairing
-deposit and pairing pickup. They carry a per-address rate limit, `THROTTLE_PER_MINUTE` (60 by
+Five routes cannot be authenticated by definition — account creation, device registration, pairing
+deposit, pairing pickup, and the recovery claim. They carry a per-address rate limit, `THROTTLE_PER_MINUTE` (60 by
 default). Account creation is what justifies it: it writes into the transparency log, whose
 entries cannot be taken back without breaking the consistency proofs.
 
@@ -102,7 +102,13 @@ drain a chosen victim's stock and leave them unreachable for any new conversatio
 the caller alone — opening conversations with many correspondents is legitimate, hammering a
 single one is not.
 
-Both counters live **in memory, hence per instance**: two instances offer twice the quota and a
+The recovery claim (`POST /v1/recovery/claim`, § 11) carries a third bound of its own,
+`RECOVERY_QUOTA_PER_MINUTE` — **three a minute per address**, the narrowest quota in the server.
+Every other limit here bounds how fast a table grows; this one bounds how fast a password can be
+guessed, and it is the only online bound that exists, because a failed claim names no account and
+so cannot be counted against one. A compile-time assertion keeps it below every write quota.
+
+All these counters live **in memory, hence per instance**: two instances offer twice the quota and a
 restart resets them. An address is not an identity either. This is a speed bump, not a barrier.
 The server reads only the socket address and never `X-Forwarded-For`, which anyone can forge.
 
@@ -123,6 +129,10 @@ the single implementation; `crates/transparency` adds one more for tree heads.
 | `wac-signal-mac-v1` | group posting key (HMAC) | `group_id`, `nonce`, `SHA256(body)` |
 | `wac-gateway-v1` | device authentication key | `device_id`, server challenge |
 | `wac-sth-v1` | transparency log key | tree `size`, `root`, `timestamp` |
+
+The recovery escrow (§ 11) adds four labels that are **derivation** domains rather than signature
+domains — they separate keys, not messages, and so are not in the table above:
+`wac-escrow-salt-v1`, `wac-escrow-lookup-v1`, `wac-escrow-seal-v1`, `wac-escrow-prf-v1`.
 
 ### 2.1 What domain separation buys
 
@@ -944,3 +954,86 @@ envelope is a missing generation of the application ratchet, and nothing after i
 device on the wrong side of a purge must therefore stop trying to decrypt — otherwise it produces
 one error per envelope, on every poll, forever — restore what it can read from the vault, and ask
 to be re-introduced to the group. If the vault is disabled, the content is gone.
+
+---
+
+## 11. The recovery escrow
+
+**Off by default.** Enabling it is the one action in this protocol that puts the account root
+secret on the server. `docs/THREAT-MODEL.md` § 2.2.2 states what that costs; this section states
+what travels. The design argument is in
+[`./specs/2026-08-22-recovery-escrow.md`](./specs/2026-08-22-recovery-escrow.md).
+
+### 11.1 Derivation
+
+One expensive step yields two independent keys — one names the row on the server, the other opens
+it. Independence comes from the `info` labels, exactly as it does for the vault and device-sync
+keys in `crypto-core/src/account.rs`.
+
+```
+password  salt   = SHA-256("wac-escrow-salt-v1" ‖ handle)
+          okm    = Argon2id(password, salt, m = 256 MiB, t = 4, p = 1)  → 64 bytes
+          lookup = HKDF-SHA256(okm, info = "wac-escrow-lookup-v1")      → 32 bytes
+          seal   = HKDF-SHA256(okm, info = "wac-escrow-seal-v1")        → 32 bytes
+
+passkey   prf    = WebAuthn PRF over the constant salt "wac-escrow-prf-v1" → 32 bytes
+          lookup = HKDF-SHA256(prf, info = "wac-escrow-lookup-v1")
+          seal   = HKDF-SHA256(prf, info = "wac-escrow-seal-v1")
+```
+
+**The Argon2id salt is derived from the handle and not drawn at random.** It cannot be random:
+reading the stored parameters requires the lookup key, and computing the lookup key requires the
+salt. A per-handle salt is unique per account, so no one table covers two users — and it is
+precomputable against a *named* target, which the memory cost is what answers. The cost parameters
+are client constants for the same circular reason; the stored copy exists so a later build
+recognises an older escrow, is checked against a floor, and is inside the AAD.
+
+**What the server receives is `SHA-256(lookup)`.** The pre-image never leaves the client.
+
+### 11.2 The sealed object
+
+```
+sealed = nonce(12) ‖ AES-256-GCM(seal_key, nonce, seed(64), aad)          → 92 bytes, always
+aad    = account_id ‖ 0x00 ‖ kind(1) ‖ params(13)
+params = version(1) ‖ memory_kib(4) ‖ iterations(4) ‖ lanes(4)            big-endian
+kind   = 0x01 password | 0x02 passkey
+```
+
+The plaintext is exactly what the pairing packet carries: `Account::export_seed`, 64 bytes, worth
+the whole account.
+
+The AAD is what makes three substitutions fail loudly instead of quietly. The account id stops a
+server serving one account's ciphertext under another's lookup — which is also why the client
+verifies nothing after opening: reaching that point already proves the id and the seed were sealed
+together. The kind stops a passkey escrow being presented as a password one. The parameters stop a
+downgrade.
+
+The length is fixed and checked server-side. A caller-chosen length on the one table an
+unauthenticated route reads back would be a storage channel.
+
+### 11.3 The routes
+
+| Route | Authentication | Effect |
+|---|---|---|
+| `POST /v1/recovery` | signed | Deposits or replaces one factor for the signing device's account |
+| `GET /v1/recovery` | signed | Lists the kinds in use. **Never the ciphertext** |
+| `POST /v1/recovery/forget` | signed | Removes one factor; removing an absent one succeeds |
+| `POST /v1/recovery/claim` | **none** | `{lookup}` → the escrow, or 404 |
+
+`claim` is `POST` so the lookup — a value derived from the password — stays out of every access
+log between the client and the server. Same reasoning as `presence` in § 1.
+
+**A wrong secret and an account with no escrow return the identical 404.** The server holds a hash
+and compares it; it cannot tell them apart, and neither may the copy shown to the user.
+
+### 11.4 Two destructions the protocol requires
+
+**A rotation deletes every escrow of the account**, in the transaction that moves the identity
+key. Rotation is the answer to a stolen device and a stolen device holds the seed; an escrow left
+behind is the abandoned key still on the server, openable by a password the thief may have
+watched being typed.
+
+**A rename deletes the password escrow.** The handle is the salt, so after a rename the owner's
+own password produces a different lookup: the row would never open again while remaining
+grindable by whoever took the database. Re-sealing is impossible — it needs the password, which no
+session holds. The passkey factor is unaffected; nothing in its derivation knows the handle.

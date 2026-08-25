@@ -220,6 +220,29 @@ normally adds the feature; this project does not use that CLI for desktop, so
 convention, because the common case here is running the application, not editing its
 interface.
 
+### Installers
+
+```sh
+cargo install tauri-cli --version "^2" --locked
+cargo tauri build                            # every target this host can produce
+cargo tauri build --bundles deb              # or just one
+```
+
+Output lands in `target/release/bundle/`. The configuration lists six targets — `deb`, `rpm`,
+`appimage`, `nsis`, `msi`, `dmg` — and each host produces the ones that belong to it.
+
+`release.yml` builds all six on a tag across three runners and attaches them to the release with a
+`SHA256SUMS` and a Sigstore attestation. **They carry no platform signature**: Windows shows
+SmartScreen and macOS asks for a right-click → Open, because a Windows certificate and an Apple
+developer account are both things somebody rents. The `.dmg` is Apple Silicon only, `macos-14`
+being an arm64 runner.
+
+Linux builds on `ubuntu-22.04` rather than the newest image, deliberately: a binary linked against
+24.04's glibc refuses to start on anything older.
+
+**The version comes from the tag**, passed with `--config`, not from `tauri.conf.json`. Two files
+already carry a version and a third place to bump is a third place to forget.
+
 **A path trap in `tauri.conf.json`**, which has cost one build: `frontendDist` is resolved from
 the configuration file, so from `apps/desktop`, while `beforeBuildCommand` and
 `beforeDevCommand` run from `apps/`. The two are not written with the same prefix. JSON takes
@@ -353,7 +376,8 @@ erased by the next `android init`.
 |---|---|---|
 | Push to `dev` | nothing | — |
 | Push to `main` | Android build, if `apps/` or `Cargo.lock` changed | Ubuntu runner |
-| Manual dispatch | Android or iOS, your choice | depends on the target |
+| Tag `v*` | The web manifest, then desktop installers on three runners | Ubuntu, Windows, macOS |
+| Manual dispatch | Android or iOS, your choice; or a release rehearsal that publishes nothing | depends on the target |
 
 Manual dispatch is the normal way to get a mobile binary. **iOS never runs automatically**: a
 macOS runner minute is billed ten times a Linux one, which makes it the decisive expense.
@@ -365,6 +389,10 @@ compiles native Rust per architecture, so the four default targets quadruple the
 of the whole dependency tree — enough to approach a runner's timeout once the cache was
 invalidated. iOS builds unsigned, for the simulator, so it produces nothing installable on a
 real device; that needs an Apple developer account, a provisioning profile and a certificate.
+
+**These builds have run in CI. `ios.yml` has had one green run**, its first ever, twelve and a half
+minutes on `macos-14`. What has still never happened is a build on this machine, or an install on a
+phone.
 
 ## See also
 

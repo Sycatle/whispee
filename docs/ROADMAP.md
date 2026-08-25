@@ -32,7 +32,7 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Local lock | Argon2id 64 MiB / 3 passes, unlock key → master key indirection, re-locking after five minutes without the user |
 | Disappearing messages | Seven days by default, carried in a `0xF101` group-context extension; admin or moderator may change it |
 | History vault | On by default, revocable in settings — and never used for a conversation that has a lifetime |
-| Desktop application | Tauri 2, interface packaged in the binary |
+| Desktop application | Tauri 2, interface packaged in the binary. Installers for the three desktop systems are built by CI on a tag, attested, and unsigned by the platforms |
 | Reproducible signed releases | `scripts/release.sh` and `scripts/verify-release.sh` |
 | Mobile adaptation | Navigation, safe areas, keyboard, touch targets, lifecycle, offline state, native storage, QR pairing |
 | Push notifications | Web Push, off until a deployment sets `VAPID_SUBJECT`; the wake-up carries nothing. Browsers only — no FCM, no APNs |
@@ -51,7 +51,7 @@ These are finished features whose last mile could not be exercised on the develo
 | Native storage migration | The end-to-end migration path has never been run from start to finish |
 | Background re-locking | Verified only in its wiring, not its timing |
 | QR pairing | The scan itself, for want of `BarcodeDetector` on Chrome under Linux; encoding and decoding are tested |
-| Mobile builds | Only ever built in CI, never locally — no Android NDK and no macOS host here |
+| Mobile builds | Only ever built in CI, never locally — no Android NDK and no macOS host here. `ios.yml` has since had one green run on `workflow_dispatch`; `android.yml` produces an unsigned debug APK |
 | Mobile builds in CI | `test.yml` runs the suites and the WebAssembly check on every pull request; `android.yml` and `ios.yml` stay manual or `main`-only, so no mobile artefact is built on a PR |
 
 ## Push notifications — Web Push works, FCM and APNs do not
@@ -111,9 +111,21 @@ received.
   browser are. `Vapid::wake` matches on the provider name, so a second emitter lands beside it
   without touching the call site, but neither is written and the wall described above has not
   moved.
-- **iOS needs the site installed to the home screen** before it will subscribe at all, and even
-  then a notification there can never show content — the service extension is a separate Swift
-  process while the keys live in a WASM module inside the webview.
+
+  A Tauri webview has no service worker either, so `pushSupported()` is false there and a packaged
+  build has **no background wake-up path at all**. Since the web client became installable, the
+  ranking is inverted on a phone: the site added to the home screen is notified and the native
+  application is not. Saying so is not a recommendation to prefer the web — it is the shape of the
+  next piece of work.
+
+- **Watches.** Nothing, and nothing is possible before the line above: a watch shows the
+  notifications its phone received. A generic "New message" on a wrist is also close to worthless,
+  which is a second reason this is a whole piece of work rather than a setting.
+- **iOS needs the site installed to the home screen** before it will subscribe at all. That is now
+  possible — `public/manifest.webmanifest` and the `apple-mobile-web-app-*` metas exist, and until
+  they did there was no version of this client iOS would have subscribed. Untested on a device,
+  for want of one. Even then a notification there can never show content: the service extension is
+  a separate Swift process while the keys live in a WASM module inside the webview.
 - **The notification is generic.** "New message", and nothing else. The worker cannot decrypt: the
   MLS keys are in the page's memory, not the worker's, and moving them would hand the decryption
   keys to a context that outlives every tab. Same constraint iOS imposes, arrived at on purpose.

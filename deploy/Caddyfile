@@ -65,7 +65,17 @@
 		# The mutable half. `index.html` carries the CSP and the script tags that name the
 		# fingerprinted files: cached, it would pin a client to a version that no longer exists on
 		# disk after a deploy — a blank page nobody can reproduce.
-		@entry path /index.html /
+		#
+		# `sw.js` joins it, and the manifest with it. A stale service worker is the same defect one
+		# level up: it decides what the *next* load is answered from, so a cached one keeps its
+		# routing rules after they have been corrected. Browsers already leave a worker script out
+		# of the HTTP cache on their own — that is what `updateViaCache` defaults to — and this
+		# line is for the proxy in between that does not know it.
+		#
+		# The client does not rely on any of this: `apps/web/public/sw.js` asks for `index.html`
+		# with `cache: "no-cache"` precisely so a deployment that omits these headers still heals.
+		# Two locks on the property that matters most.
+		@entry path /index.html / /sw.js /manifest.webmanifest
 		header @entry Cache-Control "no-cache"
 
 		try_files {path} /index.html

@@ -19,6 +19,22 @@
 # A manifest is a claim about a build somebody can install. `dev` moves several times a day and
 # nothing deploys from it; a manifest per commit would be a list of hashes nobody could act on,
 # and would make the released ones harder to find.
+#
+# # The desktop job, and why the binaries are unsigned
+#
+# Windows code signing is a certificate somebody rents; Apple notarisation is a developer account
+# somebody rents. Neither was bought, so the installers carry no platform signature: Windows shows
+# SmartScreen, macOS asks for a right-click. That is a real cost at the door and it is written into
+# `README.md` rather than left to be discovered.
+#
+# What replaces it is the same thing that carries the web manifest: `SHA256SUMS` per platform,
+# attested through Sigstore to this commit and this workflow. It is a weaker promise about *who
+# vouches* and a stronger one about *what was built* — a signature says a key-holder approved the
+# bytes, an attestation says which source produced them.
+#
+# The repository's own Ed25519 key (`scripts/release.sh`, `release/whispee.pub`) stays what it is:
+# the reproducible local build. `verify-release.sh` already states its limit — the key lives in the
+# repository, so whoever controls the repository can replace it.
 name: Release
 
 on:
@@ -113,3 +129,118 @@ jobs:
           the same claim." \
             release/web/WEB-SHA256SUMS \
             release/web/BUILD-INFO
+
+  desktop:
+    name: Desktop installers
+    # The release has to exist before anything can be added to it, and `web` is what creates it.
+    # On `workflow_dispatch` this job still builds — the point of a rehearsal is to find out
+    # whether it builds — and publishes nothing, exactly like `web`.
+    needs: web
+
+    strategy:
+      # One platform failing must not cancel the other two: a broken macOS build is not a reason
+      # to lose a Windows installer that was already compiling.
+      fail-fast: false
+      matrix:
+        include:
+          # **22.04 rather than `ubuntu-latest`, and it is a compatibility decision.** A binary
+          # linked against 24.04's glibc refuses to start on anything older, and "works on the
+          # newest Ubuntu only" is not what a `.deb` is for.
+          - os: ubuntu-22.04
+            bundles: deb,rpm,appimage
+            artefacts: target/release/bundle/{deb/*.deb,rpm/*.rpm,appimage/*.AppImage}
+          - os: windows-latest
+            bundles: msi,nsis
+            artefacts: target/release/bundle/{msi/*.msi,nsis/*.exe}
+          # **Apple Silicon only.** `macos-14` is arm64, so this produces an arm64 `.dmg` and
+          # nothing for an Intel Mac. Building both would mean a second runner or a universal
+          # binary; neither is done here, and the gap is named in `README.md` rather than
+          # discovered by somebody downloading a file that will not open.
+          - os: macos-14
+            bundles: dmg
+            artefacts: target/release/bundle/dmg/*.dmg
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Tauri links against the system webview, and without these `glib-sys`'s build script fails
+      # on `pkg-config` before anything is compiled. Same list as the `desktop` job in `test.yml`.
+      - name: Tauri's system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev patchelf
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The same pinning as the `web` job above, and for a related reason: the interface inside
+      # these binaries is the same bundle the manifest describes, so it is built the same way.
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: apps/web/.nvmrc
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@11.22.0 --activate
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # **The version comes from the tag, not from `tauri.conf.json`.**
+      #
+      # Two files already carry a version — the manifest and `apps/desktop/Cargo.toml` — and a
+      # third place to bump is a third place to forget. Taking it from the ref means an installer
+      # is named after the release it is attached to, by construction. On a rehearsal there is no
+      # tag, so the file's own value stands.
+      - name: Build the installers
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            cargo tauri build --bundles ${{ matrix.bundles }} \
+              --config "{\"version\": \"${GITHUB_REF_NAME#v}\"}"
+          else
+            cargo tauri build --bundles ${{ matrix.bundles }}
+          fi
+
+      # Collected into one directory so the hash file, the attestation and the upload all name the
+      # same paths — three globs that have to agree is three chances for one of them to quietly
+      # match nothing.
+      - name: Collect and hash
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          mkdir -p release/desktop
+          cp ${{ matrix.artefacts }} release/desktop/
+          cd release/desktop
+          # Refuse an empty directory loudly. A release carrying a `SHA256SUMS` with no files
+          # beside it is worse than a failed job: it looks like a successful publication.
+          [ -n "$(ls -A)" ] || { echo "no bundle was produced" >&2; exit 1; }
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      # The bundles themselves, not the hash file. On the web side the manifest *is* the artefact,
+      # because the bytes being checked live on somebody else's server; here the bytes are what is
+      # downloaded, so that is what the provenance has to bind.
+      - uses: actions/attest-build-provenance@v3
+        with:
+          # The hash file is excluded rather than attested alongside: it describes the bundles, and
+          # a provenance statement about a list of hashes is one indirection away from the thing
+          # somebody actually runs.
+          subject-path: |
+            release/desktop/*
+            !release/desktop/SHA256SUMS
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" release/desktop/* --clobber

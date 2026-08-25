@@ -4,19 +4,29 @@
 # this workspace once, and every byte of it is uploaded to the daemon before the first
 # instruction runs. The build produces its own artefacts inside the image; the ones lying here
 # are from another toolchain, another architecture, or both.
-target/
-node_modules/
+# **Anchored at the context root unless they start with `**/`, and that is the whole point of this
+# block.** Docker matches these against paths relative to the context, so a bare `node_modules/`
+# excludes the one at the top and copies `apps/web/node_modules` — 683 MiB of it — straight into
+# the image. Measured, not feared: the build context carried 683 files where the source tree has
+# 457.
+#
+# `apps/web/dist` was the one that cost an afternoon. Copied in, Tailwind scanned the previous
+# bundle for class names and emitted a different stylesheet, so the chunk hashes moved and the
+# deployment stopped matching the manifest `.github/workflows/release.yml` publishes — the exact
+# property `scripts/verify-web.sh` exists to check. A build whose output depends on whether
+# somebody ran `pnpm run build` beforehand is not reproducible, and nothing said so.
+**/target/
+**/node_modules/
 .git/
 .worktrees/
 
 # Secrets. `.env` is the development one and would be baked into a layer.
-.env
-.env.local
-deploy/.env
+**/.env
+**/.env.local
 
 # Build outputs that the image rebuilds itself.
-dist/
-pkg/
-*.tsbuildinfo
+**/dist/
+**/pkg/
+**/*.tsbuildinfo
 apps/desktop/gen/
 release/artefacts/

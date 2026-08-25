@@ -39,6 +39,9 @@ not their equal and does not try to be.
 | History vault | On by default, encrypted under a key derived from the recovery phrase — **and off for any conversation with a lifetime**, which is what makes disappearing mean anything. Such a conversation does not survive the loss of every device |
 | Storage quota | 256 MiB per account by default, charged on vault writes and attachment uploads, credited back when a purge deletes. Envelopes are outside it: charging a sealed post would mean naming its sender — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Web, desktop | Vite 7 + React 19; Tauri 2 wraps the same build |
+| Push notifications | Web Push, off until a deployment names a contact in `VAPID_SUBJECT`. The wake-up carries no text, no sender and no group id — the worker cannot decrypt, so it says only that something arrived |
+| Verifiable web client | The bundle belongs to no deployment, so one published manifest of hashes describes every instance. CI attests it to GitHub; an extension compares what the browser actually received. See [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) § 4quinquies for what that establishes and what it does not |
+| Deployment | `deploy/` — Postgres, the server, and Caddy terminating TLS on one origin. See [docs/DEPLOY.md](docs/DEPLOY.md) |
 | Reproducible, signed releases | `scripts/release.sh`, `scripts/verify-release.sh` |
 
 ## What does not work
@@ -123,12 +126,17 @@ Every design decision is written down, with what it costs and what it does not s
 
 ## Licence
 
-**No licence has been chosen yet.** `Cargo.toml` still declares `license = "UNLICENSED"` and
-`publish = false`.
+**GNU Affero General Public License, version 3 or later.** The full text is in
+[LICENSE](LICENSE).
 
-Until a licence is chosen, this repository is **not legally open source**. Publishing source
-code grants no rights: with no licence, default copyright applies, and nobody has permission
-to use, copy, modify or redistribute it. You may read it. Anything else is not permitted yet.
+### Why the Affero variant rather than the GPL
 
-This will be resolved. Until it is, the honest statement is the one above rather than a badge
-implying otherwise.
+Because of the one thing it adds: **running a modified version as a network service counts as
+distributing it**. A messenger is used over a network and almost never installed by the person it
+serves, so the ordinary GPL would let somebody host a changed build — with the crypto quietly
+weakened, say — and owe nobody the source. That is precisely the substitution this project spends
+a manifest, a workflow and a browser extension trying to make detectable; a licence that permitted
+it in law while the code fought it in practice would be an odd pair.
+
+`publish = false` stays on every crate. The licence says what may be done with the source; it does
+not make any of this fit to publish to a registry, and the status section above has not changed.

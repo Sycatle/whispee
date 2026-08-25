@@ -1,5 +1,6 @@
 {
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "//": "Not shipped for Chrome's benefit — the manifest already declares the service worker as a module. It is here so that `node --test` reads these files as ES modules, which is what makes verify.js testable outside a browser."
 }

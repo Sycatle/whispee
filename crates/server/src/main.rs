@@ -16,6 +16,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     let pool = server::connect(&database_url).await?;
+
+    // Read after the pool exists, because the key it may load lives in the database. Absent
+    // configuration this is `Silent` and no advertised key, which is the behaviour of a
+    // deployment that talks to no push service and must stay fully functional — see `push`.
+    let push = server::push::from_environment(&pool).await;
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!(%addr, "delivery service listening");
@@ -23,7 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `into_make_service_with_connect_info` rather than the bare service: without it, the rate
     // limit's `ConnectInfo` extractor fails and **every** open route returns an internal error.
     // A one-line omission takes the whole signup path down.
-    axum::serve(listener, server::app(pool).into_make_service_with_connect_info::<SocketAddr>())
+    let app = server::app_with_push(pool, server::throttle::Limits::from_environment(), push);
+
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

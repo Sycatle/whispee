@@ -35,6 +35,7 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Desktop application | Tauri 2, interface packaged in the binary |
 | Reproducible signed releases | `scripts/release.sh` and `scripts/verify-release.sh` |
 | Mobile adaptation | Navigation, safe areas, keyboard, touch targets, lifecycle, offline state, native storage, QR pairing |
+| Push notifications | Web Push, off until a deployment sets `VAPID_SUBJECT`; the wake-up carries nothing. Browsers only — no FCM, no APNs |
 
 The mobile work was carried out as seven numbered workstreams. Six landed. What each one left
 behind is in the next section, because "landed" and "verified on a real device" are not the
@@ -53,48 +54,88 @@ These are finished features whose last mile could not be exercised on the develo
 | Mobile builds | Only ever built in CI, never locally — no Android NDK and no macOS host here |
 | Mobile builds in CI | `test.yml` runs the suites and the WebAssembly check on every pull request; `android.yml` and `ios.yml` stay manual or `main`-only, so no mobile artefact is built on a PR |
 
-## Push notifications — half-built, and stopping there is the decision
+## Push notifications — Web Push works, FCM and APNs do not
 
-**What exists, server-side, and works:** token registration and replacement
-(`crates/server/src/push.rs`, `migrations/0011_push.sql`), the logic that decides which devices
-to wake after an envelope is posted, and a `Waker` trait whose default implementation, `Silent`,
-sends nothing.
+**What works, end to end:** a browser subscribes from the settings screen, the server signs a
+VAPID token per push service and sends an empty wake-up, and the service worker shows a
+notification with the tab closed. `crates/server/src/vapid.rs` holds the ES256 half,
+`crates/server/src/push.rs` the emitter, `apps/web/src/lib/push.ts` and `apps/web/public/sw.js`
+the browser half.
 
-`Silent` is not a stub. It is the behaviour of a deployment that has configured no provider,
-and that deployment must stay **fully functional**: tokens register, nothing is sent, the
-application keeps working exactly as it does today. Anyone wiring a real provider in must
-preserve that first.
+**What turns it on is one variable, `VAPID_SUBJECT`** — the contact a push service is told to
+reach. There is no private key to supply: the pair is the server's own, created on first start
+(`migrations/0020_vapid.sql`), the same shape `log_key` has had since the transparency log. Unset,
+the waker is `Silent`, the key route answers 503, and the client hides the control. That is the
+second of the three limits in `migrations/0011_push.sql`, and it is still the behaviour to
+preserve first.
 
-**What is missing, precisely — all of it the part that requires secrets:**
+### Why Web Push and not FCM
 
-1. **An FCM provider.** HTTP v1, therefore OAuth2 with a service account, therefore an RS256
-   JWT.
-2. **An APNs provider.** ES256 JWT, `content-available: 1`.
-3. **The configuration that wires them in.** Absent by default, or the second of the three
-   limits written into `migrations/0011_push.sql` falls.
-4. **Device-side token registration.** The token comes from the operating system through a
-   Tauri plugin that has to be integrated, and it **changes without warning** — so registration
-   must be replayed at every start, not only when the feature is switched on.
-5. **The user-facing setting.** Enabling it belongs to the user, and the screen has to say what
-   it discloses before offering the switch — as the vault screen does, for the same reason.
+The roadmap used to describe FCM and APNs, and said the missing part was "all of it the part that
+requires secrets". That was true and it was not the hard part. The hard part is device-side
+registration: it needs a Tauri plugin that does not exist, therefore Kotlin and Swift, and none of
+it compiles or runs on the development machine — no NDK, no macOS host, no physical device.
+Writing it would have produced exactly what this document refuses elsewhere: integration code that
+has never been executed and looks like a feature.
 
-The server also has **no outbound HTTP client** today. Adding one is a dependency and a new
-network surface on a service that had none.
+Web Push removed that wall for one specific reason. **The wake-up carries nothing**, so there is
+no payload to encrypt, so the whole content-encryption half of Web Push — RFC 8291, `aes128gcm`,
+the `p256dh` and `auth` subscription secrets — is unused. What is left is one ES256 signature.
 
-**None of this is written, deliberately.** Integration code that has never been executed would
-look like a feature where there is none, and a half-wired provider is the kind of thing that
-appears to work in review and fails in the hands of the person relying on it.
+It also needed no migration for the addresses: without a payload the only thing worth keeping is
+the endpoint URL, so `push::Address { provider, token }` holds a subscription unchanged.
+
+### What it cost elsewhere
+
+**The server has an outbound HTTP client now**, which it had never had. `reqwest` with rustls, no
+cookie store, no redirect following — a push endpoint that answers with a redirect is not one to
+follow carrying a bearer token. No request is made unless a deployment sets the variable.
+
+**There is a service worker**, and `notifications.ts` used to argue against one. The objection was
+that a worker would cache the application shell served by the server the desktop build exists to
+stop trusting. This one caches nothing — no `fetch` handler, no `Cache`, no precache manifest —
+and `push.test.ts` asserts that rather than trusting the comment. It exists because a push message
+wakes a worker and never a document.
+
+### What is still missing
+
+- **FCM and APNs.** The packaged mobile application is not covered; the web client and an Android
+  browser are. `Vapid::wake` matches on the provider name, so a second emitter lands beside it
+  without touching the call site, but neither is written and the wall described above has not
+  moved.
+- **iOS needs the site installed to the home screen** before it will subscribe at all, and even
+  then a notification there can never show content — the service extension is a separate Swift
+  process while the keys live in a WASM module inside the webview.
+- **The notification is generic.** "New message", and nothing else. The worker cannot decrypt: the
+  MLS keys are in the page's memory, not the worker's, and moving them would hand the decryption
+  keys to a context that outlives every tab. Same constraint iOS imposes, arrived at on purpose.
+- **No automated test can establish that Google and Mozilla accept these tokens.**
+  `tests/webpush.rs` checks the token against the specification and against the public key
+  advertised beside it, using a fake push service that verifies the signature and asserts the body
+  is empty. A service disagreeing with our reading of RFC 8292 would pass every one of them.
+
+  What closes that is `a_real_push_service_accepts_the_token`, ignored by default because it needs
+  a subscription minted by a real browser: it signs exactly as the emitter does and sends to the
+  live endpoint. Run once against Chrome's service, which answered `201 Created`, and the
+  notification appeared with every tab closed — server to FCM to service worker to screen. Mozilla
+  has not been tried. The command is in `docs/DEPLOY.md` beside the browser pass.
 
 ### What push costs, and it is not the tokens
 
-Push **degrades sealed sender** — not through its tokens, but through its existence. A server
-that chooses *whom* to wake gains a targeted activity trigger: ceasing to wake four members out
-of five makes subsequent posts attributable to the fifth. Sealed sender protects against a
-server that observes, not against a server that **paces**. Nothing cryptographic answers this.
+Unchanged by any of the above, and the reason the feature stays optional. Push **degrades sealed
+sender** — not through its tokens, but through its existence. A server that chooses *whom* to wake
+gains a targeted activity trigger: ceasing to wake four members out of five makes subsequent posts
+attributable to the fifth. Sealed sender protects against a server that observes, not against a
+server that **paces**. Nothing cryptographic answers this.
+
+A second party learns something too, and the settings screen says so before offering the switch:
+the browser's push service — Google for Chrome, Mozilla for Firefox — sees a wake-up arrive every
+time a message does, and can tie that to an address. The content stays encrypted; the timing does
+not.
 
 That is the price of the feature, and it is the reason it must stay strictly optional, inert
 without configuration, and empty — the wake-up carries no text, no sender and no group id, so
-neither Apple, nor Google, nor the lock screen learns who writes to whom.
+neither the push service nor the lock screen learns who writes to whom.
 
 ## Biometric unlock — written, never executed
 

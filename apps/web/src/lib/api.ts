@@ -8,6 +8,7 @@
 import type { Admission } from "./call";
 import type { DeviceCipher } from "./cipher";
 import { fromBase64, toBase64, toHex } from "./keys";
+import { isTauri } from "./platform";
 import type { AttestedDevice } from "./wasm";
 
 /** See the note about `buffer` in `keys.ts`. */
@@ -15,7 +16,69 @@ function buffer(bytes: Uint8Array): BufferSource {
   return bytes as unknown as BufferSource;
 }
 
-export const BASE_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8787";
+/**
+ * Where the delivery service is, and why this is no longer compiled in.
+ *
+ * # The empty string is the answer, and it is not a fallback
+ *
+ * On the web the API shares this page's origin — `deploy/` puts Caddy in front of both, and the
+ * development server proxies `/v1` to make the same thing true there. So the base is relative, and
+ * `fetch("/v1/…")` reaches the right place without anything being configured.
+ *
+ * That is what it buys, and the reason is not tidiness: `VITE_API_URL` used to be **substituted
+ * into the bundle at build time**, so every deployment produced different bytes and no published
+ * manifest of hashes could describe more than one instance. Three files out of two hundred and
+ * twenty-six changed with it. Taking it out is what lets one build be checked against one manifest
+ * by anybody, self-hosted deployments included — see `docs/THREAT-MODEL.md` on what that check is
+ * and is not.
+ *
+ * # Why an injected global rather than an import
+ *
+ * The desktop shell is the one target where the page's origin says nothing: it is `tauri://`, and
+ * the server is elsewhere. The native side sets `__WHISPEE_API__` before the webview runs, which
+ * keeps the address out of the bytes this file compiles to.
+ *
+ * A hostile web server could inject that global too. It gains nothing by it: it is already serving
+ * every line of this application, so redirecting the API is not a power it lacked.
+ */
+export const BASE_URL = apiBase();
+
+/**
+ * The address the desktop shell reaches, and the reason a literal here costs nothing.
+ *
+ * Compiled in, but **not configurable**, which is the distinction that matters: every build
+ * contains this same string, so it changes no bytes between deployments. `tauri.conf.json` already
+ * pins the same origin in its own policy, and `csp.test.ts` fails if the two disagree — so this is
+ * not a new coupling, it is the existing one written where the code can read it.
+ *
+ * A desktop build aimed at another server would set `__WHISPEE_API__` from the native side. Nothing
+ * does today, and inventing the mechanism before there is a caller would be inventing the wrong
+ * one.
+ */
+const DESKTOP_API = "http://127.0.0.1:8787";
+
+function apiBase(): string {
+  const injected = (globalThis as { __WHISPEE_API__?: unknown }).__WHISPEE_API__;
+  if (typeof injected === "string" && injected !== "") return injected.replace(/\/+$/, "");
+
+  // The packaged shell is loaded from `tauri://`, so its own origin names nothing reachable.
+  if (isTauri()) return DESKTOP_API;
+
+  return "";
+}
+
+/**
+ * The WebSocket URL for a path, whichever way the base is expressed.
+ *
+ * `BASE_URL.replace(/^http/, "ws")` was enough while the base was absolute. It is not now: an empty
+ * base leaves a bare path, and `new WebSocket("/v1/gateway")` throws `SyntaxError` — at the one
+ * moment the real-time session is being opened, with a message naming nothing.
+ */
+export function socketUrl(path: string): string {
+  const origin = BASE_URL === "" ? globalThis.location.origin : BASE_URL;
+
+  return `${origin.replace(/^http/, "ws")}${path}`;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -562,6 +625,44 @@ export class Api {
    */
   renameAccount(account: string, handle: string): Promise<{ handle: string; retired: string | null }> {
     return this.request("POST", `/v1/accounts/${encodeURIComponent(account)}/handle`, { handle });
+  }
+
+  /**
+   * Hands this device's wake address to the server.
+   *
+   * For Web Push the address is the subscription endpoint, and there is nothing else to send: a
+   * wake-up carries no payload, so the two subscription secrets that would encrypt one are never
+   * needed and never leave the browser. See `lib/push.ts`.
+   */
+  setPushToken(provider: string, token: string): Promise<void> {
+    return this.request("POST", "/v1/push/token", { provider, token });
+  }
+
+  /**
+   * Drops this device's wake address.
+   *
+   * The row goes rather than gaining a disabled flag: what is not stored cannot leak with a
+   * database later.
+   */
+  forgetPushToken(): Promise<void> {
+    return this.request("POST", "/v1/push/forget", {});
+  }
+
+  /**
+   * The key a browser must subscribe against, or `null` when this deployment does not do push.
+   *
+   * Unsigned, and it has to be: a client asks before it has anything to subscribe. `null` on 503
+   * rather than a throw — a deployment without push is not an error, it is a deployment offering
+   * one fewer thing, and the screen hides the control the way it does for calls.
+   */
+  static async vapidPublicKey(): Promise<string | null> {
+    const response = await fetch(`${BASE_URL}/v1/push/vapid`);
+
+    if (response.status === 503) return null;
+    if (!response.ok) throw new ApiError(response.status, await response.text());
+
+    const body = (await response.json()) as { key: string };
+    return body.key;
   }
 
   /** Stops or resumes broadcasting presence. Reciprocal: opting out means ceasing to see. */

@@ -311,12 +311,23 @@ export function createNotifier({
         });
       } catch {
         // `new Notification()` throws `TypeError: Illegal constructor` in the Android Chrome tab,
-        // where notifications exist only through a service worker's registration. There is no
-        // service worker here — one would be a cache of the application shell served by the same
-        // server the desktop build exists to stop trusting — so on that browser this feature is
-        // simply absent. Swallowed rather than reported: the caller has no repair to offer, and
-        // an error banner for "your browser cannot do this" on every message would be worse than
-        // the silence.
+        // where notifications exist only through a service worker's registration. Swallowed
+        // rather than reported: the caller has no repair to offer, and an error banner for "your
+        // browser cannot do this" on every message would be worse than the silence.
+        //
+        // **This used to say there was no service worker here, and that a worker would be a cache
+        // of the application shell served by the same server the desktop build exists to stop
+        // trusting.** There is one now — `public/sw.js` — and the sentence needed amending rather
+        // than deleting, because the objection it made is still right about the thing it names.
+        // That worker caches nothing: no `fetch` handler, no `Cache`, no precache manifest, and
+        // `push.test.ts` asserts the absence rather than trusting the comment. It exists because
+        // the Push API has no other delivery point — a push message wakes the worker, never a
+        // document — and it cannot serve a stale application because it cannot serve one at all.
+        //
+        // What that does **not** fix is the path this `catch` is on: the worker only runs for a
+        // push, so a tab open on Android Chrome still has no notification to show. The feature is
+        // absent there exactly as before, and `lib/push.ts` covers the other case — the tab
+        // closed — on the browsers that offer Web Push.
         return;
       }
 

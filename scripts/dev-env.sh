@@ -25,7 +25,9 @@
 # from one index:
 #
 #   - `SERVER_ADDR`, where the server listens.
-#   - `VITE_API_URL`, where the client looks. It also determines the CSP computed into
+#   - `WHISPEE_API`, where the development server proxies `/v1`. The client no longer carries an
+#     address at all — it asks its own origin, and Vite forwards. See `vite.config.ts`.
+#     Historically this was `VITE_API_URL`, which also determined the CSP computed into
 #     `index.html` (`apps/web/vite.config.ts`), and a `connect-src` that omits the port blocks
 #     the request in the browser before it is sent — no server log, no cause named. See the
 #     header of `apps/web/src/lib/csp.ts`.
@@ -107,8 +109,60 @@ web_port=$((5173 + index))
 
 printf "export DATABASE_URL='%s'\n" "${base_url%/*}/${database}${query}"
 printf "export SERVER_ADDR='127.0.0.1:%s'\n" "$server_port"
-printf "export VITE_API_URL='http://127.0.0.1:%s'\n" "$server_port"
+printf "export WHISPEE_API='http://127.0.0.1:%s'\n" "$server_port"
 printf "export ALLOWED_ORIGINS='http://127.0.0.1:%s,http://localhost:%s'\n" "$web_port" "$web_port"
 printf "export WEB_PORT='%s'\n" "$web_port"
 printf "export WHISPEE_DEV_DATABASE='%s'\n" "$database"
 printf "export WHISPEE_DEV_BRANCH='%s'\n" "$branch"
+
+# And everything else the file defines, unchanged.
+#
+# # The bug this closes, which cost an afternoon
+#
+# This script sources `.env` and then printed seven names. Everything else it had just read died
+# with the subshell, because the callers do `eval "$(scripts/dev-env.sh)"` — so a variable added
+# to `.env` never reached the server. `README.md` said "the script loads .env, which the server
+# does not do itself", and it loaded seven keys.
+#
+# The failure is silent and splits in two. `MEDIA_URL` unset makes the call route answer 503,
+# while `VITE_MEDIA_URL` — read by Vite from `apps/web/.env`, a different file entirely — still
+# shows the call button. So the client offers a call the server refuses, and neither side says
+# why: it takes reading the network panel to find the 503. `VAPID_SUBJECT` behaves the same way,
+# and `ACCOUNT_STORAGE_BYTES` silently reverts to its default.
+#
+# # Why the names come from the file rather than from the environment
+#
+# `set -a` exported `.env` into this process, but so is `PATH` and everything else a shell
+# carries. Emitting the whole environment would hand the caller a copy of ours. Reading the keys
+# back out of the file is what makes "what the file defines" the exact boundary.
+#
+# The five above are excluded because this script *computes* them: re-emitting `DATABASE_URL` or
+# `SERVER_ADDR` from the file would put every branch back on one database and one port, which is
+# the thing this file exists to prevent.
+derived=" DATABASE_URL SERVER_ADDR WHISPEE_API ALLOWED_ORIGINS WEB_PORT "
+
+# `export` is optional in the pattern, because it is optional in the file.
+#
+# A `.env` is sourced, so `export FOO=bar` is as valid in it as `FOO=bar` — and a file copied from
+# somewhere else very often carries the prefix. Matching only the bare form skipped those lines
+# **silently**, which is the exact failure this whole block was written to remove: a variable
+# present in the file, absent from the server, and nothing anywhere saying so.
+#
+# Only the name has to be recognised. The value needs no unwrapping, because `set -a` and the `.`
+# above already sourced the file: the shell treated `export FOO=bar` as the assignment it is, so
+# `${!name-}` below reads what the file set, prefix or not. Nothing else in this script has to
+# know about the two spellings.
+#
+# What this still does not read: two assignments on one line — `export FOO=bar baz=qux`. Valid
+# shell, and the pattern would take only the first. Nobody writes that in a `.env` and no file in
+# this repository does, but the silence is the same shape as the bug above, so it is named here
+# rather than left to be discovered.
+sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' "$env_file" | while read -r name; do
+  case "$derived" in *" $name "*) continue ;; esac
+
+  # Indirect expansion, and `-` so that a key with no value is an empty string rather than an
+  # error under `set -u`. Single quotes inside the value are escaped the only way sh allows:
+  # close the quote, emit an escaped one, open again.
+  value=${!name-}
+  printf "export %s='%s'\n" "$name" "${value//\'/\'\\\'\'}"
+done

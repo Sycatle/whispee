@@ -13,7 +13,7 @@ import { DetailPanel } from "./DetailPanel";
 import { EmptyCenter } from "./EmptyCenter";
 import { NewConversation } from "./NewConversation";
 import { Rail } from "./Rail";
-import { TITLES, SettingsScreen } from "./SettingsScreen";
+import { TITLES, SettingsDialog } from "./SettingsScreen";
 import { RouteAnnouncer } from "./RouteAnnouncer";
 import { useBinding } from "./Shortcuts";
 import { ShortcutsHelp } from "./ShortcutsHelp";
@@ -223,7 +223,10 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
       case "new":
         return <NewConversation />;
       case "settings":
-        return <SettingsScreen section={route.section} />;
+        // Settings are an overlay, so the centre keeps showing what settings were opened *over*.
+        // Arriving straight from a bookmark there is nothing behind, and the empty centre is the
+        // honest answer — the same thing `#/` shows.
+        return <EmptyCenter />;
       case "conversation":
         // A well-formed key that names nothing — a stale bookmark, or a thread this device has
         // not discovered yet. `parse` deliberately does not check existence, and redirecting
@@ -272,6 +275,7 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
 
         <RouteAnnouncer label={announced()} />
         <ShortcutsHelp open={helping} onOpenChange={setHelping} />
+        {route.kind === "settings" && <SettingsDialog section={route.section} />}
       </div>
     );
   }
@@ -377,6 +381,7 @@ export function Shell({ onLock, onForget }: { onLock: () => void; onForget: () =
 
       <RouteAnnouncer label={announced()} />
       <ShortcutsHelp open={helping} onOpenChange={setHelping} />
+      {route.kind === "settings" && <SettingsDialog section={route.section} />}
     </div>
   );
 }

@@ -1,0 +1,115 @@
+# Publishes the manifest of the web client, attested to this repository.
+#
+# # Why this workflow is the point, and not the script it runs
+#
+# `scripts/release-web.sh` can be run by anybody, which is what makes the build verifiable. But a
+# manifest produced on a laptop says only "somebody hashed some files"; the reader has no way to
+# tell it from a manifest describing a hostile build. What closes that is `attest-build-provenance`:
+# it binds the artefact to **this commit** and to **this workflow**, signed through Sigstore, and
+# nobody — the maintainer included — can produce that binding outside GitHub Actions.
+#
+# That is the whole reason the check means anything. The repository already carries an Ed25519 key
+# for the desktop release, and `verify-release.sh` says in as many words what it is worth: the key
+# lives in the repository, so whoever controls the repository can replace it. For a manifest whose
+# job is to be independent of the party serving the code, a key the same party carries is not
+# independence.
+#
+# # Why a tag and not every push
+#
+# A manifest is a claim about a build somebody can install. `dev` moves several times a day and
+# nothing deploys from it; a manifest per commit would be a list of hashes nobody could act on,
+# and would make the released ones harder to find.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # For rehearsing the workflow before there is a tag to rehearse it on. It publishes nothing:
+  # `gh release` only runs on a tag ref.
+  workflow_dispatch:
+
+# Absent from every other workflow in this repository, and required by two of the steps below.
+# `id-token` is what lets the runner prove to Sigstore which workflow it is; `attestations` is what
+# lets it record the result. `contents: write` is for creating the release itself.
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  web:
+    name: Web client manifest
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # **The exact version, from `apps/web/.nvmrc`, and this is the line the manifest rests on.**
+      #
+      # Measured: node 22.21.0 and node 22.23.2 produce different bytes for two of the fourteen
+      # generated files — `index-*.js` and `PdfViewer-*.js` — while the CSS and the other chunks
+      # match. A manifest built here and a deployment built elsewhere would therefore disagree on
+      # two files, and the disagreement would look exactly like an attack.
+      #
+      # `node-version: 22` resolves to whatever 22.x the runner has that week. It happened to
+      # match `deploy/Dockerfile.web` on the day this was written, which is not a property anybody
+      # should rely on — it is the kind of agreement that holds until it silently stops.
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: apps/web/.nvmrc
+          # The cache keys on a lockfile path this repository does not have at the root, and a
+          # half-hit cache is a slower build with a confusing log.
+          package-manager-cache: false
+
+      # Pinned rather than left to corepack's default, the same statement `deploy/Dockerfile.web`
+      # makes: `apps/web/package.json` declares no `packageManager`, so nothing else in the tree
+      # records which pnpm produced `pnpm-lock.yaml`.
+      #
+      # It matters more here than anywhere else. A manifest is a claim that a given commit
+      # produces given bytes; if the tool that produces them is whatever version happened to be
+      # current that day, the claim is about a build nobody can reproduce.
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@11.22.0 --activate
+
+      - name: Build and hash
+        run: scripts/release-web.sh
+
+      # Everything worth reading in the log, because a mismatch reported weeks later is
+      # investigated from here.
+      - name: What was built
+        run: |
+          cat release/web/BUILD-INFO
+          echo
+          head -5 release/web/WEB-SHA256SUMS
+
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: release/web/WEB-SHA256SUMS
+
+      # The manifest and nothing else. The bundle itself is not published: a reader does not need
+      # our copy of the files, they need the hashes to compare against the copy their own browser
+      # was served — and publishing the bundle would invite verifying the wrong thing.
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Manifest of the web client for \`${GITHUB_SHA}\`.
+
+          Check a deployment against it:
+
+          \`\`\`sh
+          gh release download ${GITHUB_REF_NAME} --pattern WEB-SHA256SUMS
+          gh attestation verify WEB-SHA256SUMS --repo ${GITHUB_REPOSITORY}
+          scripts/verify-web.sh https://your.deployment WEB-SHA256SUMS
+          \`\`\`
+
+          The second line is the one that matters: it establishes that this manifest came out of
+          this repository's workflow rather than out of somebody's laptop. Verifying the hashes
+          without it checks that a server is consistent with a file you were handed, which is not
+          the same claim." \
+            release/web/WEB-SHA256SUMS \
+            release/web/BUILD-INFO

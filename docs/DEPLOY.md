@@ -63,28 +63,35 @@ docker compose logs server | grep log_key
 It is printed rather than fetched because the only route carrying it, `/v1/log/sth`, requires a
 signed request — an operator has no signing device yet at this point.
 
-Put it in `.env` as `VITE_LOG_PUBKEY` and rebuild the client:
+There is nothing to put it in on the web any more, and that is deliberate. The pin used to be
+compiled into the bundle as `VITE_LOG_PUBKEY`; it is not, because on the web it was never a
+defence — this deployment served both the pin and the code the pin constrains, so a server willing
+to forge a log was willing to serve a build that trusted it. What it did buy, a substitution that
+broke every client at once instead of silently, is replaced by something stronger: a build anybody
+can check against the published manifest. See `apps/web/src/lib/pinning.ts`.
 
-```sh
-docker compose up -d --build web
-```
+The desktop binary still pins, and there it means what it always meant: the interface is inside a
+signed, reproducible artefact the server cannot reach.
 
-What this buys, precisely: a client with the pin refuses any log head signed by a different key.
-That is the only check that works on a **first** contact with a server — every other one compares
-the server against its own past. In the desktop binary, whose interface is packaged in a signed
-artefact, it closes the substitution hole. On the web it does not: this deployment serves both
-the pin and the code the pin constrains. There it turns a silent substitution into one that
-breaks every client at once, which is worth having and is not a defence.
+Keep the key anyway. It is what a verifier compares a log head against, and it is the value
+`scripts/verify-web.sh` will want.
 
-## Changing the domain means rebuilding the client
+## Changing the domain no longer rebuilds the client
 
-The Content-Security-Policy is computed into `index.html` at build time
-(`apps/web/src/lib/csp.ts`), and its `connect-src` has to name this deployment's exact origin —
-both the `https://` form and the `wss://` one, which it does not infer. `VITE_API_URL` is
-therefore a build argument, not an environment variable. Change the domain and run
-`docker compose build web`.
+It used to. The API address and the Content-Security-Policy were both frozen into `index.html` at
+build time, so a new domain meant `docker compose build web`.
 
-The same applies to `VITE_LOG_PUBKEY` and `VITE_MEDIA_URL`.
+Neither is now: the client reaches the API on whatever origin served it — Caddy puts both behind
+one — and the policy says `connect-src 'self'`, which is strictly tighter than naming a host. A
+domain change is a restart.
+
+The point of that is not convenience. **Two deployments of the same commit now produce
+byte-identical bundles**, which is what makes a single published manifest of hashes able to
+describe all of them, self-hosted included.
+
+`VITE_MEDIA_URL` is the one build argument left, and it is the exception: a media host has to be
+named in the policy. A deployment that sets it gives up matching the published build — verifiable
+or calls, not both, until the media server sits behind the same origin.
 
 ## Updating
 
@@ -120,6 +127,56 @@ deployment that rebuilds often and forgets its volume re-issues every time — a
 counts those: fifty certificates a week per domain, after which the domain is unusable for a
 week.
 
+## Turning on push, and what it costs
+
+One variable, `VAPID_SUBJECT` — a `mailto:` or `https:` URL a push service can use to reach
+whoever runs this deployment. There is no private key to generate: the pair belongs to the server
+and is created on its first start.
+
+```sh
+$EDITOR .env            # VAPID_SUBJECT=mailto:ops@example.test
+docker compose up -d
+```
+
+Left empty, subscriptions still register and nobody is woken — the key route answers 503 and the
+client hides the control. A deployment that wants to talk to no push service keeps a fully working
+messenger.
+
+**What it discloses, and the settings screen says this before offering the switch.** The browser's
+push service — Google for Chrome, Mozilla for Firefox — learns each time a message arrives for one
+of your users and can tie that to an address. And this server learns which devices to wake, which
+is what sealed sender was arranged to remove: a server that stops waking four members of five can
+tell who wrote the next message. Nothing cryptographic answers that. The wake-up itself carries no
+text, no sender and no group id.
+
+### Checking it actually works
+
+The suites check the token against RFC 8292 and against the key advertised beside it, against a
+fake push service. What they cannot check is that Google and Mozilla agree with that reading, so
+one pass through a browser is part of standing a deployment up rather than optional:
+
+1. Open the deployment, create an account, allow notifications, then turn on **Wake this browser
+   when a message arrives** in Settings → Notifications.
+2. Close every tab of the site.
+3. From another account — a second browser profile does — send a message.
+4. A notification saying "New message" should appear. Clicking it opens the application.
+
+If nothing arrives, `docker compose logs server | grep -i push` is where the refusal appears: a
+`401` means the service rejected the token, a `403` usually means the subscription was minted
+against a different key than the one now advertised.
+
+To separate "the service refused us" from "the browser showed nothing", take the endpoint — the
+`token` column of `push_tokens`, or `pushManager.getSubscription().endpoint` in the browser's
+console — and ask the service directly:
+
+```sh
+WEBPUSH_ENDPOINT='https://fcm.googleapis.com/fcm/send/…' \
+  cargo test -p server --release --test webpush -- --ignored --nocapture
+```
+
+It prints what the service answered. A `201` means the wake-up was accepted and queued, so
+anything still missing is on the browser's side of the line.
+
 ## Calls are not set up here
 
 `MEDIA_URL` and the four variables beside it are for a deployment that already runs a media
@@ -137,10 +194,9 @@ is encrypted under a key derived from the MLS epoch, which is never sent anywher
 
 Written here rather than discovered later.
 
-- **No push notifications.** `crates/server/src/push.rs` registers tokens and its default `Waker`
-  is `Silent`: it sends nothing. Neither provider exists, and the server has no outbound HTTP
-  client. On mobile this means the application is only notified while it is open — see
-  [`./ROADMAP.md`](./ROADMAP.md) for what is missing and what push would cost sealed sender.
+- **No push to the packaged mobile application.** Web Push covers the web client and an Android
+  browser; FCM and APNs do not exist, so the Tauri build is only notified while it is open. See
+  [`./ROADMAP.md`](./ROADMAP.md) for why, and for what push costs sealed sender.
 - **No health endpoint.** The server exposes no route for a load balancer or an uptime check to
   call; `docker compose ps` and the logs are what there is. Adding one means adding a route, and
   it has not been done.

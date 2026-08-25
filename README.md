@@ -43,10 +43,11 @@ not their equal and does not try to be.
 
 ## What does not work
 
-- **Push notifications are half-built.** The server records tokens and decides who to wake,
-  and then sends nothing. There is no FCM or APNs provider, no configuration, no device-side
-  token registration and no user-facing setting. It is inert without configuration, and a
-  self-hosted deployment that talks to neither Apple nor Google stays fully functional.
+- **Push reaches browsers, not the packaged mobile app.** Web Push works end to end — a browser
+  subscribes, the server signs a VAPID token, a notification arrives with the tab closed — and it
+  is off until a deployment sets `VAPID_SUBJECT`. FCM and APNs are not written: device-side
+  registration needs a Tauri plugin that does not exist, so the Tauri build is only notified while
+  it is open. The wake-up carries no text, no sender and no group id.
 - **Biometric unlock has never been executed.** The code exists; not one line of it has run.
   There is no Android NDK and no physical device on the development machine, so even the
   compilation of its dependency is unconfirmed.
@@ -70,8 +71,11 @@ docker compose up -d
 # 2. Configuration. The committed defaults point at that container.
 cp .env.example .env
 
-# 3. Server — listens on 127.0.0.1:8787. The script loads .env, which the
-#    server does not do itself, and gives the branch its own database and port.
+# 3. Server — listens on 127.0.0.1:8787. The script passes .env through, which
+#    the server does not read itself, and gives the branch its own database and
+#    port. Everything the file defines reaches the server: the two values the
+#    script computes — the database and the address — are the only ones it
+#    overrides.
 ./scripts/dev-server.sh
 
 # 4. Client, in a second terminal. `wasm` builds crypto-core to WebAssembly

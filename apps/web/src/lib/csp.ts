@@ -33,11 +33,16 @@
  * sees nothing, and the message does not name the cause. Same trap as the one documented on the
  * CORS header list, server side.
  *
- * # Why `connect-src` carries two origins
+ * # Why `connect-src` names no origin any more
  *
- * `connect-src` does **not** infer the `ws://` origin from the matching `http://` one. Either one
- * alone would cut half the client — requests or the real-time session — without the other
- * signalling it.
+ * It used to carry two — the API's `http://` form and its `ws://` form, because `connect-src` does
+ * not infer one from the other. Both are gone: the API is now reached relatively, on the page's own
+ * origin, so `'self'` covers it. CSP level 3 extends `'self'` to `wss:` under an `https:` document,
+ * which is what the second origin was for.
+ *
+ * That is tighter than what it replaces, and it is also what lets one build serve every deployment:
+ * the policy no longer depends on `VITE_API_URL`, which was substituted into `index.html` at build
+ * time and made every instance's bytes different.
  *
  * # No nonce, and that is hardening
  *
@@ -48,8 +53,21 @@
  * No browser policy stands in the way — only the desktop app, whose code is packaged into the
  * installed binary, closes that path.
  */
-export function csp(api: string, media?: string): string {
-  const websocket = api.replace(/^http/, "ws");
+/**
+ * One origin, spelled both ways.
+ *
+ * A `connect-src` source matches on scheme, so `wss://host` and `https://host` are two sources
+ * and a policy needs whichever the code will actually use. Normalising to HTTP first makes the
+ * function total: it accepts `ws`, `wss`, `http` or `https` and returns the pair, rather than
+ * quietly returning its input for two of the four.
+ */
+function bothSchemes(origin: string): [string, string] {
+  const http = origin.replace(/^ws/, "http");
+
+  return [http, http.replace(/^http/, "ws")];
+}
+
+export function csp(media?: string): string {
   // The media server is a second origin, and it is absent from most deployments: a build with no
   // media server must not widen its policy for a host it will never contact. Empty rather than a
   // default, so the directive is exactly as wide as the deployment is.
@@ -64,7 +82,15 @@ export function csp(api: string, media?: string): string {
   //
   // The audio itself travels over WebRTC, which no directive here can constrain — see
   // `lib/call.ts` for what does.
-  const relay = media ? ` ${media} ${media.replace(/^http/, "ws")}` : "";
+  //
+  // **Both forms are derived, whichever one the deployment wrote.** This used to be
+  // `media.replace(/^http/, "ws")`, which assumed the variable was spelled `http://`. Given the
+  // `ws://` form — which is what `.env.example` recommends for a local media server, and what a
+  // LiveKit URL looks like everywhere — the replacement matched nothing and returned its input.
+  // The policy then listed the same origin twice and **omitted the HTTP one entirely**: the
+  // paragraph above says why that costs a broken call its explanation. The test only ever passed
+  // `https://`, so it agreed.
+  const relay = media ? ` ${bothSchemes(media).join(" ")}` : "";
 
   return [
     "default-src 'self'",
@@ -74,7 +100,19 @@ export function csp(api: string, media?: string): string {
     // Tailwind injects its styles at runtime. The residual risk of a CSS injection is nowhere
     // near that of a script.
     "style-src 'self' 'unsafe-inline'",
-    `connect-src 'self' ${api} ${websocket}${relay}`,
+    // **`'self'` and no origin, which is both tighter and the reason one build serves every
+    // deployment.** The API shares this page's origin — `deploy/` puts Caddy in front of both, and
+    // the development server proxies `/v1` — so naming a host would be naming the host we are
+    // already on.
+    //
+    // It covers the WebSocket too: CSP level 3 matches `wss:` under `'self'` when the document is
+    // `https:`, and `ws:` when it is `http:`. That is what the two spelled-out origins used to be
+    // for, and it is why they are not missed.
+    //
+    // What this buys beyond tightness: the policy no longer depends on `VITE_API_URL`, which used
+    // to be substituted into `index.html` at build time and made every deployment's bytes
+    // different. See `api.ts` on why that mattered.
+    `connect-src 'self'${relay}`,
     // `blob:` is for image previews, and it is not a hole reopening.
     //
     // What a received image gets displayed as is a canvas re-encoding of what an image decoder

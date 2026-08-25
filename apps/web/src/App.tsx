@@ -238,7 +238,16 @@ function Boot() {
   }
 
   if (!store) {
-    return <Onboarding onReady={setSession} onError={report.error} error={reported.error} />;
+    // The sentence, not the message object: onboarding is a full screen shown before a session
+    // exists, so the toast viewport is not mounted behind it and its own `Banner` is the only
+    // surface there is. Nothing here floats over anything.
+    return (
+      <Onboarding
+        onReady={setSession}
+        onError={report.error}
+        error={reported.error?.message ?? null}
+      />
+    );
   }
 
   return (
@@ -353,6 +362,13 @@ function Frame({
       // timer: retrying on a schedule keeps hammering a server that is down, and the two moments
       // that actually change the answer — a reconnection, a resume — are reported right here.
       void session.flushOutbox().then(bump);
+
+      // And the wake address, on the same two moments and for a related reason: a push
+      // subscription rotates without warning, and a browser that renewed its own would otherwise
+      // be reachable at an address this server does not have — a phone that stops waking, with
+      // nothing anywhere to say why. Does nothing when this browser is not subscribed, so it
+      // never turns the feature on by itself.
+      void session.replayWaking();
     });
 
     const lost = () => setOffline(true);
@@ -440,7 +456,19 @@ function Frame({
         dismissError();
         bump();
       } catch (e) {
-        if (!cancelled) report.error(e instanceof Error ? e.message : String(e));
+        // The one place an action earns its keep. A poll that failed will be retried in thirty
+        // seconds anyway, and thirty seconds is a long time to sit in front of a sentence saying
+        // the connection is gone — especially when the cause was a laptop lid, and the fix is to
+        // ask again. The button does exactly what the timer would have done, sooner.
+        //
+        // Retrying calls `tick` again, so a second failure replaces this message with a new one
+        // and a success clears it through `dismissError` above. Nothing accumulates.
+        if (!cancelled) {
+          report.error(e instanceof Error ? e.message : String(e), {
+            label: "Retry",
+            run: () => void tick(),
+          });
+        }
       }
     };
 
@@ -471,6 +499,11 @@ function Frame({
       select: (key: string) => navigate({ kind: "conversation", key }),
     });
     title.current ??= countUnreadInTitle();
+
+    // Once per session, beside the notifier that handles the other half of the same job: this one
+    // covers the tab being closed, that one covers it being open. The address is only re-sent, so
+    // a browser that never subscribed stays unsubscribed.
+    void session.replayWaking();
 
     const notices = notifier.current;
     const counter = title.current;
@@ -668,17 +701,15 @@ function Frame({
         </Banner>
       )}
 
-      {/* Always dismissible: an error you cannot wave away ends up part of the scenery. */}
-      {reported.error && (
-        <Banner
-          tone="danger"
-          onDismiss={reported.dismissError}
-          className="rounded-none border-x-0 border-b-0"
-        >
-          {reported.error}
-        </Banner>
-      )}
-
+      {/*
+        * The error used to be a fourth full-bleed banner here, and it was the one that did not
+        * belong: the three above describe a state the reader is *in* — no network, a log that
+        * disagrees with itself, a session that would not restore — while an error describes
+        * something that just happened. A standing condition earns room in the layout; an event
+        * does not, and taking it left the conversation an inch shorter for as long as the error
+        * stood. It floats now, out of `ui/Toast.tsx`, and is still dismissible for the reason
+        * that always applied: an error you cannot wave away ends up part of the scenery.
+        */}
       <Toasts />
     </div>
   );

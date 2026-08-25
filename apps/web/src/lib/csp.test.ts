@@ -14,7 +14,14 @@ import { csp } from "./csp.ts";
  * be loud, and the only place it can be made loud is here.
  */
 
-/** The API origin the desktop configuration is pinned to, so both sides describe the same server. */
+/**
+ * The API origin the desktop configuration is pinned to.
+ *
+ * It is a **desktop-only** source now. The web policy names no origin at all — the API is reached
+ * on the page's own origin, so `'self'` covers it — while the packaged shell is loaded from
+ * `tauri://` and has to be told where the server is. That difference is a transport difference,
+ * exactly like `ipc:`, which is why it belongs in the list below rather than in both policies.
+ */
 const DESKTOP_API = "http://127.0.0.1:8787";
 
 /**
@@ -25,7 +32,14 @@ const DESKTOP_API = "http://127.0.0.1:8787";
  * bundle. Adding to this list is a deliberate act; that is why it is a list and not a filter.
  */
 const DESKTOP_ONLY: Record<string, string[]> = {
-  "connect-src": ["ipc:", "http://ipc.localhost"],
+  "connect-src": [
+    "ipc:",
+    "http://ipc.localhost",
+    // The two forms of the API origin. The web build stopped naming them when the client began
+    // asking its own origin; the desktop cannot, because its own origin is `tauri://`.
+    DESKTOP_API,
+    DESKTOP_API.replace(/^http/, "ws"),
+  ],
   "img-src": ["asset:", "http://asset.localhost"],
 };
 
@@ -53,7 +67,7 @@ function desktopPolicy(): string {
 }
 
 test("both targets declare exactly the same set of directives", () => {
-  const web = [...parse(csp(DESKTOP_API)).keys()].sort();
+  const web = [...parse(csp()).keys()].sort();
   const desktop = [...parse(desktopPolicy()).keys()].sort();
 
   assert.deepEqual(
@@ -64,7 +78,7 @@ test("both targets declare exactly the same set of directives", () => {
 });
 
 test("every directive allows the same sources, apart from the declared desktop transports", () => {
-  const web = parse(csp(DESKTOP_API));
+  const web = parse(csp());
   const desktop = parse(desktopPolicy());
 
   for (const [name, webSources] of web) {
@@ -93,7 +107,7 @@ test("the desktop policy allows the blob urls the image previews are made of", (
 
 test("neither target ever allows a script source beyond this origin", () => {
   for (const [target, policy] of [
-    ["web", csp(DESKTOP_API)],
+    ["web", csp()],
     ["desktop", desktopPolicy()],
   ] as const) {
     assert.deepEqual(
@@ -113,7 +127,7 @@ test("neither target ever allows a script source beyond this origin", () => {
  */
 test("media-src is blob: and nothing else, on both targets", () => {
   for (const [target, policy] of [
-    ["web", csp(DESKTOP_API)],
+    ["web", csp()],
     ["desktop", desktopPolicy()],
   ] as const) {
     assert.deepEqual(
@@ -132,7 +146,7 @@ test("media-src is blob: and nothing else, on both targets", () => {
  */
 test("workers come from this origin and nowhere else, on both targets", () => {
   for (const [target, policy] of [
-    ["web", csp(DESKTOP_API)],
+    ["web", csp()],
     ["desktop", desktopPolicy()],
   ] as const) {
     assert.deepEqual(
@@ -157,8 +171,8 @@ test("workers come from this origin and nowhere else, on both targets", () => {
  * once because it would live in the default.
  */
 test("the media origin appears only when a build asks for one", () => {
-  const without = parse(csp(DESKTOP_API)).get("connect-src") ?? new Set();
-  const with_ = parse(csp(DESKTOP_API, "https://media.example")).get("connect-src") ?? new Set();
+  const without = parse(csp()).get("connect-src") ?? new Set();
+  const with_ = parse(csp("https://media.example")).get("connect-src") ?? new Set();
 
   assert.ok(with_.has("wss://media.example"), "the signalling socket has no origin to reach");
   // The HTTP form is not redundant, and this assertion is here because the first version of this
@@ -170,6 +184,37 @@ test("the media origin appears only when a build asks for one", () => {
     [...without],
     "configuring a media server changed something other than the media origin",
   );
+});
+
+/**
+ * **The regression that made `bothSchemes` exist.**
+ *
+ * The pair was derived with `media.replace(/^http/, "ws")`, which only works on a variable spelled
+ * `http://`. `.env.example` recommends `ws://127.0.0.1:7880` for a local media server, and a
+ * LiveKit URL is written that way everywhere — given one, the replacement matched nothing, the
+ * policy listed the same origin twice, and the HTTP form the test above insists on was absent.
+ *
+ * The test above did not catch it because it only ever passed `https://`. This one passes the
+ * other spelling, which is the one a deployment is most likely to write.
+ */
+test("both forms are derived however the media origin is spelled", () => {
+  for (const [written, expected] of [
+    ["ws://127.0.0.1:7880", ["http://127.0.0.1:7880", "ws://127.0.0.1:7880"]],
+    ["wss://media.example", ["https://media.example", "wss://media.example"]],
+    ["http://127.0.0.1:7880", ["http://127.0.0.1:7880", "ws://127.0.0.1:7880"]],
+    ["https://media.example", ["https://media.example", "wss://media.example"]],
+  ] as const) {
+    const sources = parse(csp(written)).get("connect-src") ?? new Set();
+
+    for (const origin of expected) {
+      assert.ok(sources.has(origin), `${written} does not allow ${origin}`);
+    }
+
+    // A `Set` would hide a duplicate, so the raw directive is what is counted.
+    const directive = csp(written).split("; ").find((part) => part.startsWith("connect-src")) ?? "";
+    const occurrences = directive.split(" ").filter((source) => source === written).length;
+    assert.equal(occurrences, 1, `${written} appears ${occurrences} times in connect-src`);
+  }
 });
 
 test("media-src is not among the differences the desktop target is allowed", () => {

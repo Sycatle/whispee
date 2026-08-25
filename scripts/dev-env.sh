@@ -25,7 +25,9 @@
 # from one index:
 #
 #   - `SERVER_ADDR`, where the server listens.
-#   - `VITE_API_URL`, where the client looks. It also determines the CSP computed into
+#   - `WHISPEE_API`, where the development server proxies `/v1`. The client no longer carries an
+#     address at all — it asks its own origin, and Vite forwards. See `vite.config.ts`.
+#     Historically this was `VITE_API_URL`, which also determined the CSP computed into
 #     `index.html` (`apps/web/vite.config.ts`), and a `connect-src` that omits the port blocks
 #     the request in the browser before it is sent — no server log, no cause named. See the
 #     header of `apps/web/src/lib/csp.ts`.
@@ -107,7 +109,7 @@ web_port=$((5173 + index))
 
 printf "export DATABASE_URL='%s'\n" "${base_url%/*}/${database}${query}"
 printf "export SERVER_ADDR='127.0.0.1:%s'\n" "$server_port"
-printf "export VITE_API_URL='http://127.0.0.1:%s'\n" "$server_port"
+printf "export WHISPEE_API='http://127.0.0.1:%s'\n" "$server_port"
 printf "export ALLOWED_ORIGINS='http://127.0.0.1:%s,http://localhost:%s'\n" "$web_port" "$web_port"
 printf "export WEB_PORT='%s'\n" "$web_port"
 printf "export WHISPEE_DEV_DATABASE='%s'\n" "$database"

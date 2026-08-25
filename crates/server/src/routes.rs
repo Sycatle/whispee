@@ -77,6 +77,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/v1/accounts", post(create_account))
         .route("/v1/devices", post(register_device))
         .route("/v1/pairings/{pairing_id}", post(deposit_pairing).get(claim_pairing))
+        .route("/v1/push/vapid", get(vapid_public_key))
         .route("/v1/recovery/claim", post(claim_recovery))
         .with_state(state)
 }
@@ -2407,6 +2408,30 @@ async fn set_push_token(State(pool): State<PgPool>, signed: Signed) -> ApiResult
 async fn forget_push_token(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
     crate::push::forget(&pool, &signed.device_id).await?;
     Ok(())
+}
+
+/// The VAPID public key a browser needs in order to subscribe.
+///
+/// # Why this is a route and not a build-time value
+///
+/// Because a key baked into the client bundle is a key that needs a rebuild to change, and this
+/// project has already been caught by exactly that shape: `VITE_LOG_PUBKEY` was documented as
+/// "printed by the server on first boot" while nothing printed it. A subscription is bound to the
+/// key it was created under, so the one place that cannot disagree with the signer is the signer.
+///
+/// # Why it is open
+///
+/// It is a public key, and it is needed before anything is subscribed. It carries no information
+/// about the accounts on this deployment — only that it has push turned on, which the presence of
+/// the setting reveals anyway.
+///
+/// 503 rather than 404 when push is off, the distinction `call_token` already draws: a client
+/// reads it as "this deployment does not offer that", hides the control, and does not retry.
+async fn vapid_public_key(
+    State(public_key): State<Option<String>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let key = public_key.ok_or(ApiError::Unavailable)?;
+    Ok(Json(serde_json::json!({ "key": key })))
 }
 
 async fn post_envelope(

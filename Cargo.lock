@@ -4939,6 +4939,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "p256",
  "rand_core 0.6.4",
  "reqwest 0.12.28",
  "serde",

@@ -1,48 +1,57 @@
+import * as RadixToast from "@radix-ui/react-toast";
 import { createPortal } from "react-dom";
 import type { ReactElement } from "react";
+import type { Message } from "../state/report.ts";
 import { useReported } from "../state/report.ts";
+import { Button } from "./Button.tsx";
 import { cn } from "./cn.ts";
-import { useEntered, useOverlayContainer } from "./Overlays.tsx";
+import { Icon } from "./Icon.tsx";
+import { IconButton } from "./IconButton.tsx";
+import { useOverlayContainer } from "./Overlays.tsx";
 
 /**
- * The confirmation that an action worked.
+ * What just happened, said in one place.
  *
- * # This file owns no state and no timer, and that is the contract
+ * # Both halves come here now, and that is the change
  *
- * `state/report.ts` holds both. It says so in its own header and the reason is worth repeating
- * here, at the place that would get it wrong: a component running its own `setTimeout` restarts
- * it on every re-render of its parent. In a thread receiving messages that means the timer never
- * expires and a four-second confirmation stays on screen until the conversation goes quiet.
+ * A confirmation always did. An error went to a `Banner` mounted as a flex child of the shell —
+ * full-bleed, corners squared off through a `className`, and **shrinking the conversation to make
+ * room for itself**. Up to four of those could stack. Errors float here instead; the three
+ * remaining banners in `App.tsx` stay where they are because they describe standing conditions
+ * (offline, an inconsistent key log) rather than events, and a standing condition belongs in the
+ * layout.
  *
- * So this reads `useReported().toast` and draws it. When the field turns null, the toast is over.
- * Nothing here schedules anything.
+ * # This file still owns no state and no timer
  *
- * # `key={toast.id}`
+ * `state/report.ts` holds both, and the reason is worth repeating at the place that would get it
+ * wrong: a component running its own `setTimeout` restarts it on every re-render of its parent. In
+ * a thread receiving messages that means the timer never expires and a four-second confirmation
+ * stays until the conversation goes quiet.
  *
- * One toast at a time, and a new one replaces the old. Without the key React sees the same
- * component in the same position and merely swaps the text — the entrance never replays, and two
- * confirmations in a row look like one that changed its mind. The id exists in `report.ts`
- * precisely so that "Copied" following "Copied" is still visibly a second event.
+ * Radix has a `duration` of its own, so it is set to `Infinity` on both roots — not because
+ * nothing should expire, but because **two owners of one expiry is one owner too many**. What
+ * closes a toast is `report.ts` letting go of it.
  *
- * # The live region outlives the toast
+ * # Why Radix rather than the portal this file used to be
  *
- * `role="status"` with `aria-live="polite"` is on the *container*, which is mounted for as long
- * as the shell is, empty or not. A live region that appears at the same moment as its content is
- * unreliable — several screen readers only announce changes to a region they were already
- * observing, so a region that mounts with its message announces nothing. Mounting it empty and
- * filling it later is what makes the announcement happen.
+ * One reason: a toast can now carry a button, and a button that appears unbidden has to be
+ * reachable by keyboard **without stealing focus**. That is not a `<button>` in a `<div>`; it is a
+ * viewport in the tab order, a recall hotkey, and an announcement whose urgency matches the
+ * message. Radix implements the pattern and this file would have implemented it worse.
  *
- * Polite and not assertive: a confirmation has already happened and nothing is waiting on the
- * reader. Interrupting them mid-sentence to say an action they just took succeeded is the exact
- * habit that teaches people to ignore the channel. Errors are the assertive half and they do not
- * come here — they go to a `Banner`, per `report.ts`.
+ * It also buys an exit. `ui/Overlays.tsx` records that `useEntered` has no counterpart because
+ * Radix unmounts content the moment it closes; `RadixToast` keeps the node through
+ * `data-state="closed"`, so a dismissed message fades instead of blinking out.
  *
- * What this does not solve: it does not stack, and it must not. Two successes within four
- * seconds means the first is never read; `report.ts` chose that deliberately and the fix, if it
- * is ever needed, is to collapse the events upstream rather than to grow a queue here.
+ * # Which one interrupts
+ *
+ * `type="foreground"` for an error, `"background"` for a confirmation. That is the same
+ * distinction `ui/Banner.tsx` draws between `role="alert"` and `role="status"`, and the same
+ * sentence `docs/ACCESSIBILITY.md` writes: interrupt somebody mid-sentence only when they must
+ * stop for it. A confirmation has already happened and nothing waits on the reader.
  */
 export function Toasts(): ReactElement | null {
-  const { toast } = useReported();
+  const { error, toast, dismissError, dismissToast } = useReported();
   const container = useOverlayContainer();
 
   // The only null case: `index.html` has lost its `#overlays` node. Drawing a fixed-position
@@ -50,41 +59,121 @@ export function Toasts(): ReactElement | null {
   // a worse answer than showing nothing while the markup is broken.
   if (!container) return null;
 
-  return createPortal(
-    <div
-      role="status"
-      aria-live="polite"
-      className={cn(
-        // Above a dialog: an action taken *inside* a confirmation still has to be able to report
-        // that it worked. `--z-index-toast` exists for this one relationship.
-        "pointer-events-none fixed inset-x-0 bottom-0 z-(--z-index-toast)",
-        "flex justify-center p-pane safe-bottom safe-sides",
+  return (
+    // `swipeDirection` is what makes a touch dismissal possible at all; both roots are controlled,
+    // so a swipe reaches `report.ts` rather than closing something that reappears on the next
+    // render.
+    <RadixToast.Provider swipeDirection="down" duration={Infinity}>
+      {error === null ? null : (
+        <Reported
+          key={`error-${error.id}`}
+          message={error}
+          tone="danger"
+          onDismiss={dismissError}
+        />
       )}
-    >
-      {toast === null ? null : <Confirmation key={toast.id} message={toast.message} />}
-    </div>,
-    container,
+      {toast === null ? null : (
+        <Reported key={`toast-${toast.id}`} message={toast} tone="ok" onDismiss={dismissToast} />
+      )}
+
+      {createPortal(
+        <RadixToast.Viewport
+          // **`aria-label` and not the `label` prop.** Radix documents `label` as the accessible
+          // name and its types accept it, but in 1.2.23 it reaches no attribute: the rendered
+          // `<ol>` carries `tabindex` and `class` and nothing else. Checked in the browser rather
+          // than assumed, because a prop that silently does nothing is worse than no prop — it
+          // reads as solved.
+          //
+          // Named at all because the viewport is focusable, so a screen reader navigating by
+          // region would otherwise find an anonymous list. F8 is the key Radix binds to reach it.
+          aria-label="Messages from Whispee (F8)"
+          className={cn(
+            // Above a dialog — and more so since the settings became one: an action taken *inside*
+            // a dialog still has to be able to report that it worked. `--z-index-toast` exists for
+            // this one relationship.
+            "pointer-events-none fixed inset-x-0 bottom-0 z-(--z-index-toast)",
+            // The portal mounts outside the layout, so the shell's insets do not reach it.
+            "flex flex-col items-center gap-snug p-pane safe-bottom safe-sides",
+            // No `outline-none`: the viewport is focusable on purpose — it is how a keyboard user
+            // reaches a message that appeared without being asked for.
+            "m-0 list-none",
+          )}
+        />,
+        container,
+      )}
+    </RadixToast.Provider>
   );
 }
 
 /**
- * Separate so that the key remounts it: the entrance lives in `useEntered`, which only runs from
- * the beginning when the component is new. Keying the container instead would tear down the live
- * region with every toast, and the announcement with it.
+ * One message, whichever surface raised it.
+ *
+ * Keyed by its id from the caller, so a replacement is a new node: without that React sees the
+ * same component in the same position and merely swaps the text — the entrance never replays, and
+ * two failures in a row look like one that changed its mind. The id exists in `report.ts`
+ * precisely so that the second is visibly a second event.
  */
-function Confirmation({ message }: { message: string }) {
-  const entered = useEntered();
-
+function Reported({
+  message,
+  tone,
+  onDismiss,
+}: {
+  message: Message;
+  tone: "danger" | "ok";
+  onDismiss: () => void;
+}) {
   return (
-    <div
+    <RadixToast.Root
+      // Controlled, and closing always goes through `report.ts`. Radix closes on a swipe, on the
+      // cross, and on the hotkey; every one of those has to reach the state or the message comes
+      // back on the next render.
+      open
+      onOpenChange={(next) => {
+        if (!next) onDismiss();
+      }}
+      // See the module header: the expiry lives in `report.ts`, and two owners of it is one too
+      // many.
+      duration={Infinity}
+      type={tone === "danger" ? "foreground" : "background"}
       className={cn(
-        "max-w-full rounded-control border border-(--color-border-strong)",
-        "bg-(--color-surface-raised) px-pane py-snug text-body text-(--color-ink) shadow-overlay",
-        "transition duration-(--duration-panel) ease-out motion-reduce:transition-none",
-        entered ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0",
+        "pointer-events-auto flex w-full max-w-md items-start gap-gutter",
+        "rounded-control border bg-(--color-surface-raised) px-pane py-snug shadow-overlay",
+        // The hairline is mandatory rather than decorative: over the dark palette's ground a black
+        // shadow is very nearly invisible, so the border is what separates the surface from what
+        // is behind it. `index.css` says so where the shadow is defined.
+        tone === "danger" ? "border-(--color-danger)" : "border-(--color-border-strong)",
+        // Entrance and exit both, through tokens — `prefers-reduced-motion` collapses them to 1ms
+        // in `index.css`, so nothing here reads the preference.
+        "transition-all duration-(--duration-panel) ease-out motion-reduce:transition-none",
+        "data-[state=open]:translate-y-0 data-[state=open]:opacity-100",
+        "data-[state=closed]:translate-y-2 data-[state=closed]:opacity-0",
+        "data-[swipe=end]:translate-y-full data-[swipe=end]:opacity-0",
       )}
     >
-      {message}
-    </div>
+      {/*
+        * The text is the same ink in both tones. Colour is not what tells the two apart — the
+        * border is, and it carries 3:1 against the surface, which is what `docs/ACCESSIBILITY.md`
+        * asks of a border that means something. Tinting the sentence red would say the same thing
+        * a second time, to the readers who could already see it.
+        */}
+      <RadixToast.Description className="min-w-0 flex-1 text-body text-(--color-ink)">
+        {message.message}
+      </RadixToast.Description>
+
+      {message.action === undefined ? null : (
+        // `altText` is what a screen reader is offered in place of the button when the toast is
+        // announced — Radix requires it, and rightly: "Retry" alone says nothing about what would
+        // be retried once the sentence has scrolled past.
+        <RadixToast.Action asChild altText={`${message.action.label}: ${message.message}`}>
+          <Button size="sm" variant="secondary" onClick={message.action.run}>
+            {message.action.label}
+          </Button>
+        </RadixToast.Action>
+      )}
+
+      <RadixToast.Close asChild>
+        <IconButton label="Dismiss" icon={<Icon name="close" />} size="sm" className="shrink-0" />
+      </RadixToast.Close>
+    </RadixToast.Root>
   );
 }

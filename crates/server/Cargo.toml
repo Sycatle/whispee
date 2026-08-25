@@ -22,6 +22,15 @@ thiserror.workspace = true
 rand_core.workspace = true
 transparency = { path = "../transparency" }
 hmac.workspace = true
+# P-256, for the VAPID tokens that authenticate this deployment to a push service. `ecdsa` only:
+# no key agreement is needed here, because a wake-up carries no payload and therefore nothing to
+# encrypt — see `crate::vapid` for how much of Web Push that removes.
+p256 = { version = "0.13", features = ["ecdsa"] }
+# **The server's first outbound HTTP client**, and it stays optional in the sense that matters: no
+# request is made unless a deployment turns push on. `rustls` rather than the platform TLS, like
+# sqlx, so the binary depends on no system OpenSSL; no cookie store, no redirect following — a
+# push service that answers with a redirect is not one to follow with a bearer token attached.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 # Already in the tree through axum; declared here because the broadcast hub uses them
 # directly.

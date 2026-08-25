@@ -50,6 +50,11 @@ services:
       # them, and the comment above it explains what breaking that costs.
       ALLOWED_ORIGINS: https://${WHISPEE_DOMAIN:?set WHISPEE_DOMAIN in deploy/.env}
       ACCOUNT_STORAGE_BYTES: ${ACCOUNT_STORAGE_BYTES:-}
+      # Web Push. Empty here, and a deployment that leaves it empty wakes nobody: tokens still
+      # register, the emitter stays `Silent`, and the client hides the control because the key
+      # route answers 503. One variable, because the key pair is the server's own — see
+      # `migrations/0020_vapid.sql` for why it is not handed in.
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-}
       # Calls. Empty here, and a deployment that leaves them empty keeps a fully working
       # messenger — the call route answers 503 and the client hides the button. Read
       # `crates/server/src/call.rs` before setting them: a call leaks more than a message does.
@@ -67,12 +72,13 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.web
       args:
-        # Build-time, not runtime: the Content-Security-Policy is computed into `index.html` and
-        # must name this exact origin. Changing the domain means `docker compose build web`, not
-        # a restart.
-        VITE_API_URL: https://${WHISPEE_DOMAIN:?set WHISPEE_DOMAIN in deploy/.env}
+        # The domain is **not** here any more, and its absence is the feature: the client reaches
+        # the API on whatever origin served it, so this image is the same bytes for every
+        # deployment of a given commit. Changing the domain no longer means rebuilding the client.
+        #
+        # `VITE_MEDIA_URL` is the one exception, because a media host has to be named in the
+        # policy. Setting it means this build no longer matches the published one.
         VITE_MEDIA_URL: ${VITE_MEDIA_URL:-}
-        VITE_LOG_PUBKEY: ${VITE_LOG_PUBKEY:-}
     restart: unless-stopped
     depends_on:
       - server

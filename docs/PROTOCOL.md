@@ -90,8 +90,8 @@ is "no replay as long as the database has not collapsed".
 
 ### 1.5 Unauthenticated routes
 
-Four routes cannot be authenticated by definition — account creation, device registration, pairing
-deposit and pairing pickup. They carry a per-address rate limit, `THROTTLE_PER_MINUTE` (60 by
+Five routes cannot be authenticated by definition — account creation, device registration, pairing
+deposit, pairing pickup, and the recovery claim. They carry a per-address rate limit, `THROTTLE_PER_MINUTE` (60 by
 default). Account creation is what justifies it: it writes into the transparency log, whose
 entries cannot be taken back without breaking the consistency proofs.
 
@@ -102,7 +102,13 @@ drain a chosen victim's stock and leave them unreachable for any new conversatio
 the caller alone — opening conversations with many correspondents is legitimate, hammering a
 single one is not.
 
-Both counters live **in memory, hence per instance**: two instances offer twice the quota and a
+The recovery claim (`POST /v1/recovery/claim`, § 11) carries a third bound of its own,
+`RECOVERY_QUOTA_PER_MINUTE` — **three a minute per address**, the narrowest quota in the server.
+Every other limit here bounds how fast a table grows; this one bounds how fast a password can be
+guessed, and it is the only online bound that exists, because a failed claim names no account and
+so cannot be counted against one. A compile-time assertion keeps it below every write quota.
+
+All these counters live **in memory, hence per instance**: two instances offer twice the quota and a
 restart resets them. An address is not an identity either. This is a speed bump, not a barrier.
 The server reads only the socket address and never `X-Forwarded-For`, which anyone can forge.
 
@@ -123,6 +129,10 @@ the single implementation; `crates/transparency` adds one more for tree heads.
 | `wac-signal-mac-v1` | group posting key (HMAC) | `group_id`, `nonce`, `SHA256(body)` |
 | `wac-gateway-v1` | device authentication key | `device_id`, server challenge |
 | `wac-sth-v1` | transparency log key | tree `size`, `root`, `timestamp` |
+
+The recovery escrow (§ 11) adds four labels that are **derivation** domains rather than signature
+domains — they separate keys, not messages, and so are not in the table above:
+`wac-escrow-salt-v1`, `wac-escrow-lookup-v1`, `wac-escrow-seal-v1`, `wac-escrow-prf-v1`.
 
 ### 2.1 What domain separation buys
 
@@ -219,7 +229,7 @@ encryption path: AES-256-GCM under the epoch's **export secret**
 
 | | Durable channel | Ephemeral channel |
 |---|---|---|
-| Carries | messages, receipts, reactions, replies | typing |
+| Carries | messages, receipts, reactions, replies, call invitations and conclusions | typing, call frames |
 | Encryption | MLS application ratchet | AES-256-GCM under the epoch export secret |
 | Server storage | `envelopes` | **none** — relayed in memory, never the disk |
 | Losing one | recovered by the cursor | no consequence |
@@ -231,6 +241,63 @@ arrives.
 
 The export secret changes at every commit, so a removed member loses the typing channel at the
 same instant they lose the messages — post-compromise security applies here for free.
+
+### 3.6 Calls, and how they are split across the two channels
+
+A call needs both channels, and the split follows the missing sender authentication above rather
+than any notion of importance.
+
+**The invitation is not in the ephemeral channel.** "Alice is calling you" is a claim about *who*
+is speaking, and a key that belongs to the group cannot support one: any member could ring a group
+under somebody else's name. It travels as an ordinary MLS message — `content.ts`, type byte 13 —
+where the protocol authenticates its author. Three events share that byte: `invite`, `ended`
+carrying a duration in seconds, and `missed`. A refusal and a call nobody heard are deliberately
+the same event on the wire; telling the caller they were turned down rather than merely unheard is
+an admission the protocol has no reason to extract from a device.
+
+Two consequences come free. The call log and the missed call are messages, so they are ordered,
+archived and re-read like any other. And an invitation is an envelope, so `push::wake_detached`
+fires on it exactly as it does on a text — **without the server learning that this one was a
+call.**
+
+**Everything around the invitation is ephemeral**: `ringing`, `accepted`, `declined`, `left`,
+`muted`, `unmuted`, `alive`, under type byte 1 of the signal format. None is load-bearing. Who is
+actually in a call is whoever the media layer reports; these only let the interface react before
+it can know, and a forged one changes nothing that matters. Both ends run their own ring timeout
+(30 s) and their own silence timeout (15 s), because a frame saying "stop ringing" can be lost and
+a phone that then rang forever is the one failure a user cannot work around.
+
+### 3.7 The media path
+
+The audio does not go through this server. It goes through a media server, which terminates the
+transport encryption — that is what lets it route one stream to five listeners without holding
+five conversations — and is therefore **encrypted a second time before it gets there**, frame by
+frame, in the browser.
+
+That second key is `export_secret(..., "wac-call-key-v1", call_id, 32)`, derived by every member
+from the current epoch. Nothing is exchanged to obtain it, so neither server is ever in possession
+of one and neither can be asked for one. The call id sits in the exporter's context so that two
+calls in one epoch do not share a key — replaying one call's audio into another would otherwise
+decrypt. And because it is an epoch secret, a member removed mid-call loses the audio at the same
+commit that costs them the messages; the client re-derives it on a timer and hands it to the media
+layer, so the property is acted on rather than merely true.
+
+`POST /v1/groups/{group_id}/call/token` mints admission. It is authenticated by the **group MAC**,
+like a signal and an anonymous post and for the same reason. The room is named
+`SHA256("wac-call-room-v1" ‖ group_id ‖ call_id)`, so the media server learns neither which
+conversation a room belongs to nor that two rooms belong to the same one. The participant identity
+is derived from the call key, so members recognise each other while the media server sees an
+opaque string that changes every call — and, being derived from a group key, it is recognisable
+rather than unforgeable: a member can take another member's identity, the same forgery § 3.5
+already documents.
+
+The route answers **503** when the deployment holds no media credentials. Not 404: a missing route
+invites a retry, a refused feature tells the client to hide the call button.
+
+**What a call costs that a message does not.** This server sees that somebody is joining a call,
+when, and towards which group; the media server sees who shares a room with whom, and for how
+long. Sealed sender does not survive the media path — an RTP stream carries a stable identity for
+the length of a call. See `docs/THREAT-MODEL.md` § 4ter.
 
 ---
 
@@ -253,9 +320,10 @@ single leading type byte:
 9  reserved        the friend system, not built
 10 membership      u8 event ‖ UTF-8 account  (joined | removed | left)
 11 handle          u64 BE milliseconds ‖ UTF-8 handle (≤ 32 bytes)
+12 signals         12-byte nonce ‖ AES-256-GCM (u64 BE ms ‖ u8 bitfield ‖ UTF-8 JSON?)
 ```
 
-Types 2, 3, 4, 8 and 11 are **protocol traffic**: they ride the encrypted channel because that is
+Types 2, 3, 4, 8, 11 and 12 are **protocol traffic**: they ride the encrypted channel because that is
 precisely what is wanted — a path the server carries without being able to read it — but they are
 not messages. `isControl` names them in one place, so a new control type does not have to be
 remembered on send *and* on receive.
@@ -327,6 +395,89 @@ The server holds the directory that maps handles to accounts and is free to lie 
 the lie from mattering is that an account id is checkable against key material inside the
 credential — but a *handle* fetched at render time is checkable against nothing, and fetching it
 would hand the server a fresh opportunity to say who somebody is on every screen, forever.
+
+### 4.4 The settings and preferences travel too, and are sealed a second time
+
+Type 12 has the shape of types 8 and 11 — control, self-ordered, last-writer-wins on a clamped
+timestamp, for the reason those two give: `seq` is per conversation and these are per account, so
+two rooms would disagree about which change came last. It differs in one respect, and the
+difference is the whole design.
+
+**The body is encrypted again, under a key only the sender's own devices hold.** That key is
+`HKDF-SHA256(seed, "wac-device-sync-v1")`, derived like the vault key and independent of it. Peers
+carry the message and cannot open it; they learn that *a* preference moved, never which.
+
+That second seal is not decoration. The settings say whether an account emits read receipts and
+typing indicators, and knowing that somebody turned their read receipts off is precisely the lever
+the setting exists to remove — a peer who can see the switch can ask for it to be flipped back.
+
+The reason it travels at all is that these settings are a property of the account and used to be a
+property of the device. Acknowledgement runs per session, so an account that refused read receipts
+on one device kept sending them from another, with nothing on screen saying so. There is no
+server-side repair available: the server cannot see a receipt, which is the point of receipts
+being ordinary envelopes under sealed sender, so it can enforce nothing about them. What it can do
+is carry an opaque message between devices that already share every conversation.
+
+`presence` rides along for the screen only. The server is what records presence, so
+`accounts.presence_optout` remains the truth for it; the flag in this message keeps a second
+device from *displaying* a switch its account has already flipped. A device restored from the
+recovery phrase has no conversation and therefore no channel at all, which is why
+`GET /v1/accounts/{account}/devices` returns `presence_optout` — to its owner and to nobody else.
+
+### 4.5 The contact policy is enforced, not merely stored
+
+`accounts.contact_policy` holds `open`, `known` or `closed`, set through `POST /v1/contact-policy`
+by the signing device — never by naming an account, so nobody can close somebody else's door — and
+read back on `GET /v1/accounts/{account}/devices`, to its owner alone.
+
+It is applied in `add_members`, before any row is written. Being added to a group *is* a row in
+`group_members`, so the server is the only party that can decline it. That is what separates this
+from the local block list, which lets the envelope arrive and declines to read it.
+
+**The refusal is deliberately indistinguishable.** A closed account answers `403` with the same
+body a non-member already receives when it tries to add to a group it is not in. A reply naming
+the reason would make the setting an oracle: anybody could learn anybody's policy by trying, which
+is a fact about a person published by the mechanism meant to protect them.
+
+**`known` means "already shares a group", and the group being created does not count.** The route
+inserts the caller before the check runs, so counting the group under construction would find the
+caller inside it and admit everybody — the setting would enforce nothing while appearing to work.
+It also does not mean *verified*: that comparison happens out of band between two people and never
+reaches the server, and teaching it would hand it a finer map of who trusts whom than it holds.
+
+**An account always reaches its own devices**, whatever its policy. They are added to every
+conversation on every poll, and a policy that applied to itself would break an account the moment
+it paired a second device.
+
+**It is not retroactive.** `closed` refuses new additions and removes nobody from a group they are
+already in. No column could do otherwise: the membership that matters is the MLS tree, which this
+server cannot read.
+
+#### The rest of the preferences, appended
+
+After the nine fixed bytes comes optional UTF-8 JSON, inside the same seal: the per-conversation
+flags (pinned, archived, muted, ephemeral), the petnames, the blocks, and the two account-wide
+switches for notification naming and the vault. Nothing after the head is a message from a device
+running the older build — a valid message with no preferences in it, which is not the same as a
+message asking to clear them.
+
+**Each entry carries its own timestamp, and removals are stamped rather than merely absent.** That
+is the part worth stating in a protocol document, because the obvious alternative is wrong in a way
+nothing reports: one timestamp over a *map* means that blocking one person on a laptop and another
+on a phone loses one of the two blocks, and that an unblock loses to the device that still holds
+the block. The stamp map is therefore also the tombstone set — a key stamped and absent from the
+values *is* the record of a removal — and it is persisted, because a tombstone lost at the next
+start lets a third device re-assert what was removed.
+
+What travels is a full snapshot, not a delta: a device that was off for a week is caught up by one
+message rather than by a chain of them it never received. It is bounded at sixteen kilobytes and
+refused rather than truncated past that, since half a preference set reads as a decision to clear
+the half that fell off.
+
+What deliberately does **not** travel: the interface language and the local search coverage, which
+are facts about a machine rather than an account, and the recent-emoji list and skin tone, which
+are account facts that change on nearly every message — syncing them would spend an envelope per
+conversation on somebody reaching for a thumbs-up.
 
 So the handle is believed exactly as much as a display name: a member may claim one they do not
 hold. That buys them nothing the display name did not already offer, and the ambiguity rule above
@@ -401,7 +552,74 @@ here that constraint is useful rather than a formality: it stops a client that *
 roster** from joining an administered group. Without it, such a client would join, apply an empty
 policy, accept commits the others refuse — and fork the group with nothing to signal it.
 
-### 6.4 Admin and moderators
+### 6.4 The `0xF101` group context extension: how long the room remembers
+
+Beside the roster, in the same private-use range and for the same reason, sits the conversation's
+**lifetime**: type `0xF101`, body one `u32` big-endian, in **seconds**. `0` means off, and an
+absent extension means off too — the difference is only that `0` was chosen by somebody and
+announced in the thread. A body of any other length is refused rather than truncated: this crosses
+the wire between clients that must all read it identically, and a length nobody checks is how a
+garbled extension becomes a lifetime nobody agreed to.
+
+Conversations created by this client start at **604800** — seven days — administered or flat. It
+is listed in `RequiredCapabilities` alongside the roster, so a client that cannot read it does not
+join and then apply a policy it never saw.
+
+That capability requirement has a migration edge, and it is not worked around: a conversation
+created *before* this extension existed cannot be given a lifetime. Its members' leaf nodes were
+built without `0xF101` in their capabilities, and MLS refuses a commit requiring an extension a
+member does not declare. The interface asks whether the extension is present at all and says so
+rather than spending a click on a protocol error. New conversations carry it from the first
+commit; existing ones keep everything, as they did before.
+
+The same edge cuts a second way, and it is a **deployment concern rather than a protocol one**:
+KeyPackages published by a client that predates this extension do not declare `0xF101` in their
+leaf capabilities, so adding such a device to a *new* conversation is refused by MLS. The stock is
+consumed one package at a time and nothing flushes it, so an upgraded deployment carries the
+failure until every stale package has been claimed. `identity.rs` states the general rule —
+KeyPackages published before a capability change must be republished — and no mechanism does it:
+there is no stock invalidation route, and no version marker one could act on.
+
+**This window is accepted rather than closed**, deliberately and with its cost stated. The same
+trade was already taken once for `0xF100`, and closing it properly means a stock invalidation
+route plus a capability version to trigger it — machinery whose own failure modes (a device that
+flushes its stock and cannot republish is unreachable until it can) are worse than the window it
+removes. What it costs meanwhile: for a device whose published stock predates the release, the
+first invitation into a new conversation fails with a raw MLS error, and keeps failing until that
+stock is drained by ordinary use. It resolves on its own; nothing is corrupted, and no existing
+conversation is affected.
+
+**Who may change it: admin or moderator.** Changing how long the room remembers is moderation, the
+same rank that admits and removes members; handing out power is not, and stays the admin's alone.
+A client computes the two facts by *comparing* the extensions a commit installs with the ones in
+force — asking merely whether a `GroupContextExtensions` proposal exists cannot tell the two
+apart, and a commit that silently drops the roster while claiming to set a lifetime reads as a
+roster change and needs the admin.
+
+**Nothing in MLS enforces the deletion.** The extension makes every member agree on the number;
+what each does with it is theirs. A modified client keeps what it likes and screenshots exist.
+What the group context buys is that "this disappears in seven days" is a sentence about the room
+rather than about one screen — and what the client buys on top is that an ephemeral conversation
+is never deposited in the vault. See §6.5 and `docs/THREAT-MODEL.md`.
+
+### 6.5 What the clock is, and what it is worth
+
+The deadline for a message is `min(sentAt, first seen locally) + lifetime`, stamped once on
+arrival and stored with the message. `sentAt` is **declared by the sender and not proven**, so a
+member could otherwise post-date their own message and buy it a longer life; the clamp takes that
+away and leaves the harmless half — shortening one's own message — alone.
+
+Stamped once, and not recomputed: a message keeps the deadline it was given when it arrived even
+if the lifetime changes afterwards. That is what makes turning it on **not retroactive** for
+messages already held, and it is also what stops a device that was offline during a change from
+reading the same history differently.
+
+Turning it on **is** retroactive for the vault: the client deletes this account's archive of the
+conversation, and the server never learns why — it only ever sees `DELETE /v1/vault/{group_id}`,
+which removes the caller's own entries and nobody else's. The server is never told the lifetime,
+and there is no column, parameter or header carrying it.
+
+### 6.6 Admin and moderators
 
 One admin, exactly one. Several admins of equal rank have no tie-breaker: two of them can demote
 each other or contradict each other on the group's membership, and nothing in the protocol says
@@ -412,6 +630,7 @@ which is right. A single root removes the question.
 | Add or remove an ordinary member | admin, moderator |
 | Remove a moderator | admin |
 | Appoint, revoke, hand over | admin |
+| Change the lifetime | admin, moderator |
 | Remove the admin | nobody |
 
 No roster is **not** an empty roster: it means a flat group where everyone can do everything. That
@@ -803,3 +1022,86 @@ envelope is a missing generation of the application ratchet, and nothing after i
 device on the wrong side of a purge must therefore stop trying to decrypt — otherwise it produces
 one error per envelope, on every poll, forever — restore what it can read from the vault, and ask
 to be re-introduced to the group. If the vault is disabled, the content is gone.
+
+---
+
+## 11. The recovery escrow
+
+**Off by default.** Enabling it is the one action in this protocol that puts the account root
+secret on the server. `docs/THREAT-MODEL.md` § 2.2.2 states what that costs; this section states
+what travels. The design argument is in
+[`./specs/2026-08-22-recovery-escrow.md`](./specs/2026-08-22-recovery-escrow.md).
+
+### 11.1 Derivation
+
+One expensive step yields two independent keys — one names the row on the server, the other opens
+it. Independence comes from the `info` labels, exactly as it does for the vault and device-sync
+keys in `crypto-core/src/account.rs`.
+
+```
+password  salt   = SHA-256("wac-escrow-salt-v1" ‖ handle)
+          okm    = Argon2id(password, salt, m = 256 MiB, t = 4, p = 1)  → 64 bytes
+          lookup = HKDF-SHA256(okm, info = "wac-escrow-lookup-v1")      → 32 bytes
+          seal   = HKDF-SHA256(okm, info = "wac-escrow-seal-v1")        → 32 bytes
+
+passkey   prf    = WebAuthn PRF over the constant salt "wac-escrow-prf-v1" → 32 bytes
+          lookup = HKDF-SHA256(prf, info = "wac-escrow-lookup-v1")
+          seal   = HKDF-SHA256(prf, info = "wac-escrow-seal-v1")
+```
+
+**The Argon2id salt is derived from the handle and not drawn at random.** It cannot be random:
+reading the stored parameters requires the lookup key, and computing the lookup key requires the
+salt. A per-handle salt is unique per account, so no one table covers two users — and it is
+precomputable against a *named* target, which the memory cost is what answers. The cost parameters
+are client constants for the same circular reason; the stored copy exists so a later build
+recognises an older escrow, is checked against a floor, and is inside the AAD.
+
+**What the server receives is `SHA-256(lookup)`.** The pre-image never leaves the client.
+
+### 11.2 The sealed object
+
+```
+sealed = nonce(12) ‖ AES-256-GCM(seal_key, nonce, seed(64), aad)          → 92 bytes, always
+aad    = account_id ‖ 0x00 ‖ kind(1) ‖ params(13)
+params = version(1) ‖ memory_kib(4) ‖ iterations(4) ‖ lanes(4)            big-endian
+kind   = 0x01 password | 0x02 passkey
+```
+
+The plaintext is exactly what the pairing packet carries: `Account::export_seed`, 64 bytes, worth
+the whole account.
+
+The AAD is what makes three substitutions fail loudly instead of quietly. The account id stops a
+server serving one account's ciphertext under another's lookup — which is also why the client
+verifies nothing after opening: reaching that point already proves the id and the seed were sealed
+together. The kind stops a passkey escrow being presented as a password one. The parameters stop a
+downgrade.
+
+The length is fixed and checked server-side. A caller-chosen length on the one table an
+unauthenticated route reads back would be a storage channel.
+
+### 11.3 The routes
+
+| Route | Authentication | Effect |
+|---|---|---|
+| `POST /v1/recovery` | signed | Deposits or replaces one factor for the signing device's account |
+| `GET /v1/recovery` | signed | Lists the kinds in use. **Never the ciphertext** |
+| `POST /v1/recovery/forget` | signed | Removes one factor; removing an absent one succeeds |
+| `POST /v1/recovery/claim` | **none** | `{lookup}` → the escrow, or 404 |
+
+`claim` is `POST` so the lookup — a value derived from the password — stays out of every access
+log between the client and the server. Same reasoning as `presence` in § 1.
+
+**A wrong secret and an account with no escrow return the identical 404.** The server holds a hash
+and compares it; it cannot tell them apart, and neither may the copy shown to the user.
+
+### 11.4 Two destructions the protocol requires
+
+**A rotation deletes every escrow of the account**, in the transaction that moves the identity
+key. Rotation is the answer to a stolen device and a stolen device holds the seed; an escrow left
+behind is the abandoned key still on the server, openable by a password the thief may have
+watched being typed.
+
+**A rename deletes the password escrow.** The handle is the salt, so after a rename the owner's
+own password produces a different lookup: the row would never open again while remaining
+grindable by whoever took the database. Re-sealing is impossible — it needs the password, which no
+session holds. The passkey factor is unaffected; nothing in its derivation knows the handle.

@@ -253,3 +253,33 @@ fn authenticate(app: &tauri::AppHandle, reason: &str) -> Result<(), String> {
     #[cfg(not(mobile))]
     Ok(())
 }
+
+/// What a site says about one of its own pages.
+///
+/// **Two commands rather than one, and the split is the point.** The text card is shown without
+/// ever downloading a picture; the picture is a second round trip with its own budget and its own
+/// failure. A site that answers with metadata and then stalls on an image leaves a card that
+/// works, rather than nothing.
+///
+/// Reachable by any JavaScript on the page, like everything in this module — so it protects
+/// nothing about *who* asks. What it protects is what the answer can reach: see
+/// [`crate::link`], where the address is resolved, filtered and pinned before a connection
+/// exists. The refusal strings come from there too, and are shown as written.
+#[tauri::command]
+pub async fn link_preview(url: String) -> Result<crate::link::LinkPreview, String> {
+    crate::link::fetch_preview(&url).await
+}
+
+/// The bytes of a preview image, base64 as everything else across this boundary.
+///
+/// **These bytes are in exactly the situation of an attachment**: a server nobody vetted chose
+/// them. So the webview does not render them — it hands them to `decodePreview` in
+/// `lib/preview.ts`, which decodes them and re-emits a PNG of ours, with no new line of code on
+/// that side. That reuse is the demonstration that the decoder was put in the right place: the
+/// second source of hostile images inherits the first one's defence unchanged.
+#[tauri::command]
+pub async fn link_image(url: String) -> Result<String, String> {
+    crate::link::fetch_image(&url)
+        .await
+        .map(|bytes| BASE64_STANDARD.encode(bytes))
+}

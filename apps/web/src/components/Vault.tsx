@@ -124,6 +124,14 @@ export function VaultSettings() {
         }
       >
         <div className="space-y-pane">
+          {session.vaultFull && (
+            <Banner tone="warn" title="This account is out of room on this server">
+              Messages from now on are <strong>not</strong> being archived. Nothing already
+              archived has been deleted, and turning the backup off would free nothing — ask
+              whoever runs this server for more room.
+            </Banner>
+          )}
+
           <Banner tone="danger" title="What you gave up">
             The archive is encrypted under a key derived from your recovery phrase, so
             <strong> the same key forever</strong>. If that phrase ever gets away from you, the

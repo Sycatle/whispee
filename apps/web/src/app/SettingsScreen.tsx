@@ -1,8 +1,10 @@
 import { DeviceSettings } from "@/components/Devices";
 import { LockSettings } from "@/components/Lock";
+import { BlockedAccounts } from "@/components/Blocked";
 import { NoticeSettings } from "@/components/Notices";
 import { PairDevice } from "@/components/Pairing";
 import { ProfileSettings } from "@/components/Profile";
+import { RecoverySettings } from "@/components/Recovery";
 import { SignalSettings } from "@/components/Signals";
 import { VaultSettings } from "@/components/Vault";
 import { useDuo } from "@/lib/duo";
@@ -56,6 +58,7 @@ const GROUPS: { heading: string; entries: Entry[] }[] = [
       { section: "devices", label: "Your devices", icon: <Icon name="devices" /> },
       { section: "pairing", label: "Add a device", icon: <Icon name="pair" /> },
       { section: "backup", label: "History backup", icon: <Icon name="backup" /> },
+      { section: "recovery", label: "Getting back in", icon: <Icon name="lock" /> },
     ],
   },
   {
@@ -64,6 +67,7 @@ const GROUPS: { heading: string; entries: Entry[] }[] = [
       { section: "lock", label: "Lock", icon: <Icon name="lock" /> },
       { section: "receipts", label: "Receipts and indicators", icon: <Icon name="settings" /> },
       { section: "notifications", label: "Notifications", icon: <Icon name="notifications" /> },
+      { section: "blocked", label: "Blocked", icon: <Icon name="profile" /> },
     ],
   },
   {
@@ -78,8 +82,10 @@ export const TITLES: Record<SettingsSection, string> = {
   pairing: "Add a device",
   lock: "Lock",
   backup: "History backup",
+  recovery: "Getting back in",
   receipts: "Receipts and indicators",
   notifications: "Notifications",
+  blocked: "Blocked",
   appearance: "Appearance",
 };
 
@@ -149,10 +155,14 @@ function Section({ section }: { section: SettingsSection }) {
       return <LockSettings onDone={done} />;
     case "backup":
       return <VaultSettings />;
+    case "recovery":
+      return <RecoverySettings />;
     case "receipts":
       return <SignalSettings />;
     case "notifications":
       return <NoticeSettings />;
+    case "blocked":
+      return <BlockedAccounts />;
     case "appearance":
       return <Appearance />;
   }

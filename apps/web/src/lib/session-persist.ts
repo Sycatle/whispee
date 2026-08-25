@@ -88,6 +88,10 @@ export interface PersistInput {
    */
   trust: Pick<StoredSession, "verified" | "knownDevices">;
   signals: SignalSettings;
+  /** Ordering stamp for the settings above. See `StoredSession.signalsAt`. */
+  signalsAt: number | undefined;
+  /** Ordering stamps for the other preferences. See `StoredSession.prefStamps`. */
+  prefStamps: StoredSession["prefStamps"];
   /**
    * What `PreferencesStore` contributes, already mapped.
    *
@@ -142,6 +146,8 @@ export async function composeStored(input: PersistInput): Promise<StoredSession>
     groupIds: input.groupIds,
     ...input.trust,
     signals: input.signals,
+    signalsAt: input.signalsAt,
+    prefStamps: input.prefStamps,
     postingKeys: Object.fromEntries(
       views
         .filter((view) => view.postingKey)

@@ -114,10 +114,56 @@ interface StoredSession {
   /**
    * Signalling settings. Absent on earlier sessions, hence optional.
    *
-   * They live here and nowhere else: they are local preferences, and telling the server about
-   * them would amount to teaching it who refuses to be observed.
+   * They live here and nowhere else on the server's side: telling it about them would amount to
+   * teaching it who refuses to be observed. `presence` is the one exception, and it earns it —
+   * the server is what *records* presence, so a refusal it never hears is a refusal that changes
+   * nothing.
+   *
+   * Local, though, no longer means per-device. They are a property of the account, and a setting
+   * one forgotten laptop keeps undoing is not a setting; they now travel between our own devices
+   * as a sealed control message. See `lib/signal-sync.ts`.
    */
   signals?: SignalSettings;
+  /**
+   * When the settings above were last changed, by whichever of our devices changed them.
+   *
+   * Last-writer-wins needs an order, and `seq` cannot give one: it is per conversation while
+   * these are per account, so two rooms would disagree about which change came last. Kept beside
+   * the settings rather than inside them because it is not something the user agrees to emit —
+   * it is the bookkeeping that lets a device stay silent when what reaches it is older than what
+   * it already has.
+   *
+   * Absent on every session written before the settings started travelling, which reads as "older
+   * than anything" and lets the first announcement heard win.
+   */
+  signalsAt?: number;
+  /**
+   * When each of the other preferences was last decided, and by extension which removals happened.
+   *
+   * # Why the stamps are stored and not just sent
+   *
+   * They are the tombstones. A block lifted on the laptop is, on the phone, the *absence* of a
+   * block it still holds — and absence loses to any earlier decision that was recorded. Keeping
+   * the stamp of the removal is what makes the removal stick, so it has to survive a reload like
+   * the value it removed.
+   *
+   * `stamped.ts` states the rule in full, including why one stamp over a whole map silently loses
+   * edits made on two devices at once.
+   *
+   * # Why it grows, and how far
+   *
+   * One entry per key ever decided, including keys since removed. That is bounded by the number
+   * of distinct conversations and accounts an owner has ever pinned, muted, blocked or renamed —
+   * a set that grows with acquaintances rather than with time, and that is already the order of
+   * `verified` and `knownDevices` a few fields up.
+   */
+  prefStamps?: {
+    /** `discloseConversationName` and `vaultEnabled`, which move as one decision. */
+    scalars?: number;
+    flags?: Record<string, number>;
+    petnames?: Record<string, number>;
+    blocked?: Record<string, number>;
+  };
   /**
    * Posting key per conversation, indexed by hex group id.
    *
@@ -210,21 +256,53 @@ interface StoredSession {
    */
   searchCoverage?: Record<string, { from: number; to: number }>;
   /**
-   * Who is allowed to start a conversation with this account.
+   * Who may start a conversation with this account.
    *
-   * Mirrors the column the server holds, so the interface can show the current setting without a
-   * round trip. **The server is the enforcement point**, not this field: a copy kept locally is a
-   * cache of a decision, never the decision itself.
+   * **A cache, and the only field here that is one.** The truth is `accounts.contact_policy` on
+   * the server, which refuses to write the `group_members` row rather than writing it and letting
+   * the client decline to read. That is what separates this from `blocked` a few fields down: one
+   * prevents, the other hides, and the difference is which party can act.
+   *
+   * It governs membership, and therefore what is delivered. It is not a barrier every path
+   * consults: admission to a call proves possession of the group's posting key rather than
+   * membership, which is what keeps the server from learning who is calling. That is not a way
+   * around the policy — the posting key is handed out inside the group, and an account the server
+   * refuses never joins — but it is the reason the screen says the policy governs who may *add*
+   * you rather than claiming nothing can reach you.
+   *
+   * This comment used to describe that enforcement while nothing enforced it — no column, no
+   * route, no mention anywhere in `crates/`. It is worth saying that it was wrong for months and
+   * that nothing reported it: a placeholder describing itself as enforced is worse than no
+   * placeholder, because it stops anybody from noticing the enforcement is missing.
+   *
+   * # Why it does not travel with the other preferences
+   *
+   * They travel because the server must not know them. This one it already knows, because it acts
+   * on it — so a sealed copy between devices would be a second version of a fact that has an
+   * authority, and two versions of one fact eventually disagree. It is read back on resolve
+   * instead, and the server's answer wins outright.
+   *
+   * # `known` means what the server can check
+   *
+   * That the two accounts already share a group. Not that they have verified each other:
+   * verification is compared out of band and never reaches the server, and teaching it would hand
+   * it a finer map of who trusts whom than it already has. The screen says the relation in those
+   * words rather than saying "known" and letting each reader supply a meaning.
    */
   contactPolicy?: "open" | "known" | "closed";
   /**
    * Handles this device refuses to display.
    *
-   * Local, and therefore weak on purpose — it hides, it does not prevent. Anyone registered can
-   * still add anyone to a group and have envelopes delivered to them; blocking on this side means
-   * declining to read something that exists and is stored. That is why the screen offering it has
-   * to offer `contactPolicy` in the same breath: without the server-side half, a block is a
-   * courtesy to oneself rather than a barrier.
+   * Weak on purpose — it hides, it does not prevent. Anyone registered can still add anyone to a
+   * group and have envelopes delivered to them; blocking on this side means declining to read
+   * something that exists and is stored. That is why the screen offering it offers
+   * `contactPolicy` in the same breath: without the server-side half, a block is a courtesy to
+   * oneself rather than a barrier. That half is built now, and the two sit on one screen.
+   *
+   * No longer local to one device, though. It travels with the other preferences, per entry and
+   * with removals stamped, so that blocking somebody on a phone is not undone by a laptop that
+   * never heard about it. `stamped.ts` is where the arbitration lives, and why a single timestamp
+   * over the whole list would silently lose one of two blocks made at once.
    */
   blocked?: string[];
   /**
@@ -289,7 +367,15 @@ export interface SignalSettings {
    * invite seeing without being seen.
    */
   readReceipts: boolean;
-  /** Emit the typing indicator. Receiving it stays possible: nothing to hide in going without. */
+  /**
+   * Emit — and therefore see — the typing indicator.
+   *
+   * A single flag for both directions, as for read receipts and presence, and it took the longest
+   * to get here. The argument for letting reception continue was that there is nothing to hide in
+   * going without. There is: an account that stops emitting while still receiving gains a one-way
+   * view of who hesitates before answering it, in every conversation, at no cost. That is an
+   * advantage over the people it talks to, not privacy from them. Signal makes the same call.
+   */
   typingIndicator: boolean;
   /**
    * Broadcast — and therefore see — presence.
@@ -302,6 +388,19 @@ export interface SignalSettings {
    * Absent means enabled: presence is the default, this flag only records a refusal.
    */
   presence?: boolean;
+  /**
+   * Accept — and therefore be able to place — calls.
+   *
+   * A single flag for both directions, as for the three above, and here the reciprocity argument
+   * is the plainest of the four: an account that places calls while refusing to receive them is
+   * asking of others exactly what it declines to give.
+   *
+   * Absent means enabled, like presence: this flag only ever records a refusal. That matters more
+   * than for the others because it also decides what an *older* device announces — one that
+   * predates calls emits nothing for this field, and a default of "off" would let it turn calls
+   * off across an account every time it synchronised.
+   */
+  calls?: boolean;
 }
 
 /**

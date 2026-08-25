@@ -90,6 +90,45 @@ export interface Seams<M extends Placed> {
 }
 
 /**
+ * Drops everything said by an account the reader has declined to read.
+ *
+ * # Why this belongs here, above `layout`
+ *
+ * Because it has to run **before** `layout` sees the list, and putting it anywhere else makes
+ * that easy to get wrong. `layout` derives day headings and turn grouping from adjacency: filter
+ * afterwards and a day heading is left standing above nothing, or a turn keeps the avatar of the
+ * message that opened it and loses the message. Filtering first means the seams are computed on
+ * the thread as it will actually be drawn.
+ *
+ * It must also run **before** reactions are folded onto their targets. A reaction is that person
+ * speaking too — a thumb on somebody's message is a thing they said about it — so a blocked
+ * account's reaction to a message that stays visible goes with the rest of them. Folding first
+ * would attach it and leave no way to tell whose it was.
+ *
+ * # What it does not do, deliberately
+ *
+ * Leave any trace. No "3 messages hidden", no gap, no count. A counter of what one has declined to
+ * read is an invitation to go and read it, which makes blocking more work than not blocking — and
+ * it hands anybody who suspects they are blocked a way to keep score. The messages are still on
+ * the disk and still in the vault: this is a decision about what is drawn, and `storage.ts` is
+ * clear that blocking hides rather than prevents.
+ *
+ * Our own messages are never dropped, whatever the list says. Blocking oneself is not a state the
+ * interface can produce, and a thread that silently lost its own half would be a bug nobody could
+ * explain.
+ */
+export function unblocked<M extends { mine: boolean; sender: string | null }>(
+  messages: readonly M[],
+  blocked: ReadonlySet<string>,
+): M[] {
+  if (blocked.size === 0) return [...messages];
+
+  return messages.filter(
+    (message) => message.mine || message.sender === null || !blocked.has(message.sender),
+  );
+}
+
+/**
  * Resolve every seam in a thread, in one pass over the whole list.
  *
  * The messages are expected in `seq` order with reactions already folded away — see above for why

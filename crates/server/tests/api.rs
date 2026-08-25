@@ -1192,6 +1192,14 @@ async fn an_attachment_transits_without_being_readable() {
     assert_eq!(received.bytes().await.unwrap().as_ref(), ENCRYPTED);
 
     // And nothing of the file is kept in the clear server-side: no name, no type, no key.
+    //
+    // The count is a canary rather than an assertion about the schema: it fires on any column
+    // added to this table, so nobody widens what the server keeps about a file without coming
+    // here and saying why. It has fired once, for `account` — the uploader, added by
+    // `0019_storage_quota.sql` so that the heaviest write this server accepts can be charged to
+    // somebody. That is a metadata leak, it is argued in the migration and listed in
+    // `docs/THREAT-MODEL.md`, and it says nothing about the file itself. The loop below is what
+    // guards the file, and it is unchanged.
     let columns: Vec<(String,)> = sqlx::query_as(
         "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'attachments'",
     )
@@ -1199,7 +1207,7 @@ async fn an_attachment_transits_without_being_readable() {
     .await
     .unwrap();
     let names: Vec<String> = columns.into_iter().map(|(c,)| c).collect();
-    assert_eq!(names.len(), 4, "unexpected columns on attachments: {names:?}");
+    assert_eq!(names.len(), 5, "unexpected columns on attachments: {names:?}");
     for forbidden in ["name", "filename", "mime", "content_type", "key"] {
         assert!(!names.iter().any(|c| c == forbidden), "{forbidden} must not be stored");
     }
@@ -2271,6 +2279,86 @@ async fn forget_presence(pool: &sqlx::PgPool, device_id: &str) {
         .unwrap();
 }
 
+// ---------------------------------------------------------------- calls
+
+/// Asks for admission to a call, with the group MAC and without a device signature.
+async fn ask_for_call(
+    server: &TestServer,
+    group_id: &str,
+    posting_key: &[u8],
+    body: serde_json::Value,
+    nonce: [u8; 16],
+) -> reqwest::Response {
+    use hmac::{Hmac, Mac};
+
+    let payload = serde_json::to_vec(&body).unwrap();
+    let group = hex::decode(group_id).unwrap();
+    let message = attest::signal_message(&group, &nonce, &sha2::Sha256::digest(&payload)).unwrap();
+
+    let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(posting_key).unwrap();
+    mac.update(&message);
+
+    reqwest::Client::new()
+        .post(format!("{}/v1/groups/{group_id}/call/token", server.base_url))
+        .header("content-type", "application/json")
+        .header("x-group-nonce", BASE64_STANDARD.encode(nonce))
+        .header("x-group-mac", BASE64_STANDARD.encode(mac.finalize().into_bytes()))
+        .body(payload)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// **A deployment with no media server stays a working messenger.**
+///
+/// The answer is 503 and not 404, and the difference is what the client reads: a route that is
+/// missing invites a retry, a feature that is off tells it to hide the call button. This is the
+/// same discipline the push waker follows — see `crate::push`.
+#[tokio::test]
+async fn a_call_is_refused_when_no_media_server_is_configured() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let posting_key = [42u8; 32];
+    let group_id = group_with_key(&alice, &posting_key).await;
+
+    let asked = serde_json::json!({ "call": "9f2c41ab", "identity": "peer1" });
+    let response = ask_for_call(&server, &group_id, &posting_key, asked, [7u8; 16]).await;
+
+    assert_eq!(response.status(), 503, "an unconfigured deployment must say so, not fail");
+}
+
+/// **A token is admission to a room, so membership has to be proved to get one.**
+///
+/// The MAC is the proof, and it is the same one signals use. Without this, anybody able to name
+/// a group could join its calls — the room name is a digest, but a digest of two values the
+/// caller supplies.
+#[tokio::test]
+async fn a_call_without_the_group_mac_is_refused() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let posting_key = [42u8; 32];
+    let group_id = group_with_key(&alice, &posting_key).await;
+
+    let asked = serde_json::json!({ "call": "9f2c41ab", "identity": "peer1" });
+    let forged = ask_for_call(&server, &group_id, &[0u8; 32], asked, [8u8; 16]).await;
+
+    assert_eq!(forged.status(), 403, "a wrong MAC opened a call");
+}
+
+/// An identifier that is not a name is refused: it ends up in a room name and in a token.
+#[tokio::test]
+async fn a_call_identifier_that_is_not_a_name_is_refused() {
+    let server = start().await;
+    let alice = Device::register(&server, &unique("alice")).await;
+    let posting_key = [42u8; 32];
+    let group_id = group_with_key(&alice, &posting_key).await;
+
+    let asked = serde_json::json!({ "call": "../etc/passwd", "identity": "peer1" });
+    let response = ask_for_call(&server, &group_id, &posting_key, asked, [10u8; 16]).await;
+
+    assert_eq!(response.status(), 400);
+}
+
 /// **The test that protects sealed sender.**
 ///
 /// Anonymous posts and typing signals prove group membership with a MAC, not identity: the
@@ -2617,6 +2705,47 @@ async fn the_per_device_detail_is_only_served_to_its_owner() {
     );
 }
 
+/// Whether an account refuses presence is served to that account and to nobody else.
+///
+/// # Why it is served at all
+///
+/// The setting used to be write-only, so a device that was not there when it was written had no
+/// way to learn it. The other two signalling settings reach an account's devices as a sealed
+/// message inside the conversations they share; a device restored from the recovery phrase has no
+/// conversation, hence no channel, and would draw the switch "on" for an account the server has
+/// already stopped recording.
+///
+/// # Why it must not be served to anyone else
+///
+/// "Does this person refuse to be observed" is worth more to a stranger than to its owner. It is
+/// also exactly the fact the refusal exists to withhold, so leaking it would make the setting
+/// self-defeating.
+#[tokio::test]
+async fn the_presence_refusal_is_only_served_to_its_owner() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    let refuse = alice.post("/v1/presence/optout", serde_json::json!({ "optout": true })).await;
+    assert_eq!(refuse.status(), 200, "the refusal was not recorded");
+
+    let own: serde_json::Value =
+        alice.get(&format!("/v1/accounts/{}/devices", a.id)).await.json().await.unwrap();
+    assert_eq!(
+        own["presence_optout"], serde_json::json!(true),
+        "the owner cannot read back their own refusal",
+    );
+
+    let third_party: serde_json::Value =
+        bob.get(&format!("/v1/accounts/{}/devices", a.id)).await.json().await.unwrap();
+    assert!(
+        third_party["presence_optout"].is_null(),
+        "a stranger learns who refuses to be observed",
+    );
+}
+
 // ---------------------------------------------------------------- wake
 
 /// **The test that carries the property of the wake module.**
@@ -2949,6 +3078,26 @@ async fn a_full_attachment_quota_does_not_stop_a_message() {
 /// them. The database is shared with whatever else is running, and a head of size N covers the
 /// first N leaves of an append-only log — comparing against the whole table would make the test
 /// fail on somebody else's account creation.
+///
+/// # Why the comparison is retried rather than made once
+///
+/// It caught a defect in the log, and the defect is fixed elsewhere: `seq` is a `BIGSERIAL`, so
+/// two concurrent inserts draw their numbers **before** they commit and the larger one can become
+/// visible first — after which the smaller one lands *before* it in `ORDER BY seq` and a root
+/// recomputed afterwards no longer matches the head served a moment earlier. Under
+/// `cargo test --workspace` the other suites create accounts throughout, so this assertion failed
+/// at random until `log::append` was made to take a transaction-scoped advisory lock, which makes
+/// numbering order commit order. See `tests/log_order.rs`, which pins that property directly.
+///
+/// The retry stays, for a smaller reason than the one it was written for: this test asserts a
+/// *cache* is invisible, and it does so against a database shared with every other suite. It has
+/// no business failing on somebody else's timing, whatever the cause — and the ordering fix is a
+/// separate change with its own merge, so this file must be correct on either side of it.
+///
+/// What is retried is the **pair** — a head and the recomputation belonging to it, read close
+/// enough together that nothing landed in between. That weakens nothing: a server serving a root
+/// its own table does not support fails every attempt, because no reading of the table would ever
+/// agree with it. Only timing is given room to settle.
 #[tokio::test]
 async fn the_cached_head_matches_a_recomputation_after_an_append() {
     let server = start().await;
@@ -2961,24 +3110,47 @@ async fn the_cached_head_matches_a_recomputation_after_an_append() {
     // An account creation appends a leaf, inside the transaction that writes the account.
     TestAccount::create(&server, &unique("newcomer")).await;
 
-    let after: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
-    let size_after = after["size"].as_u64().unwrap();
+    let mut last: Option<(u64, Vec<u8>, Vec<u8>)> = None;
 
-    assert!(size_after > size_before, "the cache survived an append it should have noticed");
+    for attempt in 0..8 {
+        let after: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+        let size_after = after["size"].as_u64().unwrap();
 
-    let rows: Vec<(Vec<u8>,)> =
-        sqlx::query_as("SELECT leaf FROM log_entries ORDER BY seq LIMIT $1")
-            .bind(size_after as i64)
-            .fetch_all(&server.pool)
-            .await
-            .unwrap();
+        assert!(size_after > size_before, "the cache survived an append it should have noticed");
 
-    let leaves: Vec<transparency::Hash> =
-        rows.into_iter().map(|(leaf,)| leaf.try_into().unwrap()).collect();
-    assert_eq!(leaves.len() as u64, size_after, "the log lost rows under the test");
+        let rows: Vec<(Vec<u8>,)> =
+            sqlx::query_as("SELECT leaf FROM log_entries ORDER BY seq LIMIT $1")
+                .bind(size_after as i64)
+                .fetch_all(&server.pool)
+                .await
+                .unwrap();
 
-    let served = BASE64_STANDARD.decode(after["root"].as_str().unwrap()).unwrap();
-    assert_eq!(served, transparency::root(&leaves), "the served root is not the log's root");
+        let leaves: Vec<transparency::Hash> =
+            rows.into_iter().map(|(leaf,)| leaf.try_into().unwrap()).collect();
+        assert_eq!(leaves.len() as u64, size_after, "the log lost rows under the test");
+
+        let served = BASE64_STANDARD.decode(after["root"].as_str().unwrap()).unwrap();
+        let recomputed = transparency::root(&leaves).to_vec();
+
+        if served == recomputed {
+            return;
+        }
+
+        last = Some((size_after, served, recomputed));
+
+        // Long enough for an insert that had already drawn its `seq` to commit, short enough that
+        // eight of them cost less than a second when the log is quiet — which it is, every time
+        // this test is run on its own.
+        if attempt < 7 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    let (size, served, recomputed) = last.expect("the loop runs at least once");
+    panic!(
+        "the served root is not the log's root, on every attempt: \
+         size {size}, served {served:?}, recomputed {recomputed:?}"
+    );
 }
 
 /// The head served twice in a row without an append is the same head.
@@ -3859,4 +4031,207 @@ async fn renaming_mid_conversation_changes_nothing_about_it() {
         }
         other => panic!("expected an application message, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------- contact policy
+
+/// Adds `subject`'s device to a fresh group, as `caller`. The status is the whole answer.
+async fn try_to_reach(caller: &Device, subject: &Device) -> reqwest::StatusCode {
+    let group_id = unique("group").into_bytes();
+
+    caller
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+            serde_json::json!({ "device_ids": [caller.id, subject.id] }),
+        )
+        .await
+        .status()
+}
+
+async fn set_policy(device: &Device, policy: &str) -> reqwest::StatusCode {
+    device.post("/v1/contact-policy", serde_json::json!({ "policy": policy })).await.status()
+}
+
+/// **The test that makes the setting exist.**
+///
+/// `blocked` hides what somebody says and lets it arrive; this refuses the arrival. Being added to
+/// a group is a row in `group_members`, so the server is the only party that can decline to write
+/// it — which is why this half could never have lived in the client, and why the client field
+/// spent months claiming a server that would enforce it.
+#[tokio::test]
+async fn a_closed_account_cannot_be_added_by_a_stranger() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    assert!(try_to_reach(&alice, &bob).await.is_success(), "open is the default");
+
+    assert_eq!(set_policy(&bob, "closed").await, 200);
+    assert_eq!(try_to_reach(&alice, &bob).await, 403);
+}
+
+/// The refusal must be indistinguishable from the one a non-member already gets.
+///
+/// A reply that said "this account is not accepting" would make the setting an oracle: anybody
+/// could learn anybody's policy by trying, which is a fact about a person published by the
+/// mechanism meant to protect them. Both paths answer `403` with no body to tell them apart.
+#[tokio::test]
+async fn a_refused_contact_looks_like_any_other_refusal() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+    let c = TestAccount::create(&server, &unique("carol")).await;
+    let carol = c.device(&server, "phone").await;
+
+    assert_eq!(set_policy(&bob, "closed").await, 200);
+    let closed = alice
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(unique("group").into_bytes())),
+            serde_json::json!({ "device_ids": [alice.id, bob.id] }),
+        )
+        .await;
+
+    // A group Carol is not in: the pre-existing refusal this one has to be confused with.
+    let group_id = unique("group").into_bytes();
+    alice
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+            serde_json::json!({ "device_ids": [alice.id] }),
+        )
+        .await;
+    let outsider = carol
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+            serde_json::json!({ "device_ids": [carol.id] }),
+        )
+        .await;
+
+    assert_eq!(closed.status(), outsider.status());
+    assert_eq!(closed.text().await.unwrap(), outsider.text().await.unwrap());
+}
+
+/// `known` means "already meets me somewhere else", which is the only relation this server can
+/// establish without being told anything new.
+#[tokio::test]
+async fn known_admits_an_account_already_met_and_refuses_the_rest() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+    let c = TestAccount::create(&server, &unique("carol")).await;
+    let carol = c.device(&server, "phone").await;
+
+    // Alice and Bob already meet somewhere.
+    assert!(try_to_reach(&alice, &bob).await.is_success());
+    assert_eq!(set_policy(&bob, "known").await, 200);
+
+    assert!(try_to_reach(&alice, &bob).await.is_success(), "an account already met was refused");
+    assert_eq!(try_to_reach(&carol, &bob).await, 403, "a stranger got in under `known`");
+}
+
+/// **The subtle one.** The group being created must not count as the meeting.
+///
+/// `add_members` inserts the caller before the policy runs, so a test that counted the group under
+/// construction would find the caller in it and admit everybody — the setting would enforce
+/// nothing while appearing to work, which is worse than not shipping it.
+#[tokio::test]
+async fn the_group_being_created_does_not_make_a_stranger_known() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    assert_eq!(set_policy(&bob, "known").await, 200);
+    assert_eq!(try_to_reach(&alice, &bob).await, 403);
+}
+
+/// An account must never lock its own devices out of its own conversations.
+///
+/// `propagateOwnDevices` adds them to every thread on every poll. A policy that applied to itself
+/// would break an account the moment it paired a second device, in a way nobody would think to
+/// test because nobody thinks of their own phone as a stranger.
+#[tokio::test]
+async fn a_closed_account_still_reaches_its_own_devices() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let phone = a.device(&server, "phone").await;
+    let tablet = a.device(&server, "tablet").await;
+
+    assert_eq!(set_policy(&phone, "closed").await, 200);
+    assert!(try_to_reach(&phone, &tablet).await.is_success());
+}
+
+/// Not retroactive, and it cannot be: the membership that matters is the MLS tree, which this
+/// server cannot read. Emptying a distribution list would break every conversation the account
+/// already had while leaving its members holding the keys.
+#[tokio::test]
+async fn closing_the_door_leaves_the_conversations_already_open() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    let group_id = unique("group").into_bytes();
+    assert!(
+        alice
+            .post(
+                &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+                serde_json::json!({ "device_ids": [alice.id, bob.id] }),
+            )
+            .await
+            .status()
+            .is_success()
+    );
+
+    assert_eq!(set_policy(&bob, "closed").await, 200);
+
+    // The existing group still carries both, and posting into it still works.
+    let posted = alice
+        .post(
+            &format!("/v1/groups/{}/envelopes", hex::encode(&group_id)),
+            serde_json::json!({ "payload": BASE64_STANDARD.encode(b"still open") }),
+        )
+        .await;
+    assert!(posted.status().is_success(), "closing the door emptied a room already occupied");
+}
+
+/// A policy the schema would refuse must not reach the schema.
+#[tokio::test]
+async fn an_unknown_policy_is_refused_as_a_bad_request() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+
+    assert_eq!(set_policy(&alice, "sometimes").await, 400);
+}
+
+/// The policy is readable by its owner and by nobody else.
+///
+/// Sharper than for `presence_optout`: this answers "will this person accept a stranger", which is
+/// worth more to a stranger than to its owner — and publishing it would undo the care taken to
+/// make the refusal at `add_members` indistinguishable.
+#[tokio::test]
+async fn the_contact_policy_is_only_served_to_its_owner() {
+    let server = start().await;
+    let a = TestAccount::create(&server, &unique("alice")).await;
+    let alice = a.device(&server, "phone").await;
+    let b = TestAccount::create(&server, &unique("bob")).await;
+    let bob = b.device(&server, "phone").await;
+
+    assert_eq!(set_policy(&alice, "known").await, 200);
+
+    let own: serde_json::Value =
+        alice.get(&format!("/v1/accounts/{}/devices", a.id)).await.json().await.unwrap();
+    assert_eq!(own["contact_policy"], serde_json::json!("known"));
+
+    let third_party: serde_json::Value =
+        bob.get(&format!("/v1/accounts/{}/devices", a.id)).await.json().await.unwrap();
+    assert!(third_party["contact_policy"].is_null(), "a stranger learns who accepts strangers");
 }

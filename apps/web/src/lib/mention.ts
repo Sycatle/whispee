@@ -1,4 +1,8 @@
 import { type NameSources, compactNameOf, nameMatches } from "./naming.ts";
+// One import, one direction. `markdown.ts` knows nothing about mentions and must not learn: the
+// two scanners are correct because they are separate, and an `@` case in the inline tokeniser
+// would look like a simplification while coupling them.
+import { prose } from "./markdown.ts";
 
 /**
  * `@somebody` in a message: what is being typed, who it could be, and who it turned out to be.
@@ -188,7 +192,11 @@ export function runs(text: string, among: Iterable<string>): Run[] {
  * reader cannot find.
  */
 export function addresses(text: string, handle: string, among: Iterable<string>): boolean {
-  return runs(text, among).some((run) => "handle" in run && run.handle === handle);
+  return prose(text).some((range) =>
+    runs(text.slice(range.from, range.to), among).some(
+      (run) => "handle" in run && run.handle === handle,
+    ),
+  );
 }
 
 /**
@@ -282,10 +290,26 @@ export function addressedIn(
  * who will never read it, and inventing an id for them would be worse than leaving prose.
  */
 export function resolve(text: string, directory: ReadonlyMap<string, string>): string {
-  const parts = runs(text, directory.keys());
-  if (!parts.some((run) => "handle" in run)) return text;
+  const ranges = prose(text);
 
-  return parts
-    .map((run) => ("text" in run ? run.text : `@${directory.get(run.handle) ?? run.handle}`))
-    .join("");
+  // Rebuilt by slicing the original, never by joining what the scanner produced. Everything
+  // outside a prose range is copied byte for byte, so identity there is a property of the
+  // splice rather than of how faithful a parser is — which matters because this runs on the way
+  // *out*, on the message that is actually sent, and a lost character cannot be recovered.
+  let out = "";
+  let cut = 0;
+
+  for (const range of ranges) {
+    out += text.slice(cut, range.from);
+
+    const slice = text.slice(range.from, range.to);
+    const parts = runs(slice, directory.keys());
+    out += parts
+      .map((run) => ("text" in run ? run.text : `@${directory.get(run.handle) ?? run.handle}`))
+      .join("");
+
+    cut = range.to;
+  }
+
+  return out + text.slice(cut);
 }

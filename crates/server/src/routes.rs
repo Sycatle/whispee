@@ -18,7 +18,7 @@ use crate::auth::Signed;
 use crate::error::{ApiError, ApiResult};
 use crate::presence;
 use crate::stream::{Hub, Notice};
-use crate::throttle::{Writes, Written};
+use crate::throttle::{Recovery, Writes, Written};
 
 /// Cap on the number of KeyPackages published in one request. Without it, a single device can
 /// fill the database on its own.
@@ -27,6 +27,11 @@ const MAX_KEY_PACKAGES_PER_REQUEST: usize = 100;
 /// A device row as served: id, auth key, MLS key, attestation. Named so that the query
 /// signatures stay readable.
 type DeviceRow = (String, Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// One escrow row as the claim route reads it: account, live handle, kind, parameters, sealed
+/// seed. Named for the reason the two above are — the tuple is unreadable inline, and clippy
+/// says so.
+type EscrowRow = (String, Option<String>, String, Vec<u8>, Vec<u8>);
 
 /// A device and its revocation state, as served to clients.
 type RevocableDeviceRow =
@@ -58,11 +63,21 @@ const MAX_ENVELOPES_PER_PAGE: i64 = 200;
 /// **Account creation is what justifies the whole thing.** It writes to the transparency log,
 /// whose entries cannot be taken back without breaking the consistency proofs. See
 /// `crate::throttle` for what the limit closes, and for what it does not.
+///
+/// **`recovery/claim` is the fifth, and it is here for a different reason.** The others precede
+/// an identity; this one *follows the loss of every device that held one*. A caller recovering an
+/// account has no key to sign with — that is the situation being answered — so no amount of
+/// design makes it authenticable.
+///
+/// It carries a second, far narrower limit of its own on top of the address quota, because what
+/// it bounds is not table growth but password guessing. See `throttle::Recovery`, and
+/// `migrations/0018_recovery_escrow.sql` for why a failed attempt cannot be counted per account.
 pub fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/accounts", post(create_account))
         .route("/v1/devices", post(register_device))
         .route("/v1/pairings/{pairing_id}", post(deposit_pairing).get(claim_pairing))
+        .route("/v1/recovery/claim", post(claim_recovery))
         .with_state(state)
 }
 
@@ -90,6 +105,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/gateway", get(crate::gateway::handler))
         .route("/v1/presence", post(read_presence))
         .route("/v1/presence/optout", post(set_presence_optout))
+        .route("/v1/contact-policy", post(set_contact_policy))
         .route("/v1/push/token", post(set_push_token))
         .route("/v1/push/forget", post(forget_push_token))
         .route("/v1/accounts/{account}/devices", get(list_account_devices))
@@ -101,7 +117,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/log/proof/{account}", get(log_proof))
         .route("/v1/log/consistency", get(log_consistency))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
-        .route("/v1/vault/{group_id}", post(store_vault).get(fetch_vault))
+        .route("/v1/vault/{group_id}", post(store_vault).get(fetch_vault).delete(drop_vault))
+        .route("/v1/recovery", get(list_recovery).post(set_recovery))
+        .route("/v1/recovery/forget", post(forget_recovery))
         .route("/v1/key-packages", post(publish_key_packages))
         .route("/v1/key-packages/stock", get(key_package_stock))
         .route("/v1/key-packages/{device_id}/claim", post(claim_key_package))
@@ -109,6 +127,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/groups/{group_id}/members", post(add_members))
         .route("/v1/groups/{group_id}/members/remove", post(remove_members))
         .route("/v1/groups/{group_id}/signals", post(post_signal))
+        .route("/v1/groups/{group_id}/call/token", post(call_token))
         .route(
             "/v1/groups/{group_id}/envelopes",
             post(post_envelope).get(fetch_envelopes),
@@ -222,6 +241,103 @@ async fn post_signal(
     hub.publish(Notice::Signal { group_id, payload: body.to_vec() });
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// What a client asks for when it wants to join a call.
+#[derive(Deserialize)]
+struct CallRequest {
+    /// Which call. It is the client's, not ours: it is derived from nothing we know.
+    call: String,
+    /// The name to appear under in the room.
+    ///
+    /// Chosen by the caller and **not verified**, which is deliberate rather than tolerated: the
+    /// route is authenticated by the group MAC precisely so that this server does not learn who
+    /// is placing a call, and checking the identity would be learning it. See `crate::call`.
+    identity: String,
+}
+
+/// Where to reach the call, and with what.
+#[derive(Serialize)]
+struct CallAdmission {
+    url: String,
+    token: String,
+    /// The relay, when there is one. A deployment reachable on a direct path needs none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay: Option<CallRelay>,
+}
+
+#[derive(Serialize)]
+struct CallRelay {
+    urls: Vec<String>,
+    username: String,
+    credential: String,
+}
+
+/// Hands out admission to a call's room.
+///
+/// # Why the group MAC, and not a signature
+///
+/// The same reason [`post_signal`] uses it: a signed request would tell this server which device
+/// is calling, in real time. The MAC proves membership of the group and nothing else — which is
+/// exactly the amount of proof handing out a room token requires.
+///
+/// Note what this does **not** hide, because the module header says it and it bears repeating
+/// here where the code is: this server still sees that a call is being joined, when, and towards
+/// which group. That is more than it learns from an envelope, and it is irreducible — somebody
+/// has to sign the token.
+///
+/// # Why 503 rather than 404 when unconfigured
+///
+/// A deployment running no media server is not missing this route, it is refusing the feature.
+/// The client reads the difference and hides the call button instead of retrying.
+async fn call_token(
+    State(pool): State<PgPool>,
+    State(media): State<Arc<crate::call::Media>>,
+    Path(group_id): Path<String>,
+    request: axum::extract::Request,
+) -> ApiResult<Json<CallAdmission>> {
+    let group_id = decode_group_id(&group_id)?;
+
+    // Owned extraction before the first `await`: see the note in `anonymous_body`.
+    let (nonce, mac) = {
+        let headers = request.headers();
+        let header = |name: &str| -> ApiResult<Vec<u8>> {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| BASE64_STANDARD.decode(value).ok())
+                .ok_or(ApiError::BadRequest("signal header missing or unreadable"))
+        };
+
+        (header(HEADER_NONCE)?, header(HEADER_MAC)?)
+    };
+
+    let body = axum::body::to_bytes(request.into_body(), MAX_SIGNAL_BYTES)
+        .await
+        .map_err(|_| ApiError::BadRequest("unreadable body"))?;
+
+    // The MAC covers the body, so the call id and the identity below are the ones a member
+    // asked for — not ones an intermediary substituted.
+    verify_signal(&pool, &group_id, &nonce, &mac, &body).await?;
+
+    let asked: CallRequest =
+        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("malformed call request"))?;
+
+    if !crate::call::acceptable(&asked.call, &asked.identity) {
+        return Err(ApiError::BadRequest("unusable call identifier"));
+    }
+
+    let sfu = media.sfu.as_ref().ok_or(ApiError::Unavailable)?;
+    let room = crate::call::room_name(&group_id, &asked.call);
+
+    Ok(Json(CallAdmission {
+        url: sfu.url.clone(),
+        token: sfu.token(&room, &asked.identity),
+        relay: media.relay.as_ref().map(|relay| {
+            let (username, credential) = relay.credential();
+            CallRelay { urls: relay.urls.clone(), username, credential }
+        }),
+    }))
 }
 
 /// Checks that an ephemeral signal comes from a group member, without learning which one.
@@ -368,6 +484,14 @@ async fn create_account(
     .bind(&identity_key)
     .execute(&mut *tx)
     .await?;
+
+    // Its storage counter, in the same transaction as the account. The row has to exist before
+    // the first write, because charging is an `UPDATE` whose `WHERE` carries the ceiling — see
+    // `crate::storage` for why that cannot be an upsert.
+    sqlx::query("INSERT INTO account_storage (account) VALUES ($1) ON CONFLICT DO NOTHING")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
 
     // The account and its log entry in the **same** transaction. A key published without an
     // inclusion proof would be rejected by every client: the account would exist without being
@@ -740,6 +864,40 @@ struct AccountDevices {
     account: String,
     identity_key: String,
     devices: Vec<AccountDevice>,
+    /// Whether this account has refused presence, **served to the account owner only**.
+    ///
+    /// # Why it is readable at all
+    ///
+    /// It was write-only, and a write-only setting has no way to reach a device that was not
+    /// there when it was written. The signalling settings travel between an account's devices as
+    /// a sealed message inside the conversations they share; a device restored from the recovery
+    /// phrase has no conversation yet, so it has no channel, so it would draw the switch in its
+    /// default position — "on" — for an account the server has already stopped recording.
+    ///
+    /// The other two settings do not need this: with no conversation there is nobody to emit a
+    /// receipt or a typing indicator to, so a device that has not heard them yet cannot be
+    /// contradicting them. Presence is the one that is true of the account the moment it is set.
+    ///
+    /// # Why only the owner
+    ///
+    /// The same reason as `last_seen` above, and a sharper one: this field answers "does this
+    /// person refuse to be observed", which is a fact about someone worth more to a stranger than
+    /// to its owner. `caller_account` is what decides, from the signing device — never from a
+    /// parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_optout: Option<bool>,
+    /// Who may start a conversation with this account, **served to the owner only**.
+    ///
+    /// Read back for the reason `presence_optout` is: a device restored from the recovery phrase
+    /// has never been told, and a screen that drew "Anyone" for an account the server is already
+    /// refusing on behalf of would be lying in the direction that matters.
+    ///
+    /// Owner only, and here the reason is sharper than for presence. This answers "will this
+    /// person accept a stranger", which is worth more to a stranger than to its owner — and
+    /// publishing it would undo the refusal the `Forbidden` at `add_members` is careful to keep
+    /// indistinguishable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contact_policy: Option<String>,
 }
 
 /// Lists an account's devices, with their attestations.
@@ -756,12 +914,13 @@ async fn list_account_devices(
     Path(account): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<AccountDevices>> {
-    let found: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT identity_key FROM accounts WHERE id = $1")
-            .bind(&account)
-            .fetch_optional(&pool)
-            .await?;
-    let (identity_key,) = found.ok_or(ApiError::NotFound)?;
+    let found: Option<(Vec<u8>, bool, String)> = sqlx::query_as(
+        "SELECT identity_key, presence_optout, contact_policy FROM accounts WHERE id = $1",
+    )
+    .bind(&account)
+    .fetch_optional(&pool)
+    .await?;
+    let (identity_key, presence_optout, contact_policy) = found.ok_or(ApiError::NotFound)?;
 
     // Revoked devices are served TOO, with their certificate. Hiding them would leave the
     // client unable to tell a revocation from an omission — and omission is precisely what this
@@ -785,6 +944,8 @@ async fn list_account_devices(
     Ok(Json(AccountDevices {
         account,
         identity_key: BASE64_STANDARD.encode(identity_key),
+        presence_optout: owner.then_some(presence_optout),
+        contact_policy: owner.then_some(contact_policy),
         devices: rows
             .into_iter()
             .map(
@@ -1068,6 +1229,20 @@ async fn rotate_account(
     // own doing — a gap that became load-bearing once the account id was anchored on the genesis
     // key. See `migrations/0015_rotation_chain.sql`.
     crate::log::append(&mut tx, &account, &new_identity_key, Some((&rotation, payload.rotated_at)))
+        .await?;
+
+    // **The escrow goes with the old seed.** Rotation is the answer to a stolen device, and a
+    // stolen device holds the seed; leaving the escrow behind would leave the thing being
+    // rotated away from sitting on the server, openable by a password the thief may also have
+    // watched being typed. There is no partial version of this: the ciphertext is of the *old*
+    // seed and it is worthless to its owner the moment the key moves.
+    //
+    // The client is expected to re-post a factor afterwards. It is not done here because it
+    // cannot be: sealing needs the new seed and the user's password, neither of which the
+    // server has ever held.
+    sqlx::query("DELETE FROM recovery_escrows WHERE account = $1")
+        .bind(&account)
+        .execute(&mut *tx)
         .await?;
 
     // The other devices' KeyPackages go with the old key: they carry credentials nobody can
@@ -1506,6 +1681,55 @@ async fn add_members(
         }
     }
 
+    /*
+      The contact policy, and the only place it can be applied.
+
+      Being added to a group is a transport act — a row in this table — so the server is the only
+      party that can decline to write it. That is what separates this from `blocked`, which lets
+      the envelopes arrive and declines to read them; `storage.ts` has named this half as the one
+      that would prevent, and until now it did not exist.
+
+      Refused as `Forbidden` and nothing more specific. A reply that said "this account is not
+      accepting" would make the setting an oracle: anybody could learn anybody's policy by trying
+      to add them, which is a fact about a person, published by the mechanism meant to protect
+      them. `Forbidden` is what this route already answers to a non-member, so a probe cannot tell
+      a closed door from a group it is not in.
+
+      All or nothing, before any insert. A partial add would leave the caller's MLS tree naming
+      devices the distribution list does not carry — the welcome would be encrypted for somebody
+      who never receives it, and the conversation would be broken in a way that looks like a
+      network fault.
+
+      # What this governs, and what it does not
+
+      Membership, and therefore delivery. It is *not* a barrier every path consults, and the one
+      that does not is `call_token`: admission to a call proves possession of the group's posting
+      key, by the same MAC as an ephemeral signal, and never reads this table. That is deliberate —
+      it is what keeps the server from learning who is calling — and it is not a way around this
+      check, because the posting key is handed out inside the group. An account this route refuses
+      never joins, so never receives it.
+
+      What remains is an account that already held the key and no longer should: a former member,
+      until the epoch turns. It can still obtain a token, and finds a room it cannot read — the
+      frame key comes from the current MLS epoch's exporter, which it no longer has. The protection
+      there is MLS's, as it is everywhere else in this project, and not this column's.
+    */
+    // Read inside the transaction rather than through `caller_account`, which takes the pool: the
+    // membership rows this decision is about are being written in here, and a check made against
+    // a different snapshot than the insert is a check that can disagree with it.
+    let caller: (String,) = sqlx::query_as("SELECT account FROM devices WHERE id = $1")
+        .bind(&signed.device_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(ApiError::Forbidden)?;
+    let caller = caller.0;
+
+    for device_id in &payload.device_ids {
+        if !may_contact(&mut tx, &caller, device_id, &group_id).await? {
+            return Err(ApiError::Forbidden);
+        }
+    }
+
     sqlx::query(
         "INSERT INTO group_members (group_id, device_id)
          SELECT $1, * FROM UNNEST($2::text[])
@@ -1608,6 +1832,7 @@ async fn caller_account(pool: &PgPool, device_id: &str) -> ApiResult<String> {
 async fn store_vault(
     State(pool): State<PgPool>,
     State(writes): State<Arc<Writes>>,
+    State(quota): State<Arc<crate::storage::Quota>>,
     Path(group_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -1638,19 +1863,107 @@ async fn store_vault(
     let blobs: Vec<Vec<u8>> =
         payload.entries.iter().map(|e| decode_b64(&e.payload)).collect::<ApiResult<_>>()?;
 
-    sqlx::query(
+    let mut tx = pool.begin().await?;
+
+    // Insert first, charge what the insert actually stored.
+    //
+    // The order looks wrong and is not. `ON CONFLICT DO NOTHING` means a re-uploaded entry is not
+    // stored, and charging before the insert would charge for it anyway — two devices of one
+    // account archiving the same conversation would pay twice for one row, and the counter would
+    // drift above what the tables hold, permanently, since nothing credits an overcharge.
+    // `RETURNING` names the rows that were really written.
+    //
+    // Nothing races: both statements are in one transaction, the charge is still the single
+    // conditional `UPDATE` that makes the ceiling safe under concurrency, and a refusal returns
+    // before the commit, so the insert goes with it. What it costs is that a doomed write does
+    // its insert before being refused — the disk is untouched either way, only the work is
+    // wasted, and paying that on the rare refusal buys an exact counter on every acceptance.
+    //
+    // The bytes are the stored ones, not the request's: base64 is a third larger, and charging
+    // for the encoding would make the ceiling depend on the transport rather than on the disk.
+    let stored: Vec<(i32,)> = sqlx::query_as(
         "INSERT INTO vault_entries (account, group_id, seq, payload)
          SELECT $1, $2, * FROM UNNEST($3::bigint[], $4::bytea[])
-         ON CONFLICT DO NOTHING",
+         ON CONFLICT DO NOTHING
+         RETURNING octet_length(payload)",
     )
     .bind(&account)
     .bind(&group_id)
     .bind(&seqs)
     .bind(&blobs)
-    .execute(&pool)
+    .fetch_all(&mut *tx)
     .await?;
 
+    let charged: i64 = stored.iter().map(|(bytes,)| *bytes as i64).sum();
+
+    if !crate::storage::charge(&mut tx, &quota, &account, charged).await? {
+        return Err(ApiError::InsufficientStorage);
+    }
+
+    tx.commit().await?;
+
     Ok(Json(serde_json::json!({ "stored": seqs.len() })))
+}
+
+/// Drops the caller's vault for one group.
+///
+/// # Why the caller's and not the group's
+///
+/// The vault is indexed by account: two members of one conversation each hold their own archive
+/// of it, sealed under their own key. Deleting by group would let either of them destroy the
+/// other's copy of a shared history — which is not what turning on a lifetime asks for, and is
+/// not something one member gets to do to another.
+///
+/// # Why no membership check
+///
+/// The statement can only ever reach rows keyed to the caller's own account, so a non-member
+/// deleting their vault for a group they were never in removes nothing and leaks nothing.
+/// Requiring membership would instead leave somebody who was *removed* from a group unable to
+/// erase their own archive of it — the one case where erasing it matters most.
+///
+/// The bytes are credited in the same transaction that removes the rows: see `crate::storage`
+/// for what drifts when a deletion path forgets.
+async fn drop_vault(
+    State(pool): State<PgPool>,
+    State(writes): State<Arc<Writes>>,
+    Path(group_id): Path<String>,
+    signed: Signed,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Throttled on a counter of its own, and **not** the one the deposit uses. Sharing it looked
+    // like economy and was a defect: the client archives on every send, so a user who had sent ten
+    // messages in the last minute and then turned a lifetime on hit the quota here — after
+    // `setLifetime` had already published the commit. The room's memory had changed for everybody
+    // and the archive stayed, which is the one outcome the feature exists to prevent. See
+    // `DEFAULT_VAULT_DROPS_PER_MINUTE` for why the deletion quota sits above the deposit quota.
+    //
+    // Still bounded: each call is a `DELETE … RETURNING` and a counter update inside one
+    // transaction, which is work a signed device could otherwise ask for without end.
+    if !writes.allows(Written::VaultDrops, &signed.device_id) {
+        return Err(ApiError::TooManyRequests);
+    }
+
+    let group_id = decode_group_id(&group_id)?;
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    let mut tx = pool.begin().await?;
+
+    let (removed, bytes): (i64, i64) = sqlx::query_as(
+        "WITH gone AS (
+             DELETE FROM vault_entries
+              WHERE account = $1 AND group_id = $2
+          RETURNING octet_length(payload) AS bytes
+         )
+         SELECT count(*)::bigint, COALESCE(SUM(bytes), 0)::bigint FROM gone",
+    )
+    .bind(&account)
+    .bind(&group_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    crate::storage::credit(&mut tx, &account, bytes).await?;
+    tx.commit().await?;
+
+    Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
 #[derive(Serialize)]
@@ -1691,6 +2004,259 @@ async fn fetch_vault(
             .map(|(seq, payload)| VaultRow { seq, payload: BASE64_STANDARD.encode(payload) })
             .collect(),
     ))
+}
+
+/// Length of a lookup value: `SHA-256` of the client's lookup key.
+const RECOVERY_LOOKUP_LEN: usize = 32;
+
+/// Length of the encoded KDF parameters. See `crypto_core::escrow::Params`.
+const RECOVERY_PARAMS_LEN: usize = 13;
+
+/// Length of a sealed escrow: a 12-byte nonce, the 64-byte seed, a 16-byte GCM tag.
+///
+/// Fixed, and checked rather than merely expected. A variable-length blob under a
+/// caller-chosen key is a storage channel, and this is the one table whose rows are written by
+/// a caller and read back by an unauthenticated route.
+const RECOVERY_SEALED_LEN: usize = 92;
+
+#[derive(Deserialize)]
+struct SetRecovery {
+    /// `password` or `passkey`.
+    kind: String,
+    /// `SHA-256` of the lookup key, base64. Names the row; the pre-image stays on the client.
+    lookup: String,
+    /// Encoded KDF parameters, base64. Opaque here, covered by the seal's AAD there.
+    params: String,
+    /// The sealed account seed, base64.
+    sealed: String,
+}
+
+fn decode_exact(value: &str, expected: usize, what: &'static str) -> ApiResult<Vec<u8>> {
+    let bytes = decode_b64(value)?;
+    if bytes.len() != expected {
+        return Err(ApiError::BadRequest(what));
+    }
+    Ok(bytes)
+}
+
+/// Validates the escrow kind against the same two names the schema allows.
+///
+/// Checked here rather than left to the CHECK constraint: a violated constraint surfaces as a
+/// database error, which this server deliberately turns into a 500 with no detail. A caller
+/// sending a typo deserves to be told it was a bad request.
+fn recovery_kind(kind: &str) -> ApiResult<&str> {
+    match kind {
+        "password" | "passkey" => Ok(kind),
+        _ => Err(ApiError::BadRequest("unknown recovery kind")),
+    }
+}
+
+/// Deposits, or replaces, one recovery factor for the caller's account.
+///
+/// # What the server is being handed
+///
+/// The account seed, encrypted. Nothing else on this server is that: envelopes are unreadable
+/// *and* worthless without the MLS state, where this is the root secret itself, sitting still
+/// under a key derived from a password. `migrations/0018_recovery_escrow.sql` states the whole
+/// cost; it is not repeated here, but it is the reason this route exists at all only when the
+/// user asked for it.
+///
+/// The server verifies lengths and the caller's identity and nothing more. It cannot check that
+/// the ciphertext holds what the client says it holds, and there is no version of this route
+/// where it could.
+///
+/// # Why one factor of each kind, and not many
+///
+/// A second password is a second guess for an attacker and a forgotten one for its owner. The
+/// `UNIQUE (account, kind)` constraint says so; the delete below is what makes *replacing* a
+/// password work rather than colliding with it.
+async fn set_recovery(State(pool): State<PgPool>, signed: Signed) -> ApiResult<Json<serde_json::Value>> {
+    let payload: SetRecovery = signed.json()?;
+    let kind = recovery_kind(&payload.kind)?;
+
+    let lookup = decode_exact(&payload.lookup, RECOVERY_LOOKUP_LEN, "lookup of invalid length")?;
+    let params =
+        decode_exact(&payload.params, RECOVERY_PARAMS_LEN, "escrow parameters of invalid length")?;
+    let sealed = decode_exact(&payload.sealed, RECOVERY_SEALED_LEN, "escrow of invalid length")?;
+
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    let mut tx = pool.begin().await?;
+
+    // The old row goes first, in the same transaction: replacing a password changes the lookup,
+    // so an upsert keyed on `lookup` would leave the previous one behind — a second, stale
+    // password that still opens the account and that its owner believes they have changed.
+    sqlx::query("DELETE FROM recovery_escrows WHERE account = $1 AND kind = $2")
+        .bind(&account)
+        .bind(kind)
+        .execute(&mut *tx)
+        .await?;
+
+    let inserted = sqlx::query(
+        "INSERT INTO recovery_escrows (lookup, account, kind, params, sealed)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (lookup) DO NOTHING",
+    )
+    .bind(&lookup)
+    .bind(&account)
+    .bind(kind)
+    .bind(&params)
+    .bind(&sealed)
+    .execute(&mut *tx)
+    .await?;
+
+    // `DO NOTHING` rather than `DO UPDATE`: the surviving conflict is a lookup that belongs to
+    // **another** account, and overwriting it would let a caller who guessed it — or collided
+    // with it — destroy someone else's only way back in. A 409 is a refusal the caller can act
+    // on by choosing a different password; a silent overwrite is not.
+    if inserted.rows_affected() == 0 {
+        return Err(ApiError::Conflict("this recovery secret is already in use"));
+    }
+
+    tx.commit().await?;
+
+    Ok(Json(serde_json::json!({ "kind": kind })))
+}
+
+#[derive(Serialize)]
+struct RecoveryFactor {
+    kind: String,
+    created_at: i64,
+}
+
+/// Lists the caller's recovery factors, without the blobs.
+///
+/// For a settings screen that has to say what is switched on. The ciphertext is deliberately
+/// absent: an authenticated device already holds the seed, so serving it here would add a way
+/// to get the escrow that the recovery route's rate limit does not cover.
+async fn list_recovery(
+    State(pool): State<PgPool>,
+    signed: Signed,
+) -> ApiResult<Json<Vec<RecoveryFactor>>> {
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    // `EXTRACT(EPOCH …)` rather than a timestamp type, as everywhere else in this file: no
+    // date library is in the tree, and the wire format for a time here is Unix seconds.
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT kind, EXTRACT(EPOCH FROM created_at)::BIGINT
+         FROM recovery_escrows WHERE account = $1 ORDER BY kind",
+    )
+    .bind(&account)
+    .fetch_all(&pool)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter().map(|(kind, created_at)| RecoveryFactor { kind, created_at }).collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ForgetRecovery {
+    kind: String,
+}
+
+/// Removes one recovery factor.
+///
+/// Idempotent: forgetting a factor that is not there is a success. The alternative — a 404 —
+/// would turn "make sure this is off" into a call the client has to special-case, and would
+/// report a failure for a state the caller asked for and now has.
+async fn forget_recovery(
+    State(pool): State<PgPool>,
+    signed: Signed,
+) -> ApiResult<Json<serde_json::Value>> {
+    let payload: ForgetRecovery = signed.json()?;
+    let kind = recovery_kind(&payload.kind)?;
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    let removed = sqlx::query("DELETE FROM recovery_escrows WHERE account = $1 AND kind = $2")
+        .bind(&account)
+        .bind(kind)
+        .execute(&pool)
+        .await?;
+
+    Ok(Json(serde_json::json!({ "forgotten": removed.rows_affected() })))
+}
+
+#[derive(Deserialize)]
+struct ClaimRecovery {
+    /// `SHA-256` of the lookup key, base64.
+    lookup: String,
+}
+
+#[derive(Serialize)]
+struct ClaimedRecovery {
+    account: String,
+    /// The account's current handle, or `null` if it holds none.
+    ///
+    /// Served because a recovering client needs it and cannot derive it: the handle is an alias
+    /// the server keeps, not something the seed produces. A client is right not to trust it —
+    /// `docs/specs/2026-08-21-account-identity.md` says the displayed handle is never re-fetched
+    /// from the server — but the account id beside it *is* checkable against the recovered key,
+    /// and that check is what makes the pair safe to use.
+    handle: Option<String>,
+    kind: String,
+    params: String,
+    sealed: String,
+}
+
+/// Serves one escrow to whoever can name it. **Unauthenticated, by necessity.**
+///
+/// # Why this cannot require a signature
+///
+/// The caller has lost every device. There is no key left to sign with; that is the situation
+/// this route answers. The authentication is therefore inside the request rather than around
+/// it: naming the row already requires having done the expensive derivation, which requires
+/// the password.
+///
+/// # What the answers say, and what they refuse to say
+///
+/// A wrong lookup and an account with no escrow are the same 404. So this is not an oracle for
+/// which accounts exist, which have recovery enabled, or whether a password was close. Nothing
+/// in the response distinguishes "there is no such row" from "you guessed wrong", because the
+/// server genuinely cannot tell them apart — it holds a hash and compares it.
+///
+/// # The bound, and what it does not bound
+///
+/// Two limits stack: the address quota every open route carries, and `throttle::Recovery`'s
+/// far narrower one. Together they close the **online** door to guessing. They do nothing about
+/// the offline one: an attacker holding `recovery_escrows` never calls this route at all. That
+/// asymmetry is the feature's central cost and it is written down in the migration.
+async fn claim_recovery(
+    State(pool): State<PgPool>,
+    State(recovery): State<Arc<Recovery>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Json(payload): Json<ClaimRecovery>,
+) -> ApiResult<Json<ClaimedRecovery>> {
+    // Counted before the lookup, so a refusal costs the database nothing — and so that the
+    // quota bounds attempts rather than successes.
+    if !recovery.allows(&format!("recovery:{}", peer.ip())) {
+        return Err(ApiError::TooManyRequests);
+    }
+
+    let lookup = decode_exact(&payload.lookup, RECOVERY_LOOKUP_LEN, "lookup of invalid length")?;
+
+    // One query, joined: a second round trip for the handle would take a different amount of
+    // time depending on whether the first found anything, which is the timing side of the
+    // indistinguishability this route is built for.
+    let row: Option<EscrowRow> = sqlx::query_as(
+        "SELECT e.account, h.handle, e.kind, e.params, e.sealed
+         FROM recovery_escrows e
+         LEFT JOIN handles h ON h.account = e.account AND h.released_at IS NULL
+         WHERE e.lookup = $1",
+    )
+    .bind(&lookup)
+    .fetch_optional(&pool)
+    .await?;
+
+    let (account, handle, kind, params, sealed) = row.ok_or(ApiError::NotFound)?;
+
+    Ok(Json(ClaimedRecovery {
+        account,
+        handle,
+        kind,
+        params: BASE64_STANDARD.encode(params),
+        sealed: BASE64_STANDARD.encode(sealed),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1933,6 +2499,7 @@ struct AttachmentUploaded {
 async fn upload_attachment(
     State(pool): State<PgPool>,
     State(writes): State<Arc<Writes>>,
+    State(quota): State<Arc<crate::storage::Quota>>,
     Path(group_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<AttachmentUploaded>> {
@@ -1956,13 +2523,26 @@ async fn upload_attachment(
         return Err(ApiError::BadRequest("empty attachment"));
     }
 
+    // Recorded, not merely known: charging the uploader means keeping who they were. That is a
+    // metadata leak the migration and `docs/THREAT-MODEL.md` both state, and it is what buys the
+    // heaviest write this server accepts a personal bound.
+    let account = caller_account(&pool, &signed.device_id).await?;
+    let mut tx = pool.begin().await?;
+
+    if !crate::storage::charge(&mut tx, &quota, &account, signed.body.len() as i64).await? {
+        return Err(ApiError::InsufficientStorage);
+    }
+
     let (id,): (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO attachments (group_id, payload) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO attachments (group_id, account, payload) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(&group_id)
+    .bind(&account)
     .bind(signed.body.as_ref())
-    .fetch_one(&pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(Json(AttachmentUploaded { id: id.to_string() }))
 }
@@ -2194,6 +2774,106 @@ struct OptoutRequest {
 ///
 /// It is honoured on write, in `presence::touch`: nothing is recorded. A setting that merely
 /// filtered on read would leave the server keeping the register anyway.
+#[derive(Deserialize)]
+struct ContactPolicyRequest {
+    policy: String,
+}
+
+/// Sets who may start a conversation with the calling account.
+///
+/// The account comes from the signing device and never from a parameter, as everywhere else here:
+/// a route that took the account as input would let anybody close anybody's door.
+async fn set_contact_policy(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
+    let payload: ContactPolicyRequest = signed.json()?;
+
+    // Validated here as well as in the schema. The constraint is the backstop; this is what turns
+    // a typo into a 400 the caller can read rather than a 500 out of Postgres.
+    if !matches!(payload.policy.as_str(), "open" | "known" | "closed") {
+        return Err(ApiError::BadRequest("unknown contact policy"));
+    }
+
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    sqlx::query("UPDATE accounts SET contact_policy = $2 WHERE id = $1")
+        .bind(&account)
+        .bind(&payload.policy)
+        .execute(&pool)
+        .await?;
+
+    Ok(())
+}
+
+/// May `caller` add this device to `group_id`?
+///
+/// # Why the current group is excluded from the test
+///
+/// `known` means "already meets this account somewhere else". `add_members` creates the group and
+/// inserts the caller *before* this runs, so a test that counted the group being built would find
+/// the caller in it and answer yes to everybody — the setting would enforce nothing, and it would
+/// look like it worked, which is worse than not shipping it.
+///
+/// # Why this reads `group_members` and learns nothing
+///
+/// That table is the server's own, and "do these two accounts meet somewhere" is a question it
+/// could answer at any moment without being asked. Enforcing the policy therefore costs no new
+/// knowledge; the only new fact is the policy, which is the fact its owner is asking the server
+/// to act on.
+async fn may_contact(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    caller: &str,
+    device_id: &str,
+    group_id: &[u8],
+) -> ApiResult<bool> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT d.account, a.contact_policy
+         FROM devices d JOIN accounts a ON a.id = d.account
+         WHERE d.id = $1",
+    )
+    .bind(device_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    // A device this server has never heard of. Not our refusal to make: the insert below does
+    // nothing with it anyway, and answering "forbidden" here would turn this route into a test
+    // for whether a device id exists.
+    let Some((account, policy)) = row else {
+        return Ok(true);
+    };
+
+    // Our own devices, always. `propagateOwnDevices` adds them to every conversation, and an
+    // account whose policy locked its own phone out of its own threads would be unusable in a way
+    // nobody would think to test.
+    if account == caller {
+        return Ok(true);
+    }
+
+    match policy.as_str() {
+        "open" => Ok(true),
+        "closed" => Ok(false),
+        "known" => {
+            let shared: Option<(i32,)> = sqlx::query_as(
+                "SELECT 1
+                 FROM group_members mine
+                 JOIN devices d_mine ON d_mine.id = mine.device_id
+                 JOIN group_members theirs ON theirs.group_id = mine.group_id
+                 JOIN devices d_theirs ON d_theirs.id = theirs.device_id
+                 WHERE d_mine.account = $1 AND d_theirs.account = $2 AND mine.group_id <> $3
+                 LIMIT 1",
+            )
+            .bind(caller)
+            .bind(&account)
+            .bind(group_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+
+            Ok(shared.is_some())
+        }
+        // Unreachable while the schema constraint holds. Refusing rather than allowing is the
+        // direction to fail in, for a setting whose whole purpose is to refuse.
+        _ => Ok(false),
+    }
+}
+
 async fn set_presence_optout(State(pool): State<PgPool>, signed: Signed) -> ApiResult<()> {
     let payload: OptoutRequest = signed.json()?;
     let account = caller_account(&pool, &signed.device_id).await?;

@@ -34,6 +34,23 @@ pub enum ApiError {
     #[error("too many requests")]
     TooManyRequests,
 
+    /// The caller is within its rate, and out of room.
+    ///
+    /// Distinct from [`ApiError::TooManyRequests`] on purpose, and the distinction is the whole
+    /// point: a 429 tells an honest client to come back later, which is true of a rate limit and
+    /// never becomes true of a ceiling. A client told to retry a full vault retries forever, and
+    /// its user believes their history is being archived while nothing is.
+    #[error("storage quota reached")]
+    InsufficientStorage,
+
+    /// The deployment does not offer this, and no retry will change that.
+    ///
+    /// Distinct from `NotFound` for the reason `Gone` is: a 404 invites a client to look again
+    /// somewhere else, where this says the feature is absent from this server. A deployment
+    /// running no media server answers it to every call, and stays a working messenger.
+    #[error("not configured")]
+    Unavailable,
+
     #[error("storage error")]
     Database(#[from] sqlx::Error),
 }
@@ -48,6 +65,8 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Gone => StatusCode::GONE,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::InsufficientStorage => StatusCode::INSUFFICIENT_STORAGE,
+            ApiError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -69,3 +88,22 @@ impl IntoResponse for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 507, and above all not 429.
+    ///
+    /// The distinction is the one `Gone` already draws against `NotFound`: 429 means *retry
+    /// later*, which is true of a rate limit and false of a full vault. A client told to retry a
+    /// ceiling retries forever.
+    #[test]
+    fn a_full_account_is_not_a_client_going_too_fast() {
+        let full = ApiError::InsufficientStorage.into_response().status();
+        let fast = ApiError::TooManyRequests.into_response().status();
+
+        assert_eq!(full.as_u16(), 507);
+        assert_ne!(full, fast);
+    }
+}

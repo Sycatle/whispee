@@ -77,8 +77,10 @@ export const SETTINGS_SECTIONS = [
   "pairing",
   "lock",
   "backup",
+  "recovery",
   "receipts",
   "notifications",
+  "blocked",
   "appearance",
 ] as const;
 
@@ -99,15 +101,6 @@ export type Route =
       kind: "conversation";
       /** `toHex(groupId)`: lowercase hexadecimal, URL-safe without escaping. */
       key: string;
-      /**
-       * The detail column, absent when it is closed.
-       *
-       * Present-but-empty means the column is open on the conversation itself; `handle` names
-       * the member whose card is expanded. Two levels rather than two route kinds because
-       * closing the card must leave the column open, which is a back navigation only if the
-       * card was a history entry of its own.
-       */
-      detail?: { handle?: string };
     }
   | {
       kind: "settings";
@@ -139,24 +132,6 @@ function isSection(value: string): value is SettingsSection {
 }
 
 /**
- * A handle is any non-empty string of at most 64 bytes as far as the server is concerned
- * (`routes.rs:306`), so it can contain characters that need escaping in a URL. Hence the
- * encode/decode pair, and hence this catch: `decodeURIComponent` throws on a lone `%`.
- *
- * A broken escape does not discard the conversation. The key parsed cleanly; throwing away the
- * part that was right to punish the part that was wrong would drop the user on the home screen
- * from a link that was almost correct.
- */
-function decodeHandle(segment: string): string | undefined {
-  if (segment === "") return undefined;
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * Reads a route out of a location hash, with or without its leading `#`.
  *
  * Anything unrecognised is home. There is no "not found" screen and there should not be one: the
@@ -177,12 +152,15 @@ export function parse(hash: string): Route {
   if (segments[0] === "c" && segments.length >= 2 && isKey(segments[1])) {
     const key = segments[1];
     if (segments.length === 2) return { kind: "conversation", key };
-    if (segments[2] !== "info") return HOME;
-    if (segments.length === 3) return { kind: "conversation", key, detail: {} };
-    if (segments.length === 4) {
-      const handle = decodeHandle(segments[3]);
-      return { kind: "conversation", key, detail: handle === undefined ? {} : { handle } };
-    }
+
+    // `/info` and `/info/<handle>` used to name the detail column, and are now read as a
+    // conversation with something after it — which is what they are. Kept as a redirect rather
+    // than a rejection because these URLs are in people's history and in their open tabs, and
+    // answering an address this application itself minted with the home screen would be a worse
+    // welcome than dropping the part that no longer means anything. See `state/detail.tsx` for
+    // why the column stopped being a place one navigates to.
+    if (segments[2] === "info" && segments.length <= 4) return { kind: "conversation", key };
+
     return HOME;
   }
 
@@ -213,12 +191,8 @@ export function format(route: Route): string {
       return "#/";
     case "new":
       return "#/new";
-    case "conversation": {
-      const base = `#/c/${route.key}`;
-      if (!route.detail) return base;
-      if (route.detail.handle === undefined) return `${base}/info`;
-      return `${base}/info/${encodeURIComponent(route.detail.handle)}`;
-    }
+    case "conversation":
+      return `#/c/${route.key}`;
     case "settings":
       return route.section === null ? "#/settings" : `#/settings/${route.section}`;
   }

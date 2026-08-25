@@ -1,0 +1,84 @@
+# The delivery service, as a deployable image.
+#
+# # Why the build stage is `--release`, and why that is not a preference
+#
+# OpenMLS 0.8.1 runs a `debug_assert!(false)` before returning its decryption error. In a debug
+# build, one altered byte in transit panics the process instead of being rejected — a denial of
+# service any remote party can trigger. `CONTRIBUTING.md` states it as an invariant: never deploy
+# a debug build of this code. This file is where that sentence stops being advice and becomes the
+# only thing that can be built.
+#
+# # Why the whole workspace is copied for a one-crate build
+#
+# `cargo build -p server` still needs every member's manifest to resolve the workspace, and
+# `crates/server` depends on `attest` and `transparency` by path. It does **not** build
+# `apps/desktop`: no Tauri system dependency is installed here, and none is needed.
+#
+# # Why there is no offline sqlx preparation
+#
+# The server uses no compile-time query macro — `sqlx::migrate!` reads the migration directory,
+# which is copied in, and nothing else looks at a database. The build is hermetic: it needs no
+# Postgres, and therefore no `.sqlx` directory to keep in sync with the schema.
+
+FROM rust:1.95-bookworm AS build
+
+WORKDIR /src
+
+# `rust-toolchain.toml` pins 1.95.0 and asks for `wasm32-unknown-unknown` and `rust-src`. Copying
+# it first makes rustup resolve the toolchain once, in its own layer, rather than on every source
+# change. The wasm target is unused here and comes along because the file is the same one the
+# reproducible release depends on — see its own comment for why it is not split.
+COPY rust-toolchain.toml ./
+RUN rustup show
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
+
+# `apps/desktop` is a workspace member, so cargo insists on being able to *read* its targets even
+# when it builds none of them. Its manifest declares `[lib] name = "desktop_lib"`, so both a
+# library and a binary root have to exist or the workspace fails to load — before any compilation
+# starts, and with an error that names Tauri rather than this file.
+#
+# Stubs rather than the real sources, because the real `build.rs` runs `tauri-build`, which reads
+# `tauri.conf.json` and expects the built web client beside it. Nothing here builds the desktop
+# application; copying enough to make that possible would mean carrying the whole client build
+# into an image that serves none of it.
+RUN mkdir -p apps/desktop/src \
+    && echo 'fn main() {}' > apps/desktop/src/main.rs \
+    && : > apps/desktop/src/lib.rs
+
+# BuildKit cache mounts rather than the copy-manifests-and-stub dance: with seven workspace
+# members that recipe drifts silently the day one is added, and this one cannot.
+#
+# The binary is copied out of the cache mount deliberately — a cache mount is not part of the
+# layer, so anything left inside it does not exist in the next stage.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p server \
+    && cp target/release/server /usr/local/bin/server
+
+FROM debian:bookworm-slim
+
+# `ca-certificates` is not decoration: sqlx is built with `tls-rustls-ring`, so a managed Postgres
+# reached over TLS verifies against this store. A deployment whose database is on the compose
+# network never exercises it, and the day one moves the database out, its absence would look like
+# an authentication failure.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# An unprivileged user, because nothing here needs root: the process binds 8787, well above the
+# privileged range, and writes nothing to disk — every byte it keeps is in Postgres.
+RUN useradd --system --create-home --uid 10001 whispee
+USER whispee
+
+COPY --from=build /usr/local/bin/server /usr/local/bin/server
+
+# Bound to every interface, unlike the development default of loopback: inside a container,
+# 127.0.0.1 is reachable from nothing. What keeps it off the public internet is that the compose
+# file publishes no port for it — only the reverse proxy can reach it.
+ENV SERVER_ADDR=0.0.0.0:8787
+EXPOSE 8787
+
+CMD ["server"]

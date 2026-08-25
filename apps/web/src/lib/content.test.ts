@@ -199,9 +199,106 @@ test("an unknown membership event is refused rather than drawn with a blank verb
   assert.throws(() => decode(forged), /unknown membership event/);
 });
 
+test("a call event round-trips, for each event", () => {
+  for (const event of ["invite", "ended", "missed"] as const) {
+    const body = { kind: "call", event, call: "9f2c41ab7d0e5638", seconds: 197 } as const;
+    assert.deepEqual(decode(encode(body)), { body });
+  }
+});
+
+test("a call event is not control: a missed call has to be visible", () => {
+  // Control would drop it from the thread, from the vault and from the unread count — which is
+  // to say, a call nobody answered would leave no trace at all.
+  assert.equal(isControl({ kind: "call", event: "missed", call: "9f2c", seconds: 0 }), false);
+});
+
+test("a call keeps its timestamp", () => {
+  const at = new Date("2024-03-04T12:00:00Z").getTime();
+  const decoded = decode(encode({ kind: "call", event: "ended", call: "9f2c", seconds: 61 }, at));
+
+  assert.equal(decoded.sentAt, at);
+  assert.deepEqual(decoded.body, { kind: "call", event: "ended", call: "9f2c", seconds: 61 });
+});
+
+test("a call longer than a day keeps its duration", () => {
+  // Seconds in a `u32`: the field overflows after a hundred and thirty-six years, which is the
+  // right kind of margin for a number that is only ever read as a duration.
+  const seconds = 60 * 60 * 30;
+  const decoded = decode(encode({ kind: "call", event: "ended", call: "9f2c", seconds }));
+
+  assert.deepEqual(decoded.body, { kind: "call", event: "ended", call: "9f2c", seconds });
+});
+
+test("an unknown call event is refused rather than drawn with a blank verb", () => {
+  const forged = new Uint8Array([13, 99, 0, 0, 0, 0, ...new TextEncoder().encode("9f2c")]);
+  assert.throws(() => decode(forged), /unknown call event/);
+});
+
+test("a truncated call event is refused rather than read past its end", () => {
+  assert.throws(() => decode(new Uint8Array([13, 0, 0, 0])), /truncated call event/);
+});
+
 test("a handle with an astral character survives the round trip", () => {
   // The subject is somebody else's handle: it is not our string to assume anything about.
   const handle = "dana\u{1F600}4417";
   const decoded = decode(encode({ kind: "membership", event: "removed", handle }));
   assert.deepEqual(decoded.body, { kind: "membership", event: "removed", handle });
+});
+
+test("a sealed settings blob round-trips untouched", () => {
+  const sealed = new Uint8Array(12 + 16 + 9).map((_, i) => i);
+  const decoded = decode(encode({ kind: "signals", sealed }));
+
+  assert.deepEqual(decoded, { body: { kind: "signals", sealed } });
+});
+
+test("settings are control, so they draw no bubble and move no receipt cursor", () => {
+  // The third of those three is what would bite: an acknowledged settings message would be
+  // acknowledged by a message, and two devices would trade acknowledgements forever.
+  assert.equal(isControl({ kind: "signals", sealed: new Uint8Array(28) }), true);
+});
+
+test("settings are never stamped, even when a time is passed", () => {
+  const sealed = new Uint8Array(28);
+  assert.deepEqual(encode({ kind: "signals", sealed }, 1_700_000_000_000), encode({ kind: "signals", sealed }));
+});
+
+test("a settings blob too short to be a sealed anything is refused on both sides", () => {
+  // Twelve bytes of nonce and sixteen of tag: nothing shorter can have been sealed at all, and
+  // catching it here is what keeps the failure from surfacing inside WebCrypto with no name on it.
+  assert.throws(() => encode({ kind: "signals", sealed: new Uint8Array(27) }));
+
+  const truncated = new Uint8Array(1 + 27);
+  truncated[0] = 12;
+  assert.throws(() => decode(truncated));
+});
+
+test("an oversized settings blob is refused rather than allocated", () => {
+  const huge = new Uint8Array(1 + 12 + 16 + 129);
+  huge[0] = 12;
+
+  assert.throws(() => decode(huge));
+  assert.throws(() => encode({ kind: "signals", sealed: new Uint8Array(12 + 16 + 129) }));
+});
+
+test("an expiry notice survives the round trip", () => {
+  const encoded = encode({ kind: "expiry", seconds: 604800 });
+  const decoded = decode(encoded);
+
+  assert.deepEqual(decoded.body, { kind: "expiry", seconds: 604800 });
+});
+
+test("turning it off is a notice too, and is not an absent one", () => {
+  const decoded = decode(encode({ kind: "expiry", seconds: 0 }));
+
+  assert.deepEqual(decoded.body, { kind: "expiry", seconds: 0 });
+});
+
+test("an expiry notice is not control, so the room sees its memory change", () => {
+  assert.equal(isControl({ kind: "expiry", seconds: 604800 }), false);
+});
+
+test("a body of the wrong length is refused, as the other fixed-width bodies are", () => {
+  const truncated = new Uint8Array([14, 0, 0, 0]);
+  assert.throws(() => decode(truncated));
 });

@@ -20,6 +20,12 @@ export class AccountKey {
      */
     attest(handle: string, device_id: string, auth_key: Uint8Array, mls_key: Uint8Array): Uint8Array;
     /**
+     * Symmetric key every device of the account shares, for the state they owe each other.
+     *
+     * Distinct from the vault key on purpose — see `Account::device_sync_key`.
+     */
+    deviceSyncKey(): Uint8Array;
+    /**
      * Seed to hand to a device being paired. **It is worth the whole account.**
      */
     exportSeed(): Uint8Array;
@@ -87,6 +93,20 @@ export class Client {
      * the new member and their Welcome would be rejected.
      */
     applyPending(group_id: Uint8Array): Uint8Array;
+    /**
+     * Symmetric key protecting one call's audio, for the current epoch.
+     *
+     * The media server routes the stream and cannot read it: the audio is encrypted frame by
+     * frame under these bytes before it reaches the transport. Nothing is exchanged to obtain
+     * them — every member derives the same key from the group state MLS already gave them.
+     *
+     * `call_id` separates two calls made in the same epoch. Reusing one call's id for another
+     * would let the audio of the first decrypt inside the second.
+     *
+     * The key changes on every commit, and unlike the ephemeral channel that is not free here:
+     * a call spanning an epoch change has to be handed the new key, or it goes silent.
+     */
+    callKey(group_id: Uint8Array, call_id: Uint8Array): Uint8Array;
     /**
      * Commits the pending proposals — typically a member's request to leave.
      */
@@ -157,6 +177,11 @@ export class Client {
      */
     leaveGroup(group_id: Uint8Array): Uint8Array;
     /**
+     * How long this conversation keeps what is said in it, in seconds. `undefined` for a group
+     * created before the extension existed; `0` means the feature is off.
+     */
+    lifetimeSeconds(group_id: Uint8Array): number | undefined;
+    /**
      * This device's name, as written into the MLS credential.
      */
     name(): string;
@@ -213,6 +238,14 @@ export class Client {
      * The group roster: `{admin, moderators}`, or `null` if the group is flat.
      */
     roster(group_id: Uint8Array): any;
+    /**
+     * Sets how long messages live here, in seconds; `0` turns it off. Like every commit,
+     * publish it before `applyPending`.
+     *
+     * Not retroactive for messages members already hold: MLS cannot reach into their storage.
+     * The vault is the half that *is* retroactive, and that is arranged by the caller.
+     */
+    setLifetime(group_id: Uint8Array, seconds: number): Uint8Array;
     /**
      * Replaces the group's roles. Like every commit, publish it before `applyPending`.
      *
@@ -272,6 +305,27 @@ export class Pairing {
 }
 
 /**
+ * A recovery secret, stretched into the two keys it produces.
+ *
+ * Held as an opaque handle rather than returned as bytes, so the sealing key never reaches
+ * JavaScript. The page can ask for the lookup value — the one deliberately handed to the
+ * server — and can seal and open through it, and that is the whole surface.
+ *
+ * It is not a `CryptoKey`: WebAssembly linear memory is reachable by the page's own scripts,
+ * which `apps/web/src/lib/cipher.ts` already says of the MLS keys. What this buys is that the
+ * key is not *passed around* as a value, which is what makes it end up in a log.
+ */
+export class RecoveryFactor {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * What the server stores and what a recovery request presents: `SHA-256(lookup key)`.
+     */
+    lookupId(): Uint8Array;
+}
+
+/**
  * Fingerprint of an account we only hold the public key of.
  */
 export function accountFingerprint(identity_key: Uint8Array): string;
@@ -285,6 +339,27 @@ export function accountFingerprint(identity_key: Uint8Array): string;
  * difficulty, it is that a second definition of an identifier is a second thing that can drift.
  */
 export function accountId(identity_key: Uint8Array): string;
+
+/**
+ * Stretches a recovery password.
+ *
+ * **Argon2id, 256 MiB, four passes — several seconds, and it freezes the calling thread.**
+ * Run it from a Worker, or the interface stops responding for the duration.
+ *
+ * Four times the local lock's memory cost, because the two are paid at different rates: the
+ * lock runs on every unlock, this runs once on a restore. What it is standing in front of is
+ * also different — the lock protects one device's disk, this protects a ciphertext the server
+ * holds and can grind at leisure.
+ */
+export function derivePasswordFactor(handle: string, password: string, params: Uint8Array): RecoveryFactor;
+
+/**
+ * Turns a WebAuthn PRF output into a recovery factor.
+ *
+ * Cheap on purpose: these thirty-two bytes come from the authenticator, not from a human.
+ * Stretching a uniform secret would cost seconds and buy nothing.
+ */
+export function derivePrfFactor(prf_output: Uint8Array): RecoveryFactor;
 
 /**
  * Derives the local unlock key from a password.
@@ -302,6 +377,15 @@ export function accountId(identity_key: Uint8Array): string;
 export function deriveUnlockKey(password: string, salt: Uint8Array): Uint8Array;
 
 /**
+ * The KDF parameters this build seals with, encoded for storage.
+ *
+ * Handed to the server verbatim and fed back at recovery. They are covered by the seal's AAD,
+ * so a server that rewrites them produces a decryption failure rather than a weaker
+ * derivation.
+ */
+export function escrowParams(kind: string): Uint8Array;
+
+/**
  * Message to sign in order to open a gateway session.
  *
  * Returns the bytes to sign, **not the signature**: the device's authentication key is a
@@ -315,12 +399,31 @@ export function deriveUnlockKey(password: string, salt: Uint8Array): Uint8Array;
 export function gatewayChallenge(device_id: string, nonce: Uint8Array): Uint8Array;
 
 /**
+ * Draws a passphrase from the BIP-39 English word list.
+ *
+ * See `crypto_core::escrow::generate_passphrase` for why this is offered beside a password
+ * field at all. **It is not the recovery phrase and must never be shown as one**: twelve words
+ * from this list *are* an account, six are a password that opens an escrow, and they look
+ * identical on screen.
+ */
+export function generatePassphrase(words: number): string;
+
+/**
  * Leaf hash of a log entry, as the server must have computed it.
  *
  * The client recomputes it from the handle and the key it is served: accepting the hash the
  * server provides would amount to asking it to prove what it claims with what it claims.
  */
 export function logLeaf(handle: string, identity_key: Uint8Array): Uint8Array;
+
+/**
+ * Opens a sealed escrow and returns the seed.
+ *
+ * A wrong password, a tampered ciphertext and a substituted account all produce the same
+ * error. Distinguishing them would tell the caller which of the three it got wrong, and the
+ * only caller who does not already know is an attacker.
+ */
+export function openEscrow(sealed: Uint8Array, factor: RecoveryFactor, account: string, kind: string, params: Uint8Array): Uint8Array;
 
 /**
  * Authenticates an envelope post without revealing who posts.
@@ -341,6 +444,11 @@ export function logLeaf(handle: string, identity_key: Uint8Array): Uint8Array;
  * remove. One byte of divergence and every post is refused.
  */
 export function postMac(posting_key: Uint8Array, group_id: Uint8Array, nonce: Uint8Array, body: Uint8Array): Uint8Array;
+
+/**
+ * Seals the account seed for recovery. **These bytes are worth the whole account.**
+ */
+export function sealEscrow(seed: Uint8Array, factor: RecoveryFactor, account: string, kind: string, params: Uint8Array): Uint8Array;
 
 /**
  * Seals a packet for the new device, from the values read in the QR.
@@ -427,9 +535,11 @@ export interface InitOutput {
     readonly __wbg_accountkey_free: (a: number, b: number) => void;
     readonly __wbg_client_free: (a: number, b: number) => void;
     readonly __wbg_pairing_free: (a: number, b: number) => void;
+    readonly __wbg_recoveryfactor_free: (a: number, b: number) => void;
     readonly accountFingerprint: (a: number, b: number, c: number) => void;
     readonly accountId: (a: number, b: number, c: number) => void;
     readonly accountkey_attest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
+    readonly accountkey_deviceSyncKey: (a: number, b: number) => void;
     readonly accountkey_exportSeed: (a: number, b: number) => void;
     readonly accountkey_fingerprint: (a: number, b: number) => void;
     readonly accountkey_fromSeed: (a: number, b: number, c: number) => void;
@@ -440,6 +550,7 @@ export interface InitOutput {
     readonly accountkey_rotate: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint) => void;
     readonly accountkey_vaultKey: (a: number, b: number) => void;
     readonly client_applyPending: (a: number, b: number, c: number, d: number) => void;
+    readonly client_callKey: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly client_commitPending: (a: number, b: number, c: number, d: number) => void;
     readonly client_conversationIds: (a: number, b: number) => void;
     readonly client_create: (a: number, b: number, c: number) => void;
@@ -452,6 +563,7 @@ export interface InitOutput {
     readonly client_invite: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly client_join: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly client_leaveGroup: (a: number, b: number, c: number, d: number) => void;
+    readonly client_lifetimeSeconds: (a: number, b: number, c: number, d: number) => void;
     readonly client_name: (a: number, b: number) => void;
     readonly client_peerFingerprints: (a: number, b: number, c: number, d: number) => void;
     readonly client_peerSignatureKeys: (a: number, b: number, c: number, d: number) => void;
@@ -460,17 +572,25 @@ export interface InitOutput {
     readonly client_removeMember: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly client_restore: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly client_roster: (a: number, b: number, c: number, d: number) => void;
+    readonly client_setLifetime: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly client_setRoles: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
     readonly client_signalKey: (a: number, b: number, c: number, d: number) => void;
     readonly client_signatureKey: (a: number, b: number) => void;
+    readonly derivePasswordFactor: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly derivePrfFactor: (a: number, b: number, c: number) => void;
     readonly deriveUnlockKey: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly escrowParams: (a: number, b: number, c: number) => void;
     readonly gatewayChallenge: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly generatePassphrase: (a: number, b: number) => void;
     readonly logLeaf: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly openEscrow: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
     readonly pairing_id: (a: number, b: number) => void;
     readonly pairing_new: () => number;
     readonly pairing_open: (a: number, b: number, c: number, d: number) => void;
     readonly pairing_publicKey: (a: number, b: number) => void;
     readonly postMac: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
+    readonly recoveryfactor_lookupId: (a: number, b: number) => void;
+    readonly sealEscrow: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
     readonly sealPairing: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly signalMac: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
     readonly verifyAttestation: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => number;

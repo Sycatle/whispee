@@ -15,6 +15,7 @@
 //! doing it.
 
 pub mod auth;
+pub mod call;
 pub mod error;
 pub mod gateway;
 pub mod handle;
@@ -22,6 +23,7 @@ pub mod log;
 pub mod presence;
 pub mod push;
 pub mod routes;
+pub mod storage;
 pub mod stream;
 pub mod throttle;
 
@@ -54,12 +56,30 @@ pub struct AppState {
     /// messages in a minute and has no business uploading a hundred attachments in one. See
     /// `throttle::Writes` for each number and for what none of them solve.
     pub writes: Arc<throttle::Writes>,
+    /// Ceiling on recovery lookups, counted per address.
+    ///
+    /// Separate for a different reason from the three above: they bound how fast a table grows,
+    /// this one bounds how fast a password can be guessed. It is the narrowest quota in the
+    /// server, and — because a failed lookup names no account — the only bound on guessing that
+    /// exists online at all.
+    pub recovery: Arc<throttle::Recovery>,
+    /// Ceiling on what one account may keep on this server.
+    ///
+    /// Separate from `writes` because it bounds a total rather than a rate: see [`storage`] for
+    /// why no quota keyed on time can stand in for it.
+    pub storage: Arc<storage::Quota>,
     /// What wakes sleeping devices.
     ///
     /// [`push::Silent`] by default, and that is a design choice, not a placeholder: a deployment
     /// that talks to neither Apple nor Google must stay fully functional. See `push` for what
     /// this wake-up costs in metadata.
     pub push: Arc<dyn push::Waker>,
+    /// Where calls are relayed, if anywhere.
+    ///
+    /// Empty by default, and for the reason the waker above is silent by default: a deployment
+    /// running no media server keeps a fully working messenger. See [`call`] for what a call
+    /// costs in metadata, which is more than a message does.
+    pub media: Arc<call::Media>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -86,15 +106,33 @@ impl FromRef<AppState> for Arc<dyn push::Waker> {
     }
 }
 
+impl FromRef<AppState> for Arc<call::Media> {
+    fn from_ref(state: &AppState) -> Self {
+        state.media.clone()
+    }
+}
+
 impl FromRef<AppState> for Arc<throttle::Claims> {
     fn from_ref(state: &AppState) -> Self {
         state.claims.clone()
     }
 }
 
+impl FromRef<AppState> for Arc<storage::Quota> {
+    fn from_ref(state: &AppState) -> Self {
+        state.storage.clone()
+    }
+}
+
 impl FromRef<AppState> for Arc<throttle::Writes> {
     fn from_ref(state: &AppState) -> Self {
         state.writes.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<throttle::Recovery> {
+    fn from_ref(state: &AppState) -> Self {
+        state.recovery.clone()
     }
 }
 
@@ -112,6 +150,35 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     // The log's key is created on first start, never twice: two keys would sign two logs, and
     // clients would see a fork caused by us.
     log::ensure_signing_key(&pool).await?;
+
+    // And its public half is printed, every start.
+    //
+    // # Why it is logged at all
+    //
+    // Because a deployment cannot otherwise find it. `VITE_LOG_PUBKEY` pins the client to this
+    // log's key — the one check that works on a **first** contact with a server, where everything
+    // else compares the server against its own past — and `.env.example` has always described it
+    // as "printed by the server on first boot". It was not. The only route carrying the key,
+    // `/v1/log/sth`, requires a signed request, so an operator standing a deployment up had no way
+    // to read the value the documentation told them to set. Found by following that sentence.
+    //
+    // # Why publishing it is not a leak
+    //
+    // It is the verifying half, handed to every authenticated client on every head. What must
+    // never leave the database is the signing half, and nothing here touches it: `signing_key`
+    // returns the key so that this line can ask it for its public counterpart.
+    //
+    // # Why every start rather than only the first
+    //
+    // A value printed once lives in a log file that has since rotated. This costs one query at
+    // startup and means the answer is always in the most recent boot.
+    {
+        use base64::Engine as _;
+        let key = log::signing_key(&pool).await?;
+        let public = base64::engine::general_purpose::STANDARD
+            .encode(key.verifying_key().to_bytes());
+        tracing::info!(log_key = %public, "transparency log public key — set as VITE_LOG_PUBKEY to pin clients to it");
+    }
 
     // Accounts predating the log must enter it, otherwise clients would reject all their keys
     // for lack of an inclusion proof.
@@ -198,8 +265,10 @@ const ENVELOPE_RETENTION_DAYS: u32 = 30;
 ///
 /// What it does not solve: it is a count, not a size. Five hundred envelopes carrying 25 MiB
 /// attachment descriptors and five hundred carrying "ok" occupy the same slot in this rule. The
-/// bound that would answer that is a stored-bytes quota per account, which `throttle` names and
-/// this server still does not have.
+/// bytes those descriptors point at are bounded — [`crate::storage`] charges an attachment to
+/// whoever uploaded it — but the envelopes themselves are not counted anywhere, and cannot be
+/// until a sealed post can be charged without naming its sender. See
+/// `docs/specs/2026-08-24-posting-allowance.md`.
 const ENVELOPE_MIN_TAIL: i64 = 500;
 
 /// Age past which an attachment is deleted, whatever the state of its envelope.
@@ -379,12 +448,67 @@ pub async fn purge_once(pool: &PgPool) -> Result<Purged, sqlx::Error> {
     .await?
     .rows_affected();
 
-    let attachments = sqlx::query(&format!(
-        "DELETE FROM attachments WHERE created_at < now() - interval '{ATTACHMENT_RETENTION_DAYS} days'"
+    // Deleted inside a transaction that also gives the bytes back, and `RETURNING` rather than
+    // `rows_affected` because the credit needs to know **whose** bytes left — the deletion is the
+    // only moment that is knowable. Aggregated in SQL so a purge of ten thousand rows does not
+    // bring them all back over the wire to be summed in Rust.
+    let mut tx = pool.begin().await?;
+
+    let credited: Vec<(Option<String>, i64, i64)> = sqlx::query_as(&format!(
+        "WITH gone AS (
+             DELETE FROM attachments
+              WHERE created_at < now() - interval '{ATTACHMENT_RETENTION_DAYS} days'
+          RETURNING account, octet_length(payload) AS bytes
+         )
+         SELECT account, SUM(bytes)::bigint, count(*)::bigint FROM gone GROUP BY account"
     ))
-    .execute(pool)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for (account, bytes, _) in &credited {
+        // `None` is an attachment uploaded before `0019`: it was never charged to anybody, so
+        // there is nobody to credit. The migration says why those rows are not retrofitted.
+        if let Some(account) = account {
+            crate::storage::credit(&mut tx, account, *bytes).await?;
+        }
+    }
+
+    // Still the number of rows, unchanged: the log line this feeds is read for one thing only,
+    // which is noticing that a retention rule has started biting harder than expected. Turning it
+    // into a byte count would silently change what an operator has been watching.
+    let attachments: u64 = credited.iter().map(|(_, _, rows)| *rows as u64).sum();
+
+    // The attachments of the groups about to be deleted, credited before the cascade can take
+    // them. `DELETE FROM groups` cascades into `attachments`, and a cascade runs no application
+    // code: those bytes would stay charged to their uploader for ever, on a group that no longer
+    // exists. This is the exact drift the reconciliation test in `tests/storage.rs` watches for.
+    //
+    // The `WHERE` repeats the group deletion's own conditions rather than referring to it, and
+    // the two must be edited together: attachments credited here for a group that then survives
+    // would be a credit for bytes still stored.
+    let doomed: Vec<(Option<String>, i64)> = sqlx::query_as(&format!(
+        "WITH gone AS (
+             DELETE FROM attachments a
+              WHERE NOT EXISTS (SELECT 1 FROM group_members m WHERE m.group_id = a.group_id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM envelopes e
+                    WHERE e.group_id = a.group_id
+                      AND e.created_at >= now() - interval '{ENVELOPE_RETENTION_DAYS} days'
+                )
+          RETURNING a.account, octet_length(a.payload) AS bytes
+         )
+         SELECT account, SUM(bytes)::bigint FROM gone GROUP BY account"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for (account, bytes) in &doomed {
+        if let Some(account) = account {
+            crate::storage::credit(&mut tx, account, *bytes).await?;
+        }
+    }
+
+    tx.commit().await?;
 
     // Last, so the two counters above report what the retention rules deleted rather than what a
     // cascade happened to carry off with a group.
@@ -429,28 +553,68 @@ pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 /// this server from a user's browser. Requests stay signed, so a third-party site could not
 /// authenticate anything — but allowing broadly without reason is exactly what turns a minor
 /// defect into a breach.
+/// The origins no deployment may remove.
+///
+/// The operating system imposes them on the desktop application: `tauri://localhost` on Linux and
+/// macOS, `http://tauri.localhost` on Windows and Android. They depend on no configuration, so
+/// there is nothing a deployment could know that would make dropping them right.
+const FIXED_ORIGINS: [&str; 2] = ["tauri://localhost", "http://tauri.localhost"];
+
+/// The origins a deployment names, plus the ones it does not get to choose.
+///
+/// # Why `ALLOWED_ORIGINS` adds rather than replaces
+///
+/// It used to replace the whole list, and that is a trap that closes silently. Somebody sets the
+/// variable to add a port — a second preview server, a staging host — and takes the desktop
+/// application's two origins away with it, without touching anything that looks like the desktop
+/// application. The symptom is the one this function's headers already warn about: a "Failed to
+/// fetch" the browser emits **before** sending, so the server logs nothing and the message names
+/// no cause.
+///
+/// It happened here, between two sessions working on the same machine, which is how it was found.
+///
+/// # The two halves are not the same kind of thing, and the split is the point
+///
+/// The development origins are configurable **because they depend on the deployment** — which
+/// ports somebody happens to serve a client on is not something this crate can know. The two
+/// above are imposed by an operating system and depend on nothing. Merging them into one
+/// overridable list was treating a fact as a preference. Whoever is tempted to "simplify" this
+/// back into a substitution should read that sentence first.
+fn allowed_origins(configured: Option<String>) -> Vec<String> {
+    let named = configured
+        .unwrap_or_else(|| "http://127.0.0.1:5173,http://localhost:5173".into())
+        .split(',')
+        .map(|origin| origin.trim().to_owned())
+        .filter(|origin| !origin.is_empty())
+        .collect::<Vec<_>>();
+
+    // Deduplicated, so a deployment naming a fixed origin explicitly does not get it twice.
+    let mut origins = named;
+    for fixed in FIXED_ORIGINS {
+        if !origins.iter().any(|origin| origin == fixed) {
+            origins.push(fixed.to_owned());
+        }
+    }
+    origins
+}
+
 fn cors_layer() -> tower_http::cors::CorsLayer {
     use axum::http::{HeaderName, Method, HeaderValue};
     use tower_http::cors::CorsLayer;
 
-    // The desktop application's origins are in the default, not only in the documentation: they
-    // are fixed — the operating system imposes them, they depend on no deployment — and
-    // forgetting them produces a "Failed to fetch" the browser emits before sending anything, so
-    // without leaving a trace in the server logs.
-    //
-    // `tauri://localhost` on Linux and macOS, `http://tauri.localhost` on Windows and Android.
-    let origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| {
-            "http://127.0.0.1:5173,http://localhost:5173,tauri://localhost,http://tauri.localhost"
-                .into()
-        })
-        .split(',')
-        .filter_map(|origin| origin.trim().parse().ok())
+    let origins: Vec<HeaderValue> = allowed_origins(std::env::var("ALLOWED_ORIGINS").ok())
+        .iter()
+        .filter_map(|origin| origin.parse().ok())
         .collect();
 
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST])
+        // Every method a route answers on must be listed, for the same reason the headers below
+        // are: the browser blocks an unlisted one at the preflight, and the server never sees it.
+        // `DELETE` is the vault drop, which is how turning on a lifetime erases this account's
+        // archive — a route the integration tests reach without a preflight, and would therefore
+        // have called working while every browser refused it.
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         // Every header the client sends must be listed here, otherwise the browser blocks the
         // request **before** it leaves: the server sees nothing, and the client only gets a
         // "Failed to fetch" that does not name the cause. Integration tests do not go through
@@ -504,9 +668,15 @@ pub fn app_with_waker(
         throttle: Arc::new(limits.throttle),
         claims: Arc::new(limits.claims),
         writes: Arc::new(limits.writes),
+        recovery: Arc::new(limits.recovery),
+        storage: Arc::new(limits.storage),
         // The default is `Silent`, set by `app_with`: wiring up Apple or Google requires secrets
         // a deployment must provide knowingly, after reading what the wake-up leaks.
         push,
+        // Read from the environment rather than passed in, unlike the waker: there is nothing to
+        // substitute here. The tests that matter check what this server *sends* — a token's
+        // contents, a refusal when unconfigured — and both are reachable without a media server.
+        media: Arc::new(call::Media::from_environment()),
     };
 
     // Wires the hub onto Postgres, which allows running several instances without their clients
@@ -536,4 +706,53 @@ pub fn app_with_waker(
         .merge(public)
         .layer(cors_layer())
         .layer(TraceLayer::new_for_http())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The regression that made [`allowed_origins`] exist.**
+    ///
+    /// Setting the variable to add a port used to take the desktop application's two origins away
+    /// with it. Nothing in that change looks like it touches the desktop, and the failure it
+    /// produces leaves no trace on this side: the browser refuses before sending.
+    #[test]
+    fn naming_origins_does_not_remove_the_ones_a_deployment_cannot_choose() {
+        let origins = allowed_origins(Some("http://localhost:5176".into()));
+
+        assert!(origins.contains(&"http://localhost:5176".to_owned()));
+        for fixed in FIXED_ORIGINS {
+            assert!(origins.contains(&fixed.to_owned()), "{fixed} was dropped by an override");
+        }
+    }
+
+    #[test]
+    fn an_unset_variable_still_serves_a_local_client_and_the_desktop() {
+        let origins = allowed_origins(None);
+
+        assert!(origins.contains(&"http://127.0.0.1:5173".to_owned()));
+        // Two spellings of one host, and the browser treats them as two origins: a client served
+        // from `localhost` cannot reach a server that only allows `127.0.0.1`.
+        assert!(origins.contains(&"http://localhost:5173".to_owned()));
+        assert!(origins.contains(&"tauri://localhost".to_owned()));
+    }
+
+    /// A deployment naming a fixed origin explicitly must not have it listed twice: a duplicated
+    /// entry is the kind of header a strict intermediary rejects.
+    #[test]
+    fn naming_a_fixed_origin_does_not_list_it_twice() {
+        let origins = allowed_origins(Some("tauri://localhost,http://localhost:5176".into()));
+
+        assert_eq!(origins.iter().filter(|origin| *origin == "tauri://localhost").count(), 1);
+    }
+
+    #[test]
+    fn blank_entries_are_dropped_rather_than_parsed() {
+        // A trailing comma is what a hand-edited environment file grows, and an empty origin
+        // parses into nothing useful.
+        let origins = allowed_origins(Some("http://localhost:5176, ,".into()));
+
+        assert_eq!(origins.iter().filter(|origin| origin.is_empty()).count(), 0);
+    }
 }

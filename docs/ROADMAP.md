@@ -25,12 +25,13 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Delivery service | Axum + Postgres, signed requests, nonces, rate limits, `envelopes` partitioned by `HASH(group_id)` |
 | Gateway | WebSocket, one connection for every group, dynamic subscription, catch-up by cursor |
 | Multi-instance fan-out | Postgres `LISTEN/NOTIFY` |
-| Receipts, typing, presence, reactions, replies | All four signals, with their settings |
+| Receipts, typing, presence, reactions, replies | All four signals, with their settings — account-wide, sealed between an account's own devices |
 | Mentions | `@handle` in the composer, the account on the wire, the current name on screen |
 | Attachments | Per-file AES-256-GCM key carried inside the MLS message, padded into doubling buckets |
 | One tab per account | An exclusive Web Lock, taken before anything is read — two tabs consume each other's message keys |
 | Local lock | Argon2id 64 MiB / 3 passes, unlock key → master key indirection, re-locking after five minutes without the user |
-| History vault | On by default, revocable in settings |
+| Disappearing messages | Seven days by default, carried in a `0xF101` group-context extension; admin or moderator may change it |
+| History vault | On by default, revocable in settings — and never used for a conversation that has a lifetime |
 | Desktop application | Tauri 2, interface packaged in the binary |
 | Reproducible signed releases | `scripts/release.sh` and `scripts/verify-release.sh` |
 | Mobile adaptation | Navigation, safe areas, keyboard, touch targets, lifecycle, offline state, native storage, QR pairing |
@@ -178,20 +179,36 @@ These predate the mobile work and are argued in full in [`../README.md`](../READ
 [`./THREAT-MODEL.md`](./THREAT-MODEL.md). The short list, so this page is not misleading by
 omission:
 
-- **The history vault is the server's unbounded store, and must stay unpurged.** `envelopes` is
-  no longer the gap it was: the retention purge deletes an envelope past thirty days once its
-  group is five hundred sequences ahead of it, which turns unbounded growth into a steady state
-  proportional to the last month of traffic. That purge is only acceptable because the content
-  survives elsewhere — in `vault_entries`, which is therefore deliberately never purged, and has
-  inherited the role `envelopes` used to play. The debt moved; it was not paid. The bound that
-  would settle it is the per-account **stored-bytes quota** `crates/server/src/throttle.rs`
-  already names: write quotas cap a rate per device per minute, and ten vault writes a minute,
-  forever, is still forever.
+- **The vault is bounded now; envelopes are bounded by a clock rather than by a ceiling.**
+  `vault_entries` is deliberately never purged — the archived content is what makes deleting
+  envelopes acceptable — so it had inherited the role of the unbounded store. It no longer has
+  it: `crates/server/src/storage.rs` holds a per-account ceiling, 256 MiB by default, charged on
+  every vault write and every attachment upload and credited back when a purge deletes. What
+  remains outside it is `envelopes`, and not by oversight: a sealed post carries no device id, so
+  charging the account behind it means recording the sender of every post — the register sealed
+  sender exists to remove. The answer is anonymous byte tokens, specified in
+  [`./specs/2026-08-24-posting-allowance.md`](./specs/2026-08-24-posting-allowance.md) and not
+  built. Until it is, envelopes are held by the retention purge's steady state and by a rate
+  limit, which bound a month of traffic rather than a total.
+- **Charging the uploader means recording the uploader.** `attachments` now carries the account
+  that deposited it, where before the server learned it for the length of a request and kept
+  nothing. That is a metadata leak, it is in the limitations table of
+  [`./THREAT-MODEL.md`](./THREAT-MODEL.md), and it is what buys the heaviest write this server
+  accepts a personal bound instead of a ceiling shared by a whole group.
 - **On the desktop build, notifications neither collapse nor open the conversation.** Tauri's
   notification plugin replaces `window.Notification` with a shim that drops the `tag` and returns
   no handle, so forty arriving messages would be forty notices and clicking one does nothing. The
   plugin is therefore not installed: notifications are web-grade on the web, and whatever the
   platform webview offers on the desktop. The unread count in the title works everywhere.
+- **A vault deletion that never succeeds is forgotten when the session ends.** Turning on a
+  lifetime erases this account's archive, and every other member's client now does the same when
+  it sees the commit — the deletion each member owes for their own copy. That call can fail, so
+  the debt is queued and retried on the next poll. The queue is in memory: an application closed
+  before a retry succeeds no longer knows it owed one. What that leaves is a readable archive on
+  the server for a conversation that has since been told to forget. It is no longer served into a
+  thread — `Archive.restore` refuses a conversation with a lifetime, the same refusal `store`
+  already made — so what survives is bytes on a server, not history on a screen. Closing it means
+  persisting the debt, which is a schema change and is not done.
 - **The transparency log is signed by the party it watches.** Gossip catches a forked log
   partially; it does not remove the defect.
 - **The MLS keys still live in WASM linear memory**, reachable by the page's JavaScript, on
@@ -199,6 +216,12 @@ omission:
   crypto call asynchronous.
 - **Device secrets sit in a plaintext file** on the native side, `0600`. Real protection at rest
   means Keychain and Keystore, which needs per-platform native code.
+- **The recovery escrow is a knowing downgrade, not a solved problem.** A password that gets an
+  account back with no device left can only work by putting the account key on the server,
+  encrypted, where its holder can attack the password offline. It is off by default and the screen
+  argues against itself before offering the field. The thing that would actually close it is a
+  rate-limiting hardware enclave — Signal's SVR — which a self-hosted deployment cannot be asked
+  to run. The passkey factor has no such cost and is the one to prefer where it works.
 - **No backups, no post-quantum, no account deletion.** The last is deliberate: an append-only
   log cannot drop an entry, and shrinking the log is precisely what gossip reports as an attack.
 - **The web will always ship its own weakness**: the server delivers the JavaScript and can

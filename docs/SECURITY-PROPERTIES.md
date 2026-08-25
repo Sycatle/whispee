@@ -24,6 +24,12 @@ Attachments follow the same rule by a different path: each file is encrypted cli
 and MIME type. Reusing a key across files would mean one leaked descriptor opens them all; one key
 per file bounds the damage and lets a specific attachment be shared without granting the rest.
 
+Call audio follows it by a third: a media server terminates the transport encryption — that is what
+routing one stream to several listeners means — so every frame is encrypted a second time before it
+gets there, under `export_secret(..., "wac-call-key-v1", call_id, 32)`. Each member derives those
+bytes from the current epoch, nothing is exchanged, and neither server ever holds a key it could be
+asked for. The call id is in the exporter's context so two calls in one epoch do not share a key.
+
 **Caveat.** Length is not content. Message bodies are padded into doubling buckets from 256 bytes,
 so the server learns an order of magnitude and no more. Attachments go into the same buckets,
 applied to the plaintext before encryption, with a top bucket capped just under the server's 25 MiB
@@ -264,7 +270,51 @@ to be done.
 
 ---
 
-## 8. Metadata resistance
+## 8. Account recovery
+
+**Claim, in two parts, because the two factors do not claim the same thing.**
+
+**The passkey factor**: the account seed is sealed under 32 uniform bytes produced by a WebAuthn
+authenticator's PRF extension. An adversary holding the entire database learns nothing about it
+and has nothing to guess. This is a full claim.
+
+**The password factor**: the account seed is sealed under `Argon2id(password, 256 MiB, t = 4)` and
+the ciphertext is stored on the server. **This is deliberately not claimed to resist an adversary
+who obtains that ciphertext.** It resists guessing at the cost of one Argon2id evaluation per
+attempt, which is a factor and not a barrier, and the property it actually delivers is: *an
+attacker who has the database recovers the account if and only if they guess the password.*
+
+The floor enforced on that password is stricter than the local lock's — sixteen characters, and a
+zxcvbn estimate above 10^14 guesses — for a reason worth stating rather than tuning: the lock's
+password guards one disk against somebody holding that disk, and forgetting it costs nothing
+because the phrase still works. This one guards a ciphertext an attacker holds forever, and it is
+what somebody chose *instead of* keeping the phrase.
+
+**Not claimed, and each of these is a design consequence rather than a gap:**
+
+- **No protection against the server operator.** They hold the ciphertext by construction. The
+  online rate limit (three claims a minute per address) is irrelevant to them; they never call the
+  route. Closing this needs a rate-limiting hardware enclave, which a self-hosted deployment
+  cannot be required to run.
+- **No account lockout.** A failed claim names no account — that is what stops the route being an
+  enumeration oracle — so there is nothing to lock after N attempts. The two properties are the
+  same property seen from two sides.
+- **No protection of the vault separately from the account.** The vault key derives from the same
+  seed, so an escrow that opens the account opens the archive with it.
+- **No claim about a passkey's availability.** Whether it survives losing this device depends on
+  the provider's sync, which the application cannot observe and does not report.
+- **Recovery does not restore conversations.** It restores the account and the vault. MLS
+  membership can only be granted by a device already in the group — the same limit the phrase
+  path has always had.
+
+Pinned by `crypto-core`'s escrow tests (a substituted account, kind or parameter set fails to
+open; parameters below the floor are refused before Argon2 runs) and by
+`server/tests/recovery.rs` (a wrong secret is indistinguishable from an absent escrow; a rotation
+destroys the escrow; the quota bites).
+
+---
+
+## 9. Metadata resistance
 
 **Claim.** Two mechanisms, and both are real.
 
@@ -314,9 +364,42 @@ and no cryptography answers that. It is the price of the feature, which is why t
 strictly optional and inert without configuration. See
 [`./THREAT-MODEL.md`](./THREAT-MODEL.md#4-push-notifications-degrade-sealed-sender).
 
+And the second one, of the same kind and larger: **calls**. Sealed sender does not survive the
+media path. A posted envelope carries no identity; an RTP stream carries a stable one for the
+length of a call, so the delivery service sees that somebody joined a call and towards which group,
+and the media server sees who shared a room with whom and for how long. The room is a digest over
+the group and call ids and the participant name is derived from the call key, so neither the
+conversation nor the device directory is handed over — but the *session* is legible in a way a
+message never is. Optional, inert without configuration, and switchable per account in both
+directions. If the fact that you spoke to somebody is what must not be known, do not place the
+call. See [`./THREAT-MODEL.md`](./THREAT-MODEL.md#4ter-calls-leak-more-than-messages-and-the-leak-has-no-cryptographic-answer).
+
 ---
 
-## 9. Distribution integrity
+## 9bis. Ephemeral conversations are never archived
+
+**Claim.** A conversation carrying a lifetime is not deposited in the history vault. Not "deposited
+and pruned" — never asked. That is the one half of disappearing messages this project claims,
+because it is the half that is a mechanism rather than an appeal to the other side's good conduct,
+and it is testable: `an ephemeral conversation is never archived` in
+`apps/web/src/lib/session-vault.test.ts` asserts the vault API is never called, and its neighbour
+asserts a conversation with no lifetime is archived exactly as before.
+
+Turning a lifetime on also **deletes this account's existing archive** of the conversation, via
+`DELETE /v1/vault/{group_id}`, which removes the caller's rows and credits the bytes back. It
+removes nobody else's: two members of one conversation each hold their own archive under their own
+key, and one member erasing another's copy is not something this offers.
+
+**Caveat.** The deletion of the *messages* is not a claim. It is client-side, unenforceable, and
+[`./THREAT-MODEL.md`](./THREAT-MODEL.md#4quater-disappearing-messages-are-a-client-side-promise)
+says so plainly: a modified client keeps them, screenshots exist. The server also keeps its
+ciphertext envelopes on its own schedule — up to thirty days — and never learns the lifetime, so
+it cannot honour one even in principle. And the archive that is not written is an archive that
+cannot be restored: an ephemeral conversation does not survive the loss of every device.
+
+---
+
+## 10. Distribution integrity
 
 **Claim.** On the web, the server delivers the JavaScript on every load and can deliver a hostile
 version; no browser policy opposes that. The desktop application closes that path by packing the
@@ -341,7 +424,7 @@ machines has not been measured.
 
 ---
 
-## 10. What has never been verified
+## 11. What has never been verified
 
 Stated here so it is not inferred from silence.
 
@@ -359,6 +442,10 @@ Stated here so it is not inferred from silence.
 - **The native storage migration has never been run end to end**, and it cannot be covered by the
   existing harness (`node --test`, no DOM, no IndexedDB, no IPC). It is the code that runs once per
   installation and whose failure is irreversible.
+- **The WebAuthn PRF path has never been exercised against a real authenticator here.** It is
+  written against the specification and the browsers' documented behaviour, including the case
+  where an authenticator reports `prf.enabled` at creation and returns no output until an
+  assertion. That fallback in particular has never run on hardware that takes it.
 - **Mobile has not been built here.** Tauri 2 targets iOS and Android from the same codebase, but
   that requires the Android SDK and, for iOS, a macOS machine. A mobile webview will not match
   native on gestures and notifications in any case.

@@ -194,3 +194,58 @@ test("what resolution produces is what rendering reads back", () => {
   assert.deepEqual(runs(wire, accounts), [{ text: "hi " }, { handle: "a".repeat(32) }]);
   assert.equal(addresses(wire, "a".repeat(32), accounts), true);
 });
+
+/**
+ * The defect fenced blocks introduced, and the reason `resolve` splices rather than joins.
+ *
+ * `resolve` runs on the way **out** — on the message that is actually sent. A handle rewritten
+ * inside a code sample leaves thirty-two hexadecimal characters in the middle of somebody's
+ * snippet, on the wire, with nothing to recover it from. That is a different order of mistake
+ * from rendering it wrongly.
+ */
+test("a handle inside a fenced block is left exactly as it was written", () => {
+  const directory = new Map([["alice", "a1b2c3"]]);
+  const text = "ask @alice about this:\n```py\n@alice\ndef f(): pass\n```\nand that is all";
+
+  const out = resolve(text, directory);
+
+  assert.ok(out.includes("ask @a1b2c3 about this"), "prose was not resolved");
+  assert.ok(out.includes("```py\n@alice\ndef f(): pass\n```"), "the block was rewritten");
+  assert.equal(out.split("a1b2c3").length - 1, 1, "the id reached the code sample");
+});
+
+test("a handle inside inline code is left alone too", () => {
+  const directory = new Map([["alice", "a1b2c3"]]);
+  assert.equal(resolve("see `@alice` here", directory), "see `@alice` here");
+  assert.equal(resolve("see @alice here", directory), "see @a1b2c3 here");
+});
+
+/**
+ * Byte-for-byte identity outside prose is the property the splice buys, and the way to check it
+ * is a text the scanner has no business changing at all.
+ */
+test("text with nothing to resolve comes back unchanged", () => {
+  const directory = new Map([["alice", "a1b2c3"]]);
+  for (const text of [
+    "```\njust code\n```",
+    "no mentions at all",
+    "```\n@nobody\n```",
+    "trailing newline\n",
+    "```unclosed\n@alice",
+  ]) {
+    assert.equal(resolve(text, directory), text, `changed ${JSON.stringify(text)}`);
+  }
+});
+
+/**
+ * The mirror-image bug: a notification raised for a handle that is only visible inside a code
+ * sample, naming somebody the message does not address.
+ */
+test("a handle only present in code does not address anybody", () => {
+  const among = ["alice"];
+  assert.ok(!addresses("```\n@alice\n```", "alice", among));
+  assert.ok(!addresses("run `@alice` to see", "alice", among));
+  assert.ok(addresses("hey @alice", "alice", among));
+  // Both at once: the prose one counts, the code one does not, and the answer is still yes.
+  assert.ok(addresses("hey @alice, run `@alice`", "alice", among));
+});

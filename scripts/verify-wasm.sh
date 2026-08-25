@@ -16,11 +16,18 @@
 #
 # # Why a byte-exact comparison is legitimate here
 #
-# It was measured before being asserted: with the toolchain pinned by `rust-toolchain.toml` and
-# the wasm-bindgen version pinned by `Cargo.lock`, `wasm-pack build --release` reproduces all
-# three files bit for bit. If that ever stops holding, this script is the thing that says so —
-# and a WebAssembly module that stops being reproducible is itself worth knowing about, given
-# what `docs/BUILD.md` claims about verifiable releases.
+# It was measured before being asserted, and measured on one machine, which was the flaw. With
+# the toolchain pinned by `rust-toolchain.toml` and the wasm-bindgen version pinned by
+# `Cargo.lock`, the build reproduces all three files bit for bit **only if the paths are also
+# pinned** — Rust writes the source path of a panic into the binary, so an unremapped build
+# carries `/home/whoever/.cargo/...` and no two machines agree. That is what `build-wasm.sh`
+# remaps, and why the build lives there rather than here.
+#
+# Until the first CI run that got this far, this check had only ever passed on the machine that
+# generated the artefact, and read as a property of the project rather than of that machine. If
+# reproducibility stops holding again, this script is still the thing that says so — and a
+# WebAssembly module that stops being reproducible is worth knowing about, given what
+# `docs/BUILD.md` claims about verifiable releases.
 #
 # # What it does not prove
 #
@@ -33,7 +40,7 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
 echo "Rebuilding crypto-wasm into $scratch ..."
-wasm-pack build --target web --release --out-dir "$scratch/pkg" "$root/crates/crypto-wasm" >/dev/null
+"$root/scripts/build-wasm.sh" "$scratch/pkg" >/dev/null
 
 # The committed glue carries the `patch-wasm-glue.mjs` edit, so the fresh copy must carry it too
 # before the two can be compared. Running the patch here also keeps it honest: it exits non-zero
@@ -49,7 +56,25 @@ compare() {
   else
     echo "  MISMATCH  $3"
     status=1
+    diagnose "$1" "$2"
   fi
+}
+
+# A mismatch used to report only that one had happened, and the advice below could do no better
+# than list three things that might have moved. On a CI runner, where nobody can open the two
+# files, that is a dead end: the rebuilt copy lives in a scratch directory that is deleted when
+# the job ends.
+#
+# So say what differs. Sizes first, because a few kilobytes apart and byte-identical-but-for-a-
+# few-strings are different problems, then the strings each side has and the other does not —
+# which is how the absolute build paths were found. Capped, because these are megabyte files and
+# a log is not a diff viewer.
+diagnose() {
+  echo "            rebuilt   $(wc -c <"$1") bytes"
+  echo "            committed $(wc -c <"$2") bytes"
+  command -v strings >/dev/null || return 0
+  diff <(strings -n 8 "$1" | sort -u) <(strings -n 8 "$2" | sort -u) \
+    | grep -E '^[<>]' | head -20 | sed 's/^/            /' || true
 }
 
 echo "Comparing against the committed artefacts:"

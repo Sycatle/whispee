@@ -70,6 +70,13 @@ use crate::stream::{Hub, Notice};
 /// since a revoked device still holds the group's secrets.
 const HEARTBEAT: Duration = Duration::from_secs(30);
 
+/// What a device is told when its session is cut off because it was revoked.
+///
+/// A constant rather than two literals, because the two paths that end a revoked session — the
+/// server's tick and the client's own heartbeat — have to say the same thing. They did not: one
+/// of them said nothing at all, and a literal repeated in two places is how that stays true.
+const REASON_REVOKED: &str = "session revoked";
+
 /// Silence beyond which the session is closed.
 ///
 /// Two heartbeats plus a margin: a client that loses a heartbeat on a network switch must not be
@@ -187,6 +194,15 @@ fn reason(error: &ApiError) -> &'static str {
         }
         ApiError::Conflict(_) => "conflict",
         ApiError::TooManyRequests => "too many requests",
+        // No frame reaches this today — the feature it belongs to is an HTTP route. It is
+        // spelled out rather than swept into a catch-all so that adding one has to come back
+        // here and decide what a client should be told.
+        ApiError::Unavailable => "unavailable",
+        // Same case as above, and the same reason for spelling it out: the storage ceiling is
+        // enforced on the HTTP write routes, and no frame this socket carries stores anything.
+        // The wording stays distinct from "too many requests" all the same — a client that
+        // learns "full" must not go on retrying as it would on a rate limit.
+        ApiError::InsufficientStorage => "storage full",
         ApiError::Database(err) => {
             tracing::error!(error = %err, "database error in the gateway");
             "internal error"
@@ -560,12 +576,35 @@ impl Session {
 
                 _ = heartbeat.tick() => {
                     if last_sign_of_life.elapsed() > SILENCE_MAX {
+                        // Closed without a word, and that is the one case where silence is right:
+                        // a client that has said nothing for this long is not reading, so a frame
+                        // explaining itself would be written to a socket nobody is holding.
                         return sender.close().await;
                     }
 
                     match self.revalidate().await {
                         Ok(true) => {}
-                        Ok(false) => return sender.close().await,
+                        // The same frame the client's own heartbeat would have earned, because it
+                        // is the same event.
+                        //
+                        // This closed without a word, and which of the two paths ends a revoked
+                        // session is not something the client chooses: whichever of the tick and
+                        // its own heartbeat notices first decides whether it is told anything at
+                        // all. A device cut off here could not tell a revocation from a dropped
+                        // network, which is the one distinction this frame exists to make.
+                        //
+                        // Not a race worth fearing in practice — `HEARTBEAT` is thirty seconds,
+                        // so an active client almost always asks first — and that is exactly why
+                        // it was worth fixing rather than leaving: the silent path is the rare
+                        // one, so nobody meets it until they are the one it happens to.
+                        Ok(false) => {
+                            let _ = send(
+                                &mut sender,
+                                &ServerFrame::Error { reason: REASON_REVOKED },
+                            )
+                            .await;
+                            return sender.close().await;
+                        }
                         // A momentarily unavailable database must not disconnect everyone: we
                         // retry on the next heartbeat. The session keeps its subscriptions,
                         // which is the behaviour from before this check.
@@ -612,7 +651,7 @@ impl Session {
                     Reaction::Reply(ServerFrame::HeartbeatAck)
                 }
                 Ok(false) => {
-                    Reaction::Terminate(ServerFrame::Error { reason: "session revoked" })
+                    Reaction::Terminate(ServerFrame::Error { reason: REASON_REVOKED })
                 }
                 Err(error) => Reaction::Reply(ServerFrame::Error { reason: reason(&error) }),
             },

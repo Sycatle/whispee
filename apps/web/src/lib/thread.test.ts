@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { GROUPING_WINDOW_MS } from "./datetime.ts";
-import { layout, type Placed, textOf } from "./thread.ts";
+import { layout, type Placed, textOf, unblocked } from "./thread.ts";
 
 /** A day the tests can be precise about, well away from any local midnight. */
 const NOON = new Date("2024-03-04T12:00:00Z").getTime();
@@ -188,4 +188,63 @@ test("a quote of an attachment shows the file name", () => {
 
 test("a quote of a message we do not hold says so rather than showing a blank", () => {
   assert.equal(textOf([], 12), "message unavailable");
+});
+
+test("a blocked account's messages leave the thread, with no trace that they did", () => {
+  // No gap, no count, no "3 hidden". A counter of what one has declined to read is an invitation
+  // to read it, and it hands anybody who suspects they are blocked a way to keep score.
+  const messages = [
+    { seq: 1, mine: false, sender: "alice" },
+    { seq: 2, mine: false, sender: "mallory" },
+    { seq: 3, mine: false, sender: "alice" },
+  ];
+
+  assert.deepEqual(
+    unblocked(messages, new Set(["mallory"])).map((message) => message.seq),
+    [1, 3],
+  );
+});
+
+test("our own messages survive a list that somehow names us", () => {
+  // Blocking oneself is not a state the interface can produce. A thread that silently lost its
+  // own half would be a bug nobody could explain from the screen.
+  const messages = [{ seq: 1, mine: true, sender: "me" }];
+
+  assert.deepEqual(unblocked(messages, new Set(["me"])), messages);
+});
+
+test("a message nobody can be attributed to is not blocked", () => {
+  // Sealed sender means some arrivals have no author to decline. Declining what cannot be named
+  // would hide precisely the messages nobody can account for.
+  const messages = [{ seq: 1, mine: false, sender: null }];
+
+  assert.deepEqual(unblocked(messages, new Set(["mallory"])), messages);
+});
+
+test("an empty block list changes nothing and still hands back a copy", () => {
+  // A copy, because the caller sorts and folds in place downstream, and a filter that sometimes
+  // aliases its input is a bug that only shows up on the accounts that block nobody.
+  const messages = [{ seq: 1, mine: false, sender: "alice" }];
+  const result = unblocked(messages, new Set());
+
+  assert.deepEqual(result, messages);
+  assert.notEqual(result, messages);
+});
+
+test("filtering happens before layout, so no day heading is left over nothing", () => {
+  // The reason this function lives next to `layout` rather than in the component. Filtering after
+  // it leaves a date above an empty day, or a turn that kept its avatar and lost its message.
+  const day = 24 * 60 * 60 * 1000;
+  const messages = [
+    { seq: 1, mine: false, sender: "alice", sentAt: day },
+    { seq: 2, mine: false, sender: "mallory", sentAt: day * 2 },
+  ];
+
+  const rows = layout(unblocked(messages, new Set(["mallory"])), {
+    authorOf: (message) => message.sender,
+    readCursor: 0,
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].message.seq, 1);
 });

@@ -38,8 +38,10 @@
 //! **What this does not do is stop a disk from filling.** Nothing keyed on time can: the quotas
 //! turn "fill the disk this afternoon" into "fill the disk over a fortnight", which buys an
 //! operator the chance to notice. The bound that actually closes it is a stored-bytes quota per
-//! account, which this server does not have. Saying the rate limit solves storage would be the
-//! comfortable lie.
+//! account, and it now exists — in [`crate::storage`], keyed on the account rather than on the
+//! device, covering the vault and attachments. It is a different mechanism bounding a different
+//! quantity, which is why it is a different module: saying a rate limit solves storage would be
+//! the comfortable lie, and so would folding the two into one number.
 //!
 //! **And what it bounds in `envelopes` is a rate, not a total.** The table is no longer
 //! unbounded — `crate::purge_once` deletes an envelope once it is both older than thirty days
@@ -49,10 +51,16 @@
 //! writing five hundred messages a day still holds fifteen thousand envelopes, forever, and the
 //! quota is what stops that number being chosen by an attacker rather than by the conversation.
 //!
-//! The bound that is still missing is the same one as above, and it is now the more pressing of
-//! the two: a stored-bytes quota per account. The history vault is deliberately never purged —
-//! it is what makes deleting envelopes acceptable — so it has inherited the role of this
-//! server's unbounded store, held back only by ten writes per minute per device.
+//! **Envelopes are the half [`crate::storage`] does not cover**, and the reason is not an
+//! oversight: a sealed post carries no device id, so the account behind it cannot be charged
+//! without recording the sender of every post — which is the register sealed sender removed. The
+//! answer is anonymous byte tokens, specified in
+//! `docs/specs/2026-08-24-posting-allowance.md` and not implemented. Until then this rate limit
+//! is what stands in front of `envelopes`, and the steady state above is what bounds it.
+//!
+//! The history vault, which is deliberately never purged and had inherited the role of this
+//! server's unbounded store, is bounded now — by the ceiling in [`crate::storage`], not by the
+//! ten writes a minute below, which never could.
 //!
 //! # What this does not close
 //!
@@ -89,6 +97,23 @@ pub const DEFAULT_PER_MINUTE: u32 = 60;
 /// victim — an attack that still works: the limit would look set without preventing anything.
 pub const DEFAULT_CLAIMS_PER_MINUTE: u32 = 5;
 
+/// Default quota for recovery lookups, per address and per minute.
+///
+/// **The narrowest quota in this module, and the one carrying the most weight.** Every other
+/// limit here bounds a table's growth; this one bounds guessing. A recovery lookup is a password
+/// attempt, and it is the *only* bound on password attempts that exists — a failed lookup names
+/// no account (see `migrations/0018_recovery_escrow.sql`), so there is nothing to lock out after
+/// N tries and no per-account counter to keep.
+///
+/// Three a minute is generous for the human action, which is typing one password on the worst
+/// day of your life and mistyping it twice.
+///
+/// What it does not do, stated because the number invites the opposite conclusion: it does not
+/// make a weak password safe. An attacker who obtains the table skips this route entirely and
+/// grinds the ciphertext offline, where the only cost is Argon2id's. This limit closes the
+/// online door; the offline one is closed by the password and by nothing else.
+pub const DEFAULT_RECOVERY_LOOKUPS_PER_MINUTE: u32 = 3;
+
 /// Default quota for KeyPackage top-ups, per device and per minute.
 ///
 /// A top-up is a background action, not an interactive one: the client replenishes when its
@@ -106,16 +131,41 @@ pub const DEFAULT_KEY_PACKAGES_PER_MINUTE: u32 = 5;
 /// covers the worst honest catch-up, and no more.
 pub const DEFAULT_VAULT_WRITES_PER_MINUTE: u32 = 10;
 
+/// Default quota for vault deletions, per device and per minute.
+///
+/// **A counter of its own, and sharing the one above was a defect rather than a simplification.**
+/// A deletion undoes deposits, so it is emitted by a device that has just been depositing: the
+/// client archives on every send and on every polled batch. Counting both in one bucket meant that
+/// a user who had sent ten messages in the last minute and then turned a lifetime on got a `429`
+/// on the deletion — **after** the commit had already changed the room's memory for everybody. The
+/// archive survived the feature that exists to remove it, and the only thing on screen was "too
+/// many requests".
+///
+/// Thirty, above the ten deposits it undoes. That direction is the whole point: a session must
+/// always be able to erase what that same session was allowed to write. It is still a bound — the
+/// call is a `DELETE … RETURNING` plus a counter update in one transaction, which is real work a
+/// signed device could otherwise ask for without end.
+pub const DEFAULT_VAULT_DROPS_PER_MINUTE: u32 = 30;
+
+/// A deletion is never rarer than the deposit it undoes.
+///
+/// Checked rather than trusted to review, because the failure it prevents is silent on this side:
+/// the server answers `429` correctly, and what breaks is a client's ability to erase an archive
+/// it has just been told to erase. An edit that inverts this ordering brings back exactly the
+/// defect the constant above describes.
+const _: () = assert!(DEFAULT_VAULT_DROPS_PER_MINUTE >= DEFAULT_VAULT_WRITES_PER_MINUTE);
+
 /// Default quota for attachment uploads, per device and per minute.
 ///
 /// Set from the human action, which is picking a batch of photographs and sending them at once:
 /// thirty in a minute is a generous version of that and nothing a person exceeds by accident.
 ///
-/// **This is the one number that is uncomfortable and should be read as such.** An attachment
-/// may be `MAX_ATTACHMENT_BYTES` — twenty-five mebibytes — so thirty a minute is three quarters
-/// of a gibibyte a minute in the worst case. That is a bound and it is a bad one; it exists
-/// because unbounded is worse, not because it is sufficient. What would make it sufficient is a
-/// stored-bytes quota per account, which is a different mechanism and is not here.
+/// **This number was the uncomfortable one, and it is the ceiling behind it that fixed that.** An
+/// attachment may be `MAX_ATTACHMENT_BYTES` — twenty-five mebibytes — so thirty a minute is three
+/// quarters of a gibibyte a minute in the worst case. As a bound on storage that was a bad one,
+/// and it existed because unbounded was worse rather than because it sufficed. What makes it
+/// sufficient is [`crate::storage`]: the burst is still allowed, and it stops at the account's
+/// ceiling. This limit now bounds what it is good at bounding, which is the rate.
 pub const DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE: u32 = 30;
 
 /// Default quota for envelope posts, per device and per minute.
@@ -128,6 +178,10 @@ pub const DEFAULT_ENVELOPES_PER_MINUTE: u32 = 120;
 
 /// The four write quotas are ordered by what the row costs to keep.
 ///
+/// [`DEFAULT_VAULT_DROPS_PER_MINUTE`] is deliberately outside this ordering: it keeps no row, it
+/// removes them, so "what the row costs to keep" says nothing about it. Its own bound is the one
+/// asserted beside it — never below the deposits it undoes.
+///
 /// A message is a kilobyte, an attachment up to twenty-five mebibytes, a vault write up to two
 /// hundred rows and a KeyPackage top-up up to a hundred — so the widest quota belongs to the
 /// cheapest write and the narrowest to the most expensive. Every doc comment above argues from
@@ -138,6 +192,13 @@ const _: () = assert!(
         && DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE > DEFAULT_VAULT_WRITES_PER_MINUTE
         && DEFAULT_VAULT_WRITES_PER_MINUTE > DEFAULT_KEY_PACKAGES_PER_MINUTE
 );
+
+/// The recovery quota is below every write quota, and that ordering is not aesthetic.
+///
+/// Those bound rows; this bounds guesses at a secret. Any edit that lets recovery lookups outrun
+/// the cheapest write has stopped treating a password attempt as more expensive than a message,
+/// and should fail the build rather than the review.
+const _: () = assert!(DEFAULT_RECOVERY_LOOKUPS_PER_MINUTE < DEFAULT_KEY_PACKAGES_PER_MINUTE);
 
 /// Past this many tracked addresses, stale entries are swept.
 ///
@@ -244,6 +305,36 @@ impl Claims {
     }
 }
 
+/// Limit on recovery lookups, per address.
+///
+/// # Why not simply reuse [`Throttle`], which already counts addresses
+///
+/// Because the open routes' quota is sixty a minute, set from what it takes to grow a table
+/// inconveniently, and reusing it here would allow sixty password guesses a minute against an
+/// escrow. The number would look set and would bound the wrong quantity — the same mistake
+/// [`Claims`] exists to prevent, in the one place where the quantity being bounded is a secret
+/// rather than a row count.
+///
+/// A distinct type rather than a second [`Throttle`] field, so wiring the wrong quota onto this
+/// route does not compile.
+pub struct Recovery(Throttle);
+
+impl Recovery {
+    pub fn per_minute(quota: u32) -> Self {
+        Self(Throttle::per_minute(quota))
+    }
+
+    /// Quota read from `RECOVERY_QUOTA_PER_MINUTE`, or
+    /// [`DEFAULT_RECOVERY_LOOKUPS_PER_MINUTE`].
+    pub fn from_environment() -> Self {
+        Self::per_minute(quota("RECOVERY_QUOTA_PER_MINUTE", DEFAULT_RECOVERY_LOOKUPS_PER_MINUTE))
+    }
+
+    pub fn allows(&self, address: &str) -> bool {
+        self.0.allows(address)
+    }
+}
+
 
 /// Which table a write lands in.
 ///
@@ -254,6 +345,9 @@ impl Claims {
 pub enum Written {
     KeyPackages,
     Vault,
+    /// A vault deletion. Separate from [`Written::Vault`] on purpose — see
+    /// [`DEFAULT_VAULT_DROPS_PER_MINUTE`] for the failure that sharing one counter produced.
+    VaultDrops,
     Attachments,
     Envelopes,
 }
@@ -271,6 +365,7 @@ pub enum Written {
 pub struct Writes {
     key_packages: Throttle,
     vault: Throttle,
+    vault_drops: Throttle,
     attachments: Throttle,
     envelopes: Throttle,
 }
@@ -285,6 +380,7 @@ impl Writes {
         Self {
             key_packages: Throttle::per_minute(quota),
             vault: Throttle::per_minute(quota),
+            vault_drops: Throttle::per_minute(quota),
             attachments: Throttle::per_minute(quota),
             envelopes: Throttle::per_minute(quota),
         }
@@ -300,6 +396,10 @@ impl Writes {
             vault: Throttle::per_minute(quota(
                 "VAULT_QUOTA_PER_MINUTE",
                 DEFAULT_VAULT_WRITES_PER_MINUTE,
+            )),
+            vault_drops: Throttle::per_minute(quota(
+                "VAULT_DROP_QUOTA_PER_MINUTE",
+                DEFAULT_VAULT_DROPS_PER_MINUTE,
             )),
             attachments: Throttle::per_minute(quota(
                 "ATTACHMENT_QUOTA_PER_MINUTE",
@@ -321,6 +421,7 @@ impl Writes {
         match table {
             Written::KeyPackages => &self.key_packages,
             Written::Vault => &self.vault,
+            Written::VaultDrops => &self.vault_drops,
             Written::Attachments => &self.attachments,
             Written::Envelopes => &self.envelopes,
         }
@@ -335,7 +436,11 @@ impl Writes {
 pub struct Limits {
     pub throttle: Throttle,
     pub claims: Claims,
+    pub recovery: Recovery,
     pub writes: Writes,
+    /// Ceiling on stored bytes per account. See [`crate::storage`], which explains why a total
+    /// and a rate cannot be the same mechanism.
+    pub storage: crate::storage::Quota,
 }
 
 impl Limits {
@@ -343,7 +448,9 @@ impl Limits {
         Self {
             throttle: Throttle::from_environment(),
             claims: Claims::from_environment(),
+            recovery: Recovery::from_environment(),
             writes: Writes::from_environment(),
+            storage: crate::storage::Quota::from_environment(),
         }
     }
 
@@ -356,7 +463,9 @@ impl Limits {
         Self {
             throttle: Throttle::per_minute(0),
             claims: Claims::per_minute(0),
+            recovery: Recovery::per_minute(0),
             writes: Writes::per_minute(0),
+            storage: crate::storage::Quota::bytes(0),
         }
     }
 }
@@ -405,6 +514,25 @@ mod tests {
         assert!(
             writes.allows(Written::Envelopes, "alice:laptop"),
             "a full attachment quota must not stop a message"
+        );
+    }
+
+    /// **The regression that made [`Written::VaultDrops`] exist.**
+    ///
+    /// A deletion used to be counted in the deposit's bucket. The client archives on every send,
+    /// so a user who had been talking and then turned a lifetime on got a `429` on the deletion —
+    /// after the commit had already changed the room's memory for everybody. The archive outlived
+    /// the feature that exists to remove it, and the screen said "too many requests".
+    #[test]
+    fn archiving_does_not_exhaust_the_quota_for_erasing_the_archive() {
+        let writes = Writes::per_minute(1);
+
+        assert!(writes.allows(Written::Vault, "alice:laptop"));
+        assert!(!writes.allows(Written::Vault, "alice:laptop"));
+
+        assert!(
+            writes.allows(Written::VaultDrops, "alice:laptop"),
+            "a device must always be able to erase what it was allowed to write"
         );
     }
 

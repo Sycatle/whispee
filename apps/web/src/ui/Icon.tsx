@@ -1,4 +1,5 @@
 import {
+  Archive,
   Bell,
   Check,
   ChevronDown,
@@ -6,10 +7,17 @@ import {
   CircleQuestionMark,
   Copy,
   Ellipsis,
+  HeadphoneOff,
+  Headphones,
   Info,
   Lock,
+  Mic,
+  MicOff,
   MonitorSmartphone,
   Paperclip,
+  Phone,
+  PhoneOff,
+  Pin,
   Plus,
   QrCode,
   Reply,
@@ -27,12 +35,12 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 /**
- * The icon inventory. Twenty-four, named by role, and closed.
+ * The icon inventory. Twenty-eight, named by role, and closed.
  *
  * # Named imports only, never `import * as icons`
  *
  * A star import defeats tree-shaking: the bundler cannot prove which of the fifteen hundred
- * modules in `lucide-react` are unreachable, so it keeps them. Twenty-four named imports are a few
+ * modules in `lucide-react` are unreachable, so it keeps them. Twenty-eight named imports are a few
  * kilobytes; the star import is the whole set. This is not a style preference, it is the
  * difference between the budget the plan allowed for icons and roughly three hundred times it.
  *
@@ -63,6 +71,8 @@ export type IconName =
   | "attach"
   | "backup"
   | "back"
+  | "call"
+  | "hang"
   | "close"
   | "collapse"
   | "confirm"
@@ -72,6 +82,10 @@ export type IconName =
   | "help"
   | "info"
   | "lock"
+  | "headphones"
+  | "headphonesOff"
+  | "mic"
+  | "micOff"
   | "more"
   | "notifications"
   | "pair"
@@ -81,7 +95,9 @@ export type IconName =
   | "search"
   | "send"
   | "settings"
-  | "theme";
+  | "theme"
+  | "pin"
+  | "archive";
 
 const ICONS: Record<IconName, LucideIcon> = {
   /** Start a conversation, add a member. */
@@ -90,10 +106,35 @@ const ICONS: Record<IconName, LucideIcon> = {
   alert: TriangleAlert,
   /** The composer's paperclip, which was a literal emoji. */
   attach: Paperclip,
+  /**
+   * The two halves of a call's audio, in four glyphs.
+   *
+   * On and off are separate entries rather than one name with a crossed variant, because the
+   * crossed form is not a state of the same picture — it is the picture that says "this is not
+   * happening", and a reader scanning a bar has to tell them apart at 18px without reading a
+   * label. Lucide draws both with the same slash, which is what keeps the pair legible as a pair.
+   *
+   * Nothing captures audio yet. See `app/AccountCard.tsx`, which says so where somebody would
+   * otherwise assume the button mutes something.
+   */
+  headphones: Headphones,
+  headphonesOff: HeadphoneOff,
+  mic: Mic,
+  micOff: MicOff,
   /** The vault. Lucide's `Vault` is a strongbox, which is what the vault screen describes. */
   backup: Vault,
   /** Leaves a pane on the way back. Distinct from `collapse`, which opens something in place. */
   back: ChevronLeft,
+  /** Places a call, and answers a ringing one — one glyph for the gesture that starts audio. */
+  call: Phone,
+  /**
+   * Ends a call, and refuses a ringing one.
+   *
+   * Distinct from `close`, and the distinction matters more here than anywhere else in this
+   * file: a cross dismisses a panel, and a panel dismissed by mistake is reopened. Hanging up by
+   * mistake ends a conversation somebody was having.
+   */
+  hang: PhoneOff,
   /** Dismiss a dialog, a sheet, a banner. */
   close: X,
   /** The disclosure chevron on the rail's sections. */
@@ -145,6 +186,15 @@ const ICONS: Record<IconName, LucideIcon> = {
    */
   more: Ellipsis,
   notifications: Bell,
+  /**
+   * Kept at the top of the list, whatever was said last.
+   *
+   * A pin and not a star: a star is a rating, and this is a position. The two get confused in
+   * every product that ships both, and this one ships neither rating nor favourite.
+   */
+  pin: Pin,
+  /** Out of the list and still receiving — the box, not the bin. `revoke` is the bin. */
+  archive: Archive,
   /** Pairing, which is a QR code in practice. */
   pair: QrCode,
   /** Your own account: the name you show and the handle you cannot change. */

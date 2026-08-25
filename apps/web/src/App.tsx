@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/app/Shell";
 import { ShortcutsProvider } from "@/app/Shortcuts";
+import { CallBar, IncomingCall } from "@/components/Call";
+import { ALIVE_INTERVAL_MS } from "@/lib/session-call";
 import { Unlock } from "@/components/Lock";
 import { preload } from "@/lib/emoji-sprite";
 import { MigrationBanner } from "@/components/Migration";
@@ -14,6 +16,7 @@ import { addressedIn } from "@/lib/mention";
 import { countUnreadInTitle, createNotifier } from "@/lib/notifications";
 import { type ProposedMigration, Session, start } from "@/lib/session";
 import { RouterProvider, useNavigate } from "@/routes/Router";
+import { DetailProvider } from "@/state/detail";
 import { useNames } from "@/state/names";
 import { ReportProvider, useReport, useReported } from "@/state/report";
 import { Revision } from "@/state/revision";
@@ -363,6 +366,25 @@ function Frame({
   }, [session, bump, report, relock]);
 
   /**
+   * The call's own heartbeat.
+   *
+   * Separate from the poll, and running at a different rate for a different reason: the poll
+   * exists so a quiet conversation still catches up, this exists so a ringing phone stops ringing
+   * and a departed participant is noticed. Thirty seconds would be four times too slow for both.
+   *
+   * Unconditional, and cheap when idle: `tickCall` returns immediately with no call in progress,
+   * and gating the interval on the call state would restart it every time that state changed.
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      session.tickCall();
+      bump();
+    }, ALIVE_INTERVAL_MS);
+
+    return () => clearInterval(timer);
+  }, [session, bump]);
+
+  /**
    * The emoji artwork, once, after the first paint.
    *
    * One request for the whole untoned set. It is not on the critical path — nothing on screen
@@ -488,7 +510,10 @@ function Frame({
           user turned off for the other.
         */
         const among = view.accounts.map((account) => account.handle);
-        const name = session.discloseConversationName
+        // Per conversation, falling back to the account setting. The three states are the point:
+        // an absent flag follows the account, and only an explicit one overrides it in either
+        // direction — see `Session.disclosesNameIn`.
+        const name = session.disclosesNameIn(view)
           ? view.accounts.map((account) => compactNameOf(account.handle, names, among)).join(", ")
           : undefined;
 
@@ -511,11 +536,60 @@ function Frame({
           session.accountId,
         ]);
 
-        notifier.current?.arrived({
-          conversation: key,
-          ...(name ? { name } : {}),
-          ...(address ? { address } : {}),
-        });
+        /*
+          Muting silences the notification and nothing else.
+
+          The unread count still moves, the title still counts it, and the thread still shows the
+          line as unread — because muting is a decision about being interrupted, not a decision to
+          stop being told. A mute that also hid the count would be indistinguishable from having
+          read the conversation, and the person who muted a busy group would lose the one signal
+          that tells them to go back to it.
+
+          Being addressed does not override it. It is tempting — a mention is the case people say
+          they want to hear about — but it hands anybody in the group a way to ring a phone its
+          owner explicitly silenced, by typing one handle. Silence has to mean silence, or it is a
+          suggestion.
+        */
+        /*
+          Nothing from somebody we have declined to read.
+
+          Judged on the authors of what actually arrived, not on the membership of the room: in a
+          group, a blocked member must not be able to raise a notice, and the other members must
+          go on raising them. A conversation-level test would have made blocking one person in a
+          busy group silence everybody, which is a different feature nobody asked for.
+
+          Our own messages are skipped for the same reason `addressedIn` skips them — an arrival
+          is what somebody else said. Without that, catching up on a thread we posted to would be
+          judged on an author who cannot be blocked, and the notice would fire from a room where
+          the only other speaker is blocked.
+        */
+        const arrivals = view.messages.filter((message) => message.seq > before && !message.mine);
+        // `arrivals.length > 0` is not defensive noise: `every` on an empty list is `true`, and
+        // without it a batch of nothing but our own messages would read as a batch of blocked
+        // ones. A sender we could not attribute is likewise *not* blocked — sealed sender means
+        // some arrivals have no author to decline, and declining what cannot be named would
+        // silence the very messages nobody can account for.
+        const silenced =
+          arrivals.length > 0 &&
+          arrivals.every((message) => message.sender !== null && session.isBlocked(message.sender));
+
+        // A ringing call outranks everything else the batch could contain, including a mention:
+        // it is the one arrival that expires. Announcing it as "New message" would be announcing
+        // something the reader can attend to later, which is exactly what a call is not.
+        //
+        // It does not outrank the two refusals above, and that is deliberate. A muted
+        // conversation stays silent — a call that could ring a phone its owner explicitly
+        // silenced would make the mute a suggestion — and a batch from a blocked account raises
+        // nothing whatever it contains.
+        const ringing = session.callState().phase === "incoming";
+
+        if (!silenced && !session.mutedIn(view)) {
+          notifier.current?.arrived({
+            conversation: key,
+            ...(name ? { name } : {}),
+            ...(ringing ? { address: "call" as const } : address ? { address } : {}),
+          });
+        }
       }
     }
 
@@ -554,10 +628,25 @@ function Frame({
         </Banner>
       )}
 
-      <Shell
-        onLock={relock}
-        onForget={() => void session.forget().then(() => location.reload())}
-      />
+      {/*
+        The call, above the shell and outside it.
+
+        A call belongs to a conversation and outlives being in it: walking to another thread, or
+        to the settings screen, must not hang up. Mounted here it spans the window, sits above
+        every column, and survives every route.
+      */}
+      <CallBar />
+      <IncomingCall />
+
+      {/* Around the shell and no higher: the detail column belongs to a conversation, and
+          nothing outside the shell — the lock screen, onboarding, the migration notice — has one
+          to open. See `state/detail.tsx` for why it stopped being a route. */}
+      <DetailProvider>
+        <Shell
+          onLock={relock}
+          onForget={() => void session.forget().then(() => location.reload())}
+        />
+      </DetailProvider>
 
       {migration && (
         <MigrationBanner

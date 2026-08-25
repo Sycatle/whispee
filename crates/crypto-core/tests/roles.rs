@@ -16,7 +16,14 @@ fn roster(admin: &str, moderators: &[&str]) -> Roster {
 }
 
 fn commit<'a>(committer: &'a str, remaining: Vec<&'a str>) -> CommitSummary<'a> {
-    CommitSummary { committer, removals: Vec::new(), adds: 0, changes_roster: false, remaining }
+    CommitSummary {
+        committer,
+        removals: Vec::new(),
+        adds: 0,
+        changes_roster: false,
+        changes_lifetime: false,
+        remaining,
+    }
 }
 
 fn removal<'a>(target: &'a str, key: &'a [u8]) -> Removal<'a> {
@@ -265,4 +272,35 @@ fn a_truncated_roster_is_rejected_without_panicking() {
 fn a_roster_without_an_admin_is_rejected() {
     assert!(Roster::new(String::new(), Vec::new()).is_err());
     assert!(Roster::decode(&[0, 0, 0, 0]).is_err());
+}
+
+// ------------------------------------------------------------ the room's memory
+
+/// A moderator may change the lifetime. It is the same rank that admits and removes members.
+#[test]
+fn a_moderator_may_change_the_lifetime() {
+    let r = roster("alice", &["bob"]);
+    let mut c = commit("bob", vec!["alice", "bob"]);
+    c.changes_lifetime = true;
+
+    assert!(authorize(Some(&r), &c, &Context::default()).is_ok());
+}
+
+/// An ordinary member may not.
+#[test]
+fn an_ordinary_member_may_not_change_the_lifetime() {
+    let r = roster("alice", &["bob"]);
+    let mut c = commit("carol", vec!["alice", "bob", "carol"]);
+    c.changes_lifetime = true;
+
+    assert!(authorize(Some(&r), &c, &Context::default()).is_err());
+}
+
+/// A flat group has no rule to apply, and a 1-to-1 is a flat group.
+#[test]
+fn anyone_changes_the_lifetime_of_a_flat_group() {
+    let mut c = commit("carol", vec!["alice", "carol"]);
+    c.changes_lifetime = true;
+
+    assert!(authorize(None, &c, &Context::default()).is_ok());
 }

@@ -29,10 +29,11 @@ export default defineConfig(({ mode }) => ({
       transformIndexHtml: {
         order: "pre" as const,
         handler: (html: string) => {
-          const api =
-            loadEnv(mode, process.cwd(), "VITE_").VITE_API_URL ?? "http://127.0.0.1:8787";
+          const environment = loadEnv(mode, process.cwd(), "VITE_");
+          const api = environment.VITE_API_URL ?? "http://127.0.0.1:8787";
 
-          return html.replace("%CSP%", csp(api));
+          // Absent by default: a deployment with no media server must not carry its origin.
+          return html.replace("%CSP%", csp(api, environment.VITE_MEDIA_URL || undefined));
         },
       },
     },
@@ -40,6 +41,20 @@ export default defineConfig(({ mode }) => ({
 
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+  },
+
+  server: {
+    // The port belongs to the branch, not to Vite: `scripts/dev-env.sh` hands out one per
+    // branch so that several checkouts can run at once, and starts the server with a matching
+    // `ALLOWED_ORIGINS`. Unset — a plain `pnpm run dev` — keeps the historical 5173.
+    port: Number(process.env.WEB_PORT) || 5173,
+
+    // **`strictPort` is the point of the pair.** Vite's default on a taken port is to slide to
+    // the next free one, silently. That port is in nobody's CORS list and in no CSP, so the
+    // client comes up looking healthy and every request dies as "Failed to fetch" — the failure
+    // mode `src/lib/csp.ts` describes, arrived at by convenience rather than by misconfiguration.
+    // Refusing to start says which port is taken, which is a sentence somebody can act on.
+    strictPort: true,
   },
 
   build: {

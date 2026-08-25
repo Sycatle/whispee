@@ -11,6 +11,13 @@ import type {
   accountFingerprint,
   deriveUnlockKey,
   sealPairing,
+  RecoveryFactor,
+  escrowParams,
+  derivePasswordFactor,
+  derivePrfFactor,
+  sealEscrow,
+  openEscrow,
+  generatePassphrase,
   accountId,
   verifyAttestation,
   verifyRevocation,
@@ -37,6 +44,12 @@ export interface Crypto {
   Pairing: typeof Pairing;
   sealPairing: typeof sealPairing;
   deriveUnlockKey: typeof deriveUnlockKey;
+  escrowParams: typeof escrowParams;
+  derivePasswordFactor: typeof derivePasswordFactor;
+  derivePrfFactor: typeof derivePrfFactor;
+  sealEscrow: typeof sealEscrow;
+  openEscrow: typeof openEscrow;
+  generatePassphrase: typeof generatePassphrase;
   verifyAttestation: typeof verifyAttestation;
   verifyRevocation: typeof verifyRevocation;
   verifyRotation: typeof verifyRotation;
@@ -67,6 +80,12 @@ export function loadCrypto(): Promise<Crypto> {
       Pairing: module.Pairing,
       sealPairing: module.sealPairing,
       deriveUnlockKey: module.deriveUnlockKey,
+      escrowParams: module.escrowParams,
+      derivePasswordFactor: module.derivePasswordFactor,
+      derivePrfFactor: module.derivePrfFactor,
+      sealEscrow: module.sealEscrow,
+      openEscrow: module.openEscrow,
+      generatePassphrase: module.generatePassphrase,
       verifyAttestation: module.verifyAttestation,
       verifyRevocation: module.verifyRevocation,
       verifyRotation: module.verifyRotation,
@@ -84,7 +103,7 @@ export function loadCrypto(): Promise<Crypto> {
   return loading;
 }
 
-export type { AccountKey, Client, Pairing };
+export type { AccountKey, Client, Pairing, RecoveryFactor };
 
 /** Return value of `sealPairing`. */
 export interface Sealed {

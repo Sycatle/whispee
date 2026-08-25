@@ -24,7 +24,8 @@ What the design actually tries to keep:
 | **Account identity key (AIK)** | derived from a twelve-word BIP-39 phrase; every device of the account holds the seed |
 | **Device authentication key** | non-extractable in IndexedDB on the web; signs every HTTP request |
 | **MLS signature and group state** | per device, in the local store, encrypted at rest behind the local lock |
-| **Recovery phrase** | the only restoration path, and — since the history vault is on by default — the key to all archived history |
+| **Recovery phrase** | a restoration path, and — since the history vault is on by default — the key to all archived history |
+| **Recovery escrow** | **opt-in, off by default.** The account seed, sealed under a password or a WebAuthn PRF secret, *on the server*. The one asset in this table the server holds a copy of. See § 2.2.2 |
 | **Group membership decisions** | who is in a group, and who may change that |
 | **The truth about which devices belong to an account** | attestations, signed by the account, verified by every client |
 
@@ -69,6 +70,9 @@ authenticates *membership*, not identity. Cannot read the ephemeral signal paylo
   `the_welcome_exposes_identities_but_never_the_content`. The server already knows those identities
   from `devices` and `group_members`, so the leak adds nothing to what it knows — but it is real.
 - **vault volume** — how many messages each account archives, and when.
+- **the recovery escrow of any account that set one up**, and with it the ability to attack that
+  account's recovery password offline. See § 2.2.2 — this is the only entry in this list that is
+  not a metadata leak but a copy of a secret, and it exists only where a user asked for it.
 - **attachment sizes**, to an order of magnitude: they now go into the same doubling buckets as
   messages, with a top bucket just under the server's 25 MiB ceiling.
 - `created_at` on envelopes, which the retention purge now reads. It was kept for years for a purge
@@ -97,6 +101,40 @@ claim here, only an owned trade-off and its price. What bounds it:
   noted, rather than filtering at read time. It is reciprocal, like read receipts — no longer
   broadcasting your presence also means no longer seeing others', or it would let someone see
   without being seen.
+
+#### 2.2.2 What a recovery escrow hands the operator
+
+Without one — which is the default — the account seed has **never been on this server in any
+form**. The phrase is generated on a device, shown once, and never transmitted. An operator with
+the whole database holds unreadable envelopes and public keys, and no path to an account.
+
+A user who enables the password factor changes that for their own account, knowingly. The server
+then holds `AES-256-GCM(seed)` under `Argon2id(password, salt = SHA-256(domain ‖ handle),
+256 MiB, t=4)`. The operator can attack that password **offline**: no rate limit, no clock, no
+need to touch the user's hardware. Winning yields the account seed, hence the account, hence —
+since `wac-vault-v1` derives from the same seed — every row of that account's `vault_entries`,
+retroactively.
+
+Argon2id's memory cost is what stands in the way, and it is a factor rather than a barrier. The
+online route is bounded at three attempts a minute per address (`throttle::Recovery`) and that
+bound is irrelevant to this adversary, who never calls it.
+
+**The passkey factor does not carry this.** Its key is 32 uniform bytes from an authenticator, so
+there is nothing to grind; a stolen database yields nothing about it. Its cost is elsewhere: it is
+bound to the deployment's origin and it dies with an authenticator that does not sync.
+
+Three properties bound the feature rather than the adversary, and are stated because they are easy
+to assume and wrong:
+
+- **An escrow cannot be enumerated.** The row is named by `SHA-256` of a key from the same
+  expensive derivation, so a wrong password and an account with no escrow return the same 404.
+  The operator reading the table still sees which accounts have one — this closes the *network*
+  oracle, not the database.
+- **Nothing locks after N attempts.** A failed lookup names no account, so there is nothing to
+  lock. That is the price of the previous property.
+- **A rotation destroys the escrow, and a rename destroys the password one.** The first because
+  the sealed seed is the one being rotated away from; the second because the handle is the salt.
+  Both are enforced rather than documented — see `docs/specs/2026-08-22-recovery-escrow.md`.
 
 ### 2.3 The server operator, malicious
 
@@ -149,7 +187,14 @@ history vaults, each of which is encrypted under its own account's key.
 - **fork the group** if their client applies the role policy differently. MLS enforces no
   authorization; the clients do. `RequiredCapabilities` keeps out a client that cannot read the
   `0xF100` roster extension — it does not keep out one that reads it wrongly.
-- **see everything said in the group while a member**, obviously, and keep it.
+- **see everything said in the group while a member**, obviously, and keep it — **including past
+  the conversation's lifetime**. Disappearing messages are deleted by each client on its own
+  honour; a modified client keeps what it likes, and screenshots exist. The lifetime is agreed on
+  in the group context, not enforced by it.
+- **change how long the room remembers**, if they are the admin or a moderator. That is the
+  intended rank and it is stated in `docs/PROTOCOL.md` §6.4; what it means here is that a
+  moderator can shorten a conversation's memory without the admin, and that everybody sees the
+  notice in the thread when they do.
 
 ### 2.5 Someone holding the unlocked device
 
@@ -176,9 +221,15 @@ after five minutes without the user, in the foreground as well as in the backgro
 re-locking drops the interface's state, not the key: it stays in the WebAssembly module's memory
 until the tab closes.
 
-The lock is **not a recovery factor**: forgetting it loses nothing permanently, since the
-twelve-word phrase remains the only restoration path. Making it a second vault factor would double
-the loss surface for no gain against a server that never sees it.
+The lock is **not a recovery factor**: forgetting it loses nothing permanently, since the phrase
+still restores the account. Making it a second vault factor would double the loss surface for no
+gain against a server that never sees it.
+
+That last clause is exactly what a recovery escrow gives up, and it is why the two are separate
+mechanisms with separate passwords and separate floors rather than one password doing both jobs.
+The lock's password guards one device's disk against somebody holding that disk; an escrow
+password guards a ciphertext the server holds, against somebody who never has to leave their
+chair. Sharing a secret between the two would silently promote the weaker requirement.
 
 ---
 
@@ -334,6 +385,83 @@ before offering the switch — the lock screen being the one surface encryption 
 
 ---
 
+## 4ter. Calls leak more than messages, and the leak has no cryptographic answer
+
+The second property this project knowingly trades away, and the argument is the same shape as §4:
+the audio stays unreadable, and the fact of the conversation does not.
+
+The content is safe, and it is worth being precise about why rather than asserting it. A media
+server has to read the transport in order to route one stream to five listeners without holding
+five conversations — so the audio is encrypted a **second** time before it reaches that server,
+frame by frame, under `export_secret(..., "wac-call-key-v1", call_id, 32)`. Every member derives
+those bytes from the current MLS epoch; nothing is exchanged, so neither the delivery service nor
+the media server is ever in possession of a key, and neither can be asked for one. A member removed
+mid-call loses the audio, and does not lose it at the same instant they lose the messages.
+
+> **A removed member keeps hearing the call for about half a minute.** Measured, with three
+> browsers and a tone per participant: the removal commits, and the audio stops in both
+> directions roughly twenty-seven seconds later. Two delays add up. The client re-derives the
+> call key on a five-second timer rather than at each commit site — `Session.tickCall`, which
+> argues its own case — and the media SDK then goes on decrypting with the keys already in its
+> ring for some twenty seconds before it gives up on them. The removed participant also stays in
+> the media room throughout, publishing audio nobody can read.
+>
+> So the guarantee is eventual, not immediate, and the messages and the audio do not stop
+> together. For a removal made because somebody must stop hearing *now*, half a minute is the
+> number to plan around.
+
+What leaks is who was talking to whom, and for how long:
+
+> **Sealed sender does not survive the media path.** A posted envelope carries no identity at all;
+> an RTP stream carries a stable one for the length of a call. The delivery service sees that
+> somebody is joining a call, when, and towards which group — it signs the token, so it must. The
+> media server sees which participants share a room and for how long. Two calls in one conversation
+> look unrelated to it, and a room does not name its conversation, but the *session* is legible in
+> a way a message never is.
+
+Two things narrow it, and neither closes it. The room is named by a digest over the group id and
+the call id, so the media server cannot group a deployment's calls into conversations. The
+participant identity is derived from the call key rather than being the device id, so the media
+server never receives the directory — at the price that it is recognisable by members rather than
+unforgeable: a member can take another member's identity, which is the forgery the ephemeral
+channel already allows for the same reason (§ 2.4).
+
+As with push, the feature is **strictly optional and inert without configuration**: no media
+credentials, no token, no call button, and a fully working messenger. Unlike push, it is also
+switchable per account from the interface, and the switch cuts both directions — an account that
+places calls while refusing to receive them asks of others exactly what it declines to give.
+
+The honest summary: **if the fact that you spoke to somebody is what must not be known, do not
+place the call.** No setting in this application changes that, and no cryptography answers it.
+
+---
+
+## 4quater. Disappearing messages are a client-side promise
+
+The lifetime lives in the MLS group context: authenticated, hashed into every commit, read
+identically by every member. What it is **not** is enforced. Each client deletes on its own, and
+this design has no way to reach into somebody else's storage — a modified client keeps the
+message, a screenshot keeps it outside any client at all, and a member who wants a record has one.
+Anybody reading "disappears after seven days" as "the other side cannot keep it" has been misled,
+which is why the screen says so above the control rather than under it.
+
+What is actually bought is narrower and real: **an ephemeral conversation is never deposited in
+the vault**, so it is not sitting on a server for the rest of time under a key derived from a
+phrase that does not rotate. Turning a lifetime on deletes this account's existing archive of the
+conversation in the same gesture — the caller's own entries, never another member's.
+
+The server never learns the lifetime. There is no column, parameter or header carrying it; the
+only thing it sees is a `DELETE` on a vault it cannot read, and it keeps ciphertext envelopes on
+its own schedule — up to thirty days — regardless of what the room decided. A message that was
+never delivered inside its lifetime is therefore **lost rather than deleted**: the recipient
+computes a deadline already past and never inserts it. That is the intended behaviour and it is
+still a message somebody sent that nobody read.
+
+The price is stated once more because it is easy to skip: a conversation with a lifetime does not
+survive the loss of every device. Nothing archives it, so nothing restores it.
+
+---
+
 ## 5. Known limitations
 
 The full table, in order of real importance. Nothing here is softened.
@@ -345,16 +473,20 @@ The full table, in order of real importance. Nothing here is softened.
 | **Log key served by the server** | The client discovers it from the very server it is meant to monitor. `VITE_LOG_PUBKEY` now lets a build be compiled against a known key, which is the only check that works on a first contact — but it closes the hole only in the **desktop binary**, packaged inside a signed artefact. On the web the server ships the bundle, so it ships the pin with it: there a pin turns a silent substitution into one that breaks every deployed client at once, which is worth having and is not a defence against the party that builds it. Unset, behaviour is as before, and the client still refuses to let the key change afterwards. |
 | **Account deletion** | There is no mechanism, and that is deliberate: an append-only log forbids removing an entry. Removing one outside the code shrinks the log, which gossip immediately reports as an attack — rightly. |
 | **Post noise** | The server holds each group's posting key: it can deposit envelopes. They will not decrypt — it cannot produce valid MLS — but it can pollute. That is the price of a symmetric MAC. |
-| **Typing-post rhythm** | The signal's content is opaque and never reaches the disk, but the server sees that a post is happening towards a given group. In a one-to-one it infers that one of the two is writing. Sealed sender hides *who*, not *that* — disabling the indicator is the only real protection. |
+| **Typing-post rhythm** | The signal's content is opaque and never reaches the disk, but the server sees that a post is happening towards a given group. In a one-to-one it infers that one of the two is writing. Sealed sender hides *who*, not *that* — disabling the indicator is the only real protection. That setting is reciprocal, and was not always: it used to cut emission alone, which let an account watch its correspondents hesitate while showing them nothing. Privacy from the server, taken as an advantage over the person on the other side. |
 | **Image preview decoding** | A previewed attachment goes through the browser's image pipeline before anything is shown, and only the canvas re-encoding reaches the document — so a file lying about its type cannot become script. What it opens: the decoder is now reachable by any peer with a codec bug to spend, where before an attachment was only ever written to disk. The pixel ceiling that bounds a decode bomb is checked **after** the decode, because no browser API reports an image's dimensions without performing one. Previewing is opt-in, per file. |
 | **Local notifications** | Any notice at all discloses, to whoever glances at the device, that Whispee is installed and that a message just arrived. It names no sender, no group and no content; the conversation name is shown only if the user turns that on, and the wording says what that puts on a lock screen before offering the switch. Irreducible — it is the cost of the feature existing. Unlike push, no server is involved and none learns a notice was raised, which is also why it only fires while the page is running. |
 | **Replay window on a sealed-sender post** | An anonymous post carries no timestamp, so nothing bounds when the server should stop accepting a replay of it; remembering the nonce forever is the only complete answer, and it makes `posting_nonces` grow for the life of the deployment. It is now kept seven days. Past that a replay is accepted again — costing one duplicate row and one spurious wake-up, the MLS client discarding the message because that ratchet generation is already consumed. A storage nuisance, not a way into a conversation. |
-| **Write quotas bound a rate, not a total** | KeyPackage top-ups, vault writes, attachment uploads and signed envelope posts are capped per device per minute. The counters live in memory, so they are per instance and reset on restart, and an account multiplies its allowance by registering more devices — two rate-limited open requests each. Nothing here bounds stored bytes: at thirty attachments a minute a device still writes three quarters of a gibibyte a minute. A per-account stored-bytes quota would close that, and does not exist. |
+| **Write quotas bound a rate, not a total** | KeyPackage top-ups, vault writes, attachment uploads and signed envelope posts are capped per device per minute. The counters live in memory, so they are per instance and reset on restart, and an account multiplies its allowance by registering more devices — two rate-limited open requests each. What those quotas never bounded is stored bytes; that is now `crates/server/src/storage.rs`, a per-account ceiling in the database rather than in memory, covering the vault and attachments. Envelopes stay outside it — see the row below. |
 | **The anonymous post path is not rate-limited** | Bounding it would mean attributing a post to a device, which is the power sealed sender exists to remove; counting per group instead would throttle a conversation's honest members. Anyone holding a group's posting key can therefore grow `envelopes` in that group at will. They have to be a member — it is the ceiling the anonymous path removes, not the membership requirement. |
 | **Declared timestamps** | The time shown on a message is the one its sender put there, inside the encrypted content. The server never sees it and cannot alter it — and any member of the group can date their own message to anything. It is an annotation: the thread's order is `seq`, which the server assigns and no member controls. In a one-to-one there is exactly one other person who could lie, and they could equally lie in the text. |
 | **Unauthenticated signals** | The ephemeral channel is encrypted under a symmetric group key. In a group, a member can therefore make it look as though another is typing. Harmless with two, where there is only one other. |
 | **Forward secrecy of signals** | None inside an epoch: compromising the export secret exposes that epoch's signals. They have no retrospective value and are stored nowhere — the trade is deliberate, it avoids making the history pay for a disposable datum. |
-| **Receipts and coercion** | A read receipt proves a device displayed a message: information about behaviour, not content. Hence the opt-out, and its reciprocity. |
+| **Receipts and coercion** | A read receipt proves a device displayed a message: information about behaviour, not content. Hence the opt-out, and its reciprocity. The opt-out is a property of the account and reaches its other devices as a sealed control message — it used to be per-device, and a refusal one forgotten laptop kept undoing was a refusal in name only. What no version of it can be is server-enforced: the server cannot see a receipt, so the reciprocity holds because the client holds it. A modified client can withhold its own and still read everyone else's. That is the price of the receipt being invisible to the server, and it is not payable in both directions. |
+| **Preferences between devices** | The petnames and blocks of an account now travel between its own devices, inside the sealed control message. They are notes about people, carried by the very people they name — so the second seal is what makes this acceptable rather than a leak, and a peer sees an opaque body it cannot open. What a peer *does* learn is that a preference moved, since the message is a message: its size and its timing are visible to the server as any envelope's are. The server additionally learns that these accounts exchange envelopes, which it already knew from group membership. |
+| **Blocking** | Local and weak by design: it declines to display something that was delivered and stored, it does not prevent delivery. Its server-side half is the contact policy below, which does prevent — the two answer different halves of one question, and only the second can decline an arrival. |
+| **Contact policy** | `accounts.contact_policy` refuses to write a `group_members` row, so it is the one setting here the server *executes* rather than merely stores. It costs the server no new knowledge: `known` asks whether two accounts already share a group, which it maintains and could answer at any moment. What it does add is one more per-account fact on the server, and a fact worth more to a stranger than to its owner — hence served to the owner alone, and hence a refusal that is deliberately indistinguishable from the one a non-member already receives. A reply naming the reason would have made the setting an oracle: anybody could learn anybody's policy by trying. |
+| **Contact policy, what it cannot do** | It is not retroactive and no column could make it so. `closed` refuses new additions and removes nobody from a group they are already in, because the membership that matters is the MLS tree, which this server cannot read. Nor does it hide an account: the directory still resolves a handle, and a refusal happens at the moment of the attempt. |
 | **Session authentication** | On the gateway, the signature holds for the whole connection rather than per request. A revocation or a group removal therefore takes effect only at the next revalidation — at the client's next heartbeat, or at the server's tick for a silent client. |
 | **Signals and Postgres logs** | Inter-instance fan-out routes signals through `pg_notify`. They are written to no table, but a server set to `log_statement = all` would see them in its logs. |
 | **Device omission** | The server can neither *add* a device to an account (attestations) nor *invent* a revocation (signed certificates). It can still *omit* one from the list, or withhold a genuine revocation. The victim observes that a device receives nothing: censorship, noisy but real. |
@@ -365,8 +497,10 @@ The full table, in order of real importance. Nothing here is softened.
 | **Group deletion** | An emptied group disappears from the client, and the server now deletes the row — and, by cascade, its mailbox — once no device is a member and no envelope younger than thirty days remains. Nothing proves it really erased anything; claiming so would be worse than saying nothing. What changed is that the server no longer has a *reason* to keep it. |
 | **Retention bounds a rate of growth, not a total** | Envelopes are deleted past thirty days, and only once the group is five hundred sequences ahead of them. That is a steady state, not a ceiling: a group writing five hundred messages a day settles at around fifteen thousand envelopes and stays there. What the purge changes is the shape of the curve — growth stops being proportional to all of history and becomes proportional to the last thirty days of traffic. Attachments go at ninety days, so **a file older than three months is no longer downloadable**, and saving it is the recipient's business. |
 | **A purge can break a long-absent device** | Losing one envelope loses one generation of the MLS application ratchet, and nothing after it decrypts. A device offline for more than thirty days in a group that has moved five hundred envelopes on comes back broken and must be re-introduced. The conjunction makes that rare — no conversation under five hundred envelopes is ever touched, at any age — and the `oldest` field on the fetch, with the gateway's `gap` frame, makes it **detectable** rather than silent. Neither makes it impossible, and no retention that deletes anything could. |
-| **The vault is now the unbounded store** | `vault_entries` is deliberately never purged: the archived content is what makes deleting envelopes acceptable in the first place. That role has moved the server's growth problem rather than removed it. The vault is held back only by ten writes per minute per device, and the bound that would actually close it — a stored-bytes quota per account — still does not exist. |
+| **The vault is bounded; envelopes are not, and the reason is sealed sender** | `vault_entries` is deliberately never purged, so it had inherited the growth problem `envelopes` used to have. A per-account ceiling now bounds it, charged on write and credited when a purge deletes. `envelopes` keeps only the retention purge's steady state: a sealed post carries no device id, so charging the account behind it would mean recording the sender of every post — precisely what sealed sender removes. Anonymous byte tokens close it; they are specified and not built. |
+| **The server records who uploaded which attachment** | Charging an upload to its uploader means keeping the uploader. The server always learned it — an upload is a signed request — but it did not store it; now it does, per attachment and per group. What it buys: the heaviest write this server accepts is bounded per person instead of against a ceiling one member could exhaust for a whole group. Rows uploaded before the quota carry no owner, and age out under the attachment retention. |
 | **Compromised account** | A device added by an account whose phrase has leaked is duly attested, hence indistinguishable from a legitimate addition. The application signals it; only the user can say whether they own that device. |
+| **Recovery escrow** | Opt-in and off by default. Enabling the password factor puts the account seed on the server, encrypted, where the operator can attack it offline — and the history vault goes with it. There is no version of a memorable-secret recovery that does not do this; what closes it is a rate-limiting hardware enclave, which a self-hosted deployment cannot be asked to run. The passkey factor has no such cost and is offered first. § 2.2.2 |
 | **History vault** | It removes forward secrecy from the history: a leak of the phrase becomes retroactively total. It is **on by default**, with the counterpart stated on the recovery-phrase screen and restated in the present tense in the settings, where it remains switchable. |
 | **Orphan history** | After recovery by phrase, the vault is readable but the corresponding groups appear nowhere: the client only knows the conversations its MLS state carries a trace of. The promise "survives the loss of every device" is therefore not yet kept. Keeping it would require a route listing archived groups and read-only conversations. |
 | **Rotation and vault** | Rotating the account key makes already-archived history permanently unreadable. The rotation screen announces it; nothing allows re-encrypting it. |

@@ -1,0 +1,22 @@
+# What never belongs in a build context.
+#
+# `target/` is the one that matters: it reaches several gigabytes on a machine that has built
+# this workspace once, and every byte of it is uploaded to the daemon before the first
+# instruction runs. The build produces its own artefacts inside the image; the ones lying here
+# are from another toolchain, another architecture, or both.
+target/
+node_modules/
+.git/
+.worktrees/
+
+# Secrets. `.env` is the development one and would be baked into a layer.
+.env
+.env.local
+deploy/.env
+
+# Build outputs that the image rebuilds itself.
+dist/
+pkg/
+*.tsbuildinfo
+apps/desktop/gen/
+release/artefacts/

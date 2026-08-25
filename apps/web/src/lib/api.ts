@@ -5,6 +5,7 @@
  * the path, the timestamp and the body digest: a signature captured on one endpoint is replayable
  * neither on another path nor with a modified body.
  */
+import type { Admission } from "./call";
 import type { DeviceCipher } from "./cipher";
 import { fromBase64, toBase64, toHex } from "./keys";
 import type { AttestedDevice } from "./wasm";
@@ -24,6 +25,14 @@ export class ApiError extends Error {
     super(message);
   }
 }
+
+/**
+ * Which secret opens a recovery escrow.
+ *
+ * Mirrors `crypto_core::escrow::Kind` and the `kind` column's CHECK constraint. A union type
+ * rather than a bare string, so a third name cannot appear on one side only.
+ */
+export type RecoveryKind = "password" | "passkey";
 
 /**
  * The message signed by every request.
@@ -52,6 +61,21 @@ async function signingPayload(
   payload.set(separator, prefix.length + nonce.length);
   payload.set(digest, prefix.length + nonce.length + separator.length);
   return payload;
+}
+
+/**
+ * Who may start a conversation with an account.
+ *
+ * Three values and the middle one is the one to read carefully: `known` means "already shares a
+ * group with me", because that is the only relation the **server** can establish. It is not
+ * "verified" — verification is compared out of band and lives in the client, and teaching the
+ * server who verified whom would hand it a finer social graph than it already has, to enforce a
+ * rule it can enforce more coarsely without.
+ */
+export type ContactPolicy = "open" | "known" | "closed";
+
+export function isContactPolicy(value: unknown): value is ContactPolicy {
+  return value === "open" || value === "known" || value === "closed";
 }
 
 export class Api {
@@ -147,14 +171,18 @@ export class Api {
     }
   }
 
-  private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: "GET" | "POST" | "DELETE",
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     const encoded = body === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(body));
     return this.requestRaw(method, path, encoded, "json");
   }
 
   /** Binary variant, for bodies that are not JSON. */
   private async requestRaw<T>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "DELETE",
     path: string,
     encoded: Uint8Array,
     expect: "json" | "bytes",
@@ -176,7 +204,9 @@ export class Api {
         "x-signature": signature,
         "x-nonce": toBase64(nonce),
       },
-      body: method === "GET" ? undefined : buffer(encoded),
+      // A bodiless method carries no body, and the signature covers the empty bytes the
+      // server verifies against. `fetch` refuses a body on GET outright.
+      body: method === "POST" ? buffer(encoded) : undefined,
     });
 
     if (!response.ok) throw new ApiError(response.status, await response.text());
@@ -215,9 +245,13 @@ export class Api {
   async listAccountDevices(account: string): Promise<{
     identityKey: Uint8Array;
     devices: AttestedDevice[];
+    presenceOptout?: boolean;
+    contactPolicy?: ContactPolicy;
   }> {
     const body = await this.request<{
       identity_key: string;
+      presence_optout?: boolean;
+      contact_policy?: string;
       devices: {
         id: string;
         auth_key: string;
@@ -231,6 +265,13 @@ export class Api {
 
     return {
       identityKey: fromBase64(body.identity_key),
+      // Served for our own account and for nobody else's, so absent is the ordinary case and
+      // means "not ours to know", never "presence is on".
+      presenceOptout: body.presence_optout,
+      // Narrowed rather than cast. The column is constrained in the schema, so a value outside the
+      // three is this server saying something no version of it should — and reading it as a policy
+      // would apply a rule nobody wrote.
+      contactPolicy: isContactPolicy(body.contact_policy) ? body.contact_policy : undefined,
       devices: body.devices.map((device) => ({
         id: device.id,
         authKey: fromBase64(device.auth_key),
@@ -346,6 +387,80 @@ export class Api {
     return fromBase64(body.payload);
   }
 
+  /**
+   * Deposits, or replaces, one recovery factor for this account.
+   *
+   * The server is being handed the account seed, encrypted. That is not a normal upload — see
+   * `escrow.ts` for what it costs and why nothing here happens unless the user asked.
+   */
+  setRecovery(factor: {
+    kind: RecoveryKind;
+    lookup: Uint8Array;
+    params: Uint8Array;
+    sealed: Uint8Array;
+  }): Promise<{ kind: RecoveryKind }> {
+    return this.request("POST", "/v1/recovery", {
+      kind: factor.kind,
+      lookup: toBase64(factor.lookup),
+      params: toBase64(factor.params),
+      sealed: toBase64(factor.sealed),
+    });
+  }
+
+  /** Which recovery factors this account has, for a settings screen. Never the blobs. */
+  listRecovery(): Promise<{ kind: RecoveryKind; created_at: number }[]> {
+    return this.request("GET", "/v1/recovery");
+  }
+
+  /** Removes a recovery factor. Removing one that is not there is a success. */
+  forgetRecovery(kind: RecoveryKind): Promise<{ forgotten: number }> {
+    return this.request("POST", "/v1/recovery/forget", { kind });
+  }
+
+  /**
+   * Collects the escrow named by a lookup value. **Unsigned**, and it has to be: the caller has
+   * lost every device, so there is no key left to sign with.
+   *
+   * Returns `null` on 404, which the server answers both to a lookup that names nothing and to
+   * a wrong secret — it genuinely cannot tell them apart, and the caller must not pretend to.
+   * Surfacing that as "wrong password" is right; surfacing it as "no such account" is a
+   * statement this response does not support.
+   *
+   * `POST` rather than `GET`, for the reason `presence` is: the lookup stays out of the URL,
+   * hence out of every access log between here and the server. It is derived from the password.
+   */
+  static async claimRecovery(lookup: Uint8Array): Promise<{
+    account: string;
+    handle: string | null;
+    kind: RecoveryKind;
+    params: Uint8Array;
+    sealed: Uint8Array;
+  } | null> {
+    const response = await fetch(`${BASE_URL}/v1/recovery/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lookup: toBase64(lookup) }),
+    });
+
+    if (response.status === 404) return null;
+    if (!response.ok) throw new ApiError(response.status, await response.text());
+
+    const body = (await response.json()) as {
+      account: string;
+      handle: string | null;
+      kind: RecoveryKind;
+      params: string;
+      sealed: string;
+    };
+    return {
+      account: body.account,
+      handle: body.handle,
+      kind: body.kind,
+      params: fromBase64(body.params),
+      sealed: fromBase64(body.sealed),
+    };
+  }
+
   /** Deposits encrypted messages into the account's vault. */
   storeVault(
     groupId: Uint8Array,
@@ -354,6 +469,17 @@ export class Api {
     return this.request("POST", `/v1/vault/${toHex(groupId)}`, {
       entries: entries.map((entry) => ({ seq: entry.seq, payload: toBase64(entry.payload) })),
     });
+  }
+
+  /**
+   * Drops this account's vault for one group, and gets the bytes back against the quota.
+   *
+   * This account's own entries and nobody else's: two members of one conversation each hold a
+   * separate archive, sealed under their own key, and one member destroying another's copy of a
+   * shared history is not something turning on a lifetime asks for.
+   */
+  dropVault(groupId: Uint8Array): Promise<{ removed: number }> {
+    return this.request("DELETE", `/v1/vault/${toHex(groupId)}`);
   }
 
   /** Collects the account's vault. The server only serves the signing device's own. */
@@ -441,6 +567,16 @@ export class Api {
   /** Stops or resumes broadcasting presence. Reciprocal: opting out means ceasing to see. */
   setPresenceOptout(optout: boolean): Promise<void> {
     return this.request("POST", "/v1/presence/optout", { optout });
+  }
+
+  /**
+   * Sets who may start a conversation with this account.
+   *
+   * The account is never a parameter: the server reads it from the signing device, so this cannot
+   * close somebody else's door.
+   */
+  setContactPolicy(policy: ContactPolicy): Promise<void> {
+    return this.request("POST", "/v1/contact-policy", { policy });
   }
 
   /** Groups where the server declared us a member — how a Welcome gets discovered. */
@@ -579,6 +715,43 @@ export class Api {
     });
 
     if (!response.ok) throw new ApiError(response.status, await response.text());
+  }
+
+  /**
+   * Asks for admission to a call's room.
+   *
+   * Authenticated by the **group MAC**, like a signal and an anonymous post, and for the same
+   * reason: a signed request would tell the server which device is placing a call, in real time.
+   * It still learns that a call is being joined and towards which group — see
+   * `crates/server/src/call.rs`, which does not pretend otherwise.
+   *
+   * A 503 means the deployment runs no media server. It is not an error to report: the client
+   * hides the call button instead.
+   */
+  async callAdmission(
+    groupId: Uint8Array,
+    call: string,
+    identity: string,
+    posting: { key: Uint8Array; mac: PostMac },
+  ): Promise<Admission | undefined> {
+    const payload = new TextEncoder().encode(JSON.stringify({ call, identity }));
+    const nonce = crypto.getRandomValues(new Uint8Array(16));
+    const mac = posting.mac(posting.key, groupId, nonce, payload);
+
+    const response = await fetch(`${BASE_URL}/v1/groups/${toHex(groupId)}/call/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-group-nonce": toBase64(nonce),
+        "x-group-mac": toBase64(mac),
+      },
+      body: buffer(payload),
+    });
+
+    if (response.status === 503) return undefined;
+    if (!response.ok) throw new ApiError(response.status, await response.text());
+
+    return (await response.json()) as Admission;
   }
 
   /**

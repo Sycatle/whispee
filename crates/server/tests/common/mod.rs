@@ -14,7 +14,8 @@ use base64::prelude::BASE64_STANDARD;
 use crypto_core::Account;
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
-use server::throttle::{Claims, Limits, Throttle, Writes};
+use server::storage::Quota;
+use server::throttle::{Claims, Limits, Recovery, Throttle, Writes};
 use sqlx::PgPool;
 
 /// Keeps each test's data apart.
@@ -74,6 +75,33 @@ pub async fn start_with_throttle(quota: u32) -> TestServer {
         .await
 }
 
+/// Test server with an enforced storage ceiling, in bytes.
+///
+/// The rate limits stay off: setting up an account, a device and a group consumes several
+/// writes, and the two bounds have nothing to do with each other.
+pub async fn start_with_storage_quota(bytes: i64) -> TestServer {
+    start_with(pool().await, Limits { storage: Quota::bytes(bytes), ..Limits::off() }).await
+}
+
+/// An account, one of its devices, and a group that device is a member of.
+///
+/// The storage tests need exactly this and nothing more. Copying the set-up into each of them
+/// would make a change to registration a change to every one of them.
+pub async fn account_with_group(server: &TestServer, who: &str) -> (TestAccount, Device, Vec<u8>) {
+    let account = TestAccount::create(server, &unique(who)).await;
+    let device = account.device(server, &unique("device")).await;
+    let group_id = unique("group").into_bytes();
+
+    device
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group_id)),
+            serde_json::json!({ "device_ids": [device.id] }),
+        )
+        .await;
+
+    (account, device, group_id)
+}
+
 /// Test server with an enforced KeyPackage claim quota.
 ///
 /// The open-route limit stays disabled: setting up a test's devices consumes several of
@@ -88,6 +116,15 @@ pub async fn start_with_claim_quota(quota: u32) -> TestServer {
 /// and mixing the two bounds would make a refusal impossible to attribute.
 pub async fn start_with_write_quota(quota: u32) -> TestServer {
     start_with(pool().await, Limits { writes: Writes::per_minute(quota), ..Limits::off() }).await
+}
+
+/// Test server with an enforced recovery-lookup quota.
+///
+/// The other limits stay disabled: setting up the escrow costs signed and open requests, and a
+/// refusal has to be attributable to the one bound under test.
+pub async fn start_with_recovery_quota(quota: u32) -> TestServer {
+    start_with(pool().await, Limits { recovery: Recovery::per_minute(quota), ..Limits::off() })
+        .await
 }
 
 /// A wake emitter that keeps whatever it is handed.
@@ -336,6 +373,10 @@ impl Device {
         self.signed("GET", path, Vec::new()).await
     }
 
+    pub async fn delete(&self, path: &str) -> reqwest::Response {
+        self.signed("DELETE", path, Vec::new()).await
+    }
+
     pub async fn post(&self, path: &str, body: serde_json::Value) -> reqwest::Response {
         self.signed("POST", path, serde_json::to_vec(&body).unwrap()).await
     }
@@ -468,26 +509,66 @@ pub async fn open_socket(server: &TestServer) -> (Socket, Vec<u8>) {
     (socket, nonce)
 }
 
-/// Reads the next JSON frame, ignoring ping and pong.
+/// What came back, or what did not.
+///
+/// # Why three states and not `Option`
+///
+/// Because `None` was hiding a question. A test that expected a frame and got nothing could have
+/// been told the session was closed — which is a fact about the server — or could have run out of
+/// patience under load, which is a fact about the runner. `unwrap()` on an `Option` reports both
+/// as `called \`Option::unwrap()\` on a \`None\` value`, at a line number that says which
+/// assertion failed and nothing about why.
+///
+/// That cost real time: `a_revoked_device_has_its_session_closed` failed twice in one afternoon in
+/// CI, at `gateway.rs:239`, and the panic was compatible with two different explanations — a close
+/// arriving before the frame, or a five-second deadline expiring on a two-core runner where that
+/// binary takes seventeen seconds instead of the eighty milliseconds it takes on a development
+/// machine. Neither could be ruled out from the output, and neither reproduced locally.
+///
+/// So the next failure says which.
+#[derive(Debug)]
+pub enum Frame {
+    /// A JSON frame, parsed.
+    Text(serde_json::Value),
+    /// The server closed the session, or the stream ended.
+    Closed,
+    /// Nothing arrived in time. A statement about the machine, not about the protocol.
+    Timeout,
+}
+
+/// Reads the next JSON frame, ignoring ping and pong, and says what happened if there is none.
 ///
 /// A timeout bounds the wait: without it, a test that never gets the expected frame would hang
 /// instead of failing, and a hanging test tells nobody anything.
-pub async fn read_frame(socket: &mut Socket) -> Option<serde_json::Value> {
+pub async fn next_frame(socket: &mut Socket) -> Frame {
     let deadline = std::time::Duration::from_secs(5);
 
-    tokio::time::timeout(deadline, async {
+    let outcome = tokio::time::timeout(deadline, async {
         while let Some(message) = socket.next().await {
-            match message.ok()? {
-                Message::Text(text) => return serde_json::from_str(&text).ok(),
-                Message::Close(_) => return None,
+            match message {
+                Ok(Message::Text(text)) => {
+                    return serde_json::from_str(&text).map(Frame::Text).unwrap_or(Frame::Closed);
+                }
+                Ok(Message::Close(_)) | Err(_) => return Frame::Closed,
                 _ => continue,
             }
         }
-        None
+        Frame::Closed
     })
-    .await
-    .ok()
-    .flatten()
+    .await;
+
+    outcome.unwrap_or(Frame::Timeout)
+}
+
+/// The frame, or nothing — for the assertions that genuinely only care whether one arrived.
+///
+/// Written in terms of `next_frame` rather than beside it, so there is one place where a socket is
+/// read and one definition of what counts as a frame.
+pub async fn read_frame(socket: &mut Socket) -> Option<serde_json::Value> {
+    match next_frame(socket).await {
+        Frame::Text(value) => Some(value),
+        Frame::Closed | Frame::Timeout => None,
+    }
 }
 
 pub async fn send_frame(socket: &mut Socket, frame: serde_json::Value) {

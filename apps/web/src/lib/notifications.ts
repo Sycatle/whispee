@@ -169,6 +169,15 @@ export const NOTICE_BODY_MENTION = "You were mentioned";
 export const NOTICE_BODY_REPLY = "You were replied to";
 
 /**
+ * An incoming call.
+ *
+ * It carries no more than the other three — no name in the body, no conversation — for the reason
+ * `NOTICE_BODY_ONE` gives about all of them. What it does say is *which kind* of thing arrived,
+ * because a call announced as "New message" is a call somebody decides to read later.
+ */
+export const NOTICE_BODY_CALL = "Incoming call";
+
+/**
  * Copy for a settings screen offering the disclosure, stated before the choice as `Signals.tsx`
  * does — and exported from here so the sentence and the behaviour cannot drift apart.
  */
@@ -196,7 +205,7 @@ export interface Arrival {
    * messages and one mention share a tag, so without this the mention would be replaced by the
    * next ordinary arrival and the reader would never learn it happened.
    */
-  address?: "mention" | "reply";
+  address?: "mention" | "reply" | "call";
   /**
    * The conversation's display name, and **the only thing a user can opt into disclosing**.
    *
@@ -272,13 +281,15 @@ export function createNotifier({
       // worth carrying, and "New messages" would bury it under the thing that is true of every
       // other line in the batch.
       const lead =
-        address === "mention"
-          ? NOTICE_BODY_MENTION
-          : address === "reply"
-            ? NOTICE_BODY_REPLY
-            : count > 1
-              ? NOTICE_BODY_MANY
-              : NOTICE_BODY_ONE;
+        address === "call"
+          ? NOTICE_BODY_CALL
+          : address === "mention"
+            ? NOTICE_BODY_MENTION
+            : address === "reply"
+              ? NOTICE_BODY_REPLY
+              : count > 1
+                ? NOTICE_BODY_MANY
+                : NOTICE_BODY_ONE;
       const body = name ? `${lead} — ${name}` : lead;
 
       let handle: NotificationHandle;

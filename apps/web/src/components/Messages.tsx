@@ -5,23 +5,32 @@
  * line, it is an annotation on another line, and the same goes for the quote in a reply.
  * Keeping that logic in the page render mixed the app layout with the shape of a conversation.
  *
- * # Lines rather than bubbles, and what that costs
+ * # Lines, and our own turns mirrored
  *
- * The thread used to align our own messages right and everybody else's left, inside bubbles
- * capped at 75% of the pane. Alignment is a cheap way to say who is speaking and an expensive way
- * to lay out text: it spends a quarter of the width on nothing, it ragged-edges every paragraph
- * against a different margin, and it gives a group thread two columns for however many people are
- * in it. So authorship moved off the axis and onto the line itself — a fixed lane on the left
- * holding the avatar, the name and the hour spelled out at the top of each turn, and the text
- * running the full width underneath.
+ * The thread aligns our own messages right and everybody else's left. It did once before, inside
+ * bubbles capped at 75% of the pane, and the argument for dropping it is still on the record and
+ * still true of *that* layout: alignment inside bubbles spent a quarter of the width on nothing,
+ * ragged-edged every paragraph against a different margin, and gave a group thread two columns
+ * for however many people were in it.
  *
- * What that costs is the instant read of "mine" that alignment gave for free, and it is not paid
- * back. A tint over our own rows was tried and removed: at rest it striped the conversation into
- * bands, and a column of text asks to be read, not parsed. The avatar and the name identify every
- * turn including ours, which is the same answer everybody else's messages get.
+ * What came back is the axis, not the bubbles. A mirrored turn is the same line as any other —
+ * the lane holding the avatar, the name and the hour, and the text beside it — reflected. It
+ * costs no width, because the lane is the same 56px on either side and the text keeps the same
+ * measure. What it buys is the instant read of "mine" that the single column had to do without,
+ * and which the note below this one used to record as unpaid.
+ *
+ * The cost that is real, and is not paid back: the thread no longer has one reading edge. A
+ * received turn begins at the left lane, one of ours ends at the right one, and the eye crosses
+ * on every change of speaker. That is the price of the axis and it is the reason it was dropped
+ * the first time; it is accepted here rather than argued away.
+ *
+ * Authorship is now said three times over on our own turns — by the side, by the avatar and by
+ * the name. Two of those are redundant, and removing them is the obvious next move; it is not
+ * made here because dropping the avatar from one side of the thread changes what a group
+ * conversation looks like, and that deserves its own look rather than riding along with this.
  *
  * No row carries a fill at rest. One appears under the pointer, where it has something to say —
- * it is the line the buttons in the corner belong to.
+ * it is the line the action bar belongs to.
  *
  * # It reads the session rather than receiving it
  *
@@ -44,24 +53,28 @@ import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
 import { EmojiDrawer } from "@/components/EmojiPicker";
-import { dayLabel, timeOf } from "@/lib/datetime";
+import { dayLabel, spokenDuration, spokenLifetime, timeOf } from "@/lib/datetime";
 import { COMPOSER_ID } from "@/components/ids";
 import { say } from "@/lib/i18n";
 import { addresses } from "@/lib/mention";
 import { compactNameOf, handleOf } from "@/lib/naming";
 import type { ConversationView } from "@/lib/session";
 import { nextExpiry } from "@/lib/signals";
-import { layout, textOf } from "@/lib/thread";
+import { layout, textOf, unblocked } from "@/lib/thread";
 import { useRoving } from "@/lib/useRoving";
 import { useNavigate } from "@/routes/Router";
+import { useDetail } from "@/state/detail";
 import { useNames } from "@/state/names";
 import { useReport } from "@/state/report";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { Avatar } from "@/ui/Avatar";
 import { Banner } from "@/ui/Banner";
+import { plain } from "@/lib/markdown";
 import { cn } from "@/ui/cn";
+import { Typing } from "@/ui/Typing";
 import { membersOf } from "@/components/Conversation";
 import { MentionText } from "@/components/MentionText";
+import { RichText } from "@/components/RichText";
 import { MiniProfile } from "@/components/MiniProfile";
 import { ContextMenu } from "@/ui/ContextMenu";
 import { Emoji } from "@/ui/Emoji";
@@ -88,19 +101,22 @@ import { Tooltip } from "@/ui/Tooltip";
 const EMOJIS = ["👍️", "❤️", "😂", "😮", "🙏"];
 
 /**
- * The lane on the left of every line: the avatar at the top of a turn, the hour under it.
+ * The lane beside every line: the avatar at the top of a turn, the hour under it.
  *
- * 56px is 40 for the avatar plus 16 of air, and it is the one measurement the whole thread is
- * built on — the name, the text, the quote and the reactions all start at its right edge, so a
- * line that got it wrong would step sideways out of the column.
+ * Left for a received turn, right for one of ours — the row is mirrored, not the lane, so this is
+ * the same 56px on either side. It is the one measurement the whole thread is built on: the name,
+ * the text, the quote and the reactions all begin at its inner edge, so a line that got it wrong
+ * would step sideways out of the column.
  *
- * **This should be a `--spacing-lane` token in `index.css`,** and it is written as a scale value
- * here only because that file is not this change's to edit. Whoever adds the token has to bring
- * three things onto it at the same time: this lane, the avatar size below, and the reply banner
- * in `Conversation.tsx`, whose quote should line up with the quotes inside the thread rather than
- * with the composer.
+ * It is a token now, `--spacing-lane` in `index.css`, because a second thing needs the same
+ * number: the action bar is offset by the lane so that it lines up with the edge of the message
+ * instead of the wall of the pane. Two copies of `3.5rem` would drift on the first change and
+ * report nothing when they did.
+ *
+ * Still not on the token, and stated there too: the avatar's own 40px below, and the reply banner
+ * in `Conversation.tsx`.
  */
-const LANE = "w-14 shrink-0";
+const LANE = "w-lane shrink-0";
 
 /**
  * How the avatar is made to measure 40px.
@@ -141,7 +157,21 @@ export function Messages({
    */
   const stuck = useRef(true);
 
-  const messages = view.messages.slice().sort((a, b) => a.seq - b.seq);
+  /*
+    Blocked accounts are dropped first, before anything reads the list.
+
+    Before the sort, before reactions are folded onto their targets, and before `layout` derives
+    the day headings and the turn grouping — all three would otherwise be computed on messages
+    that are never drawn. `thread.unblocked` states the whole argument; the visible half is that
+    filtering afterwards leaves a date standing above an empty day, and a turn that kept its
+    avatar and lost its message.
+
+    Folding reactions first would be the subtler mistake: a blocked account's thumb on a message
+    that *is* shown would already be attached to it, with nothing left to say whose it was. A
+    reaction is that person speaking too.
+  */
+  const blocked = new Set(session.blocked);
+  const messages = unblocked(view.messages, blocked).sort((a, b) => a.seq - b.seq);
 
   // Reactions are pulled out of the thread and attached to their target. An empty emoji removes
   // its author's reaction: the last state is what counts, not the accumulation.
@@ -252,9 +282,14 @@ export function Messages({
    */
   const lastMine = visible.reduce<number | null>(
     // A membership notice is ours in the sense that we sent it, and nobody wants to know whether
-    // "you added Bob" has been read. The receipt belongs to the last thing we *said*.
+    // "you added Bob" has been read. The receipt belongs to the last thing we *said*, and an
+    // expiry notice is the same kind of line: the thread talking about itself.
     (found, message) =>
-      message.mine && message.content.kind !== "membership" ? message.seq : found,
+      message.mine &&
+      message.content.kind !== "membership" &&
+      message.content.kind !== "expiry"
+        ? message.seq
+        : found,
     null,
   );
 
@@ -301,6 +336,21 @@ export function Messages({
   // running.
   const sent = useRef(view.outbox.length);
 
+  /**
+   * Whether the thread has been placed yet.
+   *
+   * Opening a conversation is not an arrival, and treating it as one is what made a thread scroll
+   * itself: the list mounts at the top, this effect runs for the first time, and the reader
+   * watches several screens of their own history slide past before it settles at the end they
+   * asked for. On a long thread that is a second of travel to arrive where the first frame should
+   * already have been.
+   *
+   * So the first run jumps and every later one may glide. The distinction is the same one the
+   * comment above draws about *whose* message arrived — a scroll animation is only ever worth
+   * showing when it carries meaning about a change, and the initial position carries none.
+   */
+  const placed = useRef(false);
+
   useEffect(() => {
     const mine = view.outbox.length > sent.current;
     sent.current = view.outbox.length;
@@ -308,8 +358,26 @@ export function Messages({
     if (!mine && !stuck.current) return;
 
     const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    bottom.current?.scrollIntoView({ behavior: still ? "auto" : "smooth" });
+    const first = !placed.current;
+    placed.current = true;
+
+    bottom.current?.scrollIntoView({ behavior: still || first ? "auto" : "smooth" });
   }, [visible.length, view.outbox.length]);
+
+  /**
+   * A different conversation is a different thread, and it has to be placed again.
+   *
+   * Without this, switching conversations keeps `placed` from the last one and the new thread
+   * glides in from the top exactly as it used to.
+   *
+   * `view.key` and not `view.groupId`: the group id is a `Uint8Array`, which a dependency array
+   * compares by reference. A poll that rebuilt the view would hand over an equal-but-different
+   * array, this effect would run, and the flag would be cleared on a thread that is already
+   * placed — putting the glide back on the next arrival. The key is the same bytes as a string.
+   */
+  useEffect(() => {
+    placed.current = false;
+  }, [view.key]);
 
   // "Read" means **shown to someone**. So it is decided here, in the component that renders the
   // thread — not in the poll loop, which runs even with the window closed.
@@ -375,7 +443,10 @@ export function Messages({
     ...EMOJIS.filter((emoji) => !session.preferences.recentEmojis.includes(emoji)),
   ].slice(0, 5);
 
-  const isTyping = session.typingIn(view);
+  // Blocked accounts are dropped here too. Hiding what somebody says and still drawing their face
+  // with three dots under it announces them at the very moment they are about to be hidden — and
+  // in a one-to-one it would be the only thing the blocked person could still put on screen.
+  const isTyping = session.typingIn(view).filter((account) => !blocked.has(account));
 
   // Wake-up on expiry.
   //
@@ -519,6 +590,61 @@ export function Messages({
             and the arrow keys walk over it — it is a line of the conversation, and skipping it
             would make the thread jump for no reason the reader can see.
           */
+          /*
+            A call, drawn as the same centred line a membership change is.
+
+            Three events, two lines: the invitation is what the *caller* wrote when they started
+            ringing, and it is replaced by the conclusion when one arrives. They are not merged
+            here — an invitation whose conclusion never came, because the caller closed their
+            browser, still has to draw something, and "somebody called" is what happened.
+          */
+          if (message.content.kind === "call") {
+            const { event, seconds } = message.content;
+            const said =
+              event === "ended"
+                ? say("call.ended", { duration: spokenDuration(seconds) })
+                : event === "missed"
+                  ? say("call.missed", {})
+                  : say("call.ringing", { actor: nameOfAuthor(authorOf(message)) });
+
+            return (
+              <li
+                key={key}
+                data-row={key}
+                tabIndex={thread.at === key ? 0 : -1}
+                className="px-pane py-snug text-center focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)"
+              >
+                <span className="text-caption text-(--color-ink-muted)">{said}</span>
+              </li>
+            );
+          }
+
+          /*
+            A change to the room's memory, drawn as the same centred line a membership change is —
+            and for the same reason: it is the thread saying something about itself.
+          */
+          if (message.content.kind === "expiry") {
+            const { seconds } = message.content;
+            const said =
+              seconds === 0
+                ? say("expiry.off", { actor: nameOfAuthor(authorOf(message)) })
+                : say("expiry.set", {
+                    actor: nameOfAuthor(authorOf(message)),
+                    delay: spokenLifetime(seconds),
+                  });
+
+            return (
+              <li
+                key={key}
+                data-row={key}
+                tabIndex={thread.at === key ? 0 : -1}
+                className="px-pane py-snug text-center focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)"
+              >
+                <span className="text-caption text-(--color-ink-muted)">{said}</span>
+              </li>
+            );
+          }
+
           if (message.content.kind === "membership") {
             const { event, handle } = message.content;
             const actor = authorOf(message);
@@ -615,10 +741,14 @@ export function Messages({
                   // the rail's rows, because an outline drawn outside a full-width row is clipped
                   // by the scrolling list.
                   "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)",
-                  // `relative` is load-bearing: the action bar is absolutely positioned against
-                  // this row so that it can overlap the row's top edge without reserving height
-                  // inside it. Revealing it by reflow made the thread jump under the pointer.
+                  // `group` is what reveals the action bar on hover; `relative` is what the
+                  // `before:` rule below draws against. The bar itself is an ordinary flex item
+                  // of this row now — see where it is rendered.
                   "group relative flex px-pane py-tight",
+                  // Our own turns mirror the row: the lane crosses to the right and the text
+                  // hangs off it. Every other `message.mine` test for layout in this file
+                  // follows from this one, and none of them means anything without it.
+                  message.mine && "flex-row-reverse",
                   // The air goes above the first line of a turn, so a burst of three sentences
                   // reads as one paragraph and the next speaker is visibly a new one.
                   !continues && "mt-snug",
@@ -686,11 +816,19 @@ export function Messages({
 
                     Nothing here for our own turns: the card it would open is a verification
                     panel, and there is nothing to verify about the key this device holds. */}
-                <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
+                <AuthorMenu handle={authorOf(message)} mine={message.mine}>
                 {/* Marked only where the mark leads somewhere. `AuthorMenu` renders nothing of
                     its own for our own turns, so underlining our name on hover would promise a
                     menu that is not there — an affordance for an action that does not exist. */}
-                <div data-author className={cn(LANE, "flex flex-col items-start")}>
+                <div
+                  data-author
+                  className={cn(
+                    LANE,
+                    "flex flex-col",
+                    // the lane is on the right for our turns, so its contents hug it.
+                    message.mine ? "items-end" : "items-start",
+                  )}
+                >
                   {continues ? (
                     /*
                       The hour of a continuation line, in the lane, on hover.
@@ -741,17 +879,61 @@ export function Messages({
                 </div>
                 </AuthorMenu>
 
-                {/* `max-w-measure`: the lane holds the text, and text has a width past which it
-                    stops being comfortable to read. See `--container-measure` in `index.css`.
+                {/* Two ceilings, and the smaller one wins.
+ 
+                    `--container-measure` is the reading one: text has a width past which it stops
+                    being comfortable, and that does not change with the layout around it.
+ 
+                    Two thirds is the *mirroring* one, and it exists because of the axis. An
+                    alignment says whose turn this is by which side it hangs from, and it can only
+                    say that if the other side is visibly empty. A turn allowed to fill the pane
+                    reaches both walls at once and the asymmetry disappears exactly when the
+                    message is long enough for somebody to have to look. On a narrow pane the
+                    measure never binds, so without this the mirroring would quietly stop working
+                    on the window where it is needed most.
+ 
+                    `min()` rather than a choice between them: on a wide pane the measure is the
+                    tighter of the two and stays in charge, on a narrow one the fraction is.
+ 
                     On the lane rather than on the paragraph, so the name, the hour, the quoted
                     reply and the reactions all stop at the same edge — a column, not a ragged
                     stack of differently-bounded pieces. */}
-                <div className="min-w-0 max-w-measure flex-1">
+                <div
+                  className={cn(
+                    // `flex-1` was here and had to go when the action bar joined this row.
+                    //
+                    // It made the column take its full two thirds whatever the message was, so a
+                    // three-word sentence still reserved 622px — and the bar, sitting after it,
+                    // landed six hundred pixels from the words it acts on, floating in space that
+                    // belonged to nothing. Hugging the content instead puts the bar against the
+                    // message, which is the whole point of moving it into the line.
+                    //
+                    // The two-thirds cap is untouched: `max-w` still bounds a long message, and
+                    // `min-w-0` still lets a code block scroll inside instead of stretching the
+                    // thread. What changes is only that a short message stops claiming width it
+                    // was not using. The row's own `flex-row-reverse` keeps our turns on the
+                    // right without the column having to fill anything.
+                    //
+                    // The bar now moves with the length of each message, and that is invisible in
+                    // practice: it is revealed by hovering one row, so two are never on screen at
+                    // once and there is no line for the eye to compare against.
+                    "min-w-0 max-w-[min(66%,var(--container-measure))]",
+                    // prose ragged-left when it hangs off a right-hand avatar.
+                    message.mine && "text-right",
+
+                  )}
+                >
                   {/* The name is announced once per turn, not once per line: a burst of three
                       sentences is one person speaking, not three announcements. */}
                   {!continues && (
-                    <div className="flex items-baseline gap-snug">
-                      <AuthorMenu handle={authorOf(message)} view={view} mine={message.mine}>
+                    <div
+                      className={cn(
+                        "flex items-baseline gap-snug",
+                        // name and hour follow the text to the right edge.
+                        message.mine && "flex-row-reverse",
+                      )}
+                    >
+                      <AuthorMenu handle={authorOf(message)} mine={message.mine}>
                         {/* A real button, because the underline promises one. It is the only tab
                             stop the pair adds, and it lands once per turn rather than once per
                             message — the name is drawn only when the speaker changes. */}
@@ -792,27 +974,63 @@ export function Messages({
                       // The rule used to be `border-current/40`, which was the only colour that
                       // worked on both the accent bubble and the raised one; with every line on
                       // the same surface, the border colour can say what it means.
-                      className="mb-tight block border-l-2 border-(--color-border-strong) pl-snug text-caption text-(--color-ink-muted)"
+                      className={cn(
+                        "mb-tight block border-(--color-border-strong) text-caption text-(--color-ink-muted)",
+                        // the quote rule sits on the side the text is anchored to.
+                        message.mine ? "border-r-2 pr-snug" : "border-l-2 pl-snug",
+                      )}
                     >
-                      <MentionText text={textOf(messages, cite)} among={members} view={view} />
+                      {/* Flat, and the quote is why: this is a caption for a message that is
+                          already in the thread above, one line tall. A fenced block inside it
+                          would be a code block inside a caption, and a spoiler would offer to
+                          reveal — in a place nobody is reading for content — something the reader
+                          may not have opened where it was written.
+
+                          `plain` masks spoilers rather than dropping them, so the quote says a
+                          spoiler is there without saying what it hides. */}
+                      <MentionText
+                        text={plain(textOf(messages, cite), { spoilers: "mask" })}
+                        among={members}
+                        view={view}
+                      />
                     </span>
                   )}
 
-                  <div className="flex items-end gap-snug">
+                  <div
+                    className={cn(
+                      "flex items-end gap-snug",
+                      // receipts trail the sentence on the inner side.
+                      message.mine && "flex-row-reverse",
+                    )}
+                  >
                     <div
                       // `whitespace-pre-wrap`: the composer accepts line breaks, and HTML collapses
                       // them. Without this a message written as a list arrives as one run-on
                       // sentence — the text is intact on the wire and mangled only on screen, which
                       // is the kind of loss nobody thinks to check.
-                      className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left text-body"
+                      className={cn(
+                        "min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-body",
+                        // Spelled out on both branches because the value here was explicit,
+                        // and an explicit one overrides what the row inherits — which left
+                        // every sentence of ours ragged-right inside a right-aligned column,
+                        // looking like the mirroring had simply not worked.
+                        message.mine ? "text-right" : "text-left",
+                      )}
                     >
                       {attachment ? (
                         <Attachment
                           attachment={attachment}
                           onOpen={() => session.openAttachment(view, attachment)}
+                          align={message.mine ? "end" : "start"}
                         />
                       ) : spoken !== null ? (
-                        <MentionText text={spoken} among={members} view={view} big />
+                        // `cards` is passed here and nowhere else. A preview is a request to a
+                        // server the *sender* chose, so it discloses the reader's address the
+                        // moment it happens — which is why it may only be offered where somebody
+                        // is reading a delivered message and can press a button. The rail, the
+                        // quotations and the outbox render through the same component and do not
+                        // pass it, so none of them can produce one.
+                        <RichText text={spoken} among={members} view={view} big cards />
                       ) : null}
 
                       {/*
@@ -842,7 +1060,11 @@ export function Messages({
                     <ul
                       role="list"
                       aria-label="Reactions"
-                      className="mt-tight flex flex-wrap gap-tight text-caption"
+                      className={cn(
+                        "mt-tight flex flex-wrap gap-tight text-caption",
+                        // chips hang off the edge the sentence is anchored to.
+                        message.mine && "justify-end",
+                      )}
                     >
                       {emojis.map((emoji, at) => (
                         <li
@@ -888,7 +1110,57 @@ export function Messages({
                   // and it faded out from under the surface it had just opened. The trigger keeps
                   // `data-state="open"` for as long as the panel is up, which is exactly the
                   // condition wanted.
-                  className="absolute -top-3 right-pane z-(--z-index-sticky) flex items-center gap-tight rounded-control border border-(--color-border-subtle) bg-(--color-surface-raised) p-tight text-body shadow-menu opacity-0 transition-opacity duration-(--duration-quick) ease-out group-focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100 motion-reduce:transition-none touch:opacity-100"
+                  className={cn(
+                    // **In the row's flow, beside the message, and wearing nothing.**
+                    //
+                    // Three arrangements came before this one and each hid something. `-bottom-3`
+                    // anchored the bar's bottom edge under the row, so its 36px climbed back up
+                    // and covered 13 of the 20 pixels the sentence occupies. `top-full
+                    // -translate-y-2` put it below the row instead, which moved the damage rather
+                    // than removing it: thread rows are contiguous, so 28px landed on the row
+                    // *below* — enough to hide an attachment's file name outright. Reserving that
+                    // space with padding fixed the overlap and cost every row 40px of height,
+                    // hovered or not, which made the thread read as a list of separated cards.
+                    //
+                    // All three were arguments about where to put an element that was out of
+                    // flow. The row is already a flex row whose only child is the message, and
+                    // the message is at most two thirds of the width — so there is empty space
+                    // beside it, on the side the sender is not. Put the bar there and it costs
+                    // **width that was already empty and no height at all**. `flex-row-reverse`
+                    // on our own turns carries it across without a second rule, which is what
+                    // that line on the row means by "every other `message.mine` test follows
+                    // from this one".
+                    //
+                    // No border, no ground, no shadow. Those said "a surface has opened over the
+                    // conversation", which was true of a floating bar and is a lie about one
+                    // sitting in the line. What is left is seven glyphs at the size the rest of
+                    // the interface uses for a control inside a row.
+                    "flex items-center gap-tight self-start opacity-0 transition-opacity duration-(--duration-quick) ease-out group-focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100 motion-reduce:transition-none touch:opacity-100",
+                    // **Centred on the message's first line, not on the row.**
+                    //
+                    // `self-start` alone aimed at whatever the row began with, and that is not
+                    // the same thing twice: a turn that opens with a name and an hour put the bar
+                    // beside *those*, while a continuation put it beside the words. Measured at
+                    // 129 against 149 on one row and 307 against 307 on the next — two different
+                    // targets, which is what made a column of them read as ragged.
+                    //
+                    // So the bar is offset by exactly what sits above the body. `continues` is
+                    // the same flag that decides whether that header is rendered at all, which is
+                    // what keeps the two from drifting apart: there is no second condition to
+                    // remember.
+                    //
+                    // The numbers are the line and the button. A line of the thread is 20px and
+                    // the bar is 28 — `IconButton size="sm"` is a 20px glyph with `p-tight` round
+                    // it — so centring one on the other is a 4px lift, and a header adds one line
+                    // above. Hence 16 with a header and −4 without. The lift is inside the row's
+                    // own `py-tight`, so nothing crosses into the row above.
+                    //
+                    // `shrink-0` because it must not be squeezed by a message that wants the
+                    // whole two thirds — it would fold its glyphs onto two lines and grow the
+                    // row, which is the height this arrangement exists to not spend.
+                    "shrink-0",
+                    continues ? "-mt-1" : "mt-4",
+                  )}
                   data-actions
                 >
                   {quick.map((emoji) => (
@@ -1035,8 +1307,12 @@ export function Messages({
           guessing that the turn above was ours.
         */}
         {view.outbox.map((entry) => (
-          <li key={entry.localId} className="mt-snug flex rounded-control bg-(--color-ink)/5 px-pane py-tight">
-            <div className={LANE}>
+          <li
+            key={entry.localId}
+            // an outbox entry is ours by definition, so it mirrors with no condition.
+            className="mt-snug flex flex-row-reverse rounded-control bg-(--color-ink)/5 px-pane py-tight"
+          >
+            <div className={cn(LANE, "flex flex-col items-end")}>
               <time
                 dateTime={new Date(entry.sentAt).toISOString()}
                 title={new Date(entry.sentAt).toLocaleString()}
@@ -1048,7 +1324,8 @@ export function Messages({
 
             <div
               className={cn(
-                "min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left text-body",
+                // `text-right`, matching the accepted turns it queues behind.
+                "min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-right text-body",
                 entry.state === "failed"
                   ? "text-(--color-danger)"
                   : // The fade is the message: this one is not acquired yet. Not a muted ink —
@@ -1056,8 +1333,9 @@ export function Messages({
                     "opacity-60",
               )}
             >
-              <MentionText text={entry.text} among={members} view={view} big />
-              <span className="mt-tight flex items-center gap-snug text-caption">
+              <RichText text={entry.text} among={members} view={view} big />
+              {/* The sending state trails the sentence on the inner side. */}
+              <span className="mt-tight flex flex-row-reverse items-center gap-snug text-caption">
                 {entry.state === "sending" ? (
                   <Spinner size="sm" label="sending" />
                 ) : (
@@ -1098,10 +1376,40 @@ export function Messages({
         woken by the timer above.
       */}
       {isTyping.length > 0 && (
-        <p className="px-pane pb-tight text-caption text-(--color-ink-muted)" aria-live="polite">
-          {isTyping.map((handle) => compactNameOf(handle, names, members)).join(", ")}{" "}
-          {isTyping.length > 1 ? "are typing" : "is typing"}…
-        </p>
+        // The lane and the same padding as a row, so the faces land in the column every other
+        // face is in. It reads as a turn beginning rather than as a notice under the thread —
+        // which is what it is.
+        <div className="flex items-center px-pane pb-tight" aria-live="polite">
+          <div className={cn(LANE, "flex items-center")}>
+            {/* At most three, and the rest counted. Four faces in a lane sized for one is a row
+                that grows sideways out of the column; the number says the same thing in the space
+                of a glyph. Overlapped rather than spaced, for the same reason. */}
+            {isTyping.slice(0, 3).map((account, index) => (
+              <Avatar
+                key={account}
+                seed={seedOf(account)}
+                label={compactNameOf(account, names, members)}
+                size="sm"
+                className={index === 0 ? undefined : "-ml-2"}
+              />
+            ))}
+            {isTyping.length > 3 && (
+              <span className="ml-tight text-caption text-(--color-ink-muted)">
+                +{isTyping.length - 3}
+              </span>
+            )}
+          </div>
+
+          <Typing size="md" className="text-(--color-ink-muted)" />
+
+          {/* The dots are an animation: no role, no name, nothing announced. This is the whole of
+              what a screen reader gets, and it is why the sentence survives the redesign — see
+              the note in `ui/Typing.tsx`. */}
+          <span className="sr-only">
+            {isTyping.map((account) => compactNameOf(account, names, members)).join(", ")}{" "}
+            {isTyping.length > 1 ? "are typing" : "is typing"}
+          </span>
+        </div>
       )}
     </>
   );
@@ -1137,16 +1445,15 @@ export function Messages({
  */
 function AuthorMenu({
   handle,
-  view,
   mine,
   children,
 }: {
   handle: string | null;
-  view: ConversationView;
   mine: boolean;
   children: ReactNode;
 }) {
   const navigate = useNavigate();
+  const { open: openDetail } = useDetail();
   const report = useReport();
   const names = useNames();
 
@@ -1169,7 +1476,7 @@ function AuthorMenu({
       ) : (
         <ContextMenu.Item
           icon="info"
-          onSelect={() => navigate({ kind: "conversation", key: view.key, detail: { handle } })}
+          onSelect={() => openDetail(handle)}
         >
           View full profile
         </ContextMenu.Item>

@@ -16,9 +16,9 @@
  *
  * # What this module does not decide
  *
- * Whether a pane is *open*. That belongs to the route: the detail column is a URL, so that a
- * reload lands back on it. This module only answers whether there is room to show it beside the
- * conversation or whether it has to cover it.
+ * Whether a pane is *open*. The detail column is state — see `state/detail.tsx`, which also
+ * records what moving it out of the route cost. This module only answers whether there is room to
+ * show it beside the conversation or whether it has to cover it.
  */
 import { useEffect, useState } from "react";
 
@@ -70,8 +70,8 @@ export function useDuo(): boolean {
 /**
  * True when the detail column fits **beside** the conversation rather than over it.
  *
- * Below this, the detail column is still reachable — it is a route — but it covers the centre.
- * Above it, it takes its own third of the shell and the conversation shrinks to make room.
+ * Below this, the detail column is still reachable but it covers the centre. Above it, it takes
+ * its own third of the shell and the conversation shrinks to make room.
  */
 export function useTrio(): boolean {
   return useQuery(TRIO_BREAKPOINT);

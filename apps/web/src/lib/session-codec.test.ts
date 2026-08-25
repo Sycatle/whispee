@@ -81,6 +81,48 @@ test("presence tells absence apart from refusal", () => {
 });
 
 /**
+ * The stamp that orders the settings has to survive the round trip, and its absence has to
+ * survive it too.
+ *
+ * Absent means "older than anything", which is what lets the first announcement a device hears
+ * win — the right behaviour for an account upgrading from the era when these settings were
+ * per-device. A codec that turned absence into `0` would say the same thing by luck; one that
+ * dropped the field on the way back would make every device re-announce forever, since nothing
+ * would ever be newer than what it holds.
+ */
+test("the settings stamp survives, and so does its absence", () => {
+  const fresh = roundTrip(session());
+  assert.ok(!("signalsAt" in fresh));
+
+  assert.equal(roundTrip(session({ signalsAt: 1_700_000_000_000 })).signalsAt, 1_700_000_000_000);
+  assert.equal(roundTrip(session({ signalsAt: 0 })).signalsAt, 0);
+});
+
+/**
+ * The preference stamps have to survive too, and they are the tombstones.
+ *
+ * A stamp for a key that holds no value *is* the record of a removal — an unblock, a petname
+ * deleted. Lose it on the way back from disk and the device that still holds the value wins the
+ * next merge, so the block comes back and the petname reappears. There is no error and nothing on
+ * screen to explain it, which is why the codec is where this gets asserted rather than left to a
+ * round-trip somebody assumed.
+ */
+test("the preference stamps survive, tombstones included", () => {
+  assert.ok(!("prefStamps" in roundTrip(session())));
+
+  const stamps = {
+    scalars: 1_700_000_000_000,
+    flags: { aa: 1_700_000_000_001 },
+    petnames: { bb: 1_700_000_000_002 },
+    // No matching entry in `blocked`: this one only exists to say the block was lifted.
+    blocked: { cc: 1_700_000_000_003 },
+  };
+
+  assert.deepEqual(roundTrip(session({ prefStamps: stamps })).prefStamps, stamps);
+  assert.deepEqual(roundTrip(session({ prefStamps: {} })).prefStamps, {});
+});
+
+/**
  * Bytes survive past 127.
  *
  * The encoding goes through `String.fromCharCode` then `btoa`: a byte handled as a UTF-16 code
@@ -140,7 +182,7 @@ test("conversation flags survive a round trip through the native codec", () => {
   const original = session({
     conversationFlags: {
       "0a0b": { pinned: true, mutedUntil: 1_700_000_000_000 },
-      "0c0d": { archived: true, ephemeralMs: 86_400_000 },
+      "0c0d": { archived: true, archiveToVault: false },
     },
   });
 

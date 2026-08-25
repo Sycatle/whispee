@@ -55,6 +55,17 @@ export interface Message {
    */
   sentAt?: number;
   /**
+   * When this client drops the message, in milliseconds.
+   *
+   * Stamped once, on arrival, from the conversation's lifetime — see `expiry.ts` for the clamp
+   * that stops a sender extending their own. Stored rather than recomputed, which is what makes
+   * a later change of lifetime non-retroactive for what is already held, and what stops a device
+   * that was offline during that change from reading the same history differently.
+   *
+   * Absent means nothing expires it: control traffic, or a conversation with no lifetime.
+   */
+  expiresAt?: number;
+  /**
    * The decrypted body.
    *
    * It was once true that this never touched disk, and the note here said so. It is not true any
@@ -391,14 +402,22 @@ export class LogProofRefused extends Error {
  * in each reader — so three records are three places to forget one. They travel together and
  * they are read together.
  *
- * # What this does not solve: other devices
+ * # Other devices, which this used to leave unsolved
  *
- * These stay on the machine that set them. There is no per-account opaque storage on the server
- * to sync them through, and the two ways to invent one both cost something real: the vault
- * refuses a group the caller is not a member of, and a group of one's own devices would spend an
- * envelope per preference change — envelopes that retention eventually collects, so a device
- * left off long enough would silently drift. Pinning something on a laptop therefore does
- * nothing to a phone, and the settings screen has to say so rather than let it be discovered.
+ * These stayed on the machine that set them, and the argument against fixing it was that no
+ * per-account opaque storage existed to sync them through. That was true; it was also not the
+ * only shape available. They now ride the sealed control message an account's devices already
+ * exchange — no new storage, and no group of one's own devices to invent, because every device
+ * of an account is already a member of every one of its conversations.
+ *
+ * The cost that argument named is real and is paid: one envelope per conversation per change.
+ * What made it affordable is what does *not* travel — `recentEmojis` and `skinTone` move on
+ * nearly every message and are deliberately left behind, so the traffic is bounded by deliberate
+ * acts like pinning and muting rather than by typing.
+ *
+ * The retention worry it raised does not apply. A device that was off long enough to miss the
+ * envelope is caught up by the next announcement rather than by that one: what travels is the
+ * whole snapshot, not a delta, and it is re-sent at every epoch of every conversation.
  */
 export interface ConversationFlags {
   /** Sorted above the rest of the list, whatever its last activity. */
@@ -429,15 +448,6 @@ export interface ConversationFlags {
    * it is claiming something it has not done.
    */
   archiveToVault?: boolean;
-  /**
-   * Lifetime in milliseconds for messages sent here, counted from the sender's `sentAt`.
-   *
-   * Not enforceable, and the interface must say so before the control rather than after: the
-   * other side runs their own client, screenshots exist, and a recipient who wants to keep a
-   * message keeps it. What it does buy is that the message never reaches the vault, so it is not
-   * waiting on a server for the rest of time.
-   */
-  ephemeralMs?: number;
 }
 
 /**
@@ -517,4 +527,64 @@ export function freshPreferences(): Preferences {
 /** The flags of one conversation, or an empty set if it has never had any. */
 export function flagsOf(preferences: Preferences, key: string): ConversationFlags {
   return preferences.conversations[key] ?? {};
+}
+
+/**
+ * Is this account one we have declined to read?
+ *
+ * A list rather than a set on disk, because it round-trips through JSON and because it is short —
+ * the number of people somebody has blocked, not the number they have met. The linear scan is
+ * paid once per arrival, against a list that is empty for almost every account.
+ *
+ * # What blocking is, and is not
+ *
+ * It hides. It does not prevent: anyone registered can still add anyone to a group and have
+ * envelopes delivered to them, so this is a decision to decline something that exists and is
+ * stored. `storage.ts` says so at the field, and names `contactPolicy` as the server-side half
+ * that would prevent — the half that is not built.
+ */
+export function isBlocked(preferences: Preferences, account: string): boolean {
+  return preferences.blocked.includes(account);
+}
+
+/**
+ * Is this conversation silenced at `now`?
+ *
+ * The stored value is the moment silence ends, not a boolean, and that is what lets "mute for an
+ * hour" exist without anything having to run a timer and come back for it. The comparison happens
+ * where a notification would fire, so a mute simply stops applying — nothing to schedule, and
+ * nothing left behind if the device was asleep when it lapsed.
+ *
+ * A mute in the past is not muted, and a mute exactly at `now` has ended: the boundary belongs to
+ * the side that makes a lapsed mute lapse rather than linger.
+ */
+export function isMuted(flags: ConversationFlags, now: number): boolean {
+  return flags.mutedUntil !== undefined && flags.mutedUntil > now;
+}
+
+/**
+ * May a notification name this conversation?
+ *
+ * Three states, and the middle one is the whole reason this is a function. An absent flag means
+ * "follow the account setting", which is not `false`: turning the account-wide setting on must not
+ * reveal the name of the one conversation somebody marked as the one to stay quiet about, and
+ * turning it off must not leave a per-conversation `true` shouting.
+ */
+export function disclosesName(flags: ConversationFlags, accountWide: boolean): boolean {
+  return flags.discloseName ?? accountWide;
+}
+
+/**
+ * Should messages from this conversation be deposited in the vault?
+ *
+ * Only an explicit `false` opts out, for the reason `vaultEnabled` gives about itself one layer
+ * up: absence is "never asked", and treating it as a refusal would cut backup off for every
+ * conversation that predates the flag.
+ *
+ * The account-wide switch is not consulted here. It is enforced by `Archive` itself, which holds
+ * no key when the vault is off — so a conversation that says `true` against an account that says
+ * no still deposits nothing.
+ */
+export function archivesToVault(flags: ConversationFlags): boolean {
+  return flags.archiveToVault !== false;
 }

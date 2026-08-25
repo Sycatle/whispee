@@ -11,8 +11,6 @@ const CANONICAL: [Route, string][] = [
   [{ kind: "home" }, "#/"],
   [{ kind: "new" }, "#/new"],
   [{ kind: "conversation", key: KEY }, `#/c/${KEY}`],
-  [{ kind: "conversation", key: KEY, detail: {} }, `#/c/${KEY}/info`],
-  [{ kind: "conversation", key: KEY, detail: { handle: "bob" } }, `#/c/${KEY}/info/bob`],
   [{ kind: "settings", section: null }, "#/settings"],
   [{ kind: "settings", section: "devices" }, "#/settings/devices"],
 ];
@@ -71,55 +69,36 @@ test("a well-formed key is accepted without being checked against any conversati
   assert.deepEqual(parse("#/c/00"), { kind: "conversation", key: "00" });
 });
 
-test("the detail column is a route with and without a member expanded", () => {
-  assert.deepEqual(parse(`#/c/${KEY}/info`), { kind: "conversation", key: KEY, detail: {} });
-  assert.deepEqual(parse(`#/c/${KEY}/info/alice`), {
-    kind: "conversation",
-    key: KEY,
-    detail: { handle: "alice" },
-  });
-});
-
-/** The server accepts any non-empty string of up to 64 bytes as a handle (`routes.rs:306`). */
-test("a handle containing URL punctuation round trips through escaping", () => {
-  const handle = "a b/c%d#e?f";
-  const hash = format({ kind: "conversation", key: KEY, detail: { handle } });
-
-  assert.ok(!hash.includes(" "), "the space must be escaped");
-  assert.deepEqual(parse(hash), { kind: "conversation", key: KEY, detail: { handle } });
-});
-
 /**
- * The key parsed cleanly. Dropping the user on the home screen to punish a broken escape further
- * to the right would throw away the part of the URL that was right.
+ * The detail column stopped being a route — see `state/detail.tsx`. What is checked here is that
+ * the URLs it used to own are still *answered*, because they are in people's history and in their
+ * open tabs. An address this application minted itself should not be met with the home screen.
  */
-test("a broken escape in the handle opens the detail column with nobody expanded", () => {
-  assert.deepEqual(parse(`#/c/${KEY}/info/%zz`), {
-    kind: "conversation",
-    key: KEY,
-    detail: {},
-  });
-  assert.deepEqual(parse(`#/c/${KEY}/info/`), { kind: "conversation", key: KEY, detail: {} });
+test("the urls the detail column used to own still open their conversation", () => {
+  assert.deepEqual(parse(`#/c/${KEY}/info`), { kind: "conversation", key: KEY });
+  assert.deepEqual(parse(`#/c/${KEY}/info/alice`), { kind: "conversation", key: KEY });
+  assert.deepEqual(parse(`#/c/${KEY}/info/`), { kind: "conversation", key: KEY });
+  // A handle that never decoded is no worse off than one that did: both name a column that is no
+  // longer addressable, and both land in the conversation.
+  assert.deepEqual(parse(`#/c/${KEY}/info/%zz`), { kind: "conversation", key: KEY });
 });
 
-/**
- * The prefix was recognised; answering a half-wrong URL by ignoring the half that was right
- * would be a worse guess than showing the settings index.
- */
-test("an unknown settings section falls back to the settings index, not to home", () => {
-  assert.deepEqual(parse("#/settings/telemetry"), { kind: "settings", section: null });
-  assert.deepEqual(parse("#/settings/"), { kind: "settings", section: null });
+/** Anything past the old two levels is still nonsense, and still goes home. */
+test("a conversation url with more after it than info is not a place", () => {
+  assert.deepEqual(parse(`#/c/${KEY}/info/alice/extra`), { kind: "home" });
+  assert.deepEqual(parse(`#/c/${KEY}/details`), { kind: "home" });
 });
 
-test("a hash written without its leading # parses the same way", () => {
-  assert.deepEqual(parse("/settings/lock"), { kind: "settings", section: "lock" });
-  assert.deepEqual(parse("settings/lock"), { kind: "settings", section: "lock" });
+/** A conversation now has exactly one spelling, which is what makes the round trip total. */
+test("a conversation formats to one url and nothing else", () => {
+  assert.equal(format({ kind: "conversation", key: KEY }), `#/c/${KEY}`);
 });
 
-/** What stops the shell pushing a second history entry for the place it is already on. */
 test("two routes naming the same place compare equal whatever their identity", () => {
   assert.ok(same({ kind: "conversation", key: KEY }, { kind: "conversation", key: KEY }));
   assert.ok(same(parse(""), parse("#/")));
-  assert.ok(!same({ kind: "conversation", key: KEY }, { kind: "conversation", key: KEY, detail: {} }));
+  // Two conversations differ only by their key now: the detail column is no longer part of what
+  // a route says, so there is no second field left for `same` to disagree about.
+  assert.ok(!same({ kind: "conversation", key: KEY }, { kind: "conversation", key: "00ff" }));
   assert.ok(!same({ kind: "settings", section: null }, { kind: "settings", section: "lock" }));
 });

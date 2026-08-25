@@ -1,24 +1,9 @@
 //! Full life cycle of a 1-to-1 conversation: publication, invitation, exchange, persistence.
 
+mod common;
+
+use common::two_member_conversation;
 use crypto_core::{Conversation, Identity, Incoming, fingerprint};
-
-/// Stands up a two-member conversation the way the real flow would: Bob publishes a KeyPackage,
-/// Alice creates the group and invites him, Bob joins through the Welcome.
-fn two_member_conversation() -> (Identity, Identity, Conversation, Conversation) {
-    let alice = Identity::create("alice@device-1").unwrap();
-    let bob = Identity::create("bob@device-1").unwrap();
-
-    let bob_key_package = bob.publish_key_package().unwrap();
-
-    let mut alice_group = Conversation::create(&alice).unwrap();
-    let invitation = alice_group.invite(&alice, &bob_key_package).unwrap();
-    let tree = alice_group.apply_pending(&alice).unwrap();
-
-    let bob_group =
-        Conversation::join(&bob, &invitation.welcome, &tree).unwrap();
-
-    (alice, bob, alice_group, bob_group)
-}
 
 #[test]
 fn full_1_to_1_cycle() {
@@ -861,4 +846,62 @@ fn the_signal_key_changes_every_epoch() {
 
     assert_ne!(epoch_before, alice_group.epoch());
     assert_ne!(before, after, "otherwise a removed member would keep reading the ephemeral channel");
+}
+
+/// Both members derive the same call key, for the reason the signal key works: nothing is
+/// exchanged, so the media server has nothing to hand out and nothing to keep.
+#[test]
+fn the_call_key_is_shared_by_the_members() {
+    let (alice, bob, alice_group, bob_group) = two_member_conversation();
+
+    let alice_side = alice_group.call_key(&alice, b"call-1").unwrap();
+    let bob_side = bob_group.call_key(&bob, b"call-1").unwrap();
+
+    assert_eq!(alice_side.len(), 32);
+    assert_eq!(alice_side, bob_side, "without agreement the audio would be noise");
+}
+
+/// **Two calls in one epoch must not share a key.**
+///
+/// Without the call id in the exporter's context, audio captured from one call would decrypt
+/// inside the next — a recording outliving the call it belonged to.
+#[test]
+fn each_call_gets_its_own_key_within_one_epoch() {
+    let (alice, _bob, alice_group, _bob_group) = two_member_conversation();
+
+    let first = alice_group.call_key(&alice, b"call-1").unwrap();
+    let second = alice_group.call_key(&alice, b"call-2").unwrap();
+
+    assert_ne!(first, second, "otherwise one call's audio replays into another");
+}
+
+/// The call key is a *different* key from the ephemeral channel's, at the same epoch.
+///
+/// They come from the same secret, so only the label separates them. A copied label would make a
+/// typing indicator and a media frame share a key — the kind of confusion that raises no error
+/// anywhere.
+#[test]
+fn the_call_key_is_not_the_signal_key() {
+    let (alice, _bob, alice_group, _bob_group) = two_member_conversation();
+
+    assert_ne!(alice_group.call_key(&alice, &[]).unwrap(), alice_group.signal_key(&alice).unwrap());
+}
+
+/// A member removed mid-call loses the audio at the commit, exactly as they lose the messages.
+///
+/// Unlike the ephemeral channel this is not entirely free: the live call has to be handed the new
+/// key. What this pins down is the half that is — the key really does move.
+#[test]
+fn the_call_key_changes_every_epoch() {
+    let (alice, _bob, mut alice_group, _bob_group) = two_member_conversation();
+
+    let before = alice_group.call_key(&alice, b"call-1").unwrap();
+
+    let carol = Identity::create("carol@device-1").unwrap();
+    alice_group.invite(&alice, &carol.publish_key_package().unwrap()).unwrap();
+    alice_group.apply_pending(&alice).unwrap();
+
+    let after = alice_group.call_key(&alice, b"call-1").unwrap();
+
+    assert_ne!(before, after, "otherwise a removed member would keep listening");
 }

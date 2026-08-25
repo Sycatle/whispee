@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useGroupAdmin } from "@/components/Group";
+import { ConversationSettings } from "@/components/ConversationSettings";
 import { MiniProfile } from "@/components/MiniProfile";
 import { ContextMenu } from "@/ui/ContextMenu";
 import { PresenceBadge, PresenceLine } from "@/components/Presence";
@@ -15,14 +16,14 @@ import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
 import { ProofStrip } from "@/ui/ProofStrip";
-import { useSession } from "@/state/SessionProvider";
+import { useBump, useRevision, useSession } from "@/state/SessionProvider";
 import { useNames } from "@/state/names";
+import { useDetail } from "@/state/detail";
 import { useReport } from "@/state/report";
 import { nameOf } from "@/lib/naming";
 import { MAX_CODE_POINTS, sanitize, validate } from "@/lib/display-name";
 import { Field } from "@/ui/Field";
 import { Input } from "@/ui/Input";
-import { useNavigate, useRoute } from "@/routes/Router";
 
 /**
  * The right column: who you are talking to, proved.
@@ -231,7 +232,109 @@ function Petname({ handle }: { handle: string }) {
   );
 }
 
-function AccountDetail({ account }: { account: ResolvedAccount }) {
+/**
+ * Declining to read somebody.
+ *
+ * # Why it sits here and not in the settings screen
+ *
+ * Because the decision is about a person, and this is the screen that is about a person. A list
+ * of blocked accounts elsewhere is the place to *undo* it — and it will need one, since somebody
+ * blocked in a conversation that has since gone quiet has no card left to open — but the place to
+ * *make* the decision is in front of the face it is about.
+ *
+ * # What the copy has to say before the button, and why
+ *
+ * Blocking here hides; it does not prevent. Anyone registered can still add anyone to a group and
+ * have envelopes delivered to them, so this declines to read something that exists, was received,
+ * and is stored. `storage.ts` names `contactPolicy` as the server-side half that would prevent,
+ * and that half is not built — so the button must not imply it.
+ *
+ * # Why blocking asks twice and unblocking does not
+ *
+ * Because the design refuses to leave a trace. There is no "3 messages hidden", by a deliberate
+ * choice argued in `thread.ts`: a counter of what one has declined to read is an invitation to go
+ * and read it. The cost of that choice is that an accidental block is **silent** — messages simply
+ * stop appearing, with nothing on screen to explain it. A second click is what stands in for the
+ * feedback the design gives up.
+ *
+ * Unblocking has no such cost. It restores what was there and announces itself by the thread
+ * filling back in.
+ *
+ * # What it hides, and the one thing it does not
+ *
+ * It hides what somebody writes — messages, typing, notifications — and not their voice. A blocked
+ * account cannot make the phone ring; one already sitting in a call somebody else placed is heard.
+ * Cutting that voice would break the conversation for the person who did the cutting while costing
+ * the blocked person nothing, so the test is on who *placed* the call and never on who is in the
+ * room. `components/Blocked.tsx` carries the same promise and the same qualification.
+ */
+function Blocking({ account }: { account: ResolvedAccount }) {
+  const session = useSession();
+  const report = useReport();
+  const names = useNames();
+  const bump = useBump();
+  // Read so this section redraws after the block moves — its own, or one another device made and
+  // this one absorbed during a poll. Nothing else here subscribes to a mutation, so without it
+  // the button would keep saying "Block" for somebody already blocked.
+  useRevision();
+
+  const [confirming, setConfirming] = useState(false);
+  const blocked = session.isBlocked(account.handle);
+  const name = nameOf(account.handle, names).primary;
+
+  async function set(next: boolean) {
+    setConfirming(false);
+    try {
+      await session.setBlocked(account.handle, next);
+      bump();
+      report.done(
+        next
+          ? `Blocked. You will not see what ${name} says, on any of your devices.`
+          : `Unblocked. What ${name} says will appear again.`,
+      );
+    } catch (failure: unknown) {
+      report.error(failure instanceof Error ? failure.message : "The block could not be saved.");
+    }
+  }
+
+  return (
+    <section className="space-y-snug p-pane">
+      <SectionTitle>Blocking</SectionTitle>
+      <p className="text-caption text-(--color-ink-muted)">
+        {blocked
+          ? `You are not shown what ${name} writes. Their messages are still delivered and stored — this hides them, it does not stop them — and you will still hear them in a call somebody else placed.`
+          : `Hides what someone writes — their messages, their typing, their notifications — on every device you are signed in on. It does not stop them sending, and it does not hide their voice: they cannot call you, but you will hear them in a call somebody else placed.`}
+      </p>
+
+      {blocked ? (
+        <Button variant="secondary" size="sm" onClick={() => void set(false)}>
+          Unblock
+        </Button>
+      ) : confirming ? (
+        <div className="space-y-snug">
+          <p className="text-caption font-medium">
+            Their messages will disappear from this conversation with nothing in their place — no
+            gap and no count, so nothing will remind you afterwards.
+          </p>
+          <div className="flex gap-tight">
+            <Button variant="primary" size="sm" onClick={() => void set(true)}>
+              Block {name}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button variant="secondary" size="sm" onClick={() => setConfirming(true)}>
+          Block
+        </Button>
+      )}
+    </section>
+  );
+}
+
+function AccountDetail({ account, typing }: { account: ResolvedAccount; typing: boolean }) {
   const session = useSession();
   const names = useNames();
   const [comparing, setComparing] = useState(false);
@@ -248,7 +351,11 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
   return (
     <>
       <section className="flex flex-col items-center gap-snug p-pane text-center">
-        <PresenceBadge session={session} handle={account.handle}>
+        <PresenceBadge
+          session={session}
+          handle={account.handle}
+          typing={typing}
+        >
           <Avatar
             seed={account.fingerprint}
             label={name.primary}
@@ -312,6 +419,8 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
 
       <Petname key={account.handle} handle={account.handle} />
 
+      <Blocking key={`blocking:${account.handle}`} account={account} />
+
       <section className="space-y-snug p-pane">
         <SectionTitle>Devices</SectionTitle>
         {/* The count, then the identifiers. The fingerprint covers the account and does not move
@@ -336,14 +445,17 @@ function AccountDetail({ account }: { account: ResolvedAccount }) {
 export function DetailPanel({ view }: { view: ConversationView }) {
   const session = useSession();
   const names = useNames();
-  const route = useRoute();
-  const navigate = useNavigate();
   const duo = useDuo();
   const trio = useTrio();
   const heading = useRef<HTMLHeadingElement>(null);
   const panel = useRef<HTMLElement>(null);
 
-  const wanted = route.kind === "conversation" ? route.detail?.handle : undefined;
+  const { detail, close: closeDetail } = useDetail();
+  const wanted = detail?.handle;
+
+  // Through `typingIn` and never off `view.typing`: the indicator is reciprocal, and only that
+  // call knows whether this device has kept the right to see other people's.
+  const typingNow = session.typingIn(view);
   // A group with no member singled out shows the roster; a one-to-one has exactly one person to
   // show and asking the user to pick them would be a click that means nothing.
   const focused =
@@ -354,9 +466,9 @@ export function DetailPanel({ view }: { view: ConversationView }) {
     (!session.isGroup(view) && view.accounts.length === 1 ? view.accounts[0] : undefined);
 
   const close = () => {
-    navigate({ kind: "conversation", key: view.key });
-    // After the route change, not before: at `duo` and above the toggle is still mounted, but
-    // React has not re-rendered it yet at the moment `navigate` returns.
+    closeDetail();
+    // After the state change, not before: at `duo` and above the toggle is still mounted, but
+    // React has not re-rendered it yet at the moment this returns.
     requestAnimationFrame(() => document.getElementById(INFO_TOGGLE_ID)?.focus());
   };
 
@@ -526,7 +638,11 @@ export function DetailPanel({ view }: { view: ConversationView }) {
                   type="button"
                   className="flex w-full items-center gap-snug rounded-control p-snug text-left text-body hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
                 >
-                  <PresenceBadge session={session} handle={account.handle}>
+                  <PresenceBadge
+                    session={session}
+                    handle={account.handle}
+                    typing={typingNow.includes(account.handle)}
+                  >
                     <Avatar
                       seed={account.fingerprint}
                       label={name.primary}
@@ -586,7 +702,25 @@ export function DetailPanel({ view }: { view: ConversationView }) {
         </section>
       )}
 
-      {focused && <AccountDetail account={focused} />}
+      {/* Passed in rather than read here: whether an indicator may be shown is
+          `session.typingIn(view)`'s decision and it needs the conversation, which this card does
+          not have and should not acquire — it is about a person, not about a thread. */}
+      {focused && <AccountDetail account={focused} typing={typingNow.includes(focused.handle)} />}
+
+      {/*
+        The thread's own settings, last, and in every state of this panel.
+
+        Gating them on `focused === undefined` was the first shape and it was wrong: a one-to-one
+        singles its one correspondent out automatically, so the settings would have been invisible
+        in the commonest conversation there is. A control that exists for groups and not for pairs
+        is not a control, it is a coincidence of layout.
+
+        Last rather than first because they are the least of what this column answers — who this
+        is, and whether they are who they say, come before whether the thread is pinned. And the
+        panel names itself "This conversation", which is what keeps it from reading as one more
+        thing about the person whose card it may be sitting under.
+      */}
+      <ConversationSettings view={view} />
 
       {/* The confirmations, mounted outside every menu — see `useGroupAdmin`. Nothing is drawn
           until one is asked for. */}

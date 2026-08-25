@@ -76,6 +76,28 @@
   --color-ok: oklch(0.5 0.11 158);
   /* Text laid on a filled state — a destructive button. Same argument as `accent-ink`. */
   --color-state-ink: oklch(0.99 0 0);
+  /* Syntax colouring, for the fenced code blocks in a message.
+   *
+   * Five tokens and not a palette: `lib/highlight.ts` distinguishes comment, string, keyword,
+   * number and punctuation and stops there, because it has no notion of scope and cannot tell a
+   * type from a variable. Naming a colour it can never assign would be an invitation to guess.
+   *
+   * They are their own tokens rather than borrowings, and that is the point. In this file green
+   * means "ok" and amber means "attention"; spending them on "string" and "number" would make the
+   * vocabulary mean two things at once, and the next person adjusting a success message would
+   * silently restyle every code block in the application.
+   *
+   * All five are chosen against `--color-surface-sunken` — the ground a code block sits on, not
+   * `--color-surface`. Contrast is held above 4.5:1 there in both themes, punctuation closest to
+   * the floor because it is the one that may recede.
+   *
+   * What this does not solve: nothing checks the ratios. They were computed once, by hand, and a
+   * later edit to the sunken surface would move all five without saying so. */
+  --color-syntax-comment: oklch(0.52 0.02 265);
+  --color-syntax-string: oklch(0.45 0.12 150);
+  --color-syntax-keyword: oklch(0.45 0.16 300);
+  --color-syntax-number: oklch(0.48 0.13 40);
+  --color-syntax-punct: oklch(0.42 0.015 265);
 }
 
 /* The dark palette, declared three times for three different questions: what the system asks
@@ -96,6 +118,14 @@
     --color-warn: oklch(0.8 0.13 75);
     --color-ok: oklch(0.74 0.12 158);
     --color-state-ink: oklch(0.15 0.01 265);
+    /* See the note in the light palette. Lightness is lifted and chroma eased for the darker
+     * ground: the same hues at the same lightness are muddy on a sunken surface at 0.11, which is
+     * nearly black. */
+    --color-syntax-comment: oklch(0.6 0.02 265);
+    --color-syntax-string: oklch(0.78 0.13 150);
+    --color-syntax-keyword: oklch(0.76 0.13 300);
+    --color-syntax-number: oklch(0.79 0.12 55);
+    --color-syntax-punct: oklch(0.66 0.015 265);
   }
 }
 
@@ -113,6 +143,14 @@
   --color-warn: oklch(0.8 0.13 75);
   --color-ok: oklch(0.74 0.12 158);
   --color-state-ink: oklch(0.15 0.01 265);
+  /* See the note in the light palette. Lightness is lifted and chroma eased for the darker
+   * ground: the same hues at the same lightness are muddy on a sunken surface at 0.11, which is
+   * nearly black. */
+  --color-syntax-comment: oklch(0.6 0.02 265);
+  --color-syntax-string: oklch(0.78 0.13 150);
+  --color-syntax-keyword: oklch(0.76 0.13 300);
+  --color-syntax-number: oklch(0.79 0.12 55);
+  --color-syntax-punct: oklch(0.66 0.015 265);
 }
 
 :root[data-theme="light"] {
@@ -129,6 +167,28 @@
   --color-warn: oklch(0.58 0.13 72);
   --color-ok: oklch(0.5 0.11 158);
   --color-state-ink: oklch(0.99 0 0);
+  /* Syntax colouring, for the fenced code blocks in a message.
+   *
+   * Five tokens and not a palette: `lib/highlight.ts` distinguishes comment, string, keyword,
+   * number and punctuation and stops there, because it has no notion of scope and cannot tell a
+   * type from a variable. Naming a colour it can never assign would be an invitation to guess.
+   *
+   * They are their own tokens rather than borrowings, and that is the point. In this file green
+   * means "ok" and amber means "attention"; spending them on "string" and "number" would make the
+   * vocabulary mean two things at once, and the next person adjusting a success message would
+   * silently restyle every code block in the application.
+   *
+   * All five are chosen against `--color-surface-sunken` — the ground a code block sits on, not
+   * `--color-surface`. Contrast is held above 4.5:1 there in both themes, punctuation closest to
+   * the floor because it is the one that may recede.
+   *
+   * What this does not solve: nothing checks the ratios. They were computed once, by hand, and a
+   * later edit to the sunken surface would move all five without saying so. */
+  --color-syntax-comment: oklch(0.52 0.02 265);
+  --color-syntax-string: oklch(0.45 0.12 150);
+  --color-syntax-keyword: oklch(0.45 0.16 300);
+  --color-syntax-number: oklch(0.48 0.13 40);
+  --color-syntax-punct: oklch(0.42 0.015 265);
 }
 
 /* Tell the user agent which way the page leans, so form controls, scrollbars and the caret are
@@ -231,6 +291,44 @@
   }
 }
 
+/* The one keyframe animation in this project, and why it is allowed to be the first.
+ *
+ * Everything else here is a transition: a change of state, played once, from what the element was
+ * to what it now is. That covers menus, panels, toasts and every hover — which is why the note
+ * above can insist on two durations and no keyframes at all.
+ *
+ * Somebody typing is not a change of state. It is a *condition that persists*, and it lasts
+ * exactly as long as they keep typing — which no transition can express, because a transition
+ * ends. Three dots that rise in turn say "still happening" in a way a static mark cannot, and
+ * that is the whole information being carried.
+ *
+ * 1.2s and not one of the two tokens, for the same reason: those are the speeds at which
+ * something *arrives*, and this never arrives. It is a pulse, and at 90ms it would be a flicker.
+ *
+ * # Reduced motion stops it, and must not remove it
+ *
+ * `animation: none` leaves three dots sitting still, which still reads as "typing" beside an
+ * avatar and still occupies the same box. Hiding them instead would take the information away
+ * from precisely the people who asked for less movement, not less content — the mistake this
+ * codebase avoids elsewhere by collapsing durations rather than dropping transitions.
+ *
+ * The dots are also duplicated as text for a screen reader; see `ui/Typing.tsx`. An animation
+ * announces nothing at all. */
+@keyframes typing-dot {
+  /* Flat for most of the cycle: the rest is what makes the rise read as a beat rather than as a
+     wobble. A sine-like ease over the whole period looks like the dots are floating. */
+  0%,
+  70%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  35% {
+    transform: translateY(-25%);
+    opacity: 1;
+  }
+}
+
 /* Spacing.
  *
  * Everything is a multiple of `--spacing`, which stays at Tailwind's 0.25rem — restated rather
@@ -274,6 +372,24 @@
    * flush against the window; the shell has to apply it, and below `duo` it deliberately does
    * not — see the note on `--radius-surface`. */
   --spacing-gap: 0.5rem;
+
+  /* The thread's left lane: the avatar at the top of a turn, the hour under it.
+   *
+   * 3.5rem is 40px for the avatar plus 16 of air. It is the one measurement the whole thread is
+   * built on — the name, the text, the quote and the reactions all begin at its inner edge, so a
+   * line that got it wrong would step sideways out of the column.
+   *
+   * A token rather than a scale value because a second thing now needs the same number: with our
+   * own turns mirrored, the action bar is offset by the lane so that it lines up with the edge of
+   * the message rather than with the wall of the pane. Two `w-14`s in two files is a measurement
+   * that drifts on the first change and reports nothing when it does — it only looks wrong.
+   *
+   * What this still does not gather: the avatar's own 40px (`AVATAR_40` in `Messages.tsx`, which
+   * is a size Avatar does not offer) and the reply banner in `Conversation.tsx`, whose quote
+   * should line up with the quotes inside the thread rather than with the composer. Both belong
+   * on this token; neither is moved here, because doing it properly means changing what those two
+   * look like and that is not this change. */
+  --spacing-lane: 3.5rem;
 }
 
 /* Radius.

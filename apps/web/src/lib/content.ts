@@ -145,6 +145,118 @@ const TYPE_MEMBERSHIP = 10;
  */
 const TYPE_HANDLE = 11;
 
+/**
+ * The signalling settings of an account, for its **own** devices: `u8 12 ‖ sealed`.
+ *
+ * # Why this travels at all
+ *
+ * `readReceipts` and `typingIndicator` used to be per-device, because they live in the local
+ * encrypted session and `lib/storage.ts` gives a good reason for keeping them out of the
+ * server's sight. The consequence was not good: `Session.acknowledge` runs per session, so an
+ * account that turned receipts off on one device kept sending them from another, and nothing on
+ * screen said so. A setting a forgotten laptop silently undoes is not a setting.
+ *
+ * There is no server-side answer available. The server cannot see receipts — that is the whole
+ * point of them being ordinary envelopes under sealed sender — so it cannot enforce anything
+ * about them. What it can carry is an opaque message, which is what this is.
+ *
+ * # Why the body is sealed and `profile` is not
+ *
+ * A display name is meant for the room. This is not: it is addressed to the other devices of one
+ * account, and it travels through the room only because that is where they meet. Peers must not
+ * read it — knowing somebody turned their read receipts off is exactly the lever the setting
+ * exists to remove, since a peer who can see the switch can ask for it to be flipped back.
+ *
+ * So the transport is the group and the confidentiality is `Account::device_sync_key`, which
+ * every device of an account derives from the seed and nobody else can. A peer sees a control
+ * message of a kind it ignores. It learns that *a* preference moved, never which.
+ *
+ * # What is inside
+ *
+ * `u64 BE milliseconds ‖ u8 bitfield`, sealed. The timestamp is in the clear text and not beside
+ * it: only our own devices order these, and they can all decrypt. The rest of the argument is
+ * `TYPE_PROFILE`'s, unchanged — control traffic is never stamped, and last-writer-wins still
+ * needs an order that `seq` cannot give, since `seq` is per conversation and this is per account.
+ *
+ * The clamp `TYPE_PROFILE` describes applies here too, and matters less: the sender is our own
+ * device. It costs one comparison and covers the device whose clock is simply wrong.
+ *
+ * # No length prefix
+ *
+ * Nothing follows the sealed blob, so the remainder of the buffer is its length. A `u16` in front
+ * would be a second statement of the same fact, and two statements of one fact eventually
+ * disagree.
+ */
+const TYPE_SIGNALS = 12;
+
+/**
+ * A moment in a call: `u8 13 ‖ u8 event ‖ u32 BE seconds ‖ UTF-8 call id`.
+ *
+ * # Why a call touches the durable channel at all
+ *
+ * Almost everything a call needs is worthless a few seconds later, and `signals.ts` carries that
+ * traffic — nothing stored, nothing archived. Two moments are different, and both for the same
+ * reason: they are claims about **who**.
+ *
+ * The ephemeral channel is encrypted under a key the whole group shares, so it cannot say who
+ * emitted anything: any member could ring a group under somebody else's name. "Alice is calling
+ * you" is exactly that kind of claim, so it travels here, where MLS authenticates its author. The
+ * conclusion follows it for consistency — a fil that showed the ring but not the outcome would be
+ * worse than one showing neither.
+ *
+ * # What it buys on top
+ *
+ * The call log, and the missed call, with no extra machinery: they are messages, so they are
+ * ordered, archived and re-read like any other. And the wake-up comes for free — an invitation is
+ * an envelope, so `push::wake_detached` fires on it exactly as it does on a text, **without the
+ * server learning that this one was a call.**
+ *
+ * # Not control
+ *
+ * All three are meant to be seen. A call is an event in the conversation in the same sense a
+ * message is — which is precisely what "you have a missed call" means.
+ */
+const TYPE_CALL = 13;
+
+/**
+ * A change to how long this conversation keeps what is said in it: `u8 14 ‖ u32 BE seconds`.
+ *
+ * A notice rather than a silent setting, for the reason membership notices exist: a room whose
+ * memory grows from seven days to a year has changed in the way that matters, and the change
+ * belongs in the history where everybody sees it rather than in a menu somebody may never open.
+ *
+ * # Not the authority, and it does not need to be
+ *
+ * The lifetime itself lives in the MLS group context, authenticated and hashed into every commit
+ * — see `crates/crypto-core/src/lifetime.rs`. This is the announcement, and like the membership
+ * notice it is a claim by its sender: a client could post one without committing anything. It
+ * changes no state, and the reader's own group context is what actually decides when their
+ * messages go.
+ *
+ * # Not control
+ *
+ * It is meant to be read, so it is displayed, archived and counted like anything else in the
+ * thread. Somebody who was away while the room's memory was shortened has had the conversation
+ * change under them, which is news in the same sense a message is.
+ */
+const TYPE_EXPIRY = 14;
+
+/**
+ * What happened to a call.
+ *
+ * `invite` and its conclusion are two envelopes sharing one call id, not one envelope amended:
+ * the invitation has to leave before anybody knows how the call will end. The display is what
+ * folds the pair back into a single line — see `conversation-view.ts`.
+ *
+ * `missed` and a `declined` refusal are deliberately the same event here. The difference is
+ * visible only to the person who refused, and reporting it to the caller would tell them they
+ * were turned down rather than merely unheard — an admission the protocol has no reason to
+ * extract from a device.
+ */
+export type CallEvent = "invite" | "ended" | "missed";
+
+const CALL_EVENTS: CallEvent[] = ["invite", "ended", "missed"];
+
 /** What happened to somebody's membership. The subject is `handle`; the actor is the sender. */
 export type MembershipEvent = "joined" | "removed" | "left";
 
@@ -159,8 +271,11 @@ export type Content =
   | { kind: "reaction"; target: number; emoji: string }
   | { kind: "reply"; target: number; text: string }
   | { kind: "profile"; name: string; at: number }
+  | { kind: "call"; event: CallEvent; call: string; seconds: number }
   | { kind: "membership"; event: MembershipEvent; handle: string }
-  | { kind: "handle"; handle: string; at: number };
+  | { kind: "handle"; handle: string; at: number }
+  | { kind: "expiry"; seconds: number }
+  | { kind: "signals"; sealed: Uint8Array };
 
 /**
  * What a receipt attests.
@@ -220,6 +335,23 @@ export function encodeText(text: string): Uint8Array {
  * it as an **anchor** and asks the server to prove that its own log extends it. Carrying the
  * signature would suggest it serves some purpose here.
  */
+/**
+ * `u8 event ‖ u32 BE seconds ‖ call id`.
+ *
+ * The duration is fixed-width and always present, zero on an invitation and on a missed call. A
+ * variable field would have bought four bytes on the one message of the three that is not
+ * displayed with a duration next to it, and cost a length prefix to say so.
+ */
+export function encodeCall(event: CallEvent, call: string, seconds: number): Uint8Array {
+  const id = new TextEncoder().encode(call);
+  const out = new Uint8Array(1 + 1 + 4 + id.length);
+  out[0] = TYPE_CALL;
+  out[1] = CALL_EVENTS.indexOf(event);
+  new DataView(out.buffer).setUint32(2, Math.max(0, Math.trunc(seconds)), false);
+  out.set(id, 6);
+  return out;
+}
+
 /** `u8 event ‖ handle`. The handle is the subject; who did it is the sender of the message. */
 export function encodeMembership(event: MembershipEvent, handle: string): Uint8Array {
   const name = new TextEncoder().encode(handle);
@@ -227,6 +359,14 @@ export function encodeMembership(event: MembershipEvent, handle: string): Uint8A
   out[0] = TYPE_MEMBERSHIP;
   out[1] = MEMBERSHIP_EVENTS.indexOf(event);
   out.set(name, 2);
+  return out;
+}
+
+/** A change of lifetime, in seconds; `0` announces that it was turned off. */
+export function encodeExpiry(seconds: number): Uint8Array {
+  const out = new Uint8Array(1 + 4);
+  out[0] = TYPE_EXPIRY;
+  new DataView(out.buffer).setUint32(1, seconds, false);
   return out;
 }
 
@@ -268,7 +408,13 @@ export function isControl(body: Content): boolean {
     // A handle claim is control for all three of the same reasons, and carries its own timestamp
     // for the same one: `seq` is per conversation, a handle is per account, so two groups would
     // disagree about which claim came last.
-    body.kind === "handle"
+    body.kind === "handle" ||
+    // Signalling settings are control for all three reasons, and the third is the one that would
+    // bite: a settings announcement that moved the receipt cursor would be acknowledged, and the
+    // acknowledgement would be a message, and two devices would trade them forever. They carry
+    // their own timestamp for the reason the two above do — `seq` is per conversation, an
+    // account's settings are not.
+    body.kind === "signals"
   );
 }
 
@@ -308,10 +454,16 @@ function encodeBody(body: Content): Uint8Array {
       return encodeTargeted(TYPE_REPLY, body.target, body.text);
     case "profile":
       return encodeProfile(body.name, body.at);
+    case "call":
+      return encodeCall(body.event, body.call, body.seconds);
     case "membership":
       return encodeMembership(body.event, body.handle);
+    case "expiry":
+      return encodeExpiry(body.seconds);
     case "handle":
       return encodeHandle(body.handle, body.at);
+    case "signals":
+      return encodeSignals(body.sealed);
   }
 }
 
@@ -436,6 +588,36 @@ export function encodeHandle(handle: string, at: number): Uint8Array {
  */
 const HANDLE_MAX_BYTES = 32;
 
+/**
+ * Wraps an already sealed settings blob. The sealing happens in `session.ts`, which holds the
+ * key; this module decodes bytes and has no business holding one.
+ */
+export function encodeSignals(sealed: Uint8Array): Uint8Array {
+  if (sealed.length < SEALED_SIGNALS_MIN_BYTES) throw new Error("settings blob too short");
+  if (sealed.length > SEALED_SIGNALS_MAX_BYTES) throw new Error("settings blob too long");
+
+  const out = new Uint8Array(1 + sealed.length);
+  out[0] = TYPE_SIGNALS;
+  out.set(sealed, 1);
+  return out;
+}
+
+/**
+ * A twelve-byte AES-GCM nonce and a sixteen-byte tag, so nothing shorter can be a sealed blob at
+ * all. Checked on both sides: on send because a caller that passed the plaintext by mistake would
+ * otherwise publish it, and on receive so that a truncated message fails here rather than three
+ * layers down in WebCrypto with an error that names nothing.
+ */
+const SEALED_SIGNALS_MIN_BYTES = 12 + 16;
+
+/**
+ * And a ceiling, because a decoder without one lets a hostile member decide how much memory this
+ * costs. The payload is nine bytes today; a hundred and twenty-eight leaves room for the fields
+ * that will follow — `conversationFlags`, `blocked`, and the rest of what does not sync yet —
+ * without leaving room for an attack.
+ */
+const SEALED_SIGNALS_MAX_BYTES = 12 + 16 + 128;
+
 export function encodeAttachment(ref: AttachmentRef): Uint8Array {
   const body = new TextEncoder().encode(JSON.stringify(ref));
   const out = new Uint8Array(1 + body.length);
@@ -516,6 +698,33 @@ function decodeBody(bytes: Uint8Array): Content {
         : { kind: "reply", target, text };
     }
 
+    case TYPE_CALL: {
+      if (body.length < 5) throw new Error("truncated call event");
+
+      const event = CALL_EVENTS[body[0]];
+      // Same reasoning as the membership event below: an unknown verb draws a blank line.
+      if (event === undefined) throw new Error("unknown call event");
+
+      return {
+        kind: "call",
+        event,
+        seconds: new DataView(body.buffer, body.byteOffset).getUint32(1, false),
+        call: new TextDecoder().decode(body.subarray(5)),
+      };
+    }
+
+    case TYPE_EXPIRY: {
+      // Four bytes and nothing else. A length nobody checks is how a garbled body becomes a
+      // lifetime somebody did not choose — and the sentence drawn from it would name a delay no
+      // member of the room ever agreed to.
+      if (body.length !== 4) throw new Error("badly sized expiry notice");
+
+      return {
+        kind: "expiry",
+        seconds: new DataView(body.buffer, body.byteOffset).getUint32(0, false),
+      };
+    }
+
     case TYPE_MEMBERSHIP: {
       if (body.length < 1) throw new Error("truncated membership event");
 
@@ -547,6 +756,16 @@ function decodeBody(bytes: Uint8Array): Content {
       // know what a screen is; the receiving end in `session.ts` is what decides whether a claim
       // is well-formed enough to show.
       return { kind: "handle", handle: new TextDecoder().decode(handle), at };
+    }
+
+    case TYPE_SIGNALS: {
+      if (body.length < SEALED_SIGNALS_MIN_BYTES) throw new Error("truncated settings blob");
+      if (body.length > SEALED_SIGNALS_MAX_BYTES) throw new Error("oversized settings blob");
+
+      // Not opened here: this module has no key, and it is the receiving end in `session.ts`
+      // that knows whether the author is one of our own devices — which is the only case where
+      // opening it can succeed, and the only case where it means anything.
+      return { kind: "signals", sealed: body.slice() };
     }
 
     case TYPE_PROFILE: {

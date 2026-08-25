@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { GROUPING_WINDOW_MS, continues, dayLabel, opensDay, timeOf } from "./datetime.ts";
+import {
+  GROUPING_WINDOW_MS,
+  continues,
+  dayLabel,
+  opensDay,
+  spokenDuration,
+  spokenLifetime,
+  timeOf,
+} from "./datetime.ts";
 
 /** Local time, deliberately: these are read by a person in their own timezone. */
 const at = (year: number, month: number, day: number, hour = 12, minute = 0) =>
@@ -77,4 +85,34 @@ test("a missing stamp on either side breaks the group", () => {
 
   assert.equal(continues("alice", undefined, "alice", first), false);
   assert.equal(continues("alice", first, "alice", undefined), false);
+});
+
+test("a short call is said in seconds, not as a stopwatch", () => {
+  // "0:11" reads as a running timer. Eleven seconds of call is a call somebody picked up and put
+  // straight down, and the line in the thread should say that rather than look like a clock.
+  assert.equal(spokenDuration(11), "11 s");
+  assert.equal(spokenDuration(59), "59 s");
+});
+
+test("a call of a minute or more is said in minutes", () => {
+  assert.equal(spokenDuration(60), "1 min");
+  assert.equal(spokenDuration(3599), "59 min");
+});
+
+test("a long call keeps its minutes zero-padded beside the hours", () => {
+  // Without the padding, "1 h 5" reads as five hours rather than five minutes past one.
+  assert.equal(spokenDuration(3600), "1 h 00");
+  assert.equal(spokenDuration(3900), "1 h 05");
+});
+
+test("a duration is never negative and never a fraction", () => {
+  // The value is a difference of two clocks: one of them can be behind the other.
+  assert.equal(spokenDuration(-5), "0 s");
+  assert.equal(spokenDuration(1.6), "2 s");
+});
+
+test("a lifetime is spoken in the units it was chosen in", () => {
+  assert.equal(spokenLifetime(604800), "7 days");
+  assert.equal(spokenLifetime(86400), "1 day");
+  assert.equal(spokenLifetime(3600), "1 hour");
 });

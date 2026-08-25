@@ -2,13 +2,16 @@ import { useCallback, useState } from "react";
 
 import { LeaveGroupDialog } from "@/components/Group";
 import { PresenceBadge } from "@/components/Presence";
-import { timeOf } from "@/lib/datetime";
+import { plain } from "@/lib/markdown";
+import { spokenLifetime, timeOf } from "@/lib/datetime";
 import { type NameSources, compactNameOf, handleOf, nameMatches, nameOf, titleOf } from "@/lib/naming";
 import * as mention from "@/lib/mention";
 import { membersOf } from "@/components/Conversation";
+import { AccountCard } from "@/app/AccountCard";
 import { useBinding, useRunBinding } from "@/app/Shortcuts";
 import { say } from "@/lib/i18n";
 import { ContextMenu } from "@/ui/ContextMenu";
+import { byPinnedThenRecent } from "@/lib/ordering";
 import { roster } from "@/lib/roster";
 import { useRoving } from "@/lib/useRoving";
 import type { ConversationView } from "@/lib/session";
@@ -24,6 +27,7 @@ import { Tooltip } from "@/ui/Tooltip";
 import { cn } from "@/ui/cn";
 import { useTheme } from "@/lib/theme";
 import { useNames } from "@/state/names";
+import { useDetail } from "@/state/detail";
 import { useReport } from "@/state/report";
 import { useBump, useRevision, useSession } from "@/state/SessionProvider";
 import { useNavigate, useRoute } from "@/routes/Router";
@@ -83,7 +87,10 @@ function preview(
    */
   const spell = (text: string): string =>
     mention
-      .runs(text, members)
+      // `plain` first: a row is one line, and the markers would be spent on characters that mean
+      // nothing without the shapes they produce. Spoilers are masked — the rail is the one place
+      // a hidden line could be read by somebody walking past a screen nobody is looking at.
+      .runs(plain(text, { spoilers: "mask" }), members)
       .map((run) => {
         if ("text" in run) return run.text;
         // The sigil is kept even though the name reads as prose without it. A preview is a
@@ -108,6 +115,18 @@ function preview(
     // A membership change is the latest news of a conversation as much as a message is, and
     // skipping it would leave the row showing something older than the reason it just moved to
     // the top. Never prefixed with "You:": the sentence already names who did what.
+    // The room's memory changing is news the row must show, for the same reason: the
+    // conversation just moved to the top and something older would explain nothing.
+    if (content.kind === "expiry") {
+      return {
+        mine: false,
+        text:
+          content.seconds === 0
+            ? say("expiry.preview.off", {})
+            : say("expiry.preview.set", { delay: spokenLifetime(content.seconds) }),
+      };
+    }
+
     if (content.kind === "membership") {
       return {
         mine: false,
@@ -200,6 +219,9 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
   const route = useRoute();
   const navigate = useNavigate();
   const { theme, setTheme } = useTheme();
+  // Renamed on the way in: `open` is already a section's disclosure state in this file, and two
+  // things called `open` in one component is how the wrong one gets called.
+  const { open: openDetail } = useDetail();
   const [searching, setSearching] = useState(false);
   const [erasing, setErasing] = useState(false);
   /**
@@ -241,9 +263,50 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
     code reads by key, and rotating it to express a display concern would be the wrong place
     to hold this.
   */
+  /*
+    Pinned first, then most recent. Archived out of the list entirely.
+
+    Two orderings stacked rather than one comparator doing both, because they answer different
+    questions: pinning is a standing decision about a conversation, activity is what happened to
+    it. A pinned thread that has been quiet for a month stays where its owner put it — that is the
+    whole of what pinning means, and a comparator that let activity break the tie between a pinned
+    and an unpinned row would make it mean "usually first".
+  */
+  const pinned = (view: ConversationView) => session.flagsIn(view).pinned === true;
+  const archived = (view: ConversationView) => session.flagsIn(view).archived === true;
+
+  const byActivity = (a: ConversationView, b: ConversationView) =>
+    session.lastActivityIn(b) - session.lastActivityIn(a);
+
+  // The comparator lives in `lib/ordering.ts` with its tests. The version that belongs inline is
+  // the one that adds a constant to a pinned conversation's timestamp and sorts once — and that
+  // one is wrong in a way a screen with three conversations on it never shows.
   const listed = conversations
-    .filter(matches)
-    .sort((a, b) => session.lastActivityIn(b) - session.lastActivityIn(a));
+    .filter((view) => matches(view) && !archived(view))
+    .sort((a, b) =>
+      byPinnedThenRecent(
+        { pinned: pinned(a), activity: session.lastActivityIn(a) },
+        { pinned: pinned(b), activity: session.lastActivityIn(b) },
+      ),
+    );
+
+  /*
+    The archive, and why it is a place rather than a filter.
+
+    Hiding a conversation with no way to see what is hidden is a state the interface can produce
+    and cannot undo: the thread drops out of the list, and the screen that would unarchive it is
+    reached *through* the list. So the archive is a section of its own, closed by default, showing
+    what is in it.
+
+    Its rows are deliberately plainer than the ones above — a name, a line, and the way back in.
+    An archive is somewhere you go to retrieve something, not a second inbox, and reproducing the
+    full row would say the opposite.
+
+    A search still reaches in here. `matches` runs on both lists, because a filter that answered
+    "no match" about a conversation the reader knows exists would be lying about the only thing it
+    is for.
+  */
+  const shelved = conversations.filter((view) => matches(view) && archived(view)).sort(byActivity);
 
   /**
    * Handles verified out of band, as far as this component can see them.
@@ -344,35 +407,143 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
   // section headers, which paint their own background right up to the edge.
   return (
     <aside
-      aria-label="Conversations and contacts"
+      aria-label="Private messages and contacts"
       className="safe-top safe-sides flex h-full w-full shrink-0 flex-col overflow-hidden bg-(--color-surface) duo:w-72 duo:rounded-surface"
     >
-      <div className="flex items-center gap-tight border-b border-(--color-border-subtle) px-gutter py-snug">
-        <h2 className="flex-1 text-body font-medium">Whispee</h2>
-        {/* Shown from a handful of conversations up. Below that it is one more thing on screen
-            between the reader and a list they can already see all of. */}
-        {conversations.length > 5 && (
-          <Tooltip label="Filter by name">
-            <IconButton
-              id={FILTER_TOGGLE_ID}
-              label="Filter by name"
-              icon={<Icon name="search" size={18} />}
-              aria-expanded={searching}
-              onClick={() => {
-                setSearching(!searching);
-                if (searching) setFilter("");
-              }}
-            />
-          </Tooltip>
-        )}
-        <Tooltip label="Start a conversation">
-          <IconButton
-            label="Start a conversation"
-            icon={<Icon name="add" size={18} />}
-            onClick={() => navigate({ kind: "new" })}
-          />
-        </Tooltip>
-      </div>
+      <AccountCard menu={
+          <Menu
+            align="start"
+            // `bottom` now that the trigger is at the top of the column. It opened upwards while it
+            // sat at the bottom, which was right then and would put the menu off-screen here.
+            side="bottom"
+            trigger={
+              // The gear alone. The row beside it is the profile and opens the profile; hanging
+              // a menu off the same target would make one click mean two things.
+              <IconButton label="Account and settings" icon={<Icon name="settings" size={18} />} />
+            }
+          >
+            {/* One line, but a wide one, so both strings fit side by side and the anchor is not
+                lost the moment the menu is the only thing on screen. */}
+            <Menu.Label>
+              {self.primary}
+              {self.secondary !== null && <span className="ml-tight">{self.secondary}</span>}
+            </Menu.Label>
+  
+            <Menu.Sub label="Theme" icon="theme">
+              <Menu.Item onSelect={() => setTheme("system")}>
+                System{theme === "system" ? " ✓" : ""}
+              </Menu.Item>
+              <Menu.Item onSelect={() => setTheme("light")}>
+                Light{theme === "light" ? " ✓" : ""}
+              </Menu.Item>
+              <Menu.Item onSelect={() => setTheme("dark")}>
+                Dark{theme === "dark" ? " ✓" : ""}
+              </Menu.Item>
+            </Menu.Sub>
+  
+            {/* The one lock action that happens on the spot. Configuring the lock is a screen with
+                a password field in it, and a password field does not belong in a dropdown. */}
+            <Menu.Item icon="lock" disabled={!session.locked} onSelect={onLock}>
+              Lock now
+            </Menu.Item>
+  
+            <Menu.Separator />
+  
+            <Menu.Item
+              icon="devices"
+              onSelect={() => navigate({ kind: "settings", section: "devices" })}
+            >
+              Your devices
+            </Menu.Item>
+            <Menu.Item
+              icon="pair"
+              onSelect={() => navigate({ kind: "settings", section: "pairing" })}
+            >
+              Add a device
+            </Menu.Item>
+            <Menu.Item
+              icon="lock"
+              onSelect={() => navigate({ kind: "settings", section: "lock" })}
+            >
+              Lock
+            </Menu.Item>
+            <Menu.Item
+              icon="backup"
+              onSelect={() => navigate({ kind: "settings", section: "backup" })}
+            >
+              {/* The off state reads as a deliberate anomaly, not as an invitation. */}
+              {session.archiving ? "History backup" : "Backup disabled"}
+            </Menu.Item>
+            <Menu.Item
+              icon="settings"
+              onSelect={() => navigate({ kind: "settings", section: "receipts" })}
+            >
+              Receipts and indicators
+            </Menu.Item>
+            <Menu.Item
+              icon="notifications"
+              onSelect={() => navigate({ kind: "settings", section: "notifications" })}
+            >
+              Notifications
+            </Menu.Item>
+  
+            {/* Where a keyboard shortcut becomes findable. A chord nobody can discover is a chord
+                for whoever wrote it, so the one entry that lists them all sits in the menu people
+                already open — with its own chord drawn beside it, which is how anybody learns that
+                the column on the right of this menu means anything.
+  
+                `shortcut` had been a prop of `Menu.Item` since it was written and no call site had
+                ever passed it: the column was rendered by code that ran for nobody. This is its
+                first user.
+  
+                `run` and not a local handler: the item and the chord must open the same thing, and
+                two implementations of "open the shortcuts" is how one of them ends up doing less. */}
+            <Menu.Item
+              icon="help"
+              shortcut="help.shortcuts"
+              onSelect={() => run("help.shortcuts")}
+            >
+              Keyboard shortcuts
+            </Menu.Item>
+  
+            <Menu.Separator />
+  
+            <Menu.Item icon="revoke" tone="danger" onSelect={() => setErasing(true)}>
+              Erase this identity
+            </Menu.Item>
+          </Menu>
+        } />
+
+      {/* What is left of the old bar. It held a wordmark, a filter and a `+`; the first is
+          gone, the third moved to the foot, and the filter is conditional — so this row
+          exists only when it has something in it, instead of being an empty bordered strip
+          under the card. */}
+      {conversations.length > 5 && (
+        <div className="flex items-center justify-end border-b border-(--color-border-subtle) px-gutter py-snug">
+          {/* Whose account this is, where the product name used to be.
+              A wordmark tells somebody what they already know — they opened the application — and
+              it said it in the one place the eye returns to. Which identity is answering is the
+              thing that is genuinely ambiguous on a client built for several, and it was at the
+              far end of the column, below the fold on a short window.
+              The block is unchanged apart from where it sits: same trigger, same menu, same device
+              identifier under the name — that string is what somebody compares character by
+              character while pairing, and it is evidence rather than decoration. */}
+          {/* Shown from a handful of conversations up. Below that it is one more thing on screen
+              between the reader and a list they can already see all of. */}
+            <Tooltip label="Filter by name">
+              <IconButton
+                id={FILTER_TOGGLE_ID}
+                label="Filter by name"
+                icon={<Icon name="search" size={18} />}
+                aria-expanded={searching}
+                onClick={() => {
+                  setSearching(!searching);
+                  if (searching) setFilter("");
+                }}
+              />
+            </Tooltip>
+        </div>
+      )}
 
       {searching && (
         <div className="border-b border-(--color-border-subtle) p-snug">
@@ -414,7 +585,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <Section id="conversations" label="Conversations" count={listed.length}>
+        <Section id="conversations" label="Private messages" count={listed.length}>
           {/* See the note on the thread's `<ol>`: the explicit role is the answer to preflight's
               `list-style: none`, not a redundancy anybody forgot to remove. */}
           {/* The listener is on the list and not on each row: the key event bubbles up from
@@ -425,7 +596,7 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
           <ul
             ref={rows.list}
             role="list"
-            aria-label="Conversations"
+            aria-label="Private messages"
             onKeyDown={(event) => {
               // Up from the first row goes back to the filter, closing the loop the field's own
               // Down opened. Only while the field is there to go back to.
@@ -461,9 +632,15 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
 
               return (
                 <li key={view.key}>
-                  {/* The rail's menu is short because the protocol is: there is no archive, no
-                      mute and no delete to offer, and a menu padded with actions that do not exist
-                      would be worse than none. What is here is what the row can honestly do. */}
+                  {/* Pin, mute and archive are here because they now exist — this comment used to
+                      say the opposite, and said it correctly: a menu padded with actions the
+                      protocol cannot perform would be worse than none.
+
+                      They are a shortcut and never the only way in. `ui/ContextMenu.tsx` requires
+                      that, and the visible path is `ConversationSettings`, at the foot of the
+                      detail column, which offers these three and two more the row has no room to
+                      explain. Muting from here takes the shorter of the two durations offered
+                      there; the choice between them is a question, and a menu item is an answer. */}
                   <ContextMenu
                     trigger={
                   <button
@@ -472,16 +649,11 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     data-row={view.key}
                     tabIndex={rows.at === view.key ? 0 : -1}
                     onClick={() =>
-                      navigate({
-                        kind: "conversation",
-                        key: view.key,
-                        // Switching conversation keeps the detail column as it was. That is what
-                        // Discord does and what people expect: the column is a mode you are in,
-                        // not a property of the thread you left.
-                        ...(route.kind === "conversation" && route.detail
-                          ? { detail: {} }
-                          : {}),
-                      })
+                      // Switching conversation keeps the detail column as it was — the column
+                      // is a mode you are in, not a property of the thread you left. That used
+                      // to need spreading the old route's detail into the new one; now the
+                      // column is state beside the route and simply does not move.
+                      navigate({ kind: "conversation", key: view.key })
                     }
                     // `aria-current` rather than the highlight alone: the selected conversation is a
                     // fact about where you are, and a background colour states it only to whoever can
@@ -511,7 +683,15 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                         inferences instead of informing. `PresenceBadge` renders its child
                         untouched when there is nobody to report on, so the group needs no
                         branch here. */}
-                    <PresenceBadge session={session} handle={only?.handle ?? ""}>
+                    {/* Typing shows on the row without opening the thread, which is most of the
+                        point of putting it here. Read through `typingIn` and never off
+                        `view.typing`: the indicator is reciprocal, and only that call knows
+                        whether this device is allowed to see it. */}
+                    <PresenceBadge
+                      session={session}
+                      handle={only?.handle ?? ""}
+                      typing={session.typingIn(view).length > 0}
+                    >
                       <Avatar
                         seed={only?.fingerprint ?? (only ? undefined : view.key)}
                         // The faces in the room rather than a shape standing for it. Falls back
@@ -578,9 +758,54 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
                     }
                   >
                     <ContextMenu.Item
+                      icon="pin"
+                      onSelect={() => {
+                        const flags = session.flagsIn(view);
+                        void session
+                          .setConversationFlags(view.key, {
+                            ...flags,
+                            pinned: flags.pinned === true ? undefined : true,
+                          })
+                          .catch((error: unknown) => report.error(String(error)));
+                      }}
+                    >
+                      {session.flagsIn(view).pinned === true ? "Unpin" : "Pin to the top"}
+                    </ContextMenu.Item>
+                    <ContextMenu.Item
+                      icon="notifications"
+                      onSelect={() => {
+                        const flags = session.flagsIn(view);
+                        void session
+                          .setConversationFlags(view.key, {
+                            ...flags,
+                            // Eight hours, the shorter of the two the settings panel offers. A
+                            // menu item cannot ask how long, and the answer that lapses soonest is
+                            // the one somebody who was not asked would rather have.
+                            mutedUntil: session.mutedIn(view)
+                              ? undefined
+                              : Date.now() + 8 * 60 * 60 * 1000,
+                          })
+                          .catch((error: unknown) => report.error(String(error)));
+                      }}
+                    >
+                      {session.mutedIn(view) ? "Unmute" : "Mute for 8 hours"}
+                    </ContextMenu.Item>
+                    <ContextMenu.Item
+                      icon="archive"
+                      onSelect={() => {
+                        const flags = session.flagsIn(view);
+                        void session
+                          .setConversationFlags(view.key, { ...flags, archived: true })
+                          .catch((error: unknown) => report.error(String(error)));
+                      }}
+                    >
+                      Hide from the list
+                    </ContextMenu.Item>
+                    <ContextMenu.Separator />
+                    <ContextMenu.Item
                       icon="info"
                       onSelect={() =>
-                        navigate({ kind: "conversation", key: view.key, detail: {} })
+                        openDetail()
                       }
                     >
                       Conversation details
@@ -675,6 +900,41 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
             )}
           </ul>
         </Section>
+
+        {/*
+          The archive, closed by default and hidden entirely when it is empty.
+
+          Empty means nobody has ever archived anything, and a section offering to show nothing is
+          one more heading between the reader and what they came for. It appears the moment there
+          is something in it, which is also the moment its owner has a reason to remember it
+          exists.
+
+          The rows carry no context menu, no unread badge and no presence. What they carry is the
+          way back: the row opens the conversation, and its settings — in the detail column — are
+          where "Hide from the list" is turned off again.
+        */}
+        {shelved.length > 0 && (
+          <Section id="archived" label="Archived" count={shelved.length}>
+            <ul role="list" aria-label="Archived" className="px-snug pb-snug">
+              {shelved.map((view) => (
+                <li key={view.key}>
+                  <button
+                    type="button"
+                    onClick={() => navigate({ kind: "conversation", key: view.key })}
+                    className="flex w-full min-w-0 flex-col items-start gap-px rounded-(--radius-control) px-snug py-snug text-left hover:bg-(--color-surface-raised) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
+                  >
+                    <span className="w-full truncate text-body">
+                      {titleOf(view, names, rendered, session.isGroup(view) ? session.accountId : undefined)}
+                    </span>
+                    <span className="w-full truncate text-caption text-(--color-ink-muted)">
+                      {preview(view, names, session.accountId).text}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
       </div>
 
       {/*
@@ -686,134 +946,23 @@ export function Rail({ onLock, onForget }: { onLock: () => void; onForget: () =>
         visible effect: the theme, and locking the device now. Everything else is a screen, and
         goes to one.
       */}
+      {/* The one thing this column is *for* doing, at the edge nearest the thumb.
+
+          It was an 18px icon in the top bar, beside a filter and under a wordmark — where a
+          new-conversation control ends up when nobody has decided how often it is used. It is
+          the only action here that creates something; everything else navigates.
+
+          `touch:min-h-11` for the same reason the rows carry it: a target reached by thumb
+          needs height a pointer does not. */}
       <div className="safe-bottom border-t border-(--color-border-subtle) p-snug">
-        <Menu
-          align="start"
-          side="top"
-          trigger={
-            <button
-              type="button"
-              className="flex w-full items-center gap-snug rounded-control p-snug text-left hover:bg-(--color-surface-sunken) focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent) touch:min-h-11"
-            >
-              <PresenceBadge session={session} handle={session.accountId}>
-                <Avatar
-                  seed={session.accountFingerprint()}
-                  label={self.primary}
-                  size="md"
-                  className="shrink-0"
-                />
-              </PresenceBadge>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-body font-medium">{self.primary}</span>
-                {/*
-                  A named account gets three lines here rather than two, and the device
-                  identifier keeps the last of them. It is not a decoration: it is what somebody
-                  compares character by character while pairing, and dropping it to make room for
-                  a name would trade evidence for a label the user typed themselves.
-                */}
-                {self.secondary !== null && (
-                  <span className="block truncate text-caption text-(--color-ink-muted)">
-                    {self.secondary}
-                  </span>
-                )}
-                <span className="block truncate font-evidence text-caption text-(--color-ink-muted)">
-                  {session.deviceId.slice(session.accountId.length + 1)}
-                </span>
-              </span>
-              <Icon name="settings" className="shrink-0 text-(--color-ink-muted)" />
-            </button>
-          }
+        <Button
+          variant="secondary"
+          onClick={() => navigate({ kind: "new" })}
+          className="w-full justify-center gap-snug touch:min-h-11"
         >
-          {/* One line, but a wide one, so both strings fit side by side and the anchor is not
-              lost the moment the menu is the only thing on screen. */}
-          <Menu.Label>
-            {self.primary}
-            {self.secondary !== null && <span className="ml-tight">{self.secondary}</span>}
-          </Menu.Label>
-
-          <Menu.Sub label="Theme" icon="theme">
-            <Menu.Item onSelect={() => setTheme("system")}>
-              System{theme === "system" ? " ✓" : ""}
-            </Menu.Item>
-            <Menu.Item onSelect={() => setTheme("light")}>
-              Light{theme === "light" ? " ✓" : ""}
-            </Menu.Item>
-            <Menu.Item onSelect={() => setTheme("dark")}>
-              Dark{theme === "dark" ? " ✓" : ""}
-            </Menu.Item>
-          </Menu.Sub>
-
-          {/* The one lock action that happens on the spot. Configuring the lock is a screen with
-              a password field in it, and a password field does not belong in a dropdown. */}
-          <Menu.Item icon="lock" disabled={!session.locked} onSelect={onLock}>
-            Lock now
-          </Menu.Item>
-
-          <Menu.Separator />
-
-          <Menu.Item
-            icon="devices"
-            onSelect={() => navigate({ kind: "settings", section: "devices" })}
-          >
-            Your devices
-          </Menu.Item>
-          <Menu.Item
-            icon="pair"
-            onSelect={() => navigate({ kind: "settings", section: "pairing" })}
-          >
-            Add a device
-          </Menu.Item>
-          <Menu.Item
-            icon="lock"
-            onSelect={() => navigate({ kind: "settings", section: "lock" })}
-          >
-            Lock
-          </Menu.Item>
-          <Menu.Item
-            icon="backup"
-            onSelect={() => navigate({ kind: "settings", section: "backup" })}
-          >
-            {/* The off state reads as a deliberate anomaly, not as an invitation. */}
-            {session.archiving ? "History backup" : "Backup disabled"}
-          </Menu.Item>
-          <Menu.Item
-            icon="settings"
-            onSelect={() => navigate({ kind: "settings", section: "receipts" })}
-          >
-            Receipts and indicators
-          </Menu.Item>
-          <Menu.Item
-            icon="notifications"
-            onSelect={() => navigate({ kind: "settings", section: "notifications" })}
-          >
-            Notifications
-          </Menu.Item>
-
-          {/* Where a keyboard shortcut becomes findable. A chord nobody can discover is a chord
-              for whoever wrote it, so the one entry that lists them all sits in the menu people
-              already open — with its own chord drawn beside it, which is how anybody learns that
-              the column on the right of this menu means anything.
-
-              `shortcut` had been a prop of `Menu.Item` since it was written and no call site had
-              ever passed it: the column was rendered by code that ran for nobody. This is its
-              first user.
-
-              `run` and not a local handler: the item and the chord must open the same thing, and
-              two implementations of "open the shortcuts" is how one of them ends up doing less. */}
-          <Menu.Item
-            icon="help"
-            shortcut="help.shortcuts"
-            onSelect={() => run("help.shortcuts")}
-          >
-            Keyboard shortcuts
-          </Menu.Item>
-
-          <Menu.Separator />
-
-          <Menu.Item icon="revoke" tone="danger" onSelect={() => setErasing(true)}>
-            Erase this identity
-          </Menu.Item>
-        </Menu>
+          <Icon name="add" size={18} />
+          New message
+        </Button>
       </div>
 
       {/* Mounted here, outside the context menu that asks for it: a dialog inside a menu is

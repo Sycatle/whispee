@@ -62,6 +62,25 @@ export class AccountKey {
         }
     }
     /**
+     * Symmetric key every device of the account shares, for the state they owe each other.
+     *
+     * Distinct from the vault key on purpose — see `Account::device_sync_key`.
+     * @returns {Uint8Array}
+     */
+    deviceSyncKey() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.accountkey_deviceSyncKey(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Seed to hand to a device being paired. **It is worth the whole account.**
      * @returns {Uint8Array}
      */
@@ -318,6 +337,44 @@ export class Client {
             var v2 = getArrayU8FromWasm0(r0, r1).slice();
             wasm.__wbindgen_export4(r0, r1 * 1, 1);
             return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Symmetric key protecting one call's audio, for the current epoch.
+     *
+     * The media server routes the stream and cannot read it: the audio is encrypted frame by
+     * frame under these bytes before it reaches the transport. Nothing is exchanged to obtain
+     * them — every member derives the same key from the group state MLS already gave them.
+     *
+     * `call_id` separates two calls made in the same epoch. Reusing one call's id for another
+     * would let the audio of the first decrypt inside the second.
+     *
+     * The key changes on every commit, and unlike the ephemeral channel that is not free here:
+     * a call spanning an epoch change has to be handed the new key, or it goes silent.
+     * @param {Uint8Array} group_id
+     * @param {Uint8Array} call_id
+     * @returns {Uint8Array}
+     */
+    callKey(group_id, call_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(group_id, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(call_id, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.client_callKey(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            return v3;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
         }
@@ -629,6 +686,29 @@ export class Client {
         }
     }
     /**
+     * How long this conversation keeps what is said in it, in seconds. `undefined` for a group
+     * created before the extension existed; `0` means the feature is off.
+     * @param {Uint8Array} group_id
+     * @returns {number | undefined}
+     */
+    lifetimeSeconds(group_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(group_id, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.client_lifetimeSeconds(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            return r0 === Number.MAX_SAFE_INTEGER ? undefined : r0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * This device's name, as written into the MLS credential.
      * @returns {string}
      */
@@ -843,6 +923,36 @@ export class Client {
         }
     }
     /**
+     * Sets how long messages live here, in seconds; `0` turns it off. Like every commit,
+     * publish it before `applyPending`.
+     *
+     * Not retroactive for messages members already hold: MLS cannot reach into their storage.
+     * The vault is the half that *is* retroactive, and that is arranged by the caller.
+     * @param {Uint8Array} group_id
+     * @param {number} seconds
+     * @returns {Uint8Array}
+     */
+    setLifetime(group_id, seconds) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(group_id, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.client_setLifetime(retptr, this.__wbg_ptr, ptr0, len0, seconds);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Replaces the group's roles. Like every commit, publish it before `applyPending`.
      *
      * Passing an `admin` different from the current one **hands the group over**: the sender
@@ -1031,6 +1141,54 @@ export class Pairing {
 if (Symbol.dispose) Pairing.prototype[Symbol.dispose] = Pairing.prototype.free;
 
 /**
+ * A recovery secret, stretched into the two keys it produces.
+ *
+ * Held as an opaque handle rather than returned as bytes, so the sealing key never reaches
+ * JavaScript. The page can ask for the lookup value — the one deliberately handed to the
+ * server — and can seal and open through it, and that is the whole surface.
+ *
+ * It is not a `CryptoKey`: WebAssembly linear memory is reachable by the page's own scripts,
+ * which `apps/web/src/lib/cipher.ts` already says of the MLS keys. What this buys is that the
+ * key is not *passed around* as a value, which is what makes it end up in a log.
+ */
+export class RecoveryFactor {
+    static __wrap(ptr) {
+        const obj = Object.create(RecoveryFactor.prototype);
+        obj.__wbg_ptr = ptr;
+        RecoveryFactorFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RecoveryFactorFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_recoveryfactor_free(ptr, 0);
+    }
+    /**
+     * What the server stores and what a recovery request presents: `SHA-256(lookup key)`.
+     * @returns {Uint8Array}
+     */
+    lookupId() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.recoveryfactor_lookupId(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+}
+if (Symbol.dispose) RecoveryFactor.prototype[Symbol.dispose] = RecoveryFactor.prototype.free;
+
+/**
  * Fingerprint of an account we only hold the public key of.
  * @param {Uint8Array} identity_key
  * @returns {string}
@@ -1084,6 +1242,69 @@ export function accountId(identity_key) {
 }
 
 /**
+ * Stretches a recovery password.
+ *
+ * **Argon2id, 256 MiB, four passes — several seconds, and it freezes the calling thread.**
+ * Run it from a Worker, or the interface stops responding for the duration.
+ *
+ * Four times the local lock's memory cost, because the two are paid at different rates: the
+ * lock runs on every unlock, this runs once on a restore. What it is standing in front of is
+ * also different — the lock protects one device's disk, this protects a ciphertext the server
+ * holds and can grind at leisure.
+ * @param {string} handle
+ * @param {string} password
+ * @param {Uint8Array} params
+ * @returns {RecoveryFactor}
+ */
+export function derivePasswordFactor(handle, password, params) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(handle, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(password, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(params, wasm.__wbindgen_export);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.derivePasswordFactor(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return RecoveryFactor.__wrap(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Turns a WebAuthn PRF output into a recovery factor.
+ *
+ * Cheap on purpose: these thirty-two bytes come from the authenticator, not from a human.
+ * Stretching a uniform secret would cost seconds and buy nothing.
+ * @param {Uint8Array} prf_output
+ * @returns {RecoveryFactor}
+ */
+export function derivePrfFactor(prf_output) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(prf_output, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.derivePrfFactor(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return RecoveryFactor.__wrap(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * Derives the local unlock key from a password.
  *
  * Argon2id, 64 MiB, 3 passes. **About one second**: that is the price paid once per unlock,
@@ -1117,6 +1338,36 @@ export function deriveUnlockKey(password, salt) {
         var v3 = getArrayU8FromWasm0(r0, r1).slice();
         wasm.__wbindgen_export4(r0, r1 * 1, 1);
         return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * The KDF parameters this build seals with, encoded for storage.
+ *
+ * Handed to the server verbatim and fed back at recovery. They are covered by the seal's AAD,
+ * so a server that rewrites them produces a decryption failure rather than a weaker
+ * derivation.
+ * @param {string} kind
+ * @returns {Uint8Array}
+ */
+export function escrowParams(kind) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(kind, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.escrowParams(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export4(r0, r1 * 1, 1);
+        return v2;
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
@@ -1160,6 +1411,41 @@ export function gatewayChallenge(device_id, nonce) {
 }
 
 /**
+ * Draws a passphrase from the BIP-39 English word list.
+ *
+ * See `crypto_core::escrow::generate_passphrase` for why this is offered beside a password
+ * field at all. **It is not the recovery phrase and must never be shown as one**: twelve words
+ * from this list *are* an account, six are a password that opens an escrow, and they look
+ * identical on screen.
+ * @param {number} words
+ * @returns {string}
+ */
+export function generatePassphrase(words) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.generatePassphrase(retptr, words);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        var ptr1 = r0;
+        var len1 = r1;
+        if (r3) {
+            ptr1 = 0; len1 = 0;
+            throw takeObject(r2);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export4(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * Leaf hash of a log entry, as the server must have computed it.
  *
  * The client recomputes it from the handle and the key it is served: accepting the hash the
@@ -1181,6 +1467,47 @@ export function logLeaf(handle, identity_key) {
         var v3 = getArrayU8FromWasm0(r0, r1).slice();
         wasm.__wbindgen_export4(r0, r1 * 1, 1);
         return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Opens a sealed escrow and returns the seed.
+ *
+ * A wrong password, a tampered ciphertext and a substituted account all produce the same
+ * error. Distinguishing them would tell the caller which of the three it got wrong, and the
+ * only caller who does not already know is an attacker.
+ * @param {Uint8Array} sealed
+ * @param {RecoveryFactor} factor
+ * @param {string} account
+ * @param {string} kind
+ * @param {Uint8Array} params
+ * @returns {Uint8Array}
+ */
+export function openEscrow(sealed, factor, account, kind, params) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(sealed, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        _assertClass(factor, RecoveryFactor);
+        const ptr1 = passStringToWasm0(account, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(kind, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArray8ToWasm0(params, wasm.__wbindgen_export);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.openEscrow(retptr, ptr0, len0, factor.__wbg_ptr, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v5 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export4(r0, r1 * 1, 1);
+        return v5;
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
@@ -1221,6 +1548,43 @@ export function postMac(posting_key, group_id, nonce, body) {
         const ptr3 = passArray8ToWasm0(body, wasm.__wbindgen_export);
         const len3 = WASM_VECTOR_LEN;
         wasm.postMac(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v5 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export4(r0, r1 * 1, 1);
+        return v5;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Seals the account seed for recovery. **These bytes are worth the whole account.**
+ * @param {Uint8Array} seed
+ * @param {RecoveryFactor} factor
+ * @param {string} account
+ * @param {string} kind
+ * @param {Uint8Array} params
+ * @returns {Uint8Array}
+ */
+export function sealEscrow(seed, factor, account, kind, params) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(seed, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        _assertClass(factor, RecoveryFactor);
+        const ptr1 = passStringToWasm0(account, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(kind, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArray8ToWasm0(params, wasm.__wbindgen_export);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.sealEscrow(retptr, ptr0, len0, factor.__wbg_ptr, ptr1, len1, ptr2, len2, ptr3, len3);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -1638,6 +2002,9 @@ const ClientFinalization = (typeof FinalizationRegistry === 'undefined')
 const PairingFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_pairing_free(ptr, 1));
+const RecoveryFactorFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_recoveryfactor_free(ptr, 1));
 
 function addHeapObject(obj) {
     if (heap_next === heap.length) heap.push(heap.length + 1);
@@ -1646,6 +2013,12 @@ function addHeapObject(obj) {
 
     heap[idx] = obj;
     return idx;
+}
+
+function _assertClass(instance, klass) {
+    if (!(instance instanceof klass)) {
+        throw new Error(`expected instance of ${klass.name}`);
+    }
 }
 
 function dropObject(idx) {

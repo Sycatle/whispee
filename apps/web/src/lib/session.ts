@@ -8,13 +8,15 @@
 import { normalize as normalizeHandle, validate as validateHandle } from "./handle";
 import * as mention from "./mention";
 import { type ResolvedAccount, resolveAccount } from "./account";
-import { Api, ApiError, type PostMac } from "./api";
+import { Api, ApiError, type ContactPolicy, type PostMac, type RecoveryKind } from "./api";
+import { enablePasskeyRecovery, enablePasswordRecovery } from "./escrow";
 import type { MembershipEvent } from "./content";
 import { deviceNameCandidates, detectDeviceKind } from "./device";
 import { type PairingCode, decodePairingCode } from "./pairing";
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
 import * as envelope from "./envelope";
+import { expiryOf, prune } from "./expiry.ts";
 import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
 import * as derive from "./conversation-view.ts";
@@ -26,10 +28,20 @@ import { Archive } from "./session-vault.ts";
 import { Lockbox, type LockKit } from "./session-lock.ts";
 import { LogWitness, type LogChecks } from "./session-log.ts";
 import { composeStored } from "./session-persist.ts";
-import { fromBase64, toHex } from "./keys";
+import {
+  MAX_PREFERENCES_BYTES,
+  type SyncedPreferences,
+  type SyncedSignals,
+  importSyncKey,
+  openSignals,
+  sealSignals,
+} from "./signal-sync.ts";
+import { merge, patchOf } from "./stamped.ts";
+// `fromHex` turns a call id back into the bytes the exporter takes as its context.
+import { fromBase64, fromHex, toHex } from "./keys";
 import { changePassword, createLock, exportMaster, openLock } from "./lock";
 import * as biometrics from "./biometrics";
-import type { SignalSettings } from "./storage";
+import type { SignalSettings, StoredSession } from "./storage";
 import { type Decision, type Steps, type Presence, decide, migrate } from "./migration";
 import {
   type Anchor,
@@ -41,12 +53,16 @@ import {
 } from "./persistence";
 import { isTauri } from "./platform";
 import { pending, record } from "./receipts";
+import { identityFor, liveMedia, type JoinOptions } from "./call";
+import { Calls, RING_TIMEOUT_MS, type CallState } from "./session-call";
 import {
   TYPING_DEBOUNCE_MS,
   fresh,
-  openTyping,
-  sealTyping,
+  openSignal,
+  sealSignal,
+  showing,
   without,
+  type CallEvent as CallSignalEvent,
 } from "./signals";
 import { LockedCipher } from "./cipher";
 import { Gateway } from "./gateway";
@@ -119,9 +135,15 @@ export {
 import { isAccountId } from "./chain";
 import {
   StoredSessionTooOld,
+  archivesToVault,
+  disclosesName,
+  flagsOf,
   freshSignalState,
+  isBlocked,
+  isMuted,
   touch,
   type Preferences,
+  type ConversationFlags,
   type ConversationView,
   type Message,
   type Pending,
@@ -194,8 +216,62 @@ export class Session {
      * make the other side's display incomprehensible. It is a product choice, and one click
      * reverses it.
      */
-    private signals: SignalSettings = { readReceipts: true, typingIndicator: true, presence: true },
+    private signals: SignalSettings = {
+      readReceipts: true,
+      typingIndicator: true,
+      presence: true,
+      calls: true,
+    },
+    /**
+     * When the settings above were last changed, on whichever device changed them.
+     *
+     * `undefined` reads as older than anything, so the first announcement a device hears wins.
+     * That is the right default for an account upgrading from the per-device era: whatever is on
+     * the device that speaks first becomes the account's, and one click changes it.
+     */
+    private signalsAt: number | undefined = undefined,
+    /**
+     * When each of the other preferences was last decided.
+     *
+     * Held here rather than inside `PreferencesStore` because a stamp is not a preference: it is
+     * the record of *when* one was chosen, it never appears on a screen, and it has to cover
+     * `petnames` too, which live in `Names` and not in the store at all. One place for the
+     * arbitration, whatever the value it arbitrates.
+     */
+    private prefStamps: NonNullable<StoredSession["prefStamps"]> = {},
   ) {}
+
+  /**
+   * Conversations whose archive is owed a deletion that has not gone through yet.
+   *
+   * # Why a retry queue and not a single call
+   *
+   * Because the call that erases the archive is the half MLS cannot do, and it is the half that
+   * can fail. `setLifetime` publishes a commit and then deletes; a network error between the two
+   * leaves the room forgetting on every screen while a readable copy of its past sits on a server.
+   * The commit cannot be taken back — it is already everybody's epoch — so the only honest
+   * response is to keep owing the deletion and try again.
+   *
+   * The same queue serves the receiving side, which had no deletion at all: `setLifetime` deletes
+   * the **committer's** archive, correctly, since the other members' copies are theirs. But
+   * nothing on a peer's client reacted to the commit, so every other member kept archiving a
+   * conversation that had just been told to forget. `pollOnce` now notices the transition and
+   * enqueues its own deletion, which is the member's own archive being erased by that member.
+   *
+   * In memory, so a session that ends before the retry succeeds forgets that it owed one. What
+   * that leaves is a stale archive on the server — no longer restorable into a thread, because
+   * `Archive.restore` refuses a conversation with a lifetime — and it is written in the roadmap
+   * rather than closed here: closing it means persisting the debt, which is a schema change.
+   */
+  private readonly archiveDropsOwed = new Set<string>();
+
+  /**
+   * The key our own devices share, imported once.
+   *
+   * Derived on demand, like the vault key, and cached because every epoch of every conversation
+   * asks for it. `null` until first use; the derivation cannot fail for an account that exists.
+   */
+  private syncKey: CryptoKey | null = null;
 
   /**
    * May a notification name the conversation?
@@ -211,7 +287,7 @@ export class Session {
   /** Records the choice, so a reload does not quietly return to the quiet default. */
   async setDiscloseConversationName(value: boolean): Promise<void> {
     this.settings.setDisclose(value);
-    await this.persist();
+    await this.stampScalars();
   }
 
   /**
@@ -241,6 +317,53 @@ export class Session {
   }
 
   /**
+   * Sets the flags of one conversation, and tells our other devices.
+   *
+   * **Not `updatePreferences`**, and the difference is not stylistic. `conversations` and
+   * `blocked` are the two preferences that travel, and what makes them travel is a stamp taken at
+   * the moment of the decision — see `stamped.ts` for why one stamp over a whole map loses edits.
+   * A mutation that went through the generic path would be written to this disk and to no other,
+   * which is the defect this whole change exists to remove.
+   *
+   * Passing an empty object clears the entry rather than storing an empty record, so that "no
+   * flags" has one representation, as `setPetname` does for the absence of a name.
+   */
+  async setConversationFlags(groupId: string, flags: ConversationFlags): Promise<void> {
+    const empty = Object.values(flags).every((value) => value === undefined);
+
+    this.settings.update((preferences) => {
+      if (empty) delete preferences.conversations[groupId];
+      else preferences.conversations[groupId] = flags;
+    });
+    this.stamp("flags", groupId, Date.now());
+
+    await this.persist();
+    await this.announceSignalsEverywhere();
+  }
+
+  /**
+   * Blocks or unblocks an account, and tells our other devices.
+   *
+   * The unblock is the direction worth stating: it is recorded as a decision and not merely as an
+   * absence, because an absence loses to any earlier decision that was written down, and the
+   * device that still holds the block would put it back at the next announcement.
+   *
+   * What this still does not do is prevent anything. `storage.ts` says it plainly — a local block
+   * declines to display something that exists and is delivered — and no amount of synchronising
+   * changes that. It now declines on every device instead of one.
+   */
+  async setBlocked(account: string, blocked: boolean): Promise<void> {
+    this.settings.update((preferences) => {
+      const rest = preferences.blocked.filter((known) => known !== account);
+      preferences.blocked = blocked ? [...rest, account] : rest;
+    });
+    this.stamp("blocked", account, Date.now());
+
+    await this.persist();
+    await this.announceSignalsEverywhere();
+  }
+
+  /**
    * What is typed and not yet sent, per conversation.
    *
    * Switching conversation used to lose it: the text lived in the composer's own state, which is
@@ -264,6 +387,171 @@ export class Session {
 
   /** Real-time session, when it is open. Its failure removes no feature. */
   private gateway?: Gateway;
+
+  /**
+   * Repaints the interface after something changed on its own.
+   *
+   * `Session` mutates in place and does not notify React — every other path bumps the revision
+   * counter from the call site that started the work. A call has no such call site: it changes
+   * when a participant joins, when a timer fires, when a connection drops. So the callback
+   * `startStream` is already given is kept, which is the same one for the same reason.
+   */
+  private repaint: () => void = () => {};
+
+  /** Built on first use: a session that never places a call never constructs one. */
+  private callSlice?: Calls;
+
+  /**
+   * The call this device is in, if any.
+   *
+   * Receives ports and no `Session` — the rule `docs/ARCHITECTURE.md` sets for a slice. What it
+   * does *not* do is contribute to the stored session: a call restored from disk is a call that
+   * ended while the page was closed. See `session-call.ts`.
+   */
+  private get calls(): Calls {
+    return (this.callSlice ??= new Calls({
+      media: liveMedia(),
+      now: () => Date.now(),
+      signal: (group, event, call) => {
+        void this.emitCallSignal(group, event, call).catch(() => {});
+      },
+      announce: async (group, event, call, seconds) => {
+        const view = this.conversations.get(group);
+        if (view) await this.sendContent(view, { kind: "call", event, call, seconds });
+      },
+      admit: (group, call) => this.admitToCall(group, call),
+      changed: () => this.repaint(),
+    }));
+  }
+
+  /** What the interface reads to draw a call. */
+  callState(): CallState {
+    return this.calls.current();
+  }
+
+  /**
+   * Whether this account takes calls.
+   *
+   * Absent means enabled — the flag only ever records a refusal, as for presence and for the same
+   * reason it matters here: a device that predates calls announces nothing for it.
+   */
+  callsAllowed(): boolean {
+    return this.signals.calls !== false;
+  }
+
+  /** Places a call in this conversation. */
+  placeCall(view: ConversationView): Promise<void> {
+    // The reciprocity, at the emitting end. An account that places calls while refusing to
+    // receive them asks of others exactly what it declines to give — the same trade the read
+    // receipt and the typing indicator have refused since they were written.
+    if (!this.callsAllowed()) return Promise.resolve();
+
+    // `accounts` is the people on the other side, us excluded — see `membersOf`. It is exactly
+    // the number of refusals it takes before there is nobody left to wait for, and the slice
+    // cannot work it out on its own: it holds a group id and nothing that knows what a group is.
+    return this.calls.place(view.key, this.accountId, view.accounts.length);
+  }
+
+  /** Answers a ringing call. */
+  acceptCall(): Promise<void> {
+    return this.calls.accept();
+  }
+
+  /** Refuses a ringing call, or hangs up on one in progress. */
+  hangCall(): Promise<void> {
+    return this.calls.hang();
+  }
+
+  /** Silences or restores the microphone. */
+  muteCall(muted: boolean): Promise<void> {
+    return this.calls.mute(muted);
+  }
+
+  /**
+   * The periodic tick: heartbeats, the two timeouts, and the key.
+   *
+   * # Why the key is re-derived here rather than at each commit
+   *
+   * Because there are several places a commit lands — sending one, applying somebody else's,
+   * being added, removing a member — and the one that gets forgotten is the one that leaves a
+   * removed member listening. Re-deriving from the current epoch and comparing costs one secret
+   * export every few seconds of a call, and cannot be forgotten anywhere.
+   *
+   * The comparison is what makes it cheap in the other direction: the media layer is only
+   * disturbed when the epoch actually moved.
+   */
+  tickCall(): void {
+    const state = this.callSlice?.current();
+    if (state && state.phase !== "idle") {
+      const view = this.conversations.get(state.group);
+      if (view) {
+        const key = this.client.callKey(view.groupId, fromHex(state.call));
+        if (!this.callKeyInUse || toHex(key) !== toHex(this.callKeyInUse)) {
+          this.callKeyInUse = key;
+          void this.calls.rekey(key).catch(() => {});
+        }
+      }
+    }
+
+    this.callSlice?.tick();
+  }
+
+  /** The key the live call was last handed, so a tick only disturbs it when the epoch moved. */
+  private callKeyInUse: Uint8Array | undefined;
+
+  /**
+   * Emits a call frame on the ephemeral channel.
+   *
+   * Nothing is stored, by us or by the server, which is the whole reason this traffic is not in
+   * the thread: a call emits one of these every few seconds, and the durable channel keeps what
+   * it carries for thirty days at minimum.
+   */
+  private async emitCallSignal(group: string, event: CallSignalEvent, call: string): Promise<void> {
+    const view = this.conversations.get(group);
+    if (!view) return;
+
+    const posting = this.signalPosting(view);
+    // Same abstention as the typing indicator: without a posting key we would have to sign, and
+    // the server would learn who is calling, in real time.
+    if (!posting) return;
+
+    const payload = await sealSignal(this.client.signalKey(view.groupId), {
+      kind: "call",
+      event,
+      call,
+      account: this.accountId,
+      device: this.deviceId,
+    });
+
+    await this.emitSignal(view.groupId, payload, posting);
+  }
+
+  /**
+   * Asks the server for admission, and derives the frame key.
+   *
+   * The key never leaves this device and is never sent to anybody: every member computes the
+   * same bytes from the MLS epoch. The identity is derived from it too — see `identityFor` in
+   * `call.ts` for why it is neither the device id nor a random string.
+   */
+  private async admitToCall(group: string, call: string): Promise<{ join: JoinOptions }> {
+    const view = this.conversations.get(group);
+    if (!view) throw new Error("that conversation is gone.");
+
+    const posting = this.signalPosting(view);
+    // A group with no posting key would have to be called for under a signature, telling the
+    // server who is calling whom in real time. That is the one thing this route is arranged not
+    // to do, so we refuse the call instead of quietly downgrading it.
+    if (!posting) throw new Error("this conversation cannot place a call.");
+
+    const key = this.client.callKey(view.groupId, fromHex(call));
+    const identity = await identityFor(key, this.deviceId);
+    const admission = await this.api.callAdmission(view.groupId, call, identity, posting);
+    if (!admission) throw new Error("this server does not carry calls.");
+
+    return {
+      join: { admission, key, onPeers: () => {}, onClosed: () => {} },
+    };
+  }
 
   /**
    * Last accepted log head.
@@ -389,6 +677,40 @@ export class Session {
     // answer needs no trust, because a wrong id makes the registration below fail: the server
     // verifies our attestation against that account's key, which we would not hold.
     return Session.attach(crypto, account, await Api.resolveHandle(handle), handle);
+  }
+
+  /**
+   * Attaches this device to an account whose seed came out of a recovery escrow.
+   *
+   * # Why nothing is verified here, and why that is not an omission
+   *
+   * The other two paths take the account id from the directory and let the registration below
+   * be the check: a wrong id means the server verifies our attestation against a key we do not
+   * hold, and refuses. This path does not need even that. The account id is **inside the AAD of
+   * the seal** (`crates/crypto-core/src/escrow.rs`), so a server that served one account's
+   * ciphertext under another's name produced a decryption failure before this function was
+   * reached. Getting here at all means the id and the seed were sealed together by somebody
+   * holding both.
+   *
+   * The handle is the one value here the server is free to be wrong about, and it is the one
+   * that matters least — it is an alias, checked against nothing, and
+   * `docs/specs/2026-08-21-account-identity.md` already says the displayed handle is never to be
+   * trusted from a directory read.
+   *
+   * # What this does not restore
+   *
+   * The conversations. Exactly as with {@link restoreFromPhrase}: they are MLS groups this
+   * device is not a member of, and only a device already in them can add it. What recovery
+   * genuinely gives back is the account — the ability to be attested, to attest, to rotate — and
+   * the history vault, whose key derives from the seed that just came back.
+   */
+  static async restoreFromEscrow(
+    accountId: string,
+    handle: string,
+    seed: Uint8Array,
+  ): Promise<Session> {
+    const crypto = await loadCrypto();
+    return Session.attach(crypto, crypto.AccountKey.fromSeed(seed), accountId, handle);
   }
 
   /** Registers a device under an account whose key we already hold. */
@@ -681,7 +1003,9 @@ export class Session {
       conversations,
       TrustStore.hydrate(stored),
       // A missing `presence` means enabled: that is the default, the flag only records a refusal.
-      { readReceipts: true, typingIndicator: true, ...stored.signals },
+      { readReceipts: true, typingIndicator: true, calls: true, ...stored.signals },
+      stored.signalsAt,
+      stored.prefStamps ?? {},
     );
 
     // Assigned after construction rather than passed in: the other entry points build a session
@@ -693,6 +1017,34 @@ export class Session {
     // `@handle`, and an empty string present on the field would be a third state nobody handles.
 
     session.witness = LogWitness.hydrate(stored);
+
+    // A cache written before deadlines were stored comes back without them, and the envelopes are
+    // behind `view.cursor`, so nothing would ever stamp those messages again — they would sit in
+    // an ephemeral conversation forever. Stamped here instead, from `sentAt` and the lifetime in
+    // force: the clamp is a no-op on a message already in the past, so the answer is the one the
+    // original stamp would have produced, minus the moment this device first saw it.
+    for (const view of session.conversations.values()) {
+      const lifetime = session.lifetimeSeconds(view);
+      if (lifetime === 0) continue;
+
+      for (const message of view.messages) {
+        if (message.expiresAt !== undefined) continue;
+        const expiresAt = expiryOf(message.sentAt, Date.now(), lifetime);
+        if (expiresAt !== undefined) message.expiresAt = expiresAt;
+      }
+
+      // And the ones already past their deadline never reach the screen.
+      //
+      // Stamping alone left them in the cache: the first `pollOnce` swept them thirty seconds
+      // later, so a device closed for a week reopened onto its whole expired history and then
+      // watched it empty. `absorb` refuses an arriving message that is already dead for exactly
+      // this reason, and the cache is the same thing arriving from disk instead of the network.
+      //
+      // No cursor moves here, which is the difference from `absorb`. There the cursor has to
+      // advance or the receipts stall behind an expired run; here the messages were absorbed in
+      // an earlier session and every cursor is already past them.
+      view.messages = prune(view.messages, Date.now());
+    }
 
     return session;
   }
@@ -738,6 +1090,17 @@ export class Session {
   }
 
   /**
+   * Has this account run out of room on the server?
+   *
+   * Set when an archive comes back refused for want of space, cleared by the next one that gets
+   * through. It is read by the backup screen, which has to say it: a ceiling that fails silently
+   * leaves somebody believing their history is being kept when it stopped being.
+   */
+  get vaultFull(): boolean {
+    return this.archive.full;
+  }
+
+  /**
    * Turns the vault back on after an explicit shutdown.
    *
    * Messages **already exchanged** will not be archived: their MLS keys are destroyed, and
@@ -747,7 +1110,7 @@ export class Session {
    */
   async enableVault(): Promise<void> {
     await this.archive.enable(this.account.vaultKey());
-    await this.persist();
+    await this.stampScalars();
   }
 
   /**
@@ -759,7 +1122,67 @@ export class Session {
    */
   async disableVault(): Promise<void> {
     this.archive.disable();
-    await this.persist();
+    await this.stampScalars();
+  }
+
+  /**
+   * Which recovery factors this account has. Never the ciphertexts.
+   *
+   * A fetch rather than a field: this device is not the only one that can add or remove a
+   * factor, so a cached answer would let a settings screen report a password that another
+   * device turned off half an hour ago.
+   */
+  listRecovery(): Promise<{ kind: RecoveryKind; created_at: number }[]> {
+    return this.api.listRecovery();
+  }
+
+  /**
+   * Seals the account seed under a password and hands the ciphertext to the server.
+   *
+   * # What the caller is agreeing to on the user's behalf
+   *
+   * Until this runs, the server has never held the account seed in any form. Afterwards it holds
+   * it encrypted, which means anybody who obtains the database can attack the password offline,
+   * for as long as they like, and win the account **and** the whole history vault. `escrow.ts`
+   * states it at length; the screen calling this has to state it too, before the field.
+   *
+   * **Blocks the calling thread** — Argon2id at 256 MiB, measured at 1.1 s in this WebAssembly
+   * build on a desktop and several times that on a phone. That cost is the only thing standing
+   * between a stolen database and this account, so it is not negotiable, and the interface owes
+   * the user a sentence rather than a spinner.
+   *
+   * The handle is the derivation's salt, which is why {@link renameHandle} throws the factor
+   * away: a renamed account's password stops matching its own escrow.
+   */
+  async enablePasswordRecovery(password: string): Promise<void> {
+    await enablePasswordRecovery(
+      this.api,
+      this.accountId,
+      this.handle,
+      password,
+      this.account.exportSeed(),
+    );
+  }
+
+  /**
+   * Creates a passkey and seals the account seed under the secret it yields.
+   *
+   * Returns `false` when the authenticator will not do the PRF extension — an ordinary answer on
+   * plenty of machines, and the caller's move is to offer the password instead of reporting a
+   * failure.
+   *
+   * Unlike the password factor this one costs nothing in guessability: the key is 32 uniform
+   * bytes from the authenticator, so the offline attack above does not apply to it. What it
+   * costs instead is written in `passkey.ts` — it is bound to this origin, and it dies with the
+   * authenticator if that authenticator does not sync.
+   */
+  enablePasskeyRecovery(): Promise<boolean> {
+    return enablePasskeyRecovery(this.api, this.accountId, this.handle, this.account.exportSeed());
+  }
+
+  /** Removes a recovery factor. Removing one that is not there is a success. */
+  async forgetRecovery(kind: RecoveryKind): Promise<void> {
+    await this.api.forgetRecovery(kind);
   }
 
   /**
@@ -769,7 +1192,9 @@ export class Session {
    * message by message, which has no business delaying the display.
    */
   async restoreHistory(view: ConversationView): Promise<number> {
-    const added = await this.archive.restore(this.api, view.groupId, view.messages);
+    const added = await this.archive.restore(this.api, view.groupId, view.messages, {
+      lifetimeSeconds: this.lifetimeSeconds(view),
+    });
 
     view.messages.push(...added);
     touch(view);
@@ -939,6 +1364,8 @@ export class Session {
         vault: this.archive.snapshot(),
         trust: this.trust.snapshot(),
         signals: this.signals,
+        signalsAt: this.signalsAt,
+        prefStamps: this.prefStamps,
         preferences: this.settings.snapshot(),
         names: this.names.snapshot(),
         log: this.witness.snapshot(),
@@ -975,6 +1402,30 @@ export class Session {
    */
   async resolve(account: string): Promise<ResolvedAccount> {
     const resolved = await resolveAccount(this.api, this.crypto, account);
+
+    // Our own account is where presence is settled, and the only one this field is served for.
+    //
+    // It is the one signalling setting the sealed announcement cannot carry on its own: a device
+    // restored from the recovery phrase has no conversation yet, hence no channel, and would draw
+    // the switch in its default position for an account the server already stopped recording. The
+    // other two need no such repair — with no conversation there is nobody to emit them to.
+    // The contact policy is the server's decision, so the server's answer wins outright — there
+    // is no merge to do and no local value worth defending. It is cached only so a screen can draw
+    // the current setting without a round trip.
+    if (account === this.accountId && resolved.contactPolicy !== undefined) {
+      if (this.settings.value.contactPolicy !== resolved.contactPolicy) {
+        this.settings.update((preferences) => (preferences.contactPolicy = resolved.contactPolicy));
+        await this.persist();
+      }
+    }
+
+    if (account === this.accountId && resolved.presenceOptout !== undefined) {
+      const presence = !resolved.presenceOptout;
+      if (this.signals.presence !== presence) {
+        this.signals = { ...this.signals, presence };
+        await this.persist();
+      }
+    }
 
     // Attestations prove a device belongs to the account. They say nothing about the ACCOUNT
     // key, which we are discovering here for the first time — that is the hole the log closes.
@@ -1301,6 +1752,78 @@ export class Session {
    */
   roles(view: ConversationView): Roles | null {
     return (this.client.roster(view.groupId) as Roles | undefined) ?? null;
+  }
+
+  /**
+   * How long this conversation keeps what is said in it, in seconds; `0` when nothing expires.
+   *
+   * Read from the MLS group context on every call rather than cached on the view: it is
+   * authenticated state, it changes by commit, and a copy kept beside the view would be the copy
+   * that goes stale on the device that was offline when the room's memory changed.
+   *
+   * A group created before the extension existed reports nothing, and nothing means off — the
+   * same answer as `0`, which is what keeps every existing conversation readable.
+   */
+  lifetimeSeconds(view: ConversationView): number {
+    return (this.client.lifetimeSeconds(view.groupId) as number | undefined) ?? 0;
+  }
+
+  /**
+   * Whether this conversation can be given a lifetime at all.
+   *
+   * A group created before the extension existed cannot: its members' leaf nodes were built
+   * without `0xF101` in their capabilities, and MLS refuses a commit that requires an extension
+   * a member does not declare. The commit would fail with a raw protocol error, so the screen
+   * asks first and says why instead.
+   *
+   * The absence of the extension is the exact test: a group that has one — even set to `0` —
+   * went through a client that installed it, so every member already declares it.
+   */
+  carriesLifetime(view: ConversationView): boolean {
+    return (this.client.lifetimeSeconds(view.groupId) as number | undefined) !== undefined;
+  }
+
+  /**
+   * Sets how long messages live here, announces it, and drops this account's archive of the
+   * conversation when it is turned on.
+   *
+   * The deletion is the half MLS cannot do: the commit reaches every member's group context, and
+   * nothing in the protocol reaches a copy already deposited on a server. Turning a lifetime on
+   * while leaving that copy in place would be a claim rather than a mechanism — so the vault is
+   * dropped here, in the same call, and it is this account's own archive that goes: the other
+   * members' copies are theirs and are not ours to destroy.
+   *
+   * Not retroactive for messages members already hold. That is stated on `expiry.ts` and it is
+   * the honest half: what is on somebody's screen stays there.
+   */
+  async setLifetime(view: ConversationView, seconds: number): Promise<void> {
+    const commit = this.client.setLifetime(view.groupId, seconds);
+    await this.publishAndApply(view, commit);
+
+    // Persisted here, before anything else can fail. `publishAndApply` has already moved the MLS
+    // epoch and published the commit; a throw from the vault drop below would otherwise leave that
+    // epoch only in memory, and the next reload would restore a state behind an envelope stream
+    // that has moved on — the severed ratchet `ConversationView.stale` describes, from a failed
+    // deletion. The order is the one `pollOnce` states: the cryptographic state reaches the disk
+    // before any further network call.
+    this.refreshView(view);
+    await this.persist();
+
+    if (seconds > 0) {
+      // Failing here does not undo the commit — the room's memory has already changed for
+      // everybody, and it is now on disk. A vault that outlives it is a defect to report rather
+      // than a reason to pretend the lifetime was never set, so the throw reaches the caller and
+      // the screen says so.
+      //
+      // It is also owed from this point on: `dropArchive` records the debt before the call, so a
+      // failure here is retried by the next poll instead of being lost with the exception. That
+      // matters more than it looks — the deletion shares nothing with the commit, and the window
+      // where one has happened and the other has not is exactly the window this feature must not
+      // leave open.
+      await this.dropArchive(view);
+    }
+
+    await this.sendContent(view, { kind: "expiry", seconds });
   }
 
   /**
@@ -1636,6 +2159,12 @@ export class Session {
    * **all the already archived history becomes permanently unreadable**. While the vault was
    * optional, whoever rotated their key knew they had one; that is no longer true, and the
    * interface has to say so before offering the button.
+   *
+   * A fourth, since recovery escrows exist: **the server destroys them as part of the rotation**
+   * (`rotate_account` in `crates/server/src/routes.rs`), because they hold the seed that has just
+   * been abandoned — a ciphertext still openable by whoever knew the old password, of a key the
+   * rotation existed to get away from. Neither this device nor the server can re-seal one: that
+   * needs the user's password, and the settings screen has to ask for it again.
    *
    * Returns the new recovery phrase. The old one is worthless.
    */
@@ -2016,12 +2545,10 @@ export class Session {
     return derive.deliveryStatus(view, seq, this.accountId, this.signals.readReceipts);
   }
 
-  /** Peers currently typing, expired ones excluded. */
+  /** Peers currently typing, expired ones excluded — and nobody at all when we do not emit. */
   typingIn(view: ConversationView): string[] {
     view.typing = fresh(view.typing, Date.now());
-    return [...new Set(view.typing.map((entry) => entry.handle))].filter(
-      (handle) => handle !== this.handle,
-    );
+    return showing(view.typing, this.accountId, this.signals.typingIndicator);
   }
 
   /**
@@ -2055,7 +2582,7 @@ export class Session {
     view.typingSentAt = now;
 
     const key = this.client.signalKey(view.groupId);
-    const payload = await sealTyping(key, this.accountId);
+    const payload = await sealSignal(key, { kind: "typing", account: this.accountId });
     await this.emitSignal(view.groupId, payload, posting);
   }
 
@@ -2069,11 +2596,33 @@ export class Session {
     const view = this.conversations.get(toHex(groupId));
     if (!view) return;
 
-    const handle = await openTyping(this.client.signalKey(view.groupId), payload);
-    if (handle === undefined || handle === this.accountId) return;
+    const signal = await openSignal(this.client.signalKey(view.groupId), payload);
+    if (signal === undefined) return;
+
+    if (signal.kind === "call") {
+      this.calls.absorb(
+        signal.event,
+        signal.call,
+        signal.device,
+        this.deviceId,
+        signal.account,
+      );
+      return;
+    }
+
+    // The setting cuts reception as well as emission, and it cuts it here rather than only at
+    // display: an indicator nobody will ever be shown has no business being recorded, and the
+    // shortest path to never showing it is never keeping it. `signals.showing` refuses it a
+    // second time, deliberately — the reciprocity has to hold even if one of the two is
+    // forgotten, which is the arrangement `acknowledge` and `statusOf` already use for receipts.
+    if (!this.signals.typingIndicator) return;
+    if (signal.account === this.accountId) return;
 
     const now = Date.now();
-    view.typing = [...without(fresh(view.typing, now), handle), { handle, at: now }];
+    view.typing = [
+      ...without(fresh(view.typing, now), signal.account),
+      { account: signal.account, at: now },
+    ];
   }
 
   /**
@@ -2141,6 +2690,84 @@ export class Session {
     if (this.settings.noteEmoji(emoji)) await this.persist();
   }
 
+  /**
+   * The flags of one conversation, as they apply right now.
+   *
+   * Read through here rather than off `preferences.conversations` so that "no entry" and "an
+   * entry with nothing set" are the same answer at every call site — `flagsOf` collapses them,
+   * and a caller that indexed the record directly would have to remember to.
+   */
+  flagsIn(view: ConversationView): ConversationFlags {
+    return flagsOf(this.settings.value, view.key);
+  }
+
+  /**
+   * Is this conversation silenced right now?
+   *
+   * The stored value is the moment silence ends, not a boolean, which is what lets "mute for an
+   * hour" exist without anything having to run a timer and come back. The comparison happens at
+   * the moment a notification would fire, so a mute simply stops applying, with nothing to
+   * schedule and nothing to clean up if the device is asleep when it lapses.
+   */
+  mutedIn(view: ConversationView, now = Date.now()): boolean {
+    return isMuted(this.flagsIn(view), now);
+  }
+
+  /**
+   * May a notification name *this* conversation?
+   *
+   * Three states, and the middle one is the point: an absent per-conversation flag means "follow
+   * the account setting", which is not the same as `false`. Turning the account-wide setting on
+   * must not silently reveal the name of the one conversation somebody had marked as the one to
+   * stay quiet about — and turning it off must not leave a per-conversation `true` shouting.
+   */
+  disclosesNameIn(view: ConversationView): boolean {
+    return disclosesName(this.flagsIn(view), this.settings.discloseConversationName);
+  }
+
+  /**
+   * Have we declined to read this account?
+   *
+   * Blocking hides and does not prevent — see `isBlocked`. What it does today is decide that an
+   * arrival from this account does not interrupt anybody; hiding it on screen is the other half,
+   * and it lives where the screens are.
+   */
+  isBlocked(account: string): boolean {
+    return isBlocked(this.settings.value, account);
+  }
+
+  /** The accounts declined, for a screen that lists them so they can be undone. */
+  get blocked(): readonly string[] {
+    return this.settings.value.blocked;
+  }
+
+  /**
+   * Who may start a conversation with this account, as far as this device has been told.
+   *
+   * `open` until the server has been asked, which is the column's own default. A device restored
+   * from the recovery phrase reads it back on its first resolve — the setting is not carried by
+   * the sealed message the other preferences travel in, because it is not ours to carry: the
+   * server holds it and the server enforces it, and a copy that disagreed would just be a screen
+   * drawing the wrong word next to a door already held shut.
+   */
+  get contactPolicy(): ContactPolicy {
+    return this.settings.value.contactPolicy ?? "open";
+  }
+
+  /**
+   * Changes who may start a conversation with this account.
+   *
+   * The server first, then the local cache — and only if the server agreed. The opposite order
+   * would leave a screen showing a door somebody believes is shut and the server is holding open,
+   * which is the one direction this setting must never fail in.
+   */
+  async setContactPolicy(policy: ContactPolicy): Promise<void> {
+    await this.api.setContactPolicy(policy);
+
+    this.settings.update((preferences) => (preferences.contactPolicy = policy));
+    await this.persist();
+  }
+
   /** Signalling settings, as they apply right now. */
   signalSettings(): SignalSettings {
     return { ...this.signals };
@@ -2167,7 +2794,245 @@ export class Session {
     }
 
     this.signals[key] = value;
+    this.signalsAt = Date.now();
     await this.persist();
+
+    // Told to our other devices immediately, rather than waiting for the next epoch of each
+    // conversation. An epoch can sit still for days in a quiet room, and a setting that takes
+    // days to reach the phone in your pocket is one the phone spends those days contradicting.
+    await this.announceSignalsEverywhere();
+  }
+
+  /**
+   * Tells our own devices the settings, in every conversation.
+   *
+   * # Why every conversation and not one
+   *
+   * There is no group that holds an account's devices and nothing else. They meet inside the
+   * conversations they share with other people — see `propagateOwnDevices` and the parity
+   * invariant it states — so "everywhere" is the only address available. A device that is in one
+   * conversation and not another does not exist; that is what parity means.
+   *
+   * # Why failure is swallowed
+   *
+   * The setting has already been applied and persisted locally when this runs. A conversation
+   * whose send fails is one whose other devices learn at the next epoch instead, which is the
+   * path they were on before this method existed. Letting the rejection through would report a
+   * network error for a switch that did move, on the device that moved it.
+   */
+  private async announceSignalsEverywhere(): Promise<void> {
+    for (const view of this.conversations.values()) {
+      try {
+        await this.emitSignals(view);
+      } catch (error) {
+        console.warn("settings announcement deferred", error);
+      }
+    }
+  }
+
+  /**
+   * Posts the settings to one conversation, sealed for our own devices.
+   *
+   * Silent in a room we are alone in: `peers` is every member of the tree except this device, so
+   * an empty one means there is no other device of ours to tell and no peer to carry the message
+   * for us. It costs an envelope and reaches nobody.
+   */
+  private async emitSignals(view: ConversationView): Promise<void> {
+    if (view.peers.length === 0) return;
+
+    const signals: SyncedSignals = {
+      readReceipts: this.signals.readReceipts,
+      typingIndicator: this.signals.typingIndicator,
+      // Absent means enabled, here as everywhere else: the flag only ever records a refusal.
+      presence: this.signals.presence !== false,
+      calls: this.signals.calls !== false,
+      at: this.signalsAt ?? Date.now(),
+    };
+
+    const sealed = await sealSignals(await this.deviceSyncKey(), signals, this.syncedPreferences());
+    await this.sendContent(view, { kind: "signals", sealed });
+  }
+
+  /**
+   * The whole preference set, in the shape it travels.
+   *
+   * A full snapshot every time rather than a delta. A delta needs the receiver to have heard every
+   * earlier one, which a device that was off for a week has not; a snapshot catches it up in a
+   * single message and costs a few hundred bytes to do it.
+   *
+   * `undefined` when the snapshot would exceed what the format allows. That is not silent — the
+   * caller reports it — and it degrades to sending the signalling settings alone, which is what
+   * this message carried before the preferences joined it. Truncating instead would read as a
+   * decision to clear whatever fell off the end.
+   */
+  private syncedPreferences(): SyncedPreferences | undefined {
+    const preferences: SyncedPreferences = {
+      scalars: {
+        at: this.prefStamps.scalars ?? 0,
+        disclose: this.settings.discloseConversationName,
+        vault: this.archive.enabled,
+      },
+      flags: patchOf(this.settings.value.conversations, this.prefStamps.flags ?? {}),
+      petnames: patchOf(this.names.petnames, this.prefStamps.petnames ?? {}),
+      blocked: patchOf(
+        Object.fromEntries(this.settings.value.blocked.map((account) => [account, true as const])),
+        this.prefStamps.blocked ?? {},
+      ),
+    };
+
+    if (JSON.stringify(preferences).length > MAX_PREFERENCES_BYTES) {
+      console.warn("preference snapshot too large to sync; settings still travel", {
+        conversations: Object.keys(preferences.flags).length,
+        petnames: Object.keys(preferences.petnames).length,
+        blocked: Object.keys(preferences.blocked).length,
+      });
+      return undefined;
+    }
+
+    return preferences;
+  }
+
+  /**
+   * Stamps a decision about one keyed preference, so that it can win against an older one.
+   *
+   * The stamp is taken here, at the moment of the decision, and not when the announcement goes
+   * out: two changes made offline in a known order must reach the other devices in that order,
+   * and a stamp assigned at send time would collapse them onto whichever moment the network came
+   * back.
+   */
+  private stamp(map: "flags" | "petnames" | "blocked", key: string, at: number): void {
+    this.prefStamps = { ...this.prefStamps, [map]: { ...(this.prefStamps[map] ?? {}), [key]: at } };
+  }
+
+  /**
+   * Records that the two scalar preferences were just decided, writes them down, and tells the
+   * other devices.
+   *
+   * They share one stamp because they are two switches on two screens that nobody moves at the
+   * same instant, and giving each its own would double the bookkeeping to arbitrate a collision
+   * that has to be produced deliberately. That is the same trade `SyncedSignals` makes for its
+   * three booleans, and it is only ever wrong for maps — which is why the maps are stamped per
+   * entry instead.
+   */
+  private async stampScalars(): Promise<void> {
+    this.prefStamps = { ...this.prefStamps, scalars: Date.now() };
+    await this.persist();
+    await this.announceSignalsEverywhere();
+  }
+
+  /** The key our own devices share, imported once and kept. */
+  private async deviceSyncKey(): Promise<CryptoKey> {
+    this.syncKey ??= await importSyncKey(this.account.deviceSyncKey());
+    return this.syncKey;
+  }
+
+  /**
+   * Applies settings announced by another of our devices.
+   *
+   * Last writer wins on the **clamped** time, exactly as a profile does. The comparison is `>`
+   * and not `>=`: an announcement carrying the stamp we already hold is the periodic re-send of
+   * a state we agree on, and rewriting it would persist the session on every epoch of every
+   * conversation for no change.
+   *
+   * `presence` is applied to the local flag only. The server holds the truth for it — the column
+   * is what stops the recording — so this keeps the switch on this device honest about a decision
+   * taken elsewhere, and changes nothing about what is recorded.
+   */
+  private async absorbSignals(sealed: Uint8Array): Promise<void> {
+    const opened = await openSignals(await this.deviceSyncKey(), sealed, Date.now());
+    // Not ours to read, or a shape a later build of ours writes. Both are ordinary.
+    if (opened === null) return;
+
+    let changed = false;
+
+    if (this.signalsAt === undefined || opened.signals.at > this.signalsAt) {
+      this.signals = {
+        readReceipts: opened.signals.readReceipts,
+        typingIndicator: opened.signals.typingIndicator,
+        presence: opened.signals.presence,
+        calls: opened.signals.calls,
+      };
+      this.signalsAt = opened.signals.at;
+      changed = true;
+    }
+
+    if (opened.preferences) changed = this.absorbPreferences(opened.preferences) || changed;
+
+    // One write for both halves, and none at all when nothing moved. The announcement is
+    // periodic — once per epoch of every conversation — so most of these decide nothing, and
+    // persisting on each would re-encrypt the whole session for no change, for ever.
+    if (changed) await this.persist();
+  }
+
+  /**
+   * Merges the preferences another of our devices announced. Returns whether anything moved.
+   *
+   * # Why the arbitration is per entry and not per message
+   *
+   * Because a map is not a scalar. Block Bob on the laptop and Carol on the phone, and one stamp
+   * over the whole set means one of the two blocks disappears with nothing to report it.
+   * `stamped.ts` holds the rule and the argument; this is the wiring.
+   *
+   * # Why the vault is applied and not merely recorded
+   *
+   * `discloseConversationName` is read from the store every time something needs it, so writing
+   * it is enough. Archiving is a live object holding a key, so the decision has to be carried out
+   * — and it is carried out in the direction announced, including turning the vault **off**,
+   * which is the direction that matters: an account that refused backup on one device must not
+   * keep depositing from another.
+   */
+  private absorbPreferences(incoming: SyncedPreferences): boolean {
+    let changed = false;
+
+    const scalarsAt = this.prefStamps.scalars;
+    if (scalarsAt === undefined || incoming.scalars.at > scalarsAt) {
+      if (this.settings.discloseConversationName !== incoming.scalars.disclose) {
+        this.settings.setDisclose(incoming.scalars.disclose);
+        changed = true;
+      }
+      if (this.archive.enabled !== incoming.scalars.vault) {
+        if (incoming.scalars.vault) void this.archive.enable(this.account.vaultKey());
+        else this.archive.disable();
+        changed = true;
+      }
+      if (scalarsAt !== incoming.scalars.at) {
+        this.prefStamps = { ...this.prefStamps, scalars: incoming.scalars.at };
+        changed = true;
+      }
+    }
+
+    const flags = merge(this.settings.value.conversations, this.prefStamps.flags ?? {}, incoming.flags);
+    if (flags.changed) {
+      this.settings.update((preferences) => (preferences.conversations = flags.values));
+      changed = true;
+    }
+
+    const petnames = merge(this.names.petnames, this.prefStamps.petnames ?? {}, incoming.petnames);
+    if (petnames.changed) {
+      this.names.replacePetnames(petnames.values);
+      changed = true;
+    }
+
+    const held = Object.fromEntries(
+      this.settings.value.blocked.map((account) => [account, true as const]),
+    );
+    const blocked = merge(held, this.prefStamps.blocked ?? {}, incoming.blocked);
+    if (blocked.changed) {
+      this.settings.update((preferences) => (preferences.blocked = Object.keys(blocked.values)));
+      changed = true;
+    }
+
+    this.prefStamps = {
+      ...this.prefStamps,
+      flags: flags.stamps,
+      petnames: petnames.stamps,
+      blocked: blocked.stamps,
+    };
+
+    // A stamp that moved without a value moving still has to reach the disk. It is a tombstone,
+    // and a tombstone lost at the next start lets a third device re-assert what was removed —
+    // `Merged.stampsMoved` states the sequence in full.
+    return changed || flags.stampsMoved || petnames.stampsMoved || blocked.stampsMoved;
   }
 
   private async sendContent(
@@ -2213,13 +3078,90 @@ export class Session {
       return;
     }
 
-    const message: Message = { seq, sender: this.deviceId, content: body, mine: true, sentAt };
+    // Our own message gets the same deadline the recipients will compute for it. `sentAt` is our
+    // own clock here, so the clamp is a no-op — what matters is that the sender's copy goes at the
+    // same time as everybody else's, and not a lifetime after it was read back from disk.
+    const expiresAt = expiryOf(sentAt, Date.now(), this.lifetimeSeconds(view));
+    const message: Message = {
+      seq,
+      sender: this.deviceId,
+      content: body,
+      mine: true,
+      sentAt,
+      ...(expiresAt === undefined ? {} : { expiresAt }),
+    };
     view.messages.push(message);
     touch(view);
     // Same order as the poll, for the same reason: the write goes first, and the upload after.
     // See `pollOnce`.
     await this.persist();
-    await this.archive.store(this.api, view.groupId, [message]);
+    await this.deposit(view, [message]);
+  }
+
+  /**
+   * Deposits messages in the vault, unless this conversation was told not to.
+   *
+   * # Why the check is here and not at each call site
+   *
+   * There are two, one for what we send and one for what arrives, and a per-conversation opt-out
+   * honoured at one of them would be an opt-out that archives half the thread. Which half depends
+   * on who talks more, so it would look like it worked.
+   *
+   * # What it does not do
+   *
+   * Remove what is already deposited. `ConversationFlags.archiveToVault` says so, and the screen
+   * that offers it has to say so too: turning it off stops future deposits and leaves the past
+   * where it is, on a server, under a key derived from a phrase that does not rotate.
+   */
+  /**
+   * Drops what has passed its deadline, everywhere it is held.
+   *
+   * Every conversation and not only the open one: a thread nobody is looking at is exactly where
+   * an expired message would sit until somebody opened it, and the promise was that it goes.
+   *
+   * The persist is what makes it real — the messages are on disk in `history.ts`, so a deletion
+   * that only touched the view would come back on the next reload.
+   */
+  private dropExpired(): void {
+    const now = Date.now();
+    let dropped = false;
+
+    for (const view of this.conversations.values()) {
+      const kept = prune(view.messages, now);
+      if (kept.length === view.messages.length) continue;
+
+      view.messages = kept;
+      touch(view);
+      dropped = true;
+    }
+
+    if (dropped) void this.persist();
+  }
+
+  /**
+   * Erases this account's archive of a conversation, and keeps owing it until it succeeds.
+   *
+   * The debt is recorded **before** the call, not after a failure: a throw between the two lines
+   * would otherwise be the one case that leaves nothing behind to retry, which is the case that
+   * matters. Deleting twice is free — the route is a `DELETE` scoped to this account and this
+   * group, and deleting rows that are already gone removes nothing and reports success.
+   *
+   * Only this account's copy. The other members' archives are theirs, and the protocol offers no
+   * way to reach them: what makes the feature honest on their side is that their own clients now
+   * do the same thing when they see the commit.
+   */
+  private async dropArchive(view: ConversationView): Promise<void> {
+    this.archiveDropsOwed.add(view.key);
+    await this.api.dropVault(view.groupId);
+    this.archiveDropsOwed.delete(view.key);
+  }
+
+  private async deposit(view: ConversationView, messages: Message[]): Promise<void> {
+    if (!archivesToVault(this.flagsIn(view))) return;
+
+    await this.archive.store(this.api, view.groupId, messages, {
+      lifetimeSeconds: this.lifetimeSeconds(view),
+    });
   }
 
   /**
@@ -2243,6 +3185,9 @@ export class Session {
    */
   startStream(onChange: () => void): void {
     this.gateway?.close();
+    // Kept for the paths that change on their own: a participant joining a call, a ring timing
+    // out. See `repaint`.
+    this.repaint = onChange;
 
     this.gateway = new Gateway(
       this.api,
@@ -2318,6 +3263,16 @@ export class Session {
   }
 
   private async pollOnce(): Promise<void> {
+    // First, and before any network call. What has expired goes on the sweep that already runs
+    // every thirty seconds — reusing that timer rather than starting one for expiry, because a
+    // second clock is a second thing to keep in step and the two would drift on a throttled tab.
+    //
+    // Its position is the part that matters. Every call below can reject, and `startStream`
+    // swallows what `pollOnce` throws, so a sweep placed after them stops running the moment the
+    // server is unreachable — which is precisely the case where local expiry is the only thing
+    // left enforcing the promise. Deleting what is past needs nobody's permission.
+    this.dropExpired();
+
     // The stock of welcome keys refills itself. Without that, it runs out in silence and the
     // device becomes unreachable with nothing to say so — exactly the kind of housekeeping a user
     // should never have to carry.
@@ -2367,6 +3322,7 @@ export class Session {
       });
     }
 
+
     for (const view of this.conversations.values()) {
       // A severed ratchet does not heal by being asked again. See `ConversationView.stale`.
       if (view.stale) continue;
@@ -2385,6 +3341,12 @@ export class Session {
 
       const envelopes = page.envelopes;
       const before = view.messages.length;
+
+      // Read before the envelopes are absorbed, because absorbing them is what applies a commit
+      // that changes it. Compared after: a lifetime that went from off to on is a room that has
+      // just been told to forget, and this device holds an archive of everything it said before
+      // that. See `archiveDropsOwed`.
+      const lifetimeBefore = this.lifetimeSeconds(view);
 
       for (const row of envelopes) {
         try {
@@ -2418,7 +3380,28 @@ export class Session {
       // nothing here can skip the persist — but that is a property of the archive, not of this
       // loop, and a caller that persists after a network call depends on a guarantee it does
       // not hold. The ratchet and the cursor reach the disk before anything else can fail.
-      await this.archive.store(this.api, view.groupId, view.messages.slice(before));
+      // Before the deposit, and the order carries an argument: `Archive.store` already refuses a
+      // conversation with a lifetime, so nothing would be uploaded either way — but a reader who
+      // finds the upload first has to hold that fact in their head to see why this is safe. The
+      // erasure of the past comes before the writing of the present.
+      //
+      // The condition is the transition, not the state: a conversation that has had a lifetime
+      // for a month has nothing archived left to erase, and asking every thirty seconds would be
+      // one deletion per conversation per poll, forever. The queue covers the retries.
+      if (lifetimeBefore === 0 && this.lifetimeSeconds(view) > 0) {
+        this.archiveDropsOwed.add(view.key);
+      }
+
+      if (this.archiveDropsOwed.has(view.key)) {
+        // Swallowed here, unlike in `setLifetime`. Nobody asked for this one — it is a
+        // consequence of somebody else's commit, and there is no screen waiting on it. The debt
+        // stays in the queue and the next poll tries again.
+        await this.dropArchive(view).catch((error: unknown) => {
+          console.warn(`archive of ${view.key} not erased yet`, error);
+        });
+      }
+
+      await this.deposit(view, view.messages.slice(before));
 
       // Resolving accounts is cosmetic and goes over the network: it comes after, and its failure
       // must undo nothing.
@@ -2537,6 +3520,15 @@ export class Session {
           for (const view of this.conversations.values()) touch(view);
         }
       }
+      // Settings announced by another of our own devices. The account comes from the MLS
+      // credential, as above, and the check is what makes this cheap: every peer in the room
+      // receives this message and would otherwise attempt a decryption certain to fail, once per
+      // conversation per epoch. The seal is what makes it *safe* — the check is only economy.
+      if (decode.kind === "signals" && incoming.sender === this.accountId) {
+        void this.absorbSignals(decode.sealed).catch((error: unknown) => {
+          console.warn("settings announcement not applied", error);
+        });
+      }
       return;
     }
 
@@ -2544,6 +3536,23 @@ export class Session {
     // the message itself is the proof, and it cannot get lost since we are not waiting for it.
     // Without this, the sender appears to keep typing for the whole TTL after pressing Enter.
     if (incoming.sender) view.typing = without(view.typing, incoming.sender);
+
+    // Stamped on arrival, from the lifetime in force now: see `expiry.ts` for why the deadline is
+    // `min(sentAt, first seen here) + lifetime` and not the sender's word for it.
+    const expiresAt = expiryOf(sentAt, Date.now(), this.lifetimeSeconds(view));
+
+    // A message that arrived already past its deadline is not inserted at all. A device back from
+    // ten days offline must not watch expired messages appear and then vanish — that is the whole
+    // history of the conversation replaying in front of somebody before being taken away.
+    //
+    // The cursor moves anyway, and that is the whole subtlety: it is what receipts are computed
+    // from, so leaving it parked before an expired run would stall the delivered receipt for
+    // every message after it too — the peers would see a live conversation as permanently
+    // undelivered. The message is dropped, not unreceived.
+    if (expiresAt !== undefined && expiresAt <= Date.now()) {
+      view.contentCursor = Math.max(view.contentCursor, seq);
+      return;
+    }
 
     view.messages.push({
       seq,
@@ -2554,7 +3563,39 @@ export class Session {
       // The thread renders that as a message with no time rather than inventing one: guessing
       // "now" for something received during a catch-up would date a week-old message to today.
       ...(sentAt === undefined ? {} : { sentAt }),
+      ...(expiresAt === undefined ? {} : { expiresAt }),
     });
+
+    // An invitation is a message like any other — which is what gives it MLS's authentication,
+    // the thread entry, and the wake-up, all three without the server learning it was a call.
+    // What is *not* like any other message is that it has to ring, and only while it is fresh:
+    // an invitation read during a catch-up describes a call that ended long ago.
+    if (
+      decode.kind === "call" &&
+      decode.event === "invite" &&
+      incoming.sender &&
+      incoming.sender !== this.accountId &&
+      sentAt !== undefined &&
+      Date.now() - sentAt < RING_TIMEOUT_MS &&
+      // The reciprocity, at the receiving end, and deliberately duplicated: it has to hold even
+      // if the emitting side is forgotten, which is the arrangement receipts and typing already
+      // use. The caller sees a call nobody answers, which is what a refused call looks like.
+      this.callsAllowed() &&
+      // **The one place blocking touches a call, and it is about who placed it.**
+      //
+      // A ring arrives without being asked for and interrupts whatever is on screen, which is
+      // exactly what blocking exists to stop. A blocked member sitting in a call somebody else
+      // placed is the opposite case and is deliberately left alone — see the argument at the
+      // track-attach site in `lib/call.ts`.
+      //
+      // A sender we cannot attribute is *not* blocked, the rule the other channels already
+      // follow: declining what cannot be named would refuse precisely the traffic nobody can
+      // account for. It costs little here — an anonymous invitation rings once, expires by
+      // itself in thirty seconds, and the group MAC already stops it coming from a non-member.
+      !this.isBlocked(incoming.sender)
+    ) {
+      this.calls.receive(view.key, decode.call, incoming.sender);
+    }
 
     touch(view);
 
@@ -2678,7 +3719,9 @@ export class Session {
    */
   async setPetname(handle: string, name: string): Promise<void> {
     this.names.setPetname(handle, name);
+    this.stamp("petnames", handle, Date.now());
     await this.persist();
+    await this.announceSignalsEverywhere();
 
     // Every view, for the same reason `absorbProfile` touches every view: the person is drawn in
     // the thread, the conversation list and the member roster, and the revision counter is per
@@ -2735,6 +3778,30 @@ export class Session {
     if (wanted === this.handle) return;
 
     await this.api.renameAccount(this.accountId, wanted);
+
+    // **The password escrow does not survive a rename, and is removed rather than left broken.**
+    //
+    // Its Argon2id salt is derived from the handle — it has to be, because the salt must be
+    // computable before the lookup that would fetch it (see `crates/crypto-core/src/escrow.rs`).
+    // So after a rename the owner's password produces a different lookup and a different key:
+    // the row stops answering and would never open again.
+    //
+    // What is left behind if it is not deleted is the worst of both: a ciphertext of the account
+    // seed, sitting on the server, useless to its owner and still grindable by whoever takes the
+    // database. Deleting it converts a silent, permanent liability into a visible loss the
+    // settings screen can report and the user can redo in a minute.
+    //
+    // Re-sealing here is not an option: it needs the password, which this session has never held
+    // and must not start holding in order to make a rename tidier.
+    //
+    // The passkey factor is untouched — its key comes from the authenticator, and no part of it
+    // knows what this account is called.
+    await this.api.forgetRecovery("password").catch((error: unknown) => {
+      // A rename that succeeded must not be reported as a failure because the cleanup did not.
+      // The consequence of the miss is a dead row, which the settings screen will show as a
+      // password factor that no longer works — visible, and re-settable.
+      console.warn("password recovery not cleared after rename", error);
+    });
 
     // `handle` is `readonly` on the instance and this is the one operation that changes it. The
     // cast is confined here rather than the field being widened: every other site in this file
@@ -2816,6 +3883,13 @@ export class Session {
     if (this.displayName !== undefined) {
       await this.sendContent(view, { kind: "profile", name: this.displayName, at });
     }
+
+    // And the signalling settings, for our own devices rather than for the room. Sent from here
+    // because the trigger is the same one: the epoch moves when somebody joins, and a device of
+    // ours that just joined is precisely who has never heard these. Unconditional, unlike the
+    // display name — there is no such thing as an account without settings, and a device that
+    // never hears them keeps the defaults, which is to say keeps emitting what its owner refused.
+    await this.emitSignals(view);
   }
 
   /**

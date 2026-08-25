@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Whispee Code Verify</title>
+<style>
+  body { font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 12px; width: 320px; }
+  h1 { font-size: 13px; margin: 0 0 8px; }
+  button { font: inherit; padding: 6px 10px; }
+  #answer { font-weight: 600; margin: 10px 0 4px; }
+  .ok { color: #1a7f37; }
+  .failed { color: #cf222e; }
+  .unknown { color: #6e7781; }
+  ul { margin: 6px 0 0; padding-left: 18px; }
+  li { word-break: break-all; }
+  p { margin: 8px 0 0; color: #57606a; }
+</style>
+<h1>Whispee Code Verify</h1>
+<button id="run">Check this page</button>
+<div id="answer" class="unknown">Not checked</div>
+<div id="detail"></div>
+<script type="module" src="popup.js"></script>

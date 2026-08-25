@@ -52,9 +52,11 @@ not their equal and does not try to be.
   therefore *better* at notifications on a phone than the native one, which is a reversal worth
   stating plainly. Web Push works end to end: a browser subscribes, the server signs a VAPID
   token, a notification arrives with the tab closed, and iOS can now subscribe because the client
-  is installable. FCM and APNs are not written: device-side registration needs a Tauri plugin that
-  does not exist, and a Tauri webview has no service worker, so a packaged build has **no
-  background wake-up path at all**. The wake-up carries no text, no sender and no group id.
+  is installable. FCM and APNs are not written — not for want of tooling any more, since several
+  Tauri push plugins now exist, but because APNs cannot be exercised without a paid Apple
+  Developer membership and there is no Android device here. A Tauri webview has no service worker
+  either, so a packaged build has **no background wake-up path at all**. The wake-up carries no
+  text, no sender and no group id. See [docs/ROADMAP.md](docs/ROADMAP.md).
 - **Nothing reaches a watch.** An Apple Watch or a Wear OS device shows the notifications its
   phone received, so this waits entirely on the line above — and even then, a notice that says
   only "New message" is not much of a wrist.

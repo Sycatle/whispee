@@ -9,8 +9,10 @@ import {
   NOTICE_BODY_MANY,
   NOTICE_BODY_ONE,
   NOTICE_TITLE,
+  clearUnreadBadge,
   countUnreadInTitle,
   createNotifier,
+  markUnreadBadge,
   notificationPermission,
   requestNotificationPermission,
   unreadTitle,
@@ -312,4 +314,50 @@ test("an unchanged count writes nothing", () => {
 
   assert.equal(writes, 1);
   assert.equal(target.title, "(3) Whispee");
+});
+
+/**
+ * The badge is the count for a reader with no tab to look at, and zero has to take it off rather
+ * than set it to zero — some platforms draw a bare dot for `setAppBadge(0)`, which is the same
+ * defect as a title left reading `(0) Whispee`.
+ */
+test("the badge follows the count, and zero removes it", () => {
+  const calls: string[] = [];
+  const target = {
+    setAppBadge: (count?: number) => {
+      calls.push(`set ${String(count)}`);
+      return Promise.resolve();
+    },
+    clearAppBadge: () => {
+      calls.push("clear");
+      return Promise.resolve();
+    },
+  };
+
+  markUnreadBadge(3, target);
+  markUnreadBadge(0, target);
+
+  assert.deepEqual(calls, ["set 3", "clear"]);
+});
+
+/**
+ * The ordinary state of this application: a page that is not installed, on a browser with no
+ * Badging API at all. Nothing may throw, and nothing may reject unhandled.
+ */
+test("a target without the API is not an error", () => {
+  assert.doesNotThrow(() => markUnreadBadge(3, {}));
+  assert.doesNotThrow(() => clearUnreadBadge({}));
+});
+
+/**
+ * `setAppBadge` rejects where the method exists and the call is refused — an uninstalled page on
+ * some builds. That is not an incident and there is nothing for a caller to do, so the one thing
+ * that must not happen is an unhandled rejection on every arriving message.
+ */
+test("a refused badge does not reject into the void", async () => {
+  markUnreadBadge(1, { setAppBadge: () => Promise.reject(new Error("not installed")) });
+  clearUnreadBadge({ clearAppBadge: () => Promise.reject(new Error("not installed")) });
+
+  // A tick, so an unhandled rejection would have been raised by now and failed this test.
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });

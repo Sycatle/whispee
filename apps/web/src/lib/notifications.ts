@@ -400,6 +400,54 @@ export function countUnreadInTitle(target: TitleTarget = document): TitleCounter
   };
 }
 
+/**
+ * Anything that can carry a count on the application's icon. Satisfied by `navigator` where the
+ * Badging API exists, and by nothing at all where it does not.
+ *
+ * Optional members rather than a second type, because the absence is the common case: no Firefox,
+ * no Safari on the desktop, and — everywhere — nothing at all until the application is installed.
+ */
+export interface BadgeTarget {
+  setAppBadge?: (count?: number) => Promise<void>;
+  clearAppBadge?: () => Promise<void>;
+}
+
+/**
+ * The unread count on the installed application's icon.
+ *
+ * # Why this is the same information twice, and worth having twice
+ *
+ * The tab title already carries the count, and a tab title is invisible to somebody who installed
+ * this to a home screen: there is no tab. The badge is where that reader finds out, and it is the
+ * one place the count survives the application not being open at all.
+ *
+ * # The count and nothing else
+ *
+ * Same rule as the title, for the same reason argued there: a number is a number, where a name on
+ * a lock screen is a fact about who somebody talks to, visible to whoever picks the phone up. The
+ * Badging API cannot carry a name even if this wanted to, which is a rare case of a platform
+ * agreeing.
+ *
+ * # Why the failures are swallowed
+ *
+ * `setAppBadge` rejects on a browser that has the method and refuses the call — an uninstalled
+ * page on some builds. That is the ordinary state of this application, not an incident, and there
+ * is nothing for a caller to do about it. The one thing that must not happen is an unhandled
+ * rejection every time a message arrives.
+ */
+export function markUnreadBadge(unread: number, target: BadgeTarget = navigator): void {
+  // Zero is `clearAppBadge`, not `setAppBadge(0)`: the second shows a dot on some platforms, which
+  // is the same defect as a title left reading `(0) Whispee`.
+  if (unread <= 0) return clearUnreadBadge(target);
+
+  void target.setAppBadge?.(unread).catch(() => {});
+}
+
+/** Takes the badge off. For unmount, and for the count reaching zero. */
+export function clearUnreadBadge(target: BadgeTarget = navigator): void {
+  void target.clearAppBadge?.().catch(() => {});
+}
+
 /*
  * # On the sound that is not here
  *

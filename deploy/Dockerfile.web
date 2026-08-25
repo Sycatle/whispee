@@ -1,0 +1,77 @@
+# The web client and the reverse proxy, in one image.
+#
+# # Why the client and the proxy are not two services
+#
+# Because the client is a directory of static files, not a process. Something has to serve it, and
+# that something is already terminating TLS in front of the delivery service. Splitting them would
+# add a container whose whole job is to hand files to another container.
+#
+# # Why the client and the API share one origin
+#
+# The delivery service serves no static file (`crates/server/src/lib.rs` mounts three routers and
+# no `ServeDir`), so the two could live on separate hosts with CORS between them. Serving them
+# from one origin removes the preflight entirely — and with it the failure this repository has
+# already hit twice, documented on both `allowed_origins` and `src/lib/csp.ts`: a browser that
+# refuses **before** sending, so the server logs nothing and the message names no cause.
+#
+# # Why the API URL is a build argument and not an environment variable
+#
+# The Content-Security-Policy is computed into `index.html` at build time (`src/lib/csp.ts`), and
+# `connect-src` must name this deployment's exact origin — both the `https://` form and the
+# `wss://` one, which it does not infer. Changing the domain therefore means rebuilding the
+# client, not restarting a container. `docker compose build` is where that happens.
+
+FROM node:22-bookworm-slim AS build
+
+# The origin this deployment answers on, scheme included: https://whispee.example
+ARG VITE_API_URL
+# The media server's origin, for calls. Empty by default, and it must stay that way for a
+# deployment that runs none: an empty value keeps its host out of `connect-src` instead of
+# widening the policy for a service that will never be contacted.
+ARG VITE_MEDIA_URL=
+# The transparency log's public key, base64, as the server prints it on first boot. Optional.
+# On the web it does not close the substitution hole — this image serves both the pin and the
+# code it constrains — but it turns a silent substitution into one that breaks every client at
+# once. See `.env.example` for the full argument.
+ARG VITE_LOG_PUBKEY=
+
+# The version is pinned rather than left to corepack's default, for the reason
+# `rust-toolchain.toml` gives at length about the compiler: "recent" is not a version.
+# `apps/web/package.json` declares no `packageManager` field, so nothing else here says which
+# pnpm produced `pnpm-lock.yaml` — this line is that statement. Lockfile version 9.0, pnpm 11.
+RUN corepack enable && corepack prepare pnpm@11.22.0 --activate
+
+# pnpm re-checks the dependency tree before running a script and, finding anything it wants to
+# reconcile, asks to remove `node_modules` — a question with no terminal to answer it, so the
+# build stops on `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`. `CI` is the variable pnpm names in
+# that message, and it is true here in the only sense that matters: nobody is watching.
+ENV CI=true
+
+WORKDIR /app
+
+# The lockfile alone first, so a source change does not reinstall the tree.
+#
+# `pnpm-workspace.yaml` comes with them, and leaving it out is not a smaller copy — it is a broken
+# one. That file is where the repository declares the single dependency allowed to run an install
+# script, and pnpm 11 fails the install over an unnamed one rather than warning. Omitted here at
+# first, and the layer stopped on `ERR_PNPM_IGNORED_BUILDS`: a file that matters and does not look
+# like it does. Its own comment says why the exception exists.
+COPY apps/web/package.json apps/web/pnpm-lock.yaml apps/web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY apps/web ./
+
+# `pnpm run build` is `tsc --noEmit && vite build`: the type check is part of the build here, the
+# same way it is in CI. An image that compiles a client the repository would reject is worse than
+# one that fails to build.
+#
+# The WebAssembly module is committed under `public/` and copied in with the rest — so no Rust
+# toolchain and no `wasm-pack` are needed here. That artefact is the one `scripts/verify-wasm.sh`
+# checks against `crates/crypto-wasm` on every pull request; serving it is serving the bytes that
+# check covers.
+RUN pnpm run build
+
+FROM caddy:2-alpine
+
+COPY --from=build /app/dist /srv
+COPY deploy/Caddyfile /etc/caddy/Caddyfile

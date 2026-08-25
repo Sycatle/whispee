@@ -1,0 +1,74 @@
+# The public face of a deployment: TLS, the static client, and everything under /v1 proxied to
+# the delivery service.
+#
+# Caddy obtains and renews the certificate itself, from the domain in `WHISPEE_DOMAIN`. That is
+# the whole of the TLS configuration, and it is why this file names no certificate path: a
+# certificate that has to be renewed by hand is a certificate that expires on a Sunday.
+
+{
+	# The address for the ACME account. Certificate expiry warnings go here, and nowhere else —
+	# an unset value means nobody is told before a renewal has already failed.
+	email {$WHISPEE_ACME_EMAIL}
+}
+
+{$WHISPEE_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		# The connection is TLS or it does not happen. Two years, because a shorter window is a
+		# window: a downgrade attack only needs the one request that arrives before the browser
+		# has learned the rule.
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		# Content sniffing turns a file the client uploaded into a script the browser executes.
+		X-Content-Type-Options "nosniff"
+		# A referrer would name this deployment to every site a message links to — which is one
+		# of the metadata leaks the rest of the architecture spends real effort removing.
+		Referrer-Policy "no-referrer"
+		# No sensor of any kind is used by this client. Calls, where they are configured, ask for
+		# the microphone through the media path and are not covered here — a deployment running
+		# one has to widen this line, deliberately.
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+		# The Content-Security-Policy is **not** set here. It is computed into `index.html` at
+		# build time from this deployment's own origin (`apps/web/src/lib/csp.ts`), and a second
+		# copy in this file is the third hand-maintained duplicate of a security policy — the
+		# exact drift that file exists to prevent, and which has already cost this project a
+		# silently broken image preview on the desktop.
+		-Server
+	}
+
+	# The delivery service. Every route it answers on lives under /v1, including the WebSocket
+	# gateway at /v1/gateway — Caddy passes the upgrade through without being told to.
+	# **What this proxy does not carry, and it is not an oversight.** The rate limit on the open
+	# routes reads the peer address from `ConnectInfo` and refuses to look at `X-Forwarded-For` —
+	# that header is freely forged, and reading it would turn the limit into a header somebody
+	# writes in order to bypass it. `crates/server/src/lib.rs` says so above `rate_limit`, and
+	# names the consequence: behind a proxy every request carries the proxy's address, and it is
+	# then up to the proxy to carry the limit.
+	#
+	# This one does not. Caddy has no rate limiter in its standard build, and adding the plugin
+	# means compiling a custom Caddy — worth doing, not done here. Until it is, one client can
+	# exhaust the account-creation quota for everybody. It is written down in ../docs/DEPLOY.md
+	# rather than left for somebody to find.
+	handle /v1/* {
+		reverse_proxy server:8787
+	}
+
+	# Everything else is the client: a single page, so any path that is not a file is index.html.
+	handle {
+		root * /srv
+
+		# The immutable half. Vite fingerprints everything under /assets, so a year is safe and a
+		# short cache is pure waste.
+		@fingerprinted path /assets/*
+		header @fingerprinted Cache-Control "public, max-age=31536000, immutable"
+
+		# The mutable half. `index.html` carries the CSP and the script tags that name the
+		# fingerprinted files: cached, it would pin a client to a version that no longer exists on
+		# disk after a deploy — a blank page nobody can reproduce.
+		@entry path /index.html /
+		header @entry Cache-Control "no-cache"
+
+		try_files {path} /index.html
+		file_server
+	}
+}

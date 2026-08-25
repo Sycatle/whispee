@@ -200,6 +200,15 @@ omission:
   no handle, so forty arriving messages would be forty notices and clicking one does nothing. The
   plugin is therefore not installed: notifications are web-grade on the web, and whatever the
   platform webview offers on the desktop. The unread count in the title works everywhere.
+- **A vault deletion that never succeeds is forgotten when the session ends.** Turning on a
+  lifetime erases this account's archive, and every other member's client now does the same when
+  it sees the commit — the deletion each member owes for their own copy. That call can fail, so
+  the debt is queued and retried on the next poll. The queue is in memory: an application closed
+  before a retry succeeds no longer knows it owed one. What that leaves is a readable archive on
+  the server for a conversation that has since been told to forget. It is no longer served into a
+  thread — `Archive.restore` refuses a conversation with a lifetime, the same refusal `store`
+  already made — so what survives is bytes on a server, not history on a screen. Closing it means
+  persisting the debt, which is a schema change and is not done.
 - **The transparency log is signed by the party it watches.** Gossip catches a forked log
   partially; it does not remove the defect.
 - **The MLS keys still live in WASM linear memory**, reachable by the page's JavaScript, on

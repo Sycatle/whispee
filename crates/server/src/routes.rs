@@ -1929,10 +1929,16 @@ async fn drop_vault(
     Path(group_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // Throttled like the deposit it undoes, and for a reason of its own: each call is a
-    // `DELETE … RETURNING` and a counter update inside one transaction, which is work a signed
-    // device could otherwise ask for without end.
-    if !writes.allows(Written::Vault, &signed.device_id) {
+    // Throttled on a counter of its own, and **not** the one the deposit uses. Sharing it looked
+    // like economy and was a defect: the client archives on every send, so a user who had sent ten
+    // messages in the last minute and then turned a lifetime on hit the quota here — after
+    // `setLifetime` had already published the commit. The room's memory had changed for everybody
+    // and the archive stayed, which is the one outcome the feature exists to prevent. See
+    // `DEFAULT_VAULT_DROPS_PER_MINUTE` for why the deletion quota sits above the deposit quota.
+    //
+    // Still bounded: each call is a `DELETE … RETURNING` and a counter update inside one
+    // transaction, which is work a signed device could otherwise ask for without end.
+    if !writes.allows(Written::VaultDrops, &signed.device_id) {
         return Err(ApiError::TooManyRequests);
     }
 

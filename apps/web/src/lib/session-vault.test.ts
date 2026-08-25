@@ -90,7 +90,7 @@ test("turning it off and on again is recorded as a decision either way", async (
 test("a disabled vault restores nothing without asking the server", async () => {
   const archive = Archive.off();
 
-  assert.deepEqual(await archive.restore(server(), GROUP, []), []);
+  assert.deepEqual(await archive.restore(server(), GROUP, [], { lifetimeSeconds: 0 }), []);
 });
 
 test("an archive nobody can read is reported, not served as an empty thread", async () => {
@@ -100,7 +100,7 @@ test("an archive nobody can read is reported, not served as an empty thread", as
   const unreadable = server([{ seq: 1, payload: new Uint8Array([0, 1, 2]) }]);
 
   await assert.rejects(
-    () => archive.restore(unreadable, GROUP, []),
+    () => archive.restore(unreadable, GROUP, [], { lifetimeSeconds: 0 }),
     /recovery phrase changed/,
   );
 });
@@ -110,7 +110,23 @@ test("a conversation with nothing archived is not an error", async () => {
 
   // No entries at all is the ordinary case for a fresh group, and distinct from entries that will
   // not open. Only the second is worth interrupting somebody for.
-  assert.deepEqual(await archive.restore(server(), GROUP, []), []);
+  assert.deepEqual(await archive.restore(server(), GROUP, [], { lifetimeSeconds: 0 }), []);
+});
+
+test("a conversation with a lifetime restores nothing, however much is archived", async () => {
+  const archive = await Archive.open(() => KEY);
+
+  // Entries exist. Without the refusal, this call reaches the server, fails to open them and
+  // throws "recovery phrase changed" — so an empty result here is proof the fetch never happened,
+  // not proof that the vault was empty.
+  //
+  // What the refusal prevents: an archive deposited **before** a lifetime was turned on comes back
+  // into the thread with no deadline on it — nothing on the restore path stamps one — and
+  // `history.ts` then persists it. A room told to forget in a day would hold its whole past for
+  // good, on the first device that opened it.
+  const holding = server([{ seq: 1, payload: new Uint8Array([0, 1, 2]) }]);
+
+  assert.deepEqual(await archive.restore(holding, GROUP, [], { lifetimeSeconds: 86400 }), []);
 });
 
 test("a failed archive is swallowed, because the message is already delivered", async () => {

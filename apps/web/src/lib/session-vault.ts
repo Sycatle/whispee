@@ -146,9 +146,34 @@ export class Archive {
    * Throws when there were entries and none of them could be read. That means the vault key is no
    * longer the right one — the account has been rotated — and saying so beats serving an empty
    * thread that looks like a conversation nobody ever had.
+   *
+   * # Why the lifetime is a required argument here too
+   *
+   * The symmetry with `store` is the correctness. `store` refuses to archive a conversation that
+   * has a lifetime; without the same refusal here, an archive written **before** the lifetime was
+   * turned on came back into the thread — and came back **immortal**. Nothing on this path sets
+   * `expiresAt`: `Archived` carries `{sender, mine, body}`, `expiryOf` is never called, and
+   * `dropExpired` skips anything without a deadline. `history.ts` then persisted those messages,
+   * so they survived every reload. A conversation set to forget in one day would quietly hold its
+   * entire past, forever, on the first device that opened it.
+   *
+   * Stamping them on the way in was the other candidate and it is the wrong one. The deadline is
+   * `min(sentAt, first seen here) + lifetime`, and "first seen here" is not a thing a restore
+   * knows — it would have to invent one, which is how a message ends up outliving the same
+   * message on the device next to it. Refusing is also what the feature already promises out
+   * loud: a conversation with a lifetime does not survive the loss of every device.
+   *
+   * An optional argument would be an argument somebody forgets, and the forgotten case is the
+   * dangerous one. It is required for the same reason it is required on `store`.
    */
-  async restore(api: VaultApi, groupId: Uint8Array, held: Message[]): Promise<Message[]> {
+  async restore(
+    api: VaultApi,
+    groupId: Uint8Array,
+    held: Message[],
+    conversation: { lifetimeSeconds: number },
+  ): Promise<Message[]> {
     if (!this.key) return [];
+    if (conversation.lifetimeSeconds > 0) return [];
 
     const { messages, unreadable } = await vault.restore(api, this.key, groupId);
 

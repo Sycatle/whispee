@@ -111,6 +111,7 @@ Every design decision is written down, with what it costs and what it does not s
 | [docs/specs/2026-08-22-recovery-escrow.md](docs/specs/2026-08-22-recovery-escrow.md) | Why recovery by password exists, and everything it gives up |
 | [docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md) | What holds the interface reachable without a mouse, and what is still missing |
 | [docs/BUILD.md](docs/BUILD.md) | Building every target, reproducible releases, verification |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Putting this on a host other people reach, and what such a deployment still does not do |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | What is planned, what is half-done, and what has been ruled out |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, the invariants a patch must not break, tests, commit style |
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability, and the honest limits of the response |

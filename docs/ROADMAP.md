@@ -109,11 +109,16 @@ wakes a worker and never a document.
 - **The notification is generic.** "New message", and nothing else. The worker cannot decrypt: the
   MLS keys are in the page's memory, not the worker's, and moving them would hand the decryption
   keys to a context that outlives every tab. Same constraint iOS imposes, arrived at on purpose.
-- **No test can establish that Google and Mozilla accept these tokens.** `tests/webpush.rs` checks
-  the token against the specification and against the public key advertised beside it, using a
-  fake push service that verifies the signature and asserts the body is empty. The residual risk
-  is a service disagreeing with our reading of RFC 8292, and only a real subscription settles it —
-  which is why the browser pass in `docs/DEPLOY.md` is part of the procedure rather than optional.
+- **No automated test can establish that Google and Mozilla accept these tokens.**
+  `tests/webpush.rs` checks the token against the specification and against the public key
+  advertised beside it, using a fake push service that verifies the signature and asserts the body
+  is empty. A service disagreeing with our reading of RFC 8292 would pass every one of them.
+
+  What closes that is `a_real_push_service_accepts_the_token`, ignored by default because it needs
+  a subscription minted by a real browser: it signs exactly as the emitter does and sends to the
+  live endpoint. Run once against Chrome's service, which answered `201 Created`, and the
+  notification appeared with every tab closed — server to FCM to service worker to screen. Mozilla
+  has not been tried. The command is in `docs/DEPLOY.md` beside the browser pass.
 
 ### What push costs, and it is not the tokens
 

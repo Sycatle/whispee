@@ -158,6 +158,18 @@ If nothing arrives, `docker compose logs server | grep -i push` is where the ref
 `401` means the service rejected the token, a `403` usually means the subscription was minted
 against a different key than the one now advertised.
 
+To separate "the service refused us" from "the browser showed nothing", take the endpoint — the
+`token` column of `push_tokens`, or `pushManager.getSubscription().endpoint` in the browser's
+console — and ask the service directly:
+
+```sh
+WEBPUSH_ENDPOINT='https://fcm.googleapis.com/fcm/send/…' \
+  cargo test -p server --release --test webpush -- --ignored --nocapture
+```
+
+It prints what the service answered. A `201` means the wake-up was accepted and queued, so
+anything still missing is on the browser's side of the line.
+
 ## Calls are not set up here
 
 `MEDIA_URL` and the four variables beside it are for a deployment that already runs a media

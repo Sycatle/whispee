@@ -345,50 +345,52 @@ async fn the_key_route_is_unavailable_when_push_is_off() {
     assert_eq!(response.status(), 503);
 }
 
-/// **The one thing the double above cannot settle: does a real push service accept our token?**
+/// **The one thing no double can settle: does a real push service accept these tokens?**
 ///
-/// Ignored by default, because it needs a live subscription and a network. Run it with an endpoint
-/// taken from a browser — `pushManager.subscribe()` in the console, or the settings switch — and
-/// watch the notification arrive:
+/// Ignored by default, because it needs a live subscription minted by a real browser and reaches
+/// out to Google or Mozilla. It is the other half of `docs/DEPLOY.md`'s browser pass, and the
+/// reason that pass exists: everything above checks this server against RFC 8292 as we read it,
+/// and a service disagreeing with that reading would pass every one of them.
 ///
-/// ```sh
-/// WHISPEE_REAL_ENDPOINT='https://fcm.googleapis.com/fcm/send/…' \
-///   cargo test --release -p server --test webpush -- --ignored --nocapture
-/// ```
+/// Take the endpoint from a browser that has subscribed — it is the `token` column of
+/// `push_tokens`, or `pushManager.getSubscription().endpoint` in its console — and run:
 ///
-/// A refusal shows up two ways, and both are the point of running it: the subscription is dropped
-/// here if the service answered `404`/`410`, and a `401` or `403` is logged by the emitter. Success
-/// is a notification on the screen, which no assertion in this file can reach.
+///     WEBPUSH_ENDPOINT='https://fcm.googleapis.com/fcm/send/…' \
+///     cargo test -p server --release --test webpush -- --ignored --nocapture
+///
+/// A pass means the service accepted the token and queued the wake-up. Whether a notification
+/// then appears is the browser's half, and only a person looking at the screen can say.
 #[tokio::test]
-#[ignore = "needs a live subscription in WHISPEE_REAL_ENDPOINT and a network"]
+#[ignore = "needs a live subscription and talks to a real push service"]
 async fn a_real_push_service_accepts_the_token() {
-    let Ok(endpoint) = std::env::var("WHISPEE_REAL_ENDPOINT") else {
-        panic!("set WHISPEE_REAL_ENDPOINT to a subscription endpoint from a browser");
+    let Ok(endpoint) = std::env::var("WEBPUSH_ENDPOINT") else {
+        panic!("set WEBPUSH_ENDPOINT to a subscription endpoint from a real browser");
     };
 
     let pool = common::test_pool().await;
-    let (server, advertised) = server_with_web_push(pool).await;
-    eprintln!("advertised key: {advertised}");
-    eprintln!("pushing to:     {endpoint}");
+    let key = server::vapid::Key::ensure(&pool).await.unwrap();
 
-    let (alice, group_id) = subscribed_pair(&server, &endpoint).await;
-    post_a_message(&alice, &group_id).await;
+    // Signed exactly as the emitter does, and sent by hand rather than through `Vapid::wake` so
+    // that the service's answer reaches this test instead of a `tracing::warn!`.
+    let audience = server::vapid::audience_of(&endpoint).expect("an http(s) endpoint");
+    let token = key.token(&audience, SUBJECT);
 
-    // Long enough for the round trip to Google or Mozilla, which is not a loopback.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let response = reqwest::Client::new()
+        .post(&endpoint)
+        .header("Authorization", format!("vapid t={token}, k={}", key.public_key()))
+        .header("TTL", "60")
+        .header("Content-Length", "0")
+        .send()
+        .await
+        .expect("the push service was unreachable");
 
-    let (rows,): (i64,) =
-        sqlx::query_as("SELECT count(*)::bigint FROM push_tokens WHERE token = $1")
-            .bind(&endpoint)
-            .fetch_one(&server.pool)
-            .await
-            .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
 
-    assert_eq!(
-        rows, 1,
-        "the push service reported this subscription gone — the endpoint is stale, or it was \
-         minted against a different key than the one this deployment advertises"
+    println!("push service answered {status}: {body}");
+    assert!(
+        status.is_success(),
+        "the service refused the wake-up: {status} {body} — \
+         401 means it rejected the token, 403 that the subscription was minted under another key"
     );
-
-    eprintln!("the service did not reject the subscription; a notification should be on screen");
 }

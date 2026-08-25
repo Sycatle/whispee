@@ -141,7 +141,23 @@ printf "export WHISPEE_DEV_BRANCH='%s'\n" "$branch"
 # the thing this file exists to prevent.
 derived=" DATABASE_URL SERVER_ADDR WHISPEE_API ALLOWED_ORIGINS WEB_PORT "
 
-sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$env_file" | while read -r name; do
+# `export` is optional in the pattern, because it is optional in the file.
+#
+# A `.env` is sourced, so `export FOO=bar` is as valid in it as `FOO=bar` — and a file copied from
+# somewhere else very often carries the prefix. Matching only the bare form skipped those lines
+# **silently**, which is the exact failure this whole block was written to remove: a variable
+# present in the file, absent from the server, and nothing anywhere saying so.
+#
+# Only the name has to be recognised. The value needs no unwrapping, because `set -a` and the `.`
+# above already sourced the file: the shell treated `export FOO=bar` as the assignment it is, so
+# `${!name-}` below reads what the file set, prefix or not. Nothing else in this script has to
+# know about the two spellings.
+#
+# What this still does not read: two assignments on one line — `export FOO=bar baz=qux`. Valid
+# shell, and the pattern would take only the first. Nobody writes that in a `.env` and no file in
+# this repository does, but the silence is the same shape as the bug above, so it is named here
+# rather than left to be discovered.
+sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' "$env_file" | while read -r name; do
   case "$derived" in *" $name "*) continue ;; esac
 
   # Indirect expansion, and `-` so that a key with no value is an empty string rather than an

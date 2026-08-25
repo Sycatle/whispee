@@ -187,7 +187,14 @@ history vaults, each of which is encrypted under its own account's key.
 - **fork the group** if their client applies the role policy differently. MLS enforces no
   authorization; the clients do. `RequiredCapabilities` keeps out a client that cannot read the
   `0xF100` roster extension — it does not keep out one that reads it wrongly.
-- **see everything said in the group while a member**, obviously, and keep it.
+- **see everything said in the group while a member**, obviously, and keep it — **including past
+  the conversation's lifetime**. Disappearing messages are deleted by each client on its own
+  honour; a modified client keeps what it likes, and screenshots exist. The lifetime is agreed on
+  in the group context, not enforced by it.
+- **change how long the room remembers**, if they are the admin or a moderator. That is the
+  intended rank and it is stated in `docs/PROTOCOL.md` §6.4; what it means here is that a
+  moderator can shorten a conversation's memory without the admin, and that everybody sees the
+  notice in the thread when they do.
 
 ### 2.5 Someone holding the unlocked device
 
@@ -426,6 +433,32 @@ places calls while refusing to receive them asks of others exactly what it decli
 
 The honest summary: **if the fact that you spoke to somebody is what must not be known, do not
 place the call.** No setting in this application changes that, and no cryptography answers it.
+
+---
+
+## 4quater. Disappearing messages are a client-side promise
+
+The lifetime lives in the MLS group context: authenticated, hashed into every commit, read
+identically by every member. What it is **not** is enforced. Each client deletes on its own, and
+this design has no way to reach into somebody else's storage — a modified client keeps the
+message, a screenshot keeps it outside any client at all, and a member who wants a record has one.
+Anybody reading "disappears after seven days" as "the other side cannot keep it" has been misled,
+which is why the screen says so above the control rather than under it.
+
+What is actually bought is narrower and real: **an ephemeral conversation is never deposited in
+the vault**, so it is not sitting on a server for the rest of time under a key derived from a
+phrase that does not rotate. Turning a lifetime on deletes this account's existing archive of the
+conversation in the same gesture — the caller's own entries, never another member's.
+
+The server never learns the lifetime. There is no column, parameter or header carrying it; the
+only thing it sees is a `DELETE` on a vault it cannot read, and it keeps ciphertext envelopes on
+its own schedule — up to thirty days — regardless of what the room decided. A message that was
+never delivered inside its lifetime is therefore **lost rather than deleted**: the recipient
+computes a deadline already past and never inserts it. That is the intended behaviour and it is
+still a message somebody sent that nobody read.
+
+The price is stated once more because it is easy to skip: a conversation with a lifetime does not
+survive the loss of every device. Nothing archives it, so nothing restores it.
 
 ---
 

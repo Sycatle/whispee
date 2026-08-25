@@ -30,7 +30,8 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Attachments | Per-file AES-256-GCM key carried inside the MLS message, padded into doubling buckets |
 | One tab per account | An exclusive Web Lock, taken before anything is read — two tabs consume each other's message keys |
 | Local lock | Argon2id 64 MiB / 3 passes, unlock key → master key indirection, re-locking after five minutes without the user |
-| History vault | On by default, revocable in settings |
+| Disappearing messages | Seven days by default, carried in a `0xF101` group-context extension; admin or moderator may change it |
+| History vault | On by default, revocable in settings — and never used for a conversation that has a lifetime |
 | Desktop application | Tauri 2, interface packaged in the binary |
 | Reproducible signed releases | `scripts/release.sh` and `scripts/verify-release.sh` |
 | Mobile adaptation | Navigation, safe areas, keyboard, touch targets, lifecycle, offline state, native storage, QR pairing |

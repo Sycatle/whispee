@@ -376,6 +376,29 @@ call. See [`./THREAT-MODEL.md`](./THREAT-MODEL.md#4ter-calls-leak-more-than-mess
 
 ---
 
+## 9bis. Ephemeral conversations are never archived
+
+**Claim.** A conversation carrying a lifetime is not deposited in the history vault. Not "deposited
+and pruned" — never asked. That is the one half of disappearing messages this project claims,
+because it is the half that is a mechanism rather than an appeal to the other side's good conduct,
+and it is testable: `an ephemeral conversation is never archived` in
+`apps/web/src/lib/session-vault.test.ts` asserts the vault API is never called, and its neighbour
+asserts a conversation with no lifetime is archived exactly as before.
+
+Turning a lifetime on also **deletes this account's existing archive** of the conversation, via
+`DELETE /v1/vault/{group_id}`, which removes the caller's rows and credits the bytes back. It
+removes nobody else's: two members of one conversation each hold their own archive under their own
+key, and one member erasing another's copy is not something this offers.
+
+**Caveat.** The deletion of the *messages* is not a claim. It is client-side, unenforceable, and
+[`./THREAT-MODEL.md`](./THREAT-MODEL.md#4quater-disappearing-messages-are-a-client-side-promise)
+says so plainly: a modified client keeps them, screenshots exist. The server also keeps its
+ciphertext envelopes on its own schedule — up to thirty days — and never learns the lifetime, so
+it cannot honour one even in principle. And the archive that is not written is an archive that
+cannot be restored: an ephemeral conversation does not survive the loss of every device.
+
+---
+
 ## 10. Distribution integrity
 
 **Claim.** On the web, the server delivers the JavaScript on every load and can deliver a hostile

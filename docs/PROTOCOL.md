@@ -552,7 +552,50 @@ here that constraint is useful rather than a formality: it stops a client that *
 roster** from joining an administered group. Without it, such a client would join, apply an empty
 policy, accept commits the others refuse — and fork the group with nothing to signal it.
 
-### 6.4 Admin and moderators
+### 6.4 The `0xF101` group context extension: how long the room remembers
+
+Beside the roster, in the same private-use range and for the same reason, sits the conversation's
+**lifetime**: type `0xF101`, body one `u32` big-endian, in **seconds**. `0` means off, and an
+absent extension means off too — the difference is only that `0` was chosen by somebody and
+announced in the thread. A body of any other length is refused rather than truncated: this crosses
+the wire between clients that must all read it identically, and a length nobody checks is how a
+garbled extension becomes a lifetime nobody agreed to.
+
+Conversations created by this client start at **604800** — seven days — administered or flat. It
+is listed in `RequiredCapabilities` alongside the roster, so a client that cannot read it does not
+join and then apply a policy it never saw.
+
+**Who may change it: admin or moderator.** Changing how long the room remembers is moderation, the
+same rank that admits and removes members; handing out power is not, and stays the admin's alone.
+A client computes the two facts by *comparing* the extensions a commit installs with the ones in
+force — asking merely whether a `GroupContextExtensions` proposal exists cannot tell the two
+apart, and a commit that silently drops the roster while claiming to set a lifetime reads as a
+roster change and needs the admin.
+
+**Nothing in MLS enforces the deletion.** The extension makes every member agree on the number;
+what each does with it is theirs. A modified client keeps what it likes and screenshots exist.
+What the group context buys is that "this disappears in seven days" is a sentence about the room
+rather than about one screen — and what the client buys on top is that an ephemeral conversation
+is never deposited in the vault. See §6.5 and `docs/THREAT-MODEL.md`.
+
+### 6.5 What the clock is, and what it is worth
+
+The deadline for a message is `min(sentAt, first seen locally) + lifetime`, stamped once on
+arrival and stored with the message. `sentAt` is **declared by the sender and not proven**, so a
+member could otherwise post-date their own message and buy it a longer life; the clamp takes that
+away and leaves the harmless half — shortening one's own message — alone.
+
+Stamped once, and not recomputed: a message keeps the deadline it was given when it arrived even
+if the lifetime changes afterwards. That is what makes turning it on **not retroactive** for
+messages already held, and it is also what stops a device that was offline during a change from
+reading the same history differently.
+
+Turning it on **is** retroactive for the vault: the client deletes this account's archive of the
+conversation, and the server never learns why — it only ever sees `DELETE /v1/vault/{group_id}`,
+which removes the caller's own entries and nobody else's. The server is never told the lifetime,
+and there is no column, parameter or header carrying it.
+
+### 6.6 Admin and moderators
 
 One admin, exactly one. Several admins of equal rank have no tie-breaker: two of them can demote
 each other or contradict each other on the group's membership, and nothing in the protocol says
@@ -563,6 +606,7 @@ which is right. A single root removes the question.
 | Add or remove an ordinary member | admin, moderator |
 | Remove a moderator | admin |
 | Appoint, revoke, hand over | admin |
+| Change the lifetime | admin, moderator |
 | Remove the admin | nobody |
 
 No roster is **not** an empty roster: it means a flat group where everyone can do everything. That

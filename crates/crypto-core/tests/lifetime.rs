@@ -59,3 +59,45 @@ fn a_flat_conversation_has_a_lifetime_and_no_roster() {
     assert_eq!(group.lifetime().unwrap().map(|l| l.get()), Some(DEFAULT_SECONDS));
     assert!(group.roster().unwrap().is_none());
 }
+
+/// The rule is enforced on the commit, not merely in an interface.
+///
+/// Two members, one of them an ordinary member of an administered group: their commit changing
+/// the lifetime is refused by the other side when it is applied, which is where enforcement has
+/// to live. An interface that hides the control protects nobody from a client that does not.
+#[test]
+fn an_ordinary_members_lifetime_commit_is_refused_by_the_others() {
+    let (mut admin, mut member) = common::administered_pair("alice", "bob");
+
+    let change =
+        member.conversation.set_lifetime(&member.identity, Lifetime::seconds(60)).unwrap();
+
+    let refused =
+        admin.conversation.process(&admin.identity, &change.commit, &Default::default());
+
+    assert!(
+        matches!(refused, Err(crypto_core::CryptoError::PolicyViolation(_))),
+        "an ordinary member changed the room's memory and it was accepted — got {refused:?}"
+    );
+}
+
+/// And a moderator's is accepted, on the same path.
+#[test]
+fn a_moderators_lifetime_commit_is_applied_by_the_others() {
+    let (mut admin, mut member) = common::administered_pair("alice", "bob");
+
+    let promotion =
+        admin.conversation.set_roles(&admin.identity, "alice".into(), vec!["bob".into()]).unwrap();
+    member.conversation.process(&member.identity, &promotion.commit, &Default::default()).unwrap();
+    admin.conversation.apply_pending(&admin.identity).unwrap();
+
+    let change =
+        member.conversation.set_lifetime(&member.identity, Lifetime::seconds(60)).unwrap();
+    admin.conversation.process(&admin.identity, &change.commit, &Default::default()).unwrap();
+
+    assert_eq!(admin.conversation.lifetime().unwrap().map(|l| l.get()), Some(60));
+    assert_eq!(
+        admin.conversation.roster().unwrap().map(|r| r.admin().to_owned()),
+        Some("alice".into())
+    );
+}

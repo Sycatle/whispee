@@ -491,6 +491,36 @@ impl Conversation {
             .map(|(_, handle, _)| handle.as_str())
             .collect();
 
+        // Both flags come from comparing what the proposal installs with what the group holds.
+        // Testing for "a GroupContextExtensions proposal exists" cannot tell a lifetime change
+        // from a roster change, and would demand the admin for both — silently making the
+        // moderator's rank narrower than the table in `roles.rs` says it is.
+        //
+        // A proposal that **drops** the roster reads as `None`, which differs from the sitting
+        // roster: it counts as a roster change and needs the admin. That is what refuses the
+        // commit which would silently flatten the group while claiming to set a lifetime.
+        let proposed: Option<&Extensions<GroupContext>> =
+            commit.queued_proposals().find_map(|p| match p.proposal() {
+                Proposal::GroupContextExtensions(gce) => Some(gce.extensions()),
+                _ => None,
+            });
+
+        let (changes_roster, changes_lifetime) = match proposed {
+            None => (false, false),
+            Some(extensions) => {
+                let new_roster = match extensions.unknown(ROSTER_EXTENSION) {
+                    Some(raw) => Some(Roster::decode(&raw.0)?),
+                    None => None,
+                };
+                let new_lifetime = match extensions.unknown(LIFETIME_EXTENSION) {
+                    Some(raw) => Some(Lifetime::decode(&raw.0)?),
+                    None => None,
+                };
+
+                (new_roster.as_ref() != Some(&roster), new_lifetime != self.lifetime()?)
+            }
+        };
+
         let summary = roles::CommitSummary {
             committer,
             removals: removals
@@ -502,9 +532,8 @@ impl Conversation {
                 })
                 .collect(),
             adds: commit.add_proposals().count(),
-            changes_roster: commit
-                .queued_proposals()
-                .any(|p| matches!(p.proposal(), Proposal::GroupContextExtensions(_))),
+            changes_roster,
+            changes_lifetime,
             remaining,
         };
 

@@ -72,12 +72,13 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.web
       args:
-        # Build-time, not runtime: the Content-Security-Policy is computed into `index.html` and
-        # must name this exact origin. Changing the domain means `docker compose build web`, not
-        # a restart.
-        VITE_API_URL: https://${WHISPEE_DOMAIN:?set WHISPEE_DOMAIN in deploy/.env}
+        # The domain is **not** here any more, and its absence is the feature: the client reaches
+        # the API on whatever origin served it, so this image is the same bytes for every
+        # deployment of a given commit. Changing the domain no longer means rebuilding the client.
+        #
+        # `VITE_MEDIA_URL` is the one exception, because a media host has to be named in the
+        # policy. Setting it means this build no longer matches the published one.
         VITE_MEDIA_URL: ${VITE_MEDIA_URL:-}
-        VITE_LOG_PUBKEY: ${VITE_LOG_PUBKEY:-}
     restart: unless-stopped
     depends_on:
       - server

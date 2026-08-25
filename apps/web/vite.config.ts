@@ -30,10 +30,16 @@ export default defineConfig(({ mode }) => ({
         order: "pre" as const,
         handler: (html: string) => {
           const environment = loadEnv(mode, process.cwd(), "VITE_");
-          const api = environment.VITE_API_URL ?? "http://127.0.0.1:8787";
 
-          // Absent by default: a deployment with no media server must not carry its origin.
-          return html.replace("%CSP%", csp(api, environment.VITE_MEDIA_URL || undefined));
+          // The API's origin is no longer read here, and that is the point: it used to be
+          // substituted into this file, so two deployments produced two different `index.html`
+          // and no published manifest of hashes could describe more than one of them. The policy
+          // says `'self'` now — see `src/lib/csp.ts`.
+          //
+          // The media server is the one origin still able to vary, and a deployment that sets it
+          // gives up matching the published build. That trade is written down in
+          // `docs/THREAT-MODEL.md` rather than left here.
+          return html.replace("%CSP%", csp(environment.VITE_MEDIA_URL || undefined));
         },
       },
     },
@@ -55,6 +61,29 @@ export default defineConfig(({ mode }) => ({
     // mode `src/lib/csp.ts` describes, arrived at by convenience rather than by misconfiguration.
     // Refusing to start says which port is taken, which is a sentence somebody can act on.
     strictPort: true,
+
+    /**
+     * Development reaches the API through here rather than across origins.
+     *
+     * The client no longer carries the server's address: it asks its own origin, because in a
+     * deployment Caddy serves both. Without this proxy that would be true everywhere except on
+     * the machine where the code is written — one code path in production and another in
+     * development is how a bug ships that nobody could reproduce.
+     *
+     * `ws: true` because `/v1/gateway` is a WebSocket upgrade, and a proxy that forwards the
+     * requests but not the upgrade leaves the real-time session failing while everything else
+     * looks well.
+     *
+     * `WHISPEE_API` for the branch-scoped port `scripts/dev-env.sh` hands out; the default is the
+     * one a plain `pnpm run dev` expects.
+     */
+    proxy: {
+      "/v1": {
+        target: process.env.WHISPEE_API ?? "http://127.0.0.1:8787",
+        changeOrigin: true,
+        ws: true,
+      },
+    },
   },
 
   build: {

@@ -29,7 +29,7 @@
  * discovered along the way is added with a `subscribe` frame, without reopening the connection or
  * signing another challenge.
  */
-import { BASE_URL, type Api, type GatewayChallenge } from "./api";
+import { socketUrl, type Api, type GatewayChallenge } from "./api";
 import { fromBase64, fromHex, toBase64, toHex } from "./keys";
 
 export interface GatewayHandlers {
@@ -179,7 +179,7 @@ export class Gateway {
   /** One session, from open to close. Resolves on close, rejects on error. */
   private session(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const url = `${BASE_URL.replace(/^http/, "ws")}/v1/gateway`;
+      const url = socketUrl("/v1/gateway");
       const socket = new WebSocket(url);
       socket.binaryType = "arraybuffer";
       this.socket = socket;

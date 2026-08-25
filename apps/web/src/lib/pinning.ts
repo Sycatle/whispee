@@ -34,22 +34,41 @@
 import { fromBase64 } from "./keys";
 
 /**
- * The pinned key, or `undefined` when this build was compiled without one.
+ * The pinned key, or `undefined` when nothing pinned one.
  *
- * Read once. A malformed value is a build-time mistake and it is loud: refusing to start beats
- * running with a pin that silently checks nothing, which is the failure this whole module exists
- * to avoid — a check that looks present and is not.
+ * Read once. A malformed value is loud: refusing to start beats running with a pin that silently
+ * checks nothing, which is the failure this whole module exists to avoid — a check that looks
+ * present and is not.
  */
 export const PINNED_LOG_KEY: Uint8Array | undefined = readPin();
 
+/**
+ * # Why this is injected and no longer compiled in
+ *
+ * It used to be `import.meta.env.VITE_LOG_PUBKEY`, substituted into the bundle by Vite. That meant
+ * every deployment produced different bytes, and a published manifest of file hashes could
+ * therefore describe only one of them — which is what stood between this project and a client
+ * anybody can check against the source it claims to be built from.
+ *
+ * Taking it out of the **web** bundle costs less than it looks, and the paragraphs above say why:
+ * there the server ships the pin along with the code the pin constrains, so it was never a defence
+ * against the party building the bundle. What it did buy — turning a silent substitution into one
+ * that breaks every client at once — is exactly what a verifiable build provides, and provides
+ * better: a mismatch becomes something a reader can detect deliberately rather than something they
+ * notice because the application stopped working.
+ *
+ * On the **desktop** the pin keeps its full value, and keeps it for the same reason it had it: the
+ * interface lives inside a signed, reproducible artefact. The native side sets the global before
+ * the webview runs, so the value is in the binary rather than in these bytes.
+ */
 function readPin(): Uint8Array | undefined {
-  const raw = import.meta.env.VITE_LOG_PUBKEY;
+  const raw = (globalThis as { __WHISPEE_LOG_KEY__?: unknown }).__WHISPEE_LOG_KEY__;
   if (typeof raw !== "string" || raw === "") return undefined;
 
   const key = fromBase64(raw);
   if (key.length !== 32) {
     throw new Error(
-      `VITE_LOG_PUBKEY must be 32 bytes of base64 Ed25519 public key, got ${key.length}`,
+      `the pinned log key must be 32 bytes of base64 Ed25519 public key, got ${key.length}`,
     );
   }
   return key;

@@ -63,28 +63,35 @@ docker compose logs server | grep log_key
 It is printed rather than fetched because the only route carrying it, `/v1/log/sth`, requires a
 signed request — an operator has no signing device yet at this point.
 
-Put it in `.env` as `VITE_LOG_PUBKEY` and rebuild the client:
+There is nothing to put it in on the web any more, and that is deliberate. The pin used to be
+compiled into the bundle as `VITE_LOG_PUBKEY`; it is not, because on the web it was never a
+defence — this deployment served both the pin and the code the pin constrains, so a server willing
+to forge a log was willing to serve a build that trusted it. What it did buy, a substitution that
+broke every client at once instead of silently, is replaced by something stronger: a build anybody
+can check against the published manifest. See `apps/web/src/lib/pinning.ts`.
 
-```sh
-docker compose up -d --build web
-```
+The desktop binary still pins, and there it means what it always meant: the interface is inside a
+signed, reproducible artefact the server cannot reach.
 
-What this buys, precisely: a client with the pin refuses any log head signed by a different key.
-That is the only check that works on a **first** contact with a server — every other one compares
-the server against its own past. In the desktop binary, whose interface is packaged in a signed
-artefact, it closes the substitution hole. On the web it does not: this deployment serves both
-the pin and the code the pin constrains. There it turns a silent substitution into one that
-breaks every client at once, which is worth having and is not a defence.
+Keep the key anyway. It is what a verifier compares a log head against, and it is the value
+`scripts/verify-web.sh` will want.
 
-## Changing the domain means rebuilding the client
+## Changing the domain no longer rebuilds the client
 
-The Content-Security-Policy is computed into `index.html` at build time
-(`apps/web/src/lib/csp.ts`), and its `connect-src` has to name this deployment's exact origin —
-both the `https://` form and the `wss://` one, which it does not infer. `VITE_API_URL` is
-therefore a build argument, not an environment variable. Change the domain and run
-`docker compose build web`.
+It used to. The API address and the Content-Security-Policy were both frozen into `index.html` at
+build time, so a new domain meant `docker compose build web`.
 
-The same applies to `VITE_LOG_PUBKEY` and `VITE_MEDIA_URL`.
+Neither is now: the client reaches the API on whatever origin served it — Caddy puts both behind
+one — and the policy says `connect-src 'self'`, which is strictly tighter than naming a host. A
+domain change is a restart.
+
+The point of that is not convenience. **Two deployments of the same commit now produce
+byte-identical bundles**, which is what makes a single published manifest of hashes able to
+describe all of them, self-hosted included.
+
+`VITE_MEDIA_URL` is the one build argument left, and it is the exception: a media host has to be
+named in the policy. A deployment that sets it gives up matching the published build — verifiable
+or calls, not both, until the media server sits behind the same origin.
 
 ## Updating
 

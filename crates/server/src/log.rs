@@ -50,6 +50,13 @@ pub async fn signing_key(pool: &PgPool) -> Result<SigningKey, sqlx::Error> {
     Ok(SigningKey::from_bytes(&bytes))
 }
 
+/// Advisory lock key serialising appends to the log.
+///
+/// An arbitrary constant, and the only requirement on it is that nothing else in this server uses
+/// the same number: Postgres advisory locks share one namespace per database, so a collision
+/// would make two unrelated operations wait on each other. Nothing else here takes one.
+const APPEND_LOCK: i64 = 0x1067_0000_0000_0001;
+
 /// Appends an account key to the log.
 ///
 /// The leaf hash is computed **here**, by the shared crate, and never in SQL: a second
@@ -70,6 +77,44 @@ pub async fn append(
     rotation: Option<(&[u8], u64)>,
 ) -> Result<(), sqlx::Error> {
     let leaf = transparency::leaf_hash(&transparency::entry(account, identity_key));
+
+    // Serialises appenders, and this is the line that makes the log append-only.
+    //
+    // # What breaks without it
+    //
+    // `seq` is a `BIGSERIAL`: the number is drawn at `INSERT` and becomes visible at `COMMIT`.
+    // Two overlapping appends can therefore commit in the reverse of their numbering — the larger
+    // number lands first, is read into a tree and signed into a head, and the smaller one then
+    // takes a position **before** it in `ORDER BY seq`. A leaf a client has already counted has
+    // moved, and the tree it pinned is no longer a prefix of the tree served next:
+    // `verify_consistency` returns `BadProof`.
+    //
+    // That is the log accusing its own server of keeping two logs — the one accusation this
+    // mechanism exists to make, raised here by nothing worse than two people signing up at the
+    // same moment. A false alarm in a fork detector is not a lesser failure than a missed one: it
+    // teaches the client's user that the alarm means nothing.
+    //
+    // # Why an advisory lock and not an ordering column
+    //
+    // The lock is held until the appending transaction commits or rolls back, so **numbering
+    // order is commit order** — the property `ORDER BY seq` was already assuming. A column
+    // assigned from a counter would need the same lock to be read and incremented safely, and
+    // would add a second source of truth for a position `seq` already carries.
+    //
+    // # What it costs
+    //
+    // Appends are serialised. They are rare — an account creation and a key rotation, both behind
+    // the address quota — and the lock is taken as late as possible, immediately before the
+    // insert, so it covers the smallest part of the caller's transaction. Reads take nothing: the
+    // snapshot path never asks for this lock.
+    //
+    // Gaps stay possible and stay harmless: a transaction that draws a number and rolls back
+    // leaves a hole, the order is still increasing, and `index_of` counts rows rather than
+    // trusting `seq` to be dense.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(APPEND_LOCK)
+        .execute(&mut *tx)
+        .await?;
 
     sqlx::query(
         "INSERT INTO log_entries (account, identity_key, leaf, rotation, rotated_at)

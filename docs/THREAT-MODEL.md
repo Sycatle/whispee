@@ -167,6 +167,9 @@ Same position, now actively lying, withholding, injecting and delaying.
   meantime. The server-side membership filter narrows the window without closing it.
 - **serve hostile JavaScript**, on the web target, on every load. No browser policy fixes that —
   which is what the desktop application, with its interface inside the signed binary, exists for.
+  What the web target has instead is a published, attested manifest of the bundle's hashes, which
+  makes a substitution **detectable by whoever checks** rather than impossible. See §4quinquies for
+  what that is worth and what it is not.
 - **choose whom to wake**, wherever push is configured. See §4.
 - **keep an envelope forever.** There is no purge, and no proof of deletion for anything.
 
@@ -481,6 +484,74 @@ survive the loss of every device. Nothing archives it, so nothing restores it.
 
 ---
 
+## 4quinquies. The served code is checkable, and the banner still stays
+
+§2.3 lists what a malicious server can do, and one entry has no cryptographic answer: **serve
+hostile JavaScript, on every load, to one person**. No browser policy fixes it. The desktop
+application exists partly for that reason — its interface is inside a signed binary — and the web
+target had nothing.
+
+It now has something short of a defence and well short of nothing.
+
+### What was built
+
+Every release publishes `WEB-SHA256SUMS`, a hash per file of the bundle, produced by
+`scripts/release-web.sh` and **attested by GitHub Actions** through Sigstore
+(`.github/workflows/release.yml`). The attestation binds the manifest to a commit *and* to the
+workflow that produced it: nobody, the maintainer included, can mint that binding outside Actions.
+
+That is the part that matters. The repository already carries an Ed25519 key for the desktop
+release, and `scripts/verify-release.sh` states its own limit — the key lives in the repository, so
+whoever controls the repository can replace it. For a manifest whose entire job is to be
+independent of the party serving the code, a key that party holds is not independence.
+
+Two consumers: `scripts/verify-web.sh` compares a live deployment against a manifest, and
+`extension/` does the same continuously from a browser.
+
+### The precondition, and why it is stated here
+
+**One manifest describes every deployment**, self-hosted included, because the bundle carries no
+deployment's configuration any more. The API is reached on the page's own origin, the policy says
+`connect-src 'self'`, and the log pin left the web build. Measured: two builds with entirely
+different configuration are byte-identical across all 226 files, and a build in
+`node:22-bookworm-slim` agrees with CI byte for byte.
+
+Without that, a published manifest would have described the official deployment and nothing else —
+a service to one operator, dressed as a general mechanism.
+
+### What it does not establish, in order of how easily it is over-read
+
+**The banner does not go away, and no version of this work removes it.** Everything the page
+displays is drawn by the server being checked. A "verified" badge in the application would be
+forged by exactly the server it is meant to catch, which is why the verdict lives in the
+extension's toolbar icon and nowhere else. What the sentence changes is its second half: from
+"nobody can check this" to "here is what to check it with".
+
+**A targeted attack on somebody who does not check is untouched.** `verify-web.sh` passes for
+everybody who runs it and fails only for the person being attacked — who is, by construction, the
+person not running it. That is the ceiling of the manual half and the whole argument for the
+extension.
+
+**The extension re-requests rather than reads.** Chrome exposes no way to obtain the bytes a page
+actually received, so resources are fetched again with `cache: "force-cache"`. A server that
+answers differently to a second request defeats this and nothing here detects it. What it raises is
+the cost of an attack from "serve anything" to "serve one thing consistently and hope nobody
+compares" — real, and not the same as impossible.
+
+**Verifiable or calls, not both.** `VITE_MEDIA_URL` still enters the Content-Security-Policy, so a
+deployment configuring calls produces a bundle that no longer matches the published one. Until the
+media server sits behind the same origin, an operator chooses between the two.
+
+**The extension is its own supply chain.** It is another artefact, from another store, and
+"verified by an extension" is worth exactly what the extension is worth. It is unpublished today,
+so installing it means loading it from source.
+
+**None of this concerns the audit.** A reproducible, attested, verified build establishes that the
+bytes match the source. It says nothing about whether the source is right. That is why the banner
+in the interface is now two banners, and why the second one shows on the desktop as well.
+
+---
+
 ## 5. Known limitations
 
 The full table, in order of real importance. Nothing here is softened.
@@ -489,7 +560,7 @@ The full table, in order of real importance. Nothing here is softened.
 |---|---|
 | **Metadata** | Message sizes are now padded in buckets, and the sender is no longer identified to the server (sealed sender). Still visible: **who belongs to which group, when a post happens, and from which IP address**. Often more revealing than the content; hiding it would need a third-party relay and cover traffic. |
 | **Log signed by the party it watches** | The auditable log exists, but it is signed by the same party it monitors. A serious deployment would hand it to distinct operators. Gossip between clients partially compensates — it does not erase the defect. |
-| **Log key served by the server** | The client discovers it from the very server it is meant to monitor. `VITE_LOG_PUBKEY` now lets a build be compiled against a known key, which is the only check that works on a first contact — but it closes the hole only in the **desktop binary**, packaged inside a signed artefact. On the web the server ships the bundle, so it ships the pin with it: there a pin turns a silent substitution into one that breaks every deployed client at once, which is worth having and is not a defence against the party that builds it. Unset, behaviour is as before, and the client still refuses to let the key change afterwards. |
+| **Log key served by the server** | The client discovers it from the very server it is meant to monitor. The **desktop binary** pins it — packaged inside a signed artefact, that closes the hole on a first contact. The **web build no longer does**, and the removal was deliberate: there the server shipped the pin along with the code the pin constrained, so it was never a defence against the party building the bundle, and compiling it in made every deployment's bytes different — which is what stopped one published manifest from describing them all. What it did buy, a substitution that breaks every client at once instead of silently, is what §4quinquies provides and provides better. Either way the client still refuses to let the key change afterwards. |
 | **Account deletion** | There is no mechanism, and that is deliberate: an append-only log forbids removing an entry. Removing one outside the code shrinks the log, which gossip immediately reports as an attack — rightly. |
 | **Post noise** | The server holds each group's posting key: it can deposit envelopes. They will not decrypt — it cannot produce valid MLS — but it can pollute. That is the price of a symmetric MAC. |
 | **Typing-post rhythm** | The signal's content is opaque and never reaches the disk, but the server sees that a post is happening towards a given group. In a one-to-one it infers that one of the two is writing. Sealed sender hides *who*, not *that* — disabling the indicator is the only real protection. That setting is reciprocal, and was not always: it used to cut emission alone, which let an account watch its correspondents hesitate while showing them nothing. Privacy from the server, taken as an advantage over the person on the other side. |

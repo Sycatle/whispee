@@ -284,6 +284,16 @@ jobs:
         working-directory: apps/web
         run: pnpm test
 
+      # The extension's comparison, which is the part of it that can be checked without a browser.
+      #
+      # In this job rather than one of its own: it needs node and nothing else, and a job that
+      # spends thirty seconds installing a runtime to run nine tests would cost more than it
+      # reports. It runs unconditionally for the same reason the rest of this job does — the
+      # extension is what makes the published manifest mean anything, and a silent regression in
+      # it would turn a green icon into a claim nobody checked.
+      - name: Extension
+        run: node --test extension/*.test.js
+
       # The bundle, and it is not decoration.
       #
       # `typecheck`, `lint` and `test` all read the source; none of them resolve an import,

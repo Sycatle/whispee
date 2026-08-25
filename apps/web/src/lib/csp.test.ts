@@ -186,6 +186,37 @@ test("the media origin appears only when a build asks for one", () => {
   );
 });
 
+/**
+ * **The regression that made `bothSchemes` exist.**
+ *
+ * The pair was derived with `media.replace(/^http/, "ws")`, which only works on a variable spelled
+ * `http://`. `.env.example` recommends `ws://127.0.0.1:7880` for a local media server, and a
+ * LiveKit URL is written that way everywhere — given one, the replacement matched nothing, the
+ * policy listed the same origin twice, and the HTTP form the test above insists on was absent.
+ *
+ * The test above did not catch it because it only ever passed `https://`. This one passes the
+ * other spelling, which is the one a deployment is most likely to write.
+ */
+test("both forms are derived however the media origin is spelled", () => {
+  for (const [written, expected] of [
+    ["ws://127.0.0.1:7880", ["http://127.0.0.1:7880", "ws://127.0.0.1:7880"]],
+    ["wss://media.example", ["https://media.example", "wss://media.example"]],
+    ["http://127.0.0.1:7880", ["http://127.0.0.1:7880", "ws://127.0.0.1:7880"]],
+    ["https://media.example", ["https://media.example", "wss://media.example"]],
+  ] as const) {
+    const sources = parse(csp(written)).get("connect-src") ?? new Set();
+
+    for (const origin of expected) {
+      assert.ok(sources.has(origin), `${written} does not allow ${origin}`);
+    }
+
+    // A `Set` would hide a duplicate, so the raw directive is what is counted.
+    const directive = csp(written).split("; ").find((part) => part.startsWith("connect-src")) ?? "";
+    const occurrences = directive.split(" ").filter((source) => source === written).length;
+    assert.equal(occurrences, 1, `${written} appears ${occurrences} times in connect-src`);
+  }
+});
+
 test("media-src is not among the differences the desktop target is allowed", () => {
   assert.equal(
     DESKTOP_ONLY["media-src"],

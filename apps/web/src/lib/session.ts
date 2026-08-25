@@ -994,6 +994,22 @@ export class Session {
 
     session.witness = LogWitness.hydrate(stored);
 
+    // A cache written before deadlines were stored comes back without them, and the envelopes are
+    // behind `view.cursor`, so nothing would ever stamp those messages again — they would sit in
+    // an ephemeral conversation forever. Stamped here instead, from `sentAt` and the lifetime in
+    // force: the clamp is a no-op on a message already in the past, so the answer is the one the
+    // original stamp would have produced, minus the moment this device first saw it.
+    for (const view of session.conversations.values()) {
+      const lifetime = session.lifetimeSeconds(view);
+      if (lifetime === 0) continue;
+
+      for (const message of view.messages) {
+        if (message.expiresAt !== undefined) continue;
+        const expiresAt = expiryOf(message.sentAt, Date.now(), lifetime);
+        if (expiresAt !== undefined) message.expiresAt = expiresAt;
+      }
+    }
+
     return session;
   }
 
@@ -3185,6 +3201,16 @@ export class Session {
   }
 
   private async pollOnce(): Promise<void> {
+    // First, and before any network call. What has expired goes on the sweep that already runs
+    // every thirty seconds — reusing that timer rather than starting one for expiry, because a
+    // second clock is a second thing to keep in step and the two would drift on a throttled tab.
+    //
+    // Its position is the part that matters. Every call below can reject, and `startStream`
+    // swallows what `pollOnce` throws, so a sweep placed after them stops running the moment the
+    // server is unreachable — which is precisely the case where local expiry is the only thing
+    // left enforcing the promise. Deleting what is past needs nobody's permission.
+    this.dropExpired();
+
     // The stock of welcome keys refills itself. Without that, it runs out in silence and the
     // device becomes unreachable with nothing to say so — exactly the kind of housekeeping a user
     // should never have to carry.
@@ -3234,10 +3260,6 @@ export class Session {
       });
     }
 
-    // What has expired goes on the sweep that already runs every thirty seconds. Reusing that
-    // timer rather than starting one for expiry is deliberate: a second clock is a second thing
-    // to keep in step, and the two would drift on a tab the browser has throttled.
-    this.dropExpired();
 
     for (const view of this.conversations.values()) {
       // A severed ratchet does not heal by being asked again. See `ConversationView.stale`.

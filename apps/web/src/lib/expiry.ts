@@ -24,8 +24,15 @@ export function expiryOf(
   lifetimeSeconds: number,
 ): number | undefined {
   if (lifetimeSeconds <= 0) return undefined;
-  // Control traffic is not history: a membership notice that expired would leave a thread
-  // describing a room nobody ever joined.
+  // Nothing without a stamp has a deadline, because there is nothing to count from. In practice
+  // that is control traffic — gossip, receipts, posting keys, profiles, handles, signals — which
+  // `content.isControl` keeps unstamped, plus anything written before stamping existed.
+  //
+  // It is deliberately *not* the notices. A membership or expiry notice is stamped, appears in
+  // the thread, and therefore expires with the messages around it. That is the right answer: a
+  // room that forgets what was said should not keep a permanent record of who joined it, and a
+  // thread whose messages are gone does not read better for retaining the line announcing they
+  // would be.
   if (sentAt === undefined) return undefined;
 
   return Math.min(sentAt, seenAt) + lifetimeSeconds * 1000;

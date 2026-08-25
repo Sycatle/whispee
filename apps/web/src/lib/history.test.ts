@@ -167,3 +167,24 @@ test("a malformed queue entry is dropped without taking the others", () => {
 
   assert.deepEqual(restored.get("0a0b")?.outbox.map((q) => q.localId), ["b"]);
 });
+
+/**
+ * A deadline survives the cache, because nothing else can put it back.
+ *
+ * `view.cursor` is persisted with the thread, so a restored message is never read from the server
+ * again and never re-stamped. Dropping `expiresAt` here would leave every message in an ephemeral
+ * conversation with no deadline after the first reload — the feature working until the tab is
+ * closed, which is worse than not having it.
+ */
+test("a deadline survives the cache", () => {
+  const doomed = text(1, { sentAt: 1_700_000_000_000, expiresAt: 1_700_000_060_000 });
+  const restored = roundTrip(new Map([["0a0b", thread([doomed])]])).get("0a0b")?.messages;
+
+  assert.equal(restored?.[0].expiresAt, 1_700_000_060_000);
+});
+
+test("a message with no deadline gains none from the round trip", () => {
+  const restored = roundTrip(new Map([["0a0b", thread([text(1)])]])).get("0a0b")?.messages;
+
+  assert.equal(restored?.[0].expiresAt, undefined);
+});

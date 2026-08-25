@@ -282,9 +282,14 @@ export function Messages({
    */
   const lastMine = visible.reduce<number | null>(
     // A membership notice is ours in the sense that we sent it, and nobody wants to know whether
-    // "you added Bob" has been read. The receipt belongs to the last thing we *said*.
+    // "you added Bob" has been read. The receipt belongs to the last thing we *said*, and an
+    // expiry notice is the same kind of line: the thread talking about itself.
     (found, message) =>
-      message.mine && message.content.kind !== "membership" ? message.seq : found,
+      message.mine &&
+      message.content.kind !== "membership" &&
+      message.content.kind !== "expiry"
+        ? message.seq
+        : found,
     null,
   );
 

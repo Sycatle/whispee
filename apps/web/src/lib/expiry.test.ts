@@ -27,7 +27,10 @@ test("no lifetime means no deadline", () => {
 });
 
 test("control traffic carries no sentAt and never expires", () => {
-  // Expiring a membership notice would leave a thread describing a room nobody joined.
+  // Nothing to count from. Receipts, gossip, posting keys and profiles are never stamped — see
+  // `content.isControl` — so they have no deadline. The notices *are* stamped and do expire,
+  // which is the intended answer and not an oversight: a thread whose messages are gone does not
+  // read better for keeping the line that announced they would be.
   assert.equal(expiryOf(undefined, 1_000_000, HOUR), undefined);
 });
 

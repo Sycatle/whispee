@@ -54,6 +54,19 @@ interface StoredMessage {
   sender: string | null;
   mine: boolean;
   body: number[];
+  /**
+   * The deadline, in milliseconds, when the message has one.
+   *
+   * Stored rather than recomputed on the way back in, and that is the whole point of it being a
+   * field: `expiry.ts` stamps it once from `min(sentAt, first seen here)`, and a cache that
+   * dropped it would hand back a message with no deadline at all. `view.cursor` is persisted
+   * too, so the envelope is never read again and never re-stamped — the message would simply
+   * stop expiring, which is the feature failing at the first reload.
+   *
+   * Optional because two cases have none: an entry written before this field existed, and a
+   * message nothing expires.
+   */
+  expiresAt?: number;
 }
 
 interface StoredHistory {
@@ -111,6 +124,7 @@ export function encodeHistory(conversations: Map<string, Cached>): Uint8Array {
         sender: message.sender,
         mine: message.mine,
         body: [...content.encode(message.content, message.sentAt)],
+        ...(message.expiresAt === undefined ? {} : { expiresAt: message.expiresAt }),
       }));
     }
 
@@ -164,6 +178,11 @@ export function decodeHistory(bytes: Uint8Array): Map<string, Cached> {
           mine: entry.mine,
           content: body,
           ...(sentAt === undefined ? {} : { sentAt }),
+          // Read back rather than recomputed: the deadline was clamped against the moment this
+          // device first saw the message, and that moment is gone by now. An entry from before
+          // this field existed comes back without one, and `Session.hydrate` re-stamps it from
+          // the conversation's lifetime — the only place that knows what the lifetime is.
+          ...(typeof entry.expiresAt === "number" ? { expiresAt: entry.expiresAt } : {}),
         });
       } catch {
         // One unreadable entry, not one unreadable conversation.

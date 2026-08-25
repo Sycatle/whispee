@@ -35,7 +35,8 @@ not their equal and does not try to be.
 | Audio calls | 1-to-1 and group, through a media server that cannot hear them — frames encrypted under a key derived from the MLS epoch. Off unless a deployment configures one, and it leaks more than a message does: see [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) § 4ter |
 | Local lock | Argon2id (64 MiB, 3 passes), unlock key → master key indirection, re-locks when left alone |
 | Account recovery | Twelve words, plus an **opt-in** escrow — a password (Argon2id, 256 MiB) or a WebAuthn passkey. Off by default: it puts the account key on the server, encrypted, and [says so before the field](docs/THREAT-MODEL.md) |
-| History vault | On by default, encrypted under a key derived from the recovery phrase |
+| Disappearing messages | **On by default: seven days.** The lifetime is a group-context extension, so every member agrees on it; the server never learns it. Not enforceable on the other side — see [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) |
+| History vault | On by default, encrypted under a key derived from the recovery phrase — **and off for any conversation with a lifetime**, which is what makes disappearing mean anything. Such a conversation does not survive the loss of every device |
 | Storage quota | 256 MiB per account by default, charged on vault writes and attachment uploads, credited back when a purge deletes. Envelopes are outside it: charging a sealed post would mean naming its sender — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Web, desktop | Vite 7 + React 19; Tauri 2 wraps the same build |
 | Reproducible, signed releases | `scripts/release.sh`, `scripts/verify-release.sh` |
@@ -110,6 +111,7 @@ Every design decision is written down, with what it costs and what it does not s
 | [docs/specs/2026-08-22-recovery-escrow.md](docs/specs/2026-08-22-recovery-escrow.md) | Why recovery by password exists, and everything it gives up |
 | [docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md) | What holds the interface reachable without a mouse, and what is still missing |
 | [docs/BUILD.md](docs/BUILD.md) | Building every target, reproducible releases, verification |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Putting this on a host other people reach, and what such a deployment still does not do |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | What is planned, what is half-done, and what has been ruled out |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, the invariants a patch must not break, tests, commit style |
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability, and the honest limits of the response |

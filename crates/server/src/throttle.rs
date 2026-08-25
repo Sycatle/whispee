@@ -131,6 +131,30 @@ pub const DEFAULT_KEY_PACKAGES_PER_MINUTE: u32 = 5;
 /// covers the worst honest catch-up, and no more.
 pub const DEFAULT_VAULT_WRITES_PER_MINUTE: u32 = 10;
 
+/// Default quota for vault deletions, per device and per minute.
+///
+/// **A counter of its own, and sharing the one above was a defect rather than a simplification.**
+/// A deletion undoes deposits, so it is emitted by a device that has just been depositing: the
+/// client archives on every send and on every polled batch. Counting both in one bucket meant that
+/// a user who had sent ten messages in the last minute and then turned a lifetime on got a `429`
+/// on the deletion — **after** the commit had already changed the room's memory for everybody. The
+/// archive survived the feature that exists to remove it, and the only thing on screen was "too
+/// many requests".
+///
+/// Thirty, above the ten deposits it undoes. That direction is the whole point: a session must
+/// always be able to erase what that same session was allowed to write. It is still a bound — the
+/// call is a `DELETE … RETURNING` plus a counter update in one transaction, which is real work a
+/// signed device could otherwise ask for without end.
+pub const DEFAULT_VAULT_DROPS_PER_MINUTE: u32 = 30;
+
+/// A deletion is never rarer than the deposit it undoes.
+///
+/// Checked rather than trusted to review, because the failure it prevents is silent on this side:
+/// the server answers `429` correctly, and what breaks is a client's ability to erase an archive
+/// it has just been told to erase. An edit that inverts this ordering brings back exactly the
+/// defect the constant above describes.
+const _: () = assert!(DEFAULT_VAULT_DROPS_PER_MINUTE >= DEFAULT_VAULT_WRITES_PER_MINUTE);
+
 /// Default quota for attachment uploads, per device and per minute.
 ///
 /// Set from the human action, which is picking a batch of photographs and sending them at once:
@@ -153,6 +177,10 @@ pub const DEFAULT_ATTACHMENT_UPLOADS_PER_MINUTE: u32 = 30;
 pub const DEFAULT_ENVELOPES_PER_MINUTE: u32 = 120;
 
 /// The four write quotas are ordered by what the row costs to keep.
+///
+/// [`DEFAULT_VAULT_DROPS_PER_MINUTE`] is deliberately outside this ordering: it keeps no row, it
+/// removes them, so "what the row costs to keep" says nothing about it. Its own bound is the one
+/// asserted beside it — never below the deposits it undoes.
 ///
 /// A message is a kilobyte, an attachment up to twenty-five mebibytes, a vault write up to two
 /// hundred rows and a KeyPackage top-up up to a hundred — so the widest quota belongs to the
@@ -317,6 +345,9 @@ impl Recovery {
 pub enum Written {
     KeyPackages,
     Vault,
+    /// A vault deletion. Separate from [`Written::Vault`] on purpose — see
+    /// [`DEFAULT_VAULT_DROPS_PER_MINUTE`] for the failure that sharing one counter produced.
+    VaultDrops,
     Attachments,
     Envelopes,
 }
@@ -334,6 +365,7 @@ pub enum Written {
 pub struct Writes {
     key_packages: Throttle,
     vault: Throttle,
+    vault_drops: Throttle,
     attachments: Throttle,
     envelopes: Throttle,
 }
@@ -348,6 +380,7 @@ impl Writes {
         Self {
             key_packages: Throttle::per_minute(quota),
             vault: Throttle::per_minute(quota),
+            vault_drops: Throttle::per_minute(quota),
             attachments: Throttle::per_minute(quota),
             envelopes: Throttle::per_minute(quota),
         }
@@ -363,6 +396,10 @@ impl Writes {
             vault: Throttle::per_minute(quota(
                 "VAULT_QUOTA_PER_MINUTE",
                 DEFAULT_VAULT_WRITES_PER_MINUTE,
+            )),
+            vault_drops: Throttle::per_minute(quota(
+                "VAULT_DROP_QUOTA_PER_MINUTE",
+                DEFAULT_VAULT_DROPS_PER_MINUTE,
             )),
             attachments: Throttle::per_minute(quota(
                 "ATTACHMENT_QUOTA_PER_MINUTE",
@@ -384,6 +421,7 @@ impl Writes {
         match table {
             Written::KeyPackages => &self.key_packages,
             Written::Vault => &self.vault,
+            Written::VaultDrops => &self.vault_drops,
             Written::Attachments => &self.attachments,
             Written::Envelopes => &self.envelopes,
         }
@@ -476,6 +514,25 @@ mod tests {
         assert!(
             writes.allows(Written::Envelopes, "alice:laptop"),
             "a full attachment quota must not stop a message"
+        );
+    }
+
+    /// **The regression that made [`Written::VaultDrops`] exist.**
+    ///
+    /// A deletion used to be counted in the deposit's bucket. The client archives on every send,
+    /// so a user who had been talking and then turned a lifetime on got a `429` on the deletion —
+    /// after the commit had already changed the room's memory for everybody. The archive outlived
+    /// the feature that exists to remove it, and the screen said "too many requests".
+    #[test]
+    fn archiving_does_not_exhaust_the_quota_for_erasing_the_archive() {
+        let writes = Writes::per_minute(1);
+
+        assert!(writes.allows(Written::Vault, "alice:laptop"));
+        assert!(!writes.allows(Written::Vault, "alice:laptop"));
+
+        assert!(
+            writes.allows(Written::VaultDrops, "alice:laptop"),
+            "a device must always be able to erase what it was allowed to write"
         );
     }
 

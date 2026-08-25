@@ -53,7 +53,7 @@ import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 import { Attachment } from "@/components/Attachment";
 import { EmojiDrawer } from "@/components/EmojiPicker";
-import { dayLabel, spokenDuration, timeOf } from "@/lib/datetime";
+import { dayLabel, spokenDuration, spokenLifetime, timeOf } from "@/lib/datetime";
 import { COMPOSER_ID } from "@/components/ids";
 import { say } from "@/lib/i18n";
 import { addresses } from "@/lib/mention";
@@ -282,9 +282,14 @@ export function Messages({
    */
   const lastMine = visible.reduce<number | null>(
     // A membership notice is ours in the sense that we sent it, and nobody wants to know whether
-    // "you added Bob" has been read. The receipt belongs to the last thing we *said*.
+    // "you added Bob" has been read. The receipt belongs to the last thing we *said*, and an
+    // expiry notice is the same kind of line: the thread talking about itself.
     (found, message) =>
-      message.mine && message.content.kind !== "membership" ? message.seq : found,
+      message.mine &&
+      message.content.kind !== "membership" &&
+      message.content.kind !== "expiry"
+        ? message.seq
+        : found,
     null,
   );
 
@@ -601,6 +606,32 @@ export function Messages({
                 : event === "missed"
                   ? say("call.missed", {})
                   : say("call.ringing", { actor: nameOfAuthor(authorOf(message)) });
+
+            return (
+              <li
+                key={key}
+                data-row={key}
+                tabIndex={thread.at === key ? 0 : -1}
+                className="px-pane py-snug text-center focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-(--color-accent)"
+              >
+                <span className="text-caption text-(--color-ink-muted)">{said}</span>
+              </li>
+            );
+          }
+
+          /*
+            A change to the room's memory, drawn as the same centred line a membership change is —
+            and for the same reason: it is the thread saying something about itself.
+          */
+          if (message.content.kind === "expiry") {
+            const { seconds } = message.content;
+            const said =
+              seconds === 0
+                ? say("expiry.off", { actor: nameOfAuthor(authorOf(message)) })
+                : say("expiry.set", {
+                    actor: nameOfAuthor(authorOf(message)),
+                    delay: spokenLifetime(seconds),
+                  });
 
             return (
               <li

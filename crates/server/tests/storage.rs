@@ -289,3 +289,86 @@ async fn the_counter_reconciles_with_what_is_actually_stored() {
         "the counter drifted from what is stored"
     );
 }
+
+/// Dropping a group's vault removes that account's entries and gives the bytes back.
+#[tokio::test]
+async fn deleting_a_groups_vault_credits_the_account() {
+    let server = start().await;
+    let (alice, device, group) = account_with_group(&server, "alice").await;
+
+    let path = format!("/v1/vault/{}", hex::encode(&group));
+    device.post(&path, vault_body(1, 1000)).await;
+    assert_eq!(counter(&server.pool, &alice.id).await, 1000);
+
+    let response = device.delete(&path).await;
+    assert!(response.status().is_success(), "delete refused: {}", response.status());
+
+    assert_eq!(counter(&server.pool, &alice.id).await, 0);
+    assert_eq!(
+        counter(&server.pool, &alice.id).await,
+        actually_stored(&server.pool, &alice.id).await
+    );
+}
+
+/// It removes the caller's entries and nobody else's.
+///
+/// The vault is indexed by account, and two members of one group each have their own. A delete
+/// that took the group's rows rather than the caller's would let anybody erase everybody's
+/// archive of a shared conversation.
+#[tokio::test]
+async fn deleting_a_vault_leaves_the_other_members_alone() {
+    let server = start().await;
+    let (alice, alice_device, group) = account_with_group(&server, "alice").await;
+    let bob = TestAccount::create(&server, &unique("bob")).await;
+    let bob_device = bob.device(&server, &unique("device")).await;
+
+    let path = format!("/v1/vault/{}", hex::encode(&group));
+    alice_device
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group)),
+            serde_json::json!({ "device_ids": [alice_device.id, bob_device.id] }),
+        )
+        .await;
+    alice_device.post(&path, vault_body(1, 1000)).await;
+    bob_device.post(&path, vault_body(2, 700)).await;
+
+    alice_device.delete(&path).await;
+
+    assert_eq!(counter(&server.pool, &alice.id).await, 0);
+    assert_eq!(
+        counter(&server.pool, &bob.id).await,
+        700,
+        "one member erased another's archive"
+    );
+}
+
+/// The browser is allowed to send the vault delete at all.
+///
+/// The rest of this file signs its requests with `reqwest`, which never issues a preflight — so
+/// every test here would pass on a server whose CORS layer refuses the method, and every real
+/// browser would fail before the request left. `cors_layer` says as much about its header list;
+/// the same trap applies to the method list, and this is the test that springs it.
+#[tokio::test]
+async fn the_browser_may_preflight_a_vault_delete() {
+    let server = start().await;
+
+    let response = reqwest::Client::new()
+        .request(reqwest::Method::OPTIONS, format!("{}/v1/vault/00", server.base_url))
+        .header("origin", "http://localhost:5173")
+        .header("access-control-request-method", "DELETE")
+        .header("access-control-request-headers", "x-device-id")
+        .send()
+        .await
+        .unwrap();
+
+    let allowed = response
+        .headers()
+        .get("access-control-allow-methods")
+        .map(|value| value.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+
+    assert!(
+        allowed.contains("DELETE"),
+        "the preflight refuses the vault delete: allow-methods is {allowed:?}"
+    );
+}

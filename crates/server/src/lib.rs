@@ -151,6 +151,35 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     // clients would see a fork caused by us.
     log::ensure_signing_key(&pool).await?;
 
+    // And its public half is printed, every start.
+    //
+    // # Why it is logged at all
+    //
+    // Because a deployment cannot otherwise find it. `VITE_LOG_PUBKEY` pins the client to this
+    // log's key — the one check that works on a **first** contact with a server, where everything
+    // else compares the server against its own past — and `.env.example` has always described it
+    // as "printed by the server on first boot". It was not. The only route carrying the key,
+    // `/v1/log/sth`, requires a signed request, so an operator standing a deployment up had no way
+    // to read the value the documentation told them to set. Found by following that sentence.
+    //
+    // # Why publishing it is not a leak
+    //
+    // It is the verifying half, handed to every authenticated client on every head. What must
+    // never leave the database is the signing half, and nothing here touches it: `signing_key`
+    // returns the key so that this line can ask it for its public counterpart.
+    //
+    // # Why every start rather than only the first
+    //
+    // A value printed once lives in a log file that has since rotated. This costs one query at
+    // startup and means the answer is always in the most recent boot.
+    {
+        use base64::Engine as _;
+        let key = log::signing_key(&pool).await?;
+        let public = base64::engine::general_purpose::STANDARD
+            .encode(key.verifying_key().to_bytes());
+        tracing::info!(log_key = %public, "transparency log public key — set as VITE_LOG_PUBKEY to pin clients to it");
+    }
+
     // Accounts predating the log must enter it, otherwise clients would reject all their keys
     // for lack of an inclusion proof.
     log::backfill(&pool).await?;
@@ -580,7 +609,12 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
 
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST])
+        // Every method a route answers on must be listed, for the same reason the headers below
+        // are: the browser blocks an unlisted one at the preflight, and the server never sees it.
+        // `DELETE` is the vault drop, which is how turning on a lifetime erases this account's
+        // archive — a route the integration tests reach without a preflight, and would therefore
+        // have called working while every browser refused it.
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         // Every header the client sends must be listed here, otherwise the browser blocks the
         // request **before** it leaves: the server sees nothing, and the client only gets a
         // "Failed to fetch" that does not name the cause. Integration tests do not go through

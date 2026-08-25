@@ -12,6 +12,7 @@ pub mod conversation;
 pub mod error;
 pub mod escrow;
 pub mod identity;
+pub mod lifetime;
 pub mod lock;
 pub mod pairing;
 pub mod provider;

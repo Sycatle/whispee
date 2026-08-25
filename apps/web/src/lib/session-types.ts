@@ -55,6 +55,17 @@ export interface Message {
    */
   sentAt?: number;
   /**
+   * When this client drops the message, in milliseconds.
+   *
+   * Stamped once, on arrival, from the conversation's lifetime — see `expiry.ts` for the clamp
+   * that stops a sender extending their own. Stored rather than recomputed, which is what makes
+   * a later change of lifetime non-retroactive for what is already held, and what stops a device
+   * that was offline during that change from reading the same history differently.
+   *
+   * Absent means nothing expires it: control traffic, or a conversation with no lifetime.
+   */
+  expiresAt?: number;
+  /**
    * The decrypted body.
    *
    * It was once true that this never touched disk, and the note here said so. It is not true any
@@ -437,15 +448,6 @@ export interface ConversationFlags {
    * it is claiming something it has not done.
    */
   archiveToVault?: boolean;
-  /**
-   * Lifetime in milliseconds for messages sent here, counted from the sender's `sentAt`.
-   *
-   * Not enforceable, and the interface must say so before the control rather than after: the
-   * other side runs their own client, screenshots exist, and a recipient who wants to keep a
-   * message keeps it. What it does buy is that the message never reaches the vault, so it is not
-   * waiting on a server for the rest of time.
-   */
-  ephemeralMs?: number;
 }
 
 /**

@@ -3078,6 +3078,26 @@ async fn a_full_attachment_quota_does_not_stop_a_message() {
 /// them. The database is shared with whatever else is running, and a head of size N covers the
 /// first N leaves of an append-only log — comparing against the whole table would make the test
 /// fail on somebody else's account creation.
+///
+/// # Why the comparison is retried rather than made once
+///
+/// It caught a defect in the log, and the defect is fixed elsewhere: `seq` is a `BIGSERIAL`, so
+/// two concurrent inserts draw their numbers **before** they commit and the larger one can become
+/// visible first — after which the smaller one lands *before* it in `ORDER BY seq` and a root
+/// recomputed afterwards no longer matches the head served a moment earlier. Under
+/// `cargo test --workspace` the other suites create accounts throughout, so this assertion failed
+/// at random until `log::append` was made to take a transaction-scoped advisory lock, which makes
+/// numbering order commit order. See `tests/log_order.rs`, which pins that property directly.
+///
+/// The retry stays, for a smaller reason than the one it was written for: this test asserts a
+/// *cache* is invisible, and it does so against a database shared with every other suite. It has
+/// no business failing on somebody else's timing, whatever the cause — and the ordering fix is a
+/// separate change with its own merge, so this file must be correct on either side of it.
+///
+/// What is retried is the **pair** — a head and the recomputation belonging to it, read close
+/// enough together that nothing landed in between. That weakens nothing: a server serving a root
+/// its own table does not support fails every attempt, because no reading of the table would ever
+/// agree with it. Only timing is given room to settle.
 #[tokio::test]
 async fn the_cached_head_matches_a_recomputation_after_an_append() {
     let server = start().await;
@@ -3090,24 +3110,47 @@ async fn the_cached_head_matches_a_recomputation_after_an_append() {
     // An account creation appends a leaf, inside the transaction that writes the account.
     TestAccount::create(&server, &unique("newcomer")).await;
 
-    let after: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
-    let size_after = after["size"].as_u64().unwrap();
+    let mut last: Option<(u64, Vec<u8>, Vec<u8>)> = None;
 
-    assert!(size_after > size_before, "the cache survived an append it should have noticed");
+    for attempt in 0..8 {
+        let after: serde_json::Value = reader.get("/v1/log/sth").await.json().await.unwrap();
+        let size_after = after["size"].as_u64().unwrap();
 
-    let rows: Vec<(Vec<u8>,)> =
-        sqlx::query_as("SELECT leaf FROM log_entries ORDER BY seq LIMIT $1")
-            .bind(size_after as i64)
-            .fetch_all(&server.pool)
-            .await
-            .unwrap();
+        assert!(size_after > size_before, "the cache survived an append it should have noticed");
 
-    let leaves: Vec<transparency::Hash> =
-        rows.into_iter().map(|(leaf,)| leaf.try_into().unwrap()).collect();
-    assert_eq!(leaves.len() as u64, size_after, "the log lost rows under the test");
+        let rows: Vec<(Vec<u8>,)> =
+            sqlx::query_as("SELECT leaf FROM log_entries ORDER BY seq LIMIT $1")
+                .bind(size_after as i64)
+                .fetch_all(&server.pool)
+                .await
+                .unwrap();
 
-    let served = BASE64_STANDARD.decode(after["root"].as_str().unwrap()).unwrap();
-    assert_eq!(served, transparency::root(&leaves), "the served root is not the log's root");
+        let leaves: Vec<transparency::Hash> =
+            rows.into_iter().map(|(leaf,)| leaf.try_into().unwrap()).collect();
+        assert_eq!(leaves.len() as u64, size_after, "the log lost rows under the test");
+
+        let served = BASE64_STANDARD.decode(after["root"].as_str().unwrap()).unwrap();
+        let recomputed = transparency::root(&leaves).to_vec();
+
+        if served == recomputed {
+            return;
+        }
+
+        last = Some((size_after, served, recomputed));
+
+        // Long enough for an insert that had already drawn its `seq` to commit, short enough that
+        // eight of them cost less than a second when the log is quiet — which it is, every time
+        // this test is run on its own.
+        if attempt < 7 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    let (size, served, recomputed) = last.expect("the loop runs at least once");
+    panic!(
+        "the served root is not the log's root, on every attempt: \
+         size {size}, served {served:?}, recomputed {recomputed:?}"
+    );
 }
 
 /// The head served twice in a row without an append is the same head.

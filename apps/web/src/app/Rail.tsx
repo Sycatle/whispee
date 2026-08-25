@@ -3,7 +3,7 @@ import { useCallback, useState } from "react";
 import { LeaveGroupDialog } from "@/components/Group";
 import { PresenceBadge } from "@/components/Presence";
 import { plain } from "@/lib/markdown";
-import { timeOf } from "@/lib/datetime";
+import { spokenLifetime, timeOf } from "@/lib/datetime";
 import { type NameSources, compactNameOf, handleOf, nameMatches, nameOf, titleOf } from "@/lib/naming";
 import * as mention from "@/lib/mention";
 import { membersOf } from "@/components/Conversation";
@@ -115,6 +115,18 @@ function preview(
     // A membership change is the latest news of a conversation as much as a message is, and
     // skipping it would leave the row showing something older than the reason it just moved to
     // the top. Never prefixed with "You:": the sentence already names who did what.
+    // The room's memory changing is news the row must show, for the same reason: the
+    // conversation just moved to the top and something older would explain nothing.
+    if (content.kind === "expiry") {
+      return {
+        mine: false,
+        text:
+          content.seconds === 0
+            ? say("expiry.preview.off", {})
+            : say("expiry.preview.set", { delay: spokenLifetime(content.seconds) }),
+      };
+    }
+
     if (content.kind === "membership") {
       return {
         mine: false,

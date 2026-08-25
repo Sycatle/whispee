@@ -1,0 +1,99 @@
+# A deployment, on one host.
+#
+# This is not `../docker-compose.yml`. That file is a development Postgres with a password that
+# says what it is worth, published on a port chosen to avoid the ones already taken on a laptop.
+# Nothing in it was meant to face the internet, and starting it on a server would expose a
+# database with a known password.
+#
+# Run this one from this directory, so that `.env` beside it is picked up:
+#
+#     cd deploy && docker compose up -d --build
+#
+# Read `../docs/DEPLOY.md` first. It carries what this file cannot: what the deployment learns
+# about its users, what it must be told before it works, and what it still does not do.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: whispee
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: whispee
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No `ports`. The database is reachable from the compose network and from nothing else —
+    # publishing 5432 on a public host is how a Postgres ends up in somebody else's scan results.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whispee -d whispee"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://whispee:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/whispee
+      # Loopback would be reachable from nothing inside a container. What keeps this off the
+      # internet is the absence of a `ports` entry: only the proxy can reach it.
+      SERVER_ADDR: 0.0.0.0:8787
+      # The client is served from the same origin as the API, so no browser sends a preflight and
+      # this list is exercised by nothing in a normal deployment. It is set anyway, for the
+      # desktop application pointed at this host and for whoever adds a second client origin
+      # later: `allowed_origins` **adds** to the two origins Tauri imposes rather than replacing
+      # them, and the comment above it explains what breaking that costs.
+      ALLOWED_ORIGINS: https://${WHISPEE_DOMAIN:?set WHISPEE_DOMAIN in deploy/.env}
+      ACCOUNT_STORAGE_BYTES: ${ACCOUNT_STORAGE_BYTES:-}
+      # Calls. Empty here, and a deployment that leaves them empty keeps a fully working
+      # messenger — the call route answers 503 and the client hides the button. Read
+      # `crates/server/src/call.rs` before setting them: a call leaks more than a message does.
+      MEDIA_URL: ${MEDIA_URL:-}
+      MEDIA_API_KEY: ${MEDIA_API_KEY:-}
+      MEDIA_API_SECRET: ${MEDIA_API_SECRET:-}
+      RELAY_URLS: ${RELAY_URLS:-}
+      RELAY_SECRET: ${RELAY_SECRET:-}
+      RUST_LOG: ${RUST_LOG:-server=info,tower_http=info}
+    # Migrations run on connect (`server::connect` calls `sqlx::migrate!`), so there is no
+    # migration step to sequence here and no window where the schema and the binary disagree.
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+      args:
+        # Build-time, not runtime: the Content-Security-Policy is computed into `index.html` and
+        # must name this exact origin. Changing the domain means `docker compose build web`, not
+        # a restart.
+        VITE_API_URL: https://${WHISPEE_DOMAIN:?set WHISPEE_DOMAIN in deploy/.env}
+        VITE_MEDIA_URL: ${VITE_MEDIA_URL:-}
+        VITE_LOG_PUBKEY: ${VITE_LOG_PUBKEY:-}
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      WHISPEE_DOMAIN: ${WHISPEE_DOMAIN:?set WHISPEE_DOMAIN in deploy/.env}
+      WHISPEE_ACME_EMAIL: ${WHISPEE_ACME_EMAIL:?set WHISPEE_ACME_EMAIL in deploy/.env}
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3. Harmless if the host firewall drops it; the connection falls back to TCP.
+      - "443:443/udp"
+    volumes:
+      # **The two volumes that must survive a rebuild.** `caddy_data` holds the certificates and
+      # the ACME account key. Losing it means re-issuing on every deploy, and Let's Encrypt counts
+      # those: five failures an hour, fifty certificates a week per domain. A deployment that
+      # rebuilds often and forgets this line stops being able to obtain a certificate at all, for
+      # a week, with no way to shorten it.
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

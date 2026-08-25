@@ -146,9 +146,34 @@ export class Archive {
    * Throws when there were entries and none of them could be read. That means the vault key is no
    * longer the right one — the account has been rotated — and saying so beats serving an empty
    * thread that looks like a conversation nobody ever had.
+   *
+   * # Why the lifetime is a required argument here too
+   *
+   * The symmetry with `store` is the correctness. `store` refuses to archive a conversation that
+   * has a lifetime; without the same refusal here, an archive written **before** the lifetime was
+   * turned on came back into the thread — and came back **immortal**. Nothing on this path sets
+   * `expiresAt`: `Archived` carries `{sender, mine, body}`, `expiryOf` is never called, and
+   * `dropExpired` skips anything without a deadline. `history.ts` then persisted those messages,
+   * so they survived every reload. A conversation set to forget in one day would quietly hold its
+   * entire past, forever, on the first device that opened it.
+   *
+   * Stamping them on the way in was the other candidate and it is the wrong one. The deadline is
+   * `min(sentAt, first seen here) + lifetime`, and "first seen here" is not a thing a restore
+   * knows — it would have to invent one, which is how a message ends up outliving the same
+   * message on the device next to it. Refusing is also what the feature already promises out
+   * loud: a conversation with a lifetime does not survive the loss of every device.
+   *
+   * An optional argument would be an argument somebody forgets, and the forgotten case is the
+   * dangerous one. It is required for the same reason it is required on `store`.
    */
-  async restore(api: VaultApi, groupId: Uint8Array, held: Message[]): Promise<Message[]> {
+  async restore(
+    api: VaultApi,
+    groupId: Uint8Array,
+    held: Message[],
+    conversation: { lifetimeSeconds: number },
+  ): Promise<Message[]> {
     if (!this.key) return [];
+    if (conversation.lifetimeSeconds > 0) return [];
 
     const { messages, unreadable } = await vault.restore(api, this.key, groupId);
 
@@ -176,9 +201,24 @@ export class Archive {
    * backup is missing, and it will be retried on the next send. Hence the swallowed error — the
    * one place in this file where failing quietly is the right answer, and `full` above is the one
    * refusal that is not.
+   *
+   * # Why the lifetime is a required argument
+   *
+   * A conversation that forgets its messages after seven days must not be leaving copies on a
+   * server that keeps them for good — the vault would quietly turn the whole feature into a
+   * label. The two are one decision, so the caller cannot deposit without stating it: an optional
+   * argument here is an argument somebody forgets at one of the two call sites, and half a thread
+   * is archived depending on who talks more.
    */
-  async store(api: VaultApi, groupId: Uint8Array, messages: Message[]): Promise<void> {
+  async store(
+    api: VaultApi,
+    groupId: Uint8Array,
+    messages: Message[],
+    conversation: { lifetimeSeconds: number },
+  ): Promise<void> {
     if (!this.key || messages.length === 0) return;
+    // Never asked, rather than asked and refused: the point is that nothing leaves this device.
+    if (conversation.lifetimeSeconds > 0) return;
 
     try {
       await vault.store(api, this.key, groupId, messages);

@@ -42,6 +42,27 @@ export function spokenDuration(seconds: number): string {
   return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")}`;
 }
 
+/**
+ * How long a conversation keeps what is said in it, as the notice in the thread says it.
+ *
+ * Whole units only, because the control that sets it offers whole units: a lifetime is chosen
+ * from a short list, not typed in seconds, so "7 days" is the exact value and not a rounding of
+ * it. Hand-formatted for the reason `spokenDuration` above is — `Intl.DurationFormat` is not in
+ * every browser this application is meant to run in.
+ */
+export function spokenLifetime(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  if (whole % 86400 === 0 && whole >= 86400) {
+    const days = whole / 86400;
+    return days === 1 ? "1 day" : `${days} days`;
+  }
+  if (whole % 3600 === 0 && whole >= 3600) {
+    const hours = whole / 3600;
+    return hours === 1 ? "1 hour" : `${hours} hours`;
+  }
+  return spokenDuration(whole);
+}
+
 /** `HH:MM`, in the reader's local time. */
 export function timeOf(sentAt: number): string {
   const date = new Date(sentAt);

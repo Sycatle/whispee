@@ -177,6 +177,11 @@ export class Client {
      */
     leaveGroup(group_id: Uint8Array): Uint8Array;
     /**
+     * How long this conversation keeps what is said in it, in seconds. `undefined` for a group
+     * created before the extension existed; `0` means the feature is off.
+     */
+    lifetimeSeconds(group_id: Uint8Array): number | undefined;
+    /**
      * This device's name, as written into the MLS credential.
      */
     name(): string;
@@ -233,6 +238,14 @@ export class Client {
      * The group roster: `{admin, moderators}`, or `null` if the group is flat.
      */
     roster(group_id: Uint8Array): any;
+    /**
+     * Sets how long messages live here, in seconds; `0` turns it off. Like every commit,
+     * publish it before `applyPending`.
+     *
+     * Not retroactive for messages members already hold: MLS cannot reach into their storage.
+     * The vault is the half that *is* retroactive, and that is arranged by the caller.
+     */
+    setLifetime(group_id: Uint8Array, seconds: number): Uint8Array;
     /**
      * Replaces the group's roles. Like every commit, publish it before `applyPending`.
      *
@@ -550,6 +563,7 @@ export interface InitOutput {
     readonly client_invite: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly client_join: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly client_leaveGroup: (a: number, b: number, c: number, d: number) => void;
+    readonly client_lifetimeSeconds: (a: number, b: number, c: number, d: number) => void;
     readonly client_name: (a: number, b: number) => void;
     readonly client_peerFingerprints: (a: number, b: number, c: number, d: number) => void;
     readonly client_peerSignatureKeys: (a: number, b: number, c: number, d: number) => void;
@@ -558,6 +572,7 @@ export interface InitOutput {
     readonly client_removeMember: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly client_restore: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly client_roster: (a: number, b: number, c: number, d: number) => void;
+    readonly client_setLifetime: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly client_setRoles: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
     readonly client_signalKey: (a: number, b: number, c: number, d: number) => void;
     readonly client_signatureKey: (a: number, b: number) => void;

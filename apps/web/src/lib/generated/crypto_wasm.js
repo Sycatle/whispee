@@ -686,6 +686,29 @@ export class Client {
         }
     }
     /**
+     * How long this conversation keeps what is said in it, in seconds. `undefined` for a group
+     * created before the extension existed; `0` means the feature is off.
+     * @param {Uint8Array} group_id
+     * @returns {number | undefined}
+     */
+    lifetimeSeconds(group_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(group_id, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.client_lifetimeSeconds(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            return r0 === Number.MAX_SAFE_INTEGER ? undefined : r0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * This device's name, as written into the MLS credential.
      * @returns {string}
      */
@@ -895,6 +918,36 @@ export class Client {
                 throw takeObject(r1);
             }
             return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Sets how long messages live here, in seconds; `0` turns it off. Like every commit,
+     * publish it before `applyPending`.
+     *
+     * Not retroactive for messages members already hold: MLS cannot reach into their storage.
+     * The vault is the half that *is* retroactive, and that is arranged by the caller.
+     * @param {Uint8Array} group_id
+     * @param {number} seconds
+     * @returns {Uint8Array}
+     */
+    setLifetime(group_id, seconds) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(group_id, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.client_setLifetime(retptr, this.__wbg_ptr, ptr0, len0, seconds);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            return v2;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
         }

@@ -16,6 +16,7 @@ import { type PairingCode, decodePairingCode } from "./pairing";
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
 import * as envelope from "./envelope";
+import { expiryOf, prune } from "./expiry.ts";
 import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
 import * as derive from "./conversation-view.ts";
@@ -239,6 +240,30 @@ export class Session {
      */
     private prefStamps: NonNullable<StoredSession["prefStamps"]> = {},
   ) {}
+
+  /**
+   * Conversations whose archive is owed a deletion that has not gone through yet.
+   *
+   * # Why a retry queue and not a single call
+   *
+   * Because the call that erases the archive is the half MLS cannot do, and it is the half that
+   * can fail. `setLifetime` publishes a commit and then deletes; a network error between the two
+   * leaves the room forgetting on every screen while a readable copy of its past sits on a server.
+   * The commit cannot be taken back — it is already everybody's epoch — so the only honest
+   * response is to keep owing the deletion and try again.
+   *
+   * The same queue serves the receiving side, which had no deletion at all: `setLifetime` deletes
+   * the **committer's** archive, correctly, since the other members' copies are theirs. But
+   * nothing on a peer's client reacted to the commit, so every other member kept archiving a
+   * conversation that had just been told to forget. `pollOnce` now notices the transition and
+   * enqueues its own deletion, which is the member's own archive being erased by that member.
+   *
+   * In memory, so a session that ends before the retry succeeds forgets that it owed one. What
+   * that leaves is a stale archive on the server — no longer restorable into a thread, because
+   * `Archive.restore` refuses a conversation with a lifetime — and it is written in the roadmap
+   * rather than closed here: closing it means persisting the debt, which is a schema change.
+   */
+  private readonly archiveDropsOwed = new Set<string>();
 
   /**
    * The key our own devices share, imported once.
@@ -993,6 +1018,34 @@ export class Session {
 
     session.witness = LogWitness.hydrate(stored);
 
+    // A cache written before deadlines were stored comes back without them, and the envelopes are
+    // behind `view.cursor`, so nothing would ever stamp those messages again — they would sit in
+    // an ephemeral conversation forever. Stamped here instead, from `sentAt` and the lifetime in
+    // force: the clamp is a no-op on a message already in the past, so the answer is the one the
+    // original stamp would have produced, minus the moment this device first saw it.
+    for (const view of session.conversations.values()) {
+      const lifetime = session.lifetimeSeconds(view);
+      if (lifetime === 0) continue;
+
+      for (const message of view.messages) {
+        if (message.expiresAt !== undefined) continue;
+        const expiresAt = expiryOf(message.sentAt, Date.now(), lifetime);
+        if (expiresAt !== undefined) message.expiresAt = expiresAt;
+      }
+
+      // And the ones already past their deadline never reach the screen.
+      //
+      // Stamping alone left them in the cache: the first `pollOnce` swept them thirty seconds
+      // later, so a device closed for a week reopened onto its whole expired history and then
+      // watched it empty. `absorb` refuses an arriving message that is already dead for exactly
+      // this reason, and the cache is the same thing arriving from disk instead of the network.
+      //
+      // No cursor moves here, which is the difference from `absorb`. There the cursor has to
+      // advance or the receipts stall behind an expired run; here the messages were absorbed in
+      // an earlier session and every cursor is already past them.
+      view.messages = prune(view.messages, Date.now());
+    }
+
     return session;
   }
 
@@ -1139,7 +1192,9 @@ export class Session {
    * message by message, which has no business delaying the display.
    */
   async restoreHistory(view: ConversationView): Promise<number> {
-    const added = await this.archive.restore(this.api, view.groupId, view.messages);
+    const added = await this.archive.restore(this.api, view.groupId, view.messages, {
+      lifetimeSeconds: this.lifetimeSeconds(view),
+    });
 
     view.messages.push(...added);
     touch(view);
@@ -1697,6 +1752,78 @@ export class Session {
    */
   roles(view: ConversationView): Roles | null {
     return (this.client.roster(view.groupId) as Roles | undefined) ?? null;
+  }
+
+  /**
+   * How long this conversation keeps what is said in it, in seconds; `0` when nothing expires.
+   *
+   * Read from the MLS group context on every call rather than cached on the view: it is
+   * authenticated state, it changes by commit, and a copy kept beside the view would be the copy
+   * that goes stale on the device that was offline when the room's memory changed.
+   *
+   * A group created before the extension existed reports nothing, and nothing means off — the
+   * same answer as `0`, which is what keeps every existing conversation readable.
+   */
+  lifetimeSeconds(view: ConversationView): number {
+    return (this.client.lifetimeSeconds(view.groupId) as number | undefined) ?? 0;
+  }
+
+  /**
+   * Whether this conversation can be given a lifetime at all.
+   *
+   * A group created before the extension existed cannot: its members' leaf nodes were built
+   * without `0xF101` in their capabilities, and MLS refuses a commit that requires an extension
+   * a member does not declare. The commit would fail with a raw protocol error, so the screen
+   * asks first and says why instead.
+   *
+   * The absence of the extension is the exact test: a group that has one — even set to `0` —
+   * went through a client that installed it, so every member already declares it.
+   */
+  carriesLifetime(view: ConversationView): boolean {
+    return (this.client.lifetimeSeconds(view.groupId) as number | undefined) !== undefined;
+  }
+
+  /**
+   * Sets how long messages live here, announces it, and drops this account's archive of the
+   * conversation when it is turned on.
+   *
+   * The deletion is the half MLS cannot do: the commit reaches every member's group context, and
+   * nothing in the protocol reaches a copy already deposited on a server. Turning a lifetime on
+   * while leaving that copy in place would be a claim rather than a mechanism — so the vault is
+   * dropped here, in the same call, and it is this account's own archive that goes: the other
+   * members' copies are theirs and are not ours to destroy.
+   *
+   * Not retroactive for messages members already hold. That is stated on `expiry.ts` and it is
+   * the honest half: what is on somebody's screen stays there.
+   */
+  async setLifetime(view: ConversationView, seconds: number): Promise<void> {
+    const commit = this.client.setLifetime(view.groupId, seconds);
+    await this.publishAndApply(view, commit);
+
+    // Persisted here, before anything else can fail. `publishAndApply` has already moved the MLS
+    // epoch and published the commit; a throw from the vault drop below would otherwise leave that
+    // epoch only in memory, and the next reload would restore a state behind an envelope stream
+    // that has moved on — the severed ratchet `ConversationView.stale` describes, from a failed
+    // deletion. The order is the one `pollOnce` states: the cryptographic state reaches the disk
+    // before any further network call.
+    this.refreshView(view);
+    await this.persist();
+
+    if (seconds > 0) {
+      // Failing here does not undo the commit — the room's memory has already changed for
+      // everybody, and it is now on disk. A vault that outlives it is a defect to report rather
+      // than a reason to pretend the lifetime was never set, so the throw reaches the caller and
+      // the screen says so.
+      //
+      // It is also owed from this point on: `dropArchive` records the debt before the call, so a
+      // failure here is retried by the next poll instead of being lost with the exception. That
+      // matters more than it looks — the deletion shares nothing with the commit, and the window
+      // where one has happened and the other has not is exactly the window this feature must not
+      // leave open.
+      await this.dropArchive(view);
+    }
+
+    await this.sendContent(view, { kind: "expiry", seconds });
   }
 
   /**
@@ -2951,7 +3078,18 @@ export class Session {
       return;
     }
 
-    const message: Message = { seq, sender: this.deviceId, content: body, mine: true, sentAt };
+    // Our own message gets the same deadline the recipients will compute for it. `sentAt` is our
+    // own clock here, so the clamp is a no-op — what matters is that the sender's copy goes at the
+    // same time as everybody else's, and not a lifetime after it was read back from disk.
+    const expiresAt = expiryOf(sentAt, Date.now(), this.lifetimeSeconds(view));
+    const message: Message = {
+      seq,
+      sender: this.deviceId,
+      content: body,
+      mine: true,
+      sentAt,
+      ...(expiresAt === undefined ? {} : { expiresAt }),
+    };
     view.messages.push(message);
     touch(view);
     // Same order as the poll, for the same reason: the write goes first, and the upload after.
@@ -2975,10 +3113,55 @@ export class Session {
    * that offers it has to say so too: turning it off stops future deposits and leaves the past
    * where it is, on a server, under a key derived from a phrase that does not rotate.
    */
+  /**
+   * Drops what has passed its deadline, everywhere it is held.
+   *
+   * Every conversation and not only the open one: a thread nobody is looking at is exactly where
+   * an expired message would sit until somebody opened it, and the promise was that it goes.
+   *
+   * The persist is what makes it real — the messages are on disk in `history.ts`, so a deletion
+   * that only touched the view would come back on the next reload.
+   */
+  private dropExpired(): void {
+    const now = Date.now();
+    let dropped = false;
+
+    for (const view of this.conversations.values()) {
+      const kept = prune(view.messages, now);
+      if (kept.length === view.messages.length) continue;
+
+      view.messages = kept;
+      touch(view);
+      dropped = true;
+    }
+
+    if (dropped) void this.persist();
+  }
+
+  /**
+   * Erases this account's archive of a conversation, and keeps owing it until it succeeds.
+   *
+   * The debt is recorded **before** the call, not after a failure: a throw between the two lines
+   * would otherwise be the one case that leaves nothing behind to retry, which is the case that
+   * matters. Deleting twice is free — the route is a `DELETE` scoped to this account and this
+   * group, and deleting rows that are already gone removes nothing and reports success.
+   *
+   * Only this account's copy. The other members' archives are theirs, and the protocol offers no
+   * way to reach them: what makes the feature honest on their side is that their own clients now
+   * do the same thing when they see the commit.
+   */
+  private async dropArchive(view: ConversationView): Promise<void> {
+    this.archiveDropsOwed.add(view.key);
+    await this.api.dropVault(view.groupId);
+    this.archiveDropsOwed.delete(view.key);
+  }
+
   private async deposit(view: ConversationView, messages: Message[]): Promise<void> {
     if (!archivesToVault(this.flagsIn(view))) return;
 
-    await this.archive.store(this.api, view.groupId, messages);
+    await this.archive.store(this.api, view.groupId, messages, {
+      lifetimeSeconds: this.lifetimeSeconds(view),
+    });
   }
 
   /**
@@ -3080,6 +3263,16 @@ export class Session {
   }
 
   private async pollOnce(): Promise<void> {
+    // First, and before any network call. What has expired goes on the sweep that already runs
+    // every thirty seconds — reusing that timer rather than starting one for expiry, because a
+    // second clock is a second thing to keep in step and the two would drift on a throttled tab.
+    //
+    // Its position is the part that matters. Every call below can reject, and `startStream`
+    // swallows what `pollOnce` throws, so a sweep placed after them stops running the moment the
+    // server is unreachable — which is precisely the case where local expiry is the only thing
+    // left enforcing the promise. Deleting what is past needs nobody's permission.
+    this.dropExpired();
+
     // The stock of welcome keys refills itself. Without that, it runs out in silence and the
     // device becomes unreachable with nothing to say so — exactly the kind of housekeeping a user
     // should never have to carry.
@@ -3129,6 +3322,7 @@ export class Session {
       });
     }
 
+
     for (const view of this.conversations.values()) {
       // A severed ratchet does not heal by being asked again. See `ConversationView.stale`.
       if (view.stale) continue;
@@ -3147,6 +3341,12 @@ export class Session {
 
       const envelopes = page.envelopes;
       const before = view.messages.length;
+
+      // Read before the envelopes are absorbed, because absorbing them is what applies a commit
+      // that changes it. Compared after: a lifetime that went from off to on is a room that has
+      // just been told to forget, and this device holds an archive of everything it said before
+      // that. See `archiveDropsOwed`.
+      const lifetimeBefore = this.lifetimeSeconds(view);
 
       for (const row of envelopes) {
         try {
@@ -3180,6 +3380,27 @@ export class Session {
       // nothing here can skip the persist — but that is a property of the archive, not of this
       // loop, and a caller that persists after a network call depends on a guarantee it does
       // not hold. The ratchet and the cursor reach the disk before anything else can fail.
+      // Before the deposit, and the order carries an argument: `Archive.store` already refuses a
+      // conversation with a lifetime, so nothing would be uploaded either way — but a reader who
+      // finds the upload first has to hold that fact in their head to see why this is safe. The
+      // erasure of the past comes before the writing of the present.
+      //
+      // The condition is the transition, not the state: a conversation that has had a lifetime
+      // for a month has nothing archived left to erase, and asking every thirty seconds would be
+      // one deletion per conversation per poll, forever. The queue covers the retries.
+      if (lifetimeBefore === 0 && this.lifetimeSeconds(view) > 0) {
+        this.archiveDropsOwed.add(view.key);
+      }
+
+      if (this.archiveDropsOwed.has(view.key)) {
+        // Swallowed here, unlike in `setLifetime`. Nobody asked for this one — it is a
+        // consequence of somebody else's commit, and there is no screen waiting on it. The debt
+        // stays in the queue and the next poll tries again.
+        await this.dropArchive(view).catch((error: unknown) => {
+          console.warn(`archive of ${view.key} not erased yet`, error);
+        });
+      }
+
       await this.deposit(view, view.messages.slice(before));
 
       // Resolving accounts is cosmetic and goes over the network: it comes after, and its failure
@@ -3316,6 +3537,23 @@ export class Session {
     // Without this, the sender appears to keep typing for the whole TTL after pressing Enter.
     if (incoming.sender) view.typing = without(view.typing, incoming.sender);
 
+    // Stamped on arrival, from the lifetime in force now: see `expiry.ts` for why the deadline is
+    // `min(sentAt, first seen here) + lifetime` and not the sender's word for it.
+    const expiresAt = expiryOf(sentAt, Date.now(), this.lifetimeSeconds(view));
+
+    // A message that arrived already past its deadline is not inserted at all. A device back from
+    // ten days offline must not watch expired messages appear and then vanish — that is the whole
+    // history of the conversation replaying in front of somebody before being taken away.
+    //
+    // The cursor moves anyway, and that is the whole subtlety: it is what receipts are computed
+    // from, so leaving it parked before an expired run would stall the delivered receipt for
+    // every message after it too — the peers would see a live conversation as permanently
+    // undelivered. The message is dropped, not unreceived.
+    if (expiresAt !== undefined && expiresAt <= Date.now()) {
+      view.contentCursor = Math.max(view.contentCursor, seq);
+      return;
+    }
+
     view.messages.push({
       seq,
       sender: incoming.sender,
@@ -3325,6 +3563,7 @@ export class Session {
       // The thread renders that as a message with no time rather than inventing one: guessing
       // "now" for something received during a catch-up would date a week-old message to today.
       ...(sentAt === undefined ? {} : { sentAt }),
+      ...(expiresAt === undefined ? {} : { expiresAt }),
     });
 
     // An invitation is a message like any other — which is what gives it MLS's authentication,

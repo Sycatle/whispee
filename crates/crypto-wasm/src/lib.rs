@@ -25,6 +25,7 @@
 use std::collections::HashMap;
 
 use crypto_core::escrow;
+use crypto_core::lifetime::Lifetime;
 use crypto_core::lock::derive_unlock_key;
 use crypto_core::pairing::{PairingOffer, seal};
 use crypto_core::{Account, Conversation, Identity, Incoming};
@@ -213,6 +214,36 @@ impl Client {
             .get_mut(group_id)
             .ok_or_else(|| JsError::new("unknown conversation"))?
             .set_roles(identity, admin, moderators)
+            .map_err(to_js)?
+            .commit)
+    }
+
+    /// How long this conversation keeps what is said in it, in seconds. `undefined` for a group
+    /// created before the extension existed; `0` means the feature is off.
+    #[wasm_bindgen(js_name = lifetimeSeconds)]
+    pub fn lifetime_seconds(&self, group_id: &[u8]) -> Result<Option<u32>, JsError> {
+        Ok(self
+            .conversations
+            .get(group_id)
+            .ok_or_else(|| JsError::new("unknown conversation"))?
+            .lifetime()
+            .map_err(to_js)?
+            .map(|lifetime| lifetime.get()))
+    }
+
+    /// Sets how long messages live here, in seconds; `0` turns it off. Like every commit,
+    /// publish it before `applyPending`.
+    ///
+    /// Not retroactive for messages members already hold: MLS cannot reach into their storage.
+    /// The vault is the half that *is* retroactive, and that is arranged by the caller.
+    #[wasm_bindgen(js_name = setLifetime)]
+    pub fn set_lifetime(&mut self, group_id: &[u8], seconds: u32) -> Result<Vec<u8>, JsError> {
+        let identity = &self.identity;
+        Ok(self
+            .conversations
+            .get_mut(group_id)
+            .ok_or_else(|| JsError::new("unknown conversation"))?
+            .set_lifetime(identity, Lifetime::seconds(seconds))
             .map_err(to_js)?
             .commit)
     }

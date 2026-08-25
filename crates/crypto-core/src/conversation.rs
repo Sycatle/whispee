@@ -10,6 +10,7 @@ use openmls_traits::OpenMlsProvider;
 
 use crate::error::{CryptoError, Result, mls};
 use crate::identity::{Identity, fingerprint, parse_key_package};
+use crate::lifetime::{LIFETIME_EXTENSION, Lifetime};
 use crate::roles::{self, ROSTER_EXTENSION, Roster};
 
 /// What adding a member produces. The parts travel by different paths: the commit goes to the
@@ -38,28 +39,51 @@ pub struct Conversation {
     group: MlsGroup,
 }
 
-/// Wraps the roster into the group context extensions, with the matching capability.
+/// The group context extensions, built from **every** policy the group carries.
 ///
-/// # Why `RequiredCapabilities` accompanies the roster
+/// # Why this takes both, always
+///
+/// `update_group_context_extensions` replaces the whole set. A setter that builds only its own
+/// extension therefore deletes the other one, and the deletion is silent: the commit is well
+/// formed, the other members apply it, and an administered group becomes flat — everybody an
+/// admin — because somebody changed how long messages live. Both setters go through here, and
+/// here reads the current state of both.
+///
+/// # Why `RequiredCapabilities` accompanies them
 ///
 /// MLS requires every group context extension to appear in the required capabilities. That is
-/// a useful constraint rather than a formality: it stops a client that **cannot read the
-/// roster** from joining an administered group. Without it, such a client would join, apply an
-/// empty policy, accept commits the others refuse — and fork the group with nothing to signal
-/// it.
-///
-/// The error is propagated rather than assumed impossible: a badly chosen constant is then
-/// rejected at group creation, and not months later on a roster change.
-fn roster_extension(roster: &Roster) -> Result<Extensions<GroupContext>> {
-    Extensions::from_vec(vec![
-        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
-            &[ExtensionType::Unknown(ROSTER_EXTENSION)],
-            &[],
-            &[],
-        )),
-        Extension::Unknown(ROSTER_EXTENSION, UnknownExtension(roster.encode()?)),
-    ])
-    .map_err(mls)
+/// a useful constraint rather than a formality: it stops a client that **cannot read** one of
+/// them from joining, applying a policy it never saw, and accepting commits the others refuse —
+/// forking the group with nothing to signal it.
+fn context_extensions(
+    roster: Option<&Roster>,
+    lifetime: Option<Lifetime>,
+) -> Result<Extensions<GroupContext>> {
+    let mut types = Vec::new();
+    let mut extensions = Vec::new();
+
+    if let Some(roster) = roster {
+        types.push(ExtensionType::Unknown(ROSTER_EXTENSION));
+        extensions.push(Extension::Unknown(
+            ROSTER_EXTENSION,
+            UnknownExtension(roster.encode()?),
+        ));
+    }
+
+    if let Some(lifetime) = lifetime {
+        types.push(ExtensionType::Unknown(LIFETIME_EXTENSION));
+        extensions.push(Extension::Unknown(
+            LIFETIME_EXTENSION,
+            UnknownExtension(lifetime.encode().to_vec()),
+        ));
+    }
+
+    extensions.insert(
+        0,
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&types, &[], &[])),
+    );
+
+    Extensions::from_vec(extensions).map_err(mls)
 }
 
 /// Handle carried by an MLS credential. A non-basic credential has no usable handle and can
@@ -98,9 +122,13 @@ impl Conversation {
             .ciphersuite(crate::identity::CIPHERSUITE)
             .capabilities(crate::identity::capabilities());
 
-        if let Some(roster) = &roster {
-            builder = builder.with_group_context_extensions(roster_extension(roster)?);
-        }
+        // Every conversation starts at seven days, administered or flat. A 1-to-1 has no roster
+        // and still has a lifetime: the two policies are independent, which is why the builder is
+        // now called unconditionally.
+        builder = builder.with_group_context_extensions(context_extensions(
+            roster.as_ref(),
+            Some(Lifetime::seconds(crate::lifetime::DEFAULT_SECONDS)),
+        )?);
 
         let group = MlsGroup::new(
             &identity.provider,
@@ -124,6 +152,40 @@ impl Conversation {
         }
     }
 
+    /// The conversation's lifetime, or `None` for a group predating the extension.
+    ///
+    /// Read from the group context, hence from authenticated state: neither the server nor a
+    /// single member can forge it.
+    pub fn lifetime(&self) -> Result<Option<Lifetime>> {
+        match self.group.extensions().unknown(LIFETIME_EXTENSION) {
+            Some(raw) => Lifetime::decode(&raw.0).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Sets how long messages live here. Subject to the policy: a member without a role sees
+    /// their commit refused by the others.
+    ///
+    /// Not retroactive for what members already hold — MLS has no way to reach into their
+    /// storage, and a policy that pretended otherwise would be a claim rather than a mechanism.
+    /// What it does reach is the vault, and that is arranged on the client side.
+    ///
+    /// Same discipline as the rest: publish the commit before [`Conversation::apply_pending`].
+    pub fn set_lifetime(&mut self, identity: &Identity, lifetime: Lifetime) -> Result<Change> {
+        let roster = self.roster()?;
+
+        let (commit, _welcome, _group_info) = self
+            .group
+            .update_group_context_extensions(
+                &identity.provider,
+                context_extensions(roster.as_ref(), Some(lifetime))?,
+                &identity.signer,
+            )
+            .map_err(mls)?;
+
+        Ok(Change { commit: commit.tls_serialize_detached().map_err(mls)? })
+    }
+
     /// Replaces the roster: admin and moderators. Subject to the policy like everything else —
     /// the other members will refuse the commit if it does not come from the sitting admin.
     ///
@@ -143,7 +205,7 @@ impl Conversation {
             .group
             .update_group_context_extensions(
                 &identity.provider,
-                roster_extension(&roster)?,
+                context_extensions(Some(&roster), self.lifetime()?)?,
                 &identity.signer,
             )
             .map_err(mls)?;
@@ -429,6 +491,65 @@ impl Conversation {
             .map(|(_, handle, _)| handle.as_str())
             .collect();
 
+        // Both flags come from comparing what the proposal installs with what the group holds.
+        // Testing for "a GroupContextExtensions proposal exists" cannot tell a lifetime change
+        // from a roster change, and would demand the admin for both — silently making the
+        // moderator's rank narrower than the table in `roles.rs` says it is.
+        //
+        // A proposal that **drops** the roster reads as `None`, which differs from the sitting
+        // roster: it counts as a roster change and needs the admin. That is what refuses the
+        // commit which would silently flatten the group while claiming to set a lifetime.
+        let proposed: Option<&Extensions<GroupContext>> =
+            commit.queued_proposals().find_map(|p| match p.proposal() {
+                Proposal::GroupContextExtensions(gce) => Some(gce.extensions()),
+                _ => None,
+            });
+
+        let (changes_roster, changes_lifetime) = match proposed {
+            None => (false, false),
+            Some(extensions) => {
+                let new_roster = match extensions.unknown(ROSTER_EXTENSION) {
+                    Some(raw) => Some(Roster::decode(&raw.0)?),
+                    None => None,
+                };
+                let new_lifetime = match extensions.unknown(LIFETIME_EXTENSION) {
+                    Some(raw) => Some(Lifetime::decode(&raw.0)?),
+                    None => None,
+                };
+
+                // **The rest of the group context is checked too, and reading only the two
+                // policies above was a hole.** Those two flags decide who may commit; everything
+                // else in the proposed set went unexamined. A member running a modified client
+                // could therefore re-install the identical roster and the identical lifetime —
+                // both flags false, no add, no removal, admin still seated — while changing the
+                // rest, and `authorize` would return `Ok`. Dropping `RequiredCapabilities` that
+                // way removes the very constraint whose purpose is written above
+                // `context_extensions`: it is what stops a client that cannot read a policy from
+                // joining, applying a policy it never saw, and forking the group with nothing to
+                // signal it.
+                //
+                // The test is equality with what this client would have built, not a list of
+                // things to forbid. An honest commit comes out of `context_extensions`, so it
+                // matches by construction; anything else is a set no client of this protocol
+                // produces, and there is no version of it worth applying. That closes the whole
+                // class rather than the one member of it somebody thought of — a deny-list here
+                // would have to be extended for every extension MLS gains.
+                //
+                // Refused outright rather than escalated to the admin. An admin has no legitimate
+                // way to reach this either: both setters go through `context_extensions`, and a
+                // rank is permission to change a *policy*, not permission to hand the group a
+                // context its members never agreed to parse.
+                let expected = context_extensions(new_roster.as_ref(), new_lifetime)?;
+                if extensions != &expected {
+                    return Err(CryptoError::PolicyViolation(
+                        "group context extensions this client would not have produced",
+                    ));
+                }
+
+                (new_roster.as_ref() != Some(&roster), new_lifetime != self.lifetime()?)
+            }
+        };
+
         let summary = roles::CommitSummary {
             committer,
             removals: removals
@@ -440,9 +561,8 @@ impl Conversation {
                 })
                 .collect(),
             adds: commit.add_proposals().count(),
-            changes_roster: commit
-                .queued_proposals()
-                .any(|p| matches!(p.proposal(), Proposal::GroupContextExtensions(_))),
+            changes_roster,
+            changes_lifetime,
             remaining,
         };
 
@@ -580,4 +700,107 @@ pub enum Incoming {
     GroupChanged,
     /// Proposal awaiting a commit. Nothing to display.
     Proposal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A two-member administered group, and the pieces needed to make each side commit.
+    ///
+    /// Built here rather than in `tests/common` because the attack below has to reach
+    /// [`MlsGroup::update_group_context_extensions`] directly — that is the whole point of it. A
+    /// hostile client is one that does not go through `set_lifetime`, so a test that could only
+    /// call `set_lifetime` could not describe it.
+    fn administered_pair() -> (Identity, Conversation, Identity, Conversation) {
+        let alice = Identity::create("alice").unwrap();
+        let bob = Identity::create("bob").unwrap();
+
+        let mut admin = Conversation::create_administered(&alice, "alice".into()).unwrap();
+        let invitation = admin.invite(&alice, &bob.publish_key_package().unwrap()).unwrap();
+        let tree = admin.apply_pending(&alice).unwrap();
+        let member = Conversation::join(&bob, &invitation.welcome, &tree).unwrap();
+
+        (alice, admin, bob, member)
+    }
+
+    /// **The hole this closes.**
+    ///
+    /// The authorisation used to read two extensions out of a `GroupContextExtensions` proposal —
+    /// the roster and the lifetime — and to ignore the rest of the set. An ordinary member could
+    /// therefore re-install both unchanged, so that neither flag was raised and `authorize` saw a
+    /// commit that changed nothing it looked at, while handing every member a group context they
+    /// never agreed to parse.
+    ///
+    /// The commit below keeps the roster and the lifetime byte for byte and touches only
+    /// `RequiredCapabilities`, which is the extension whose presence stops a client that cannot
+    /// read a policy from joining and forking the group. It is refused now because it is not the
+    /// set this client would have built — and no honest client builds another.
+    #[test]
+    fn an_ordinary_member_may_not_reshape_the_rest_of_the_group_context() {
+        let (alice, mut admin, bob, mut member) = administered_pair();
+
+        let roster = member.roster().unwrap().unwrap();
+        let lifetime = member.lifetime().unwrap();
+
+        // Everything as `context_extensions` would have it, except that the required capabilities
+        // now name a credential type. Every member supports Basic, so MLS itself raises no
+        // objection: the only thing standing between this commit and every member's group context
+        // is the policy check.
+        let mut types = vec![ExtensionType::Unknown(ROSTER_EXTENSION)];
+        let mut extensions = vec![Extension::Unknown(
+            ROSTER_EXTENSION,
+            UnknownExtension(roster.encode().unwrap()),
+        )];
+        if let Some(lifetime) = lifetime {
+            types.push(ExtensionType::Unknown(LIFETIME_EXTENSION));
+            extensions.push(Extension::Unknown(
+                LIFETIME_EXTENSION,
+                UnknownExtension(lifetime.encode().to_vec()),
+            ));
+        }
+        extensions.insert(
+            0,
+            Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+                &types,
+                &[],
+                &[CredentialType::Basic],
+            )),
+        );
+
+        let (commit, _, _) = member
+            .group
+            .update_group_context_extensions(
+                &bob.provider,
+                Extensions::from_vec(extensions).unwrap(),
+                &bob.signer,
+            )
+            .unwrap();
+
+        let refused = admin.process(
+            &alice,
+            &commit.tls_serialize_detached().unwrap(),
+            &Default::default(),
+        );
+
+        assert!(
+            matches!(refused, Err(CryptoError::PolicyViolation(_))),
+            "a member reshaped the group context and it was applied — got {refused:?}"
+        );
+    }
+
+    /// The same path, unmodified, still goes through.
+    ///
+    /// Without this, the check above is satisfied by refusing everything — and a policy that
+    /// refuses every commit is indistinguishable from a broken group until somebody tries to use
+    /// it.
+    #[test]
+    fn the_admins_own_lifetime_commit_still_passes_the_same_check() {
+        let (alice, mut admin, bob, mut member) = administered_pair();
+
+        let change = admin.set_lifetime(&alice, Lifetime::seconds(60)).unwrap();
+        member.process(&bob, &change.commit, &Default::default()).unwrap();
+
+        assert_eq!(member.lifetime().unwrap().map(|l| l.get()), Some(60));
+    }
 }

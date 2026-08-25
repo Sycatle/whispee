@@ -181,8 +181,18 @@ pub struct CommitSummary<'a> {
     pub removals: Vec<Removal<'a>>,
     /// Does the commit add members?
     pub adds: usize,
-    /// Does the commit change the group context extensions (hence the roster)?
+    /// Does the commit change the roster?
+    ///
+    /// Computed by comparing the extensions the commit installs with the ones in force, not by
+    /// the mere presence of a `GroupContextExtensions` proposal: the lifetime travels the same
+    /// way, and conflating them would demand the admin for both.
     pub changes_roster: bool,
+    /// The commit changes how long messages live here.
+    ///
+    /// Distinct from `changes_roster` although both travel as a `GroupContextExtensions`
+    /// proposal, and the distinction is the rule: changing the room's memory is moderation, like
+    /// admitting and removing members. Handing out power is not, and stays the admin's alone.
+    pub changes_lifetime: bool,
     /// Handles still represented in the group **after** the commit is applied.
     ///
     /// Needed because an account has several devices: removing one of Alice's devices does not
@@ -234,6 +244,7 @@ impl Context {
 /// | remove an ordinary member | admin, moderator |
 /// | remove a moderator | admin |
 /// | change the roster (appoint, revoke, hand over) | admin |
+/// | change the lifetime | admin, moderator |
 /// | remove the admin | nobody |
 /// | commit a member's voluntary departure | everyone |
 /// | remove a device whose revocation is verified | everyone |
@@ -274,6 +285,12 @@ pub fn authorize(
 
     if commit.changes_roster && !committer_is_admin {
         return Err(CryptoError::PolicyViolation("only the admin changes roles"));
+    }
+
+    if commit.changes_lifetime && !committer_can_moderate {
+        return Err(CryptoError::PolicyViolation(
+            "changing the lifetime requires a role",
+        ));
     }
 
     if commit.adds > 0 && !committer_can_moderate {

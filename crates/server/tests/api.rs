@@ -3081,23 +3081,23 @@ async fn a_full_attachment_quota_does_not_stop_a_message() {
 ///
 /// # Why the comparison is retried rather than made once
 ///
-/// Because of a property of the log, not of this test. `seq` is a `BIGSERIAL`: two concurrent
-/// inserts draw their numbers **before** they commit, so the one holding the larger number can
-/// become visible first. A tree read inside that window ends at the larger `seq`; when the
-/// smaller one lands it takes its place *before* it in `ORDER BY seq`, and a root recomputed
-/// afterwards no longer matches the head served a moment earlier. Under `cargo test --workspace`
-/// the other suites create accounts throughout, so the window was entered often enough to make
-/// this assertion fail at random.
+/// It caught a defect in the log, and the defect is fixed elsewhere: `seq` is a `BIGSERIAL`, so
+/// two concurrent inserts draw their numbers **before** they commit and the larger one can become
+/// visible first — after which the smaller one lands *before* it in `ORDER BY seq` and a root
+/// recomputed afterwards no longer matches the head served a moment earlier. Under
+/// `cargo test --workspace` the other suites create accounts throughout, so this assertion failed
+/// at random until `log::append` was made to take a transaction-scoped advisory lock, which makes
+/// numbering order commit order. See `tests/log_order.rs`, which pins that property directly.
+///
+/// The retry stays, for a smaller reason than the one it was written for: this test asserts a
+/// *cache* is invisible, and it does so against a database shared with every other suite. It has
+/// no business failing on somebody else's timing, whatever the cause — and the ordering fix is a
+/// separate change with its own merge, so this file must be correct on either side of it.
 ///
 /// What is retried is the **pair** — a head and the recomputation belonging to it, read close
 /// enough together that nothing landed in between. That weakens nothing: a server serving a root
 /// its own table does not support fails every attempt, because no reading of the table would ever
-/// agree with it. Only the race is given room to settle.
-///
-/// It is deliberately not "fixed" by locking the append. The reordering is real and visible to
-/// clients too — a head signed inside that window describes a tree the log no longer has — and a
-/// test quietly serialising the writers would hide it rather than answer it. That belongs in the
-/// log's own design, not here.
+/// agree with it. Only timing is given room to settle.
 #[tokio::test]
 async fn the_cached_head_matches_a_recomputation_after_an_append() {
     let server = start().await;

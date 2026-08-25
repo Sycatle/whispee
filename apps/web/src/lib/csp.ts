@@ -153,6 +153,16 @@ export function csp(media?: string): string {
     // same-origin `workerPort` precisely so that never happens; this is the second lock.
     "worker-src 'self'",
     "base-uri 'none'",
+    // **Inert as delivered, and kept anyway.**
+    //
+    // This policy reaches the browser in a `<meta http-equiv>`, and the specification says
+    // `frame-ancestors` is ignored there — Chrome logs it as such. So this line protects nothing
+    // today, and `deploy/Caddyfile` carries an `X-Frame-Options: DENY` header that does.
+    //
+    // It stays because it is not wrong, only undelivered: the day this policy is sent as a header
+    // — which is what a deployment ought to do — it becomes the stronger of the two, and taking it
+    // out now would mean rediscovering the need later. The desktop shell repeats it for the same
+    // reason, and `csp.test.ts` compares the two sets.
     "frame-ancestors 'none'",
     "form-action 'self'",
   ].join("; ");

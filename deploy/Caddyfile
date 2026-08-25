@@ -21,6 +21,18 @@
 		Strict-Transport-Security "max-age=63072000; includeSubDomains"
 		# Content sniffing turns a file the client uploaded into a script the browser executes.
 		X-Content-Type-Options "nosniff"
+		# **The one directive a `<meta>` Content-Security-Policy cannot carry.**
+		#
+		# `apps/web/src/lib/csp.ts` declares `frame-ancestors 'none'` and `index.html` delivers the
+		# policy in a meta element, where the specification says that directive is ignored — Chrome
+		# logs it as such. The result was a deployment with no defence against being framed at all.
+		# Found by reading a real browser's console against this stack, not by inspection.
+		#
+		# `X-Frame-Options` rather than a `Content-Security-Policy` header: sending the policy from
+		# here would be the third hand-maintained copy of it, which is the drift the note below
+		# refuses. This header says one thing, it is the thing the meta cannot say, and no part of
+		# it repeats a decision made elsewhere.
+		X-Frame-Options "DENY"
 		# A referrer would name this deployment to every site a message links to — which is one
 		# of the metadata leaks the rest of the architecture spends real effort removing.
 		Referrer-Policy "no-referrer"

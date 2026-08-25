@@ -72,6 +72,13 @@
       for it, and a different value here would leave an inert band in a colour nothing controls.
     -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!--
+      The same statement under the name that replaced it. Chrome logs the Apple-prefixed one as
+      deprecated and asks for this spelling; Safari reads only the Apple one. Both are declared
+      because dropping either loses a platform, and the warning was found by reading a real
+      browser's console rather than by guessing.
+    -->
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Whispee" />
 

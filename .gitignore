@@ -6,6 +6,9 @@ pkg/
 *.tsbuildinfo
 dist/
 release/artefacts/
+# `release-web.sh` writes here, and refuses to run on a dirty tree — so leaving its own
+# output tracked means it works once and then blocks itself.
+release/web/
 apps/desktop/gen/
 .claude/scheduled_tasks.lock
 .worktrees/

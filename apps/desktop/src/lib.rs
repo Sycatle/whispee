@@ -35,6 +35,7 @@
 pub mod cipher;
 pub mod commands;
 pub mod link;
+pub mod server;
 pub mod store;
 
 /// Starts the application.
@@ -67,6 +68,8 @@ pub fn run() {
             commands::session_load,
             commands::session_save,
             commands::session_clear,
+            commands::server_url,
+            commands::server_set,
             commands::master_seal,
             commands::master_open,
             commands::master_present,

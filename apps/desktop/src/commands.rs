@@ -124,6 +124,28 @@ pub fn session_clear(vault: State<'_, Vault>) -> Result<(), String> {
     }
 }
 
+/// The delivery service this installation was pointed at, or `None` before it has been.
+///
+/// `None` is what puts `apps/web/src/app/ServerSetup.tsx` on screen instead of the application.
+/// It is a first-launch state, not a failure, which is why it is an `Option` and not an error.
+#[tauri::command]
+pub fn server_url(vault: State<'_, Vault>) -> Result<Option<String>, String> {
+    crate::server::read(&vault.paths.server()).map_err(|_| failure("unreadable address"))
+}
+
+/// Records the delivery service, and answers with the form that was stored.
+///
+/// The answer is the normalised address rather than `()`, so the page uses exactly what the file
+/// holds: the two would otherwise differ by a trailing slash or a default port, and the client
+/// would build its URLs from a string the next launch does not agree with.
+///
+/// The message on refusal is shown to the person typing, so it says what is wrong with the
+/// address rather than that something is — see [`crate::server::normalise`].
+#[tauri::command]
+pub fn server_set(url: String, vault: State<'_, Vault>) -> Result<String, String> {
+    crate::server::write(&vault.paths.server(), &url)
+}
+
 /// Installs the vault into the application.
 ///
 /// Fails loudly if the secrets can be neither read nor created. That is deliberate: starting

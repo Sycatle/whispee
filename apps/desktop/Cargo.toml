@@ -19,6 +19,20 @@ publish.workspace = true
 name = "desktop_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+# **The installed binary is `whispee`, not `desktop`.**
+#
+# Without this the binary takes the crate's name, and the first `.deb` ever built here proved what
+# that costs: it installed `/usr/bin/desktop`, an icon keyed `desktop`, and a launcher entry whose
+# `Exec` and `StartupWMClass` both said `desktop`. A name that generic on a shared `PATH` is a
+# collision waiting for a second package, and a window class nothing can match is a taskbar entry
+# that never groups with its own launcher.
+#
+# The package stays `desktop` because that is what serves desktop, Android and iOS from one crate
+# and what every `-p desktop` in the workflows names. Only the artefact is renamed.
+[[bin]]
+name = "whispee"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -32,7 +32,7 @@ Everything in this list is implemented and has tests, unless the row says otherw
 | Local lock | Argon2id 64 MiB / 3 passes, unlock key → master key indirection, re-locking after five minutes without the user |
 | Disappearing messages | Seven days by default, carried in a `0xF101` group-context extension; admin or moderator may change it |
 | History vault | On by default, revocable in settings — and never used for a conversation that has a lifetime |
-| Desktop application | Tauri 2, interface packaged in the binary |
+| Desktop application | Tauri 2, interface packaged in the binary. Installers for the three desktop systems are built by CI on a tag, attested, and unsigned by the platforms |
 | Reproducible signed releases | `scripts/release.sh` and `scripts/verify-release.sh` |
 | Mobile adaptation | Navigation, safe areas, keyboard, touch targets, lifecycle, offline state, native storage, QR pairing |
 | Push notifications | Web Push, off until a deployment sets `VAPID_SUBJECT`; the wake-up carries nothing. Browsers only — no FCM, no APNs |
@@ -47,11 +47,11 @@ These are finished features whose last mile could not be exercised on the develo
 
 | Area | What has not been checked |
 |---|---|
-| Keyboard and safe areas | Never seen on a physical device — only in a browser and an emulator |
+| Keyboard and safe areas | Never seen on a physical device — only in a browser and an emulator. No longer untestable, though: an iPhone can load the `deploy/` stack through a tunnel |
 | Native storage migration | The end-to-end migration path has never been run from start to finish |
 | Background re-locking | Verified only in its wiring, not its timing |
 | QR pairing | The scan itself, for want of `BarcodeDetector` on Chrome under Linux; encoding and decoding are tested |
-| Mobile builds | Only ever built in CI, never locally — no Android NDK and no macOS host here |
+| Mobile builds | Only ever built in CI, never locally — no Android NDK and no macOS host here. `ios.yml` has since had one green run on `workflow_dispatch`; `android.yml` produces an unsigned debug APK |
 | Mobile builds in CI | `test.yml` runs the suites and the WebAssembly check on every pull request; `android.yml` and `ios.yml` stay manual or `main`-only, so no mobile artefact is built on a PR |
 
 ## Push notifications — Web Push works, FCM and APNs do not
@@ -73,10 +73,23 @@ preserve first.
 
 The roadmap used to describe FCM and APNs, and said the missing part was "all of it the part that
 requires secrets". That was true and it was not the hard part. The hard part is device-side
-registration: it needs a Tauri plugin that does not exist, therefore Kotlin and Swift, and none of
-it compiles or runs on the development machine — no NDK, no macOS host, no physical device.
-Writing it would have produced exactly what this document refuses elsewhere: integration code that
-has never been executed and looks like a feature.
+registration, and this section used to say it "needs a Tauri plugin that does not exist".
+
+**That sentence has expired.** Several exist now — `tauri-plugin-notifications` (0.5.0-rc.11,
+20k downloads, last published 2026-06-30) announces FCM and APNs delivery outright, and
+`tauri-plugin-mobile-push`, `tauri-plugin-remote-push` and `tauri-plugin-fcm` sit beside it. A
+release candidate is not a thing to lean a messenger on without reading it, but "no such plugin"
+is no longer why this is unwritten.
+
+What is still why: **APNs cannot be exercised at all without a paid Apple Developer membership.**
+Registering for remote notifications needs the `aps-environment` entitlement, which needs a
+provisioning profile, which needs the membership — a free personal team is not offered the Push
+Notifications capability, and the simulator receives no remote push. There is an iPhone here now
+and it changes nothing about that. On the Android side there is no device here at all.
+
+So writing it would still produce what this document refuses elsewhere: integration code that has
+never been executed and looks like a feature. The wall moved from "the tooling does not exist" to
+"nothing here can run it", which is a smaller wall and an honest one.
 
 Web Push removed that wall for one specific reason. **The wake-up carries nothing**, so there is
 no payload to encrypt, so the whole content-encryption half of Web Push — RFC 8291, `aes128gcm`,
@@ -93,9 +106,17 @@ follow carrying a bearer token. No request is made unless a deployment sets the 
 
 **There is a service worker**, and `notifications.ts` used to argue against one. The objection was
 that a worker would cache the application shell served by the server the desktop build exists to
-stop trusting. This one caches nothing — no `fetch` handler, no `Cache`, no precache manifest —
-and `push.test.ts` asserts that rather than trusting the comment. It exists because a push message
-wakes a worker and never a document.
+stop trusting. It exists because a push message wakes a worker and never a document — and it
+caches now as well.
+
+What makes that acceptable is written in its header and asserted in `push.test.ts`, which runs the
+file in a sandbox and checks what it decides: `index.html` is fetched from the network every time
+and read from the cache only when there is none, so a corrected deployment takes effect on the next
+load; what is answered from the cache first is either addressed by its content (`/assets/`, which
+Vite fingerprints) or is not code (`/emoji/*.json`, `/fonts/`). `crypto_wasm_bg.wasm` and
+`pdfjs/wasm/` are excluded for being both executable and stably named. The residual cost is stated
+rather than buried: offline, the application starts from the last `index.html` this browser
+received.
 
 ### What is still missing
 
@@ -103,9 +124,48 @@ wakes a worker and never a document.
   browser are. `Vapid::wake` matches on the provider name, so a second emitter lands beside it
   without touching the call site, but neither is written and the wall described above has not
   moved.
-- **iOS needs the site installed to the home screen** before it will subscribe at all, and even
-  then a notification there can never show content — the service extension is a separate Swift
-  process while the keys live in a WASM module inside the webview.
+
+  A Tauri webview has no service worker either, so `pushSupported()` is false there and a packaged
+  build has **no background wake-up path at all**. Since the web client became installable, the
+  ranking is inverted on a phone: the site added to the home screen is notified and the native
+  application is not. Saying so is not a recommendation to prefer the web — it is the shape of the
+  next piece of work.
+
+- **Android without Google services.** Recorded until now under "What will not be resolved" as
+  "not specified, and not planned". The first half of that was wrong, and the entry was in the
+  wrong list: UnifiedPush is specified, precisely, and its fix is inside this design rather than
+  outside it. Its endpoints are Web Push endpoints — RFC 8030, authenticated with the same VAPID
+  signature `vapid.rs` already mints — so the transport, the token cache and the dead-subscription
+  handling all apply unchanged.
+
+  It is **not** free, and the first reading of this said it was. The Android specification requires
+  the body be RFC 8291 content of between 1 and 4096 bytes: an empty POST, which is exactly what
+  this server sends and what the section above calls the reason Web Push was affordable, is not a
+  legal UnifiedPush message. So it needs the content-encryption half after all — ECDH on P-256,
+  HKDF, AES-128-GCM — plus the two subscription secrets `p256dh` and `auth`, which
+  `migrations/0011_push.sql` has no columns for because there was nothing to encrypt under them.
+
+  What that costs is smaller than it sounds and worth writing down before somebody re-estimates
+  it: `p256`, `hkdf`, `sha2` and `aes-gcm` are already dependencies of this server, so it is one
+  cargo feature (`p256/ecdh`), one module and one migration. **And the wake-up stays empty of
+  meaning** — the ciphertext can carry a single constant byte, which satisfies the minimum without
+  telling the distributor, the push server or the lock screen anything. The property is preserved,
+  not traded.
+
+  The client half is unchanged by any of this and is still the reason it is unplanned: registering
+  with a distributor is Kotlin, over Android broadcast intents, and there is no Android device
+  here.
+
+- **Watches.** Nothing, and nothing is possible before the line above: a watch shows the
+  notifications its phone received. A generic "New message" on a wrist is also close to worthless,
+  which is a second reason this is a whole piece of work rather than a setting.
+- **iOS needs the site installed to the home screen** before it will subscribe at all. That is now
+  possible — `public/manifest.webmanifest` and the `apple-mobile-web-app-*` metas exist, and until
+  they did there was no version of this client iOS would have subscribed. Still untested on a
+  device, but no longer for want of one: there is an iPhone here and a tunnelled `deploy/` stack
+  reaches it. It is the next thing to run, and it is the one that decides how much APNs is worth
+  buying. Even then a notification there can never show content: the service extension is
+  a separate Swift process while the keys live in a WASM module inside the webview.
 - **The notification is generic.** "New message", and nothing else. The worker cannot decrypt: the
   MLS keys are in the page's memory, not the worker's, and moving them would hand the decryption
   keys to a context that outlives every tab. Same constraint iOS imposes, arrived at on purpose.
@@ -209,10 +269,14 @@ design.
 - **On iOS, a notification can never show content.** The service extension is a separate Swift
   process; the keys live in a WASM module inside the webview. Fixing that means porting the
   cryptography to native code.
-- **There is no physical device here.** Biometric invalidation on re-enrolment, a real notch,
-  `windowSoftInputMode`: three things no emulator settles honestly.
-- **Android without Google services has no wake path.** UnifiedPush would be the answer. It is
-  not specified, and it is not planned.
+- **No device can run a *native* build here.** This used to read "there is no physical device
+  here", and there is an iPhone now — which changes less than it sounds. Biometric invalidation on
+  re-enrolment and `windowSoftInputMode` live in a packaged application, and packaging one for
+  that iPhone needs a paid Apple Developer membership; the Android side has no device at all.
+
+  A real notch and a real virtual keyboard are the exception and have left this list: they belong
+  to the web client, which that iPhone can load from a tunnelled `deploy/` stack. Untested, but no
+  longer untestable — see "What is not fully verified".
 
 ## Longer-standing gaps
 

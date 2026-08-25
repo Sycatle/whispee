@@ -116,13 +116,12 @@ jobs:
       # init` produces a full Gradle project, and a generated project that drifts from its source
       # is a source of silent errors. Regenerating costs a few seconds.
       #
-      # `VITE_API_URL` is frozen into the bundle **and** into the CSP — see `csp()` in
-      # `vite.config.ts`. Absent, it would produce a client pointing at the phone's own loopback,
-      # that is, at nothing.
+      # No API address is passed. The bundle carries none — the client asks its own origin on the
+      # web, and the packaged application asks the person installing it (`apps/desktop/src/
+      # server.rs`). Freezing one in here used to produce an application pointing at the phone's
+      # own loopback, that is, at nothing.
       - name: Generate the Android project
         working-directory: apps/desktop
-        env:
-          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
         run: cargo tauri android init
 
       # The camera scans the pairing square, and Android refuses `getUserMedia` without this
@@ -142,8 +141,6 @@ jobs:
 
       - name: Build the APK
         working-directory: apps/desktop
-        env:
-          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
         run: cargo tauri android build --debug --apk --target aarch64
 
       - uses: actions/upload-artifact@v6

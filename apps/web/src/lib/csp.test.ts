@@ -15,16 +15,6 @@ import { csp } from "./csp.ts";
  */
 
 /**
- * The API origin the desktop configuration is pinned to.
- *
- * It is a **desktop-only** source now. The web policy names no origin at all — the API is reached
- * on the page's own origin, so `'self'` covers it — while the packaged shell is loaded from
- * `tauri://` and has to be told where the server is. That difference is a transport difference,
- * exactly like `ipc:`, which is why it belongs in the list below rather than in both policies.
- */
-const DESKTOP_API = "http://127.0.0.1:8787";
-
-/**
  * Sources the desktop policy is allowed to have and the web policy is not.
  *
  * Each one is a Tauri transport with no web equivalent: `ipc:` and `http://ipc.localhost` carry
@@ -35,10 +25,40 @@ const DESKTOP_ONLY: Record<string, string[]> = {
   "connect-src": [
     "ipc:",
     "http://ipc.localhost",
-    // The two forms of the API origin. The web build stopped naming them when the client began
-    // asking its own origin; the desktop cannot, because its own origin is `tauri://`.
-    DESKTOP_API,
-    DESKTOP_API.replace(/^http/, "ws"),
+    // **The two schemes, with no host, and that width is the deliberate part.**
+    //
+    // The shell is pointed at a server by the person installing it, so this policy has to be
+    // written before the origin is known — and a `connect-src` cannot name a host it will only
+    // learn at run time. The choice was between one application that reaches any deployment and
+    // one application built per deployment; the first is what makes a build worth putting in
+    // anybody's hands.
+    //
+    // What makes the width affordable here and nowhere else: this policy governs JavaScript
+    // packaged inside the installed binary. No server ships it, so no server can replace it —
+    // which is the whole argument `apps/desktop/src/lib.rs` makes for the application existing. On
+    // the web, where the server does ship the code, `connect-src 'self'` stays as tight as it is.
+    //
+    // The compensation is that the address went through a parser first:
+    // `apps/desktop/src/server.rs` refuses anything that is not a bare origin.
+    "https:",
+    "wss:",
+    // Loopback over plain HTTP, for development against a local server where there is no
+    // certificate and `https:` above would not match.
+    //
+    // **These three hosts are the same three `server.rs::is_loopback` accepts, and that is not a
+    // coincidence to be tidied away.** A validator that accepted a loopback address this policy
+    // does not name — `127.0.0.2`, say — would store an address the browser engine then refuses
+    // to contact, with no error naming the cause. The comment on that function says so from its
+    // side.
+    //
+    // The port is a wildcard because `scripts/dev-env.sh` hands each branch its own: pinning
+    // 8787 would work on `main` and silently fail on every other checkout.
+    "http://127.0.0.1:*",
+    "http://localhost:*",
+    "http://[::1]:*",
+    "ws://127.0.0.1:*",
+    "ws://localhost:*",
+    "ws://[::1]:*",
   ],
   "img-src": ["asset:", "http://asset.localhost"],
 };

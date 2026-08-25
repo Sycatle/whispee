@@ -34,8 +34,57 @@
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#14161b" />
 
     <!--
-      Content-Security-Policy, computed at build time from `VITE_API_URL`: see `csp()` in
-      `vite.config.ts`, which explains why it is not hard-coded here.
+      The application manifest, and what it buys beyond an icon on a home screen.
+
+      Installability is not decoration here: **Safari will not accept a push subscription from a
+      site that has not been added to the home screen**, so until this file existed there was no
+      version of this client that could be woken on iOS at all. The badge below is the same story
+      in miniature — `navigator.setAppBadge` does nothing for a page that is not installed.
+
+      A manifest cannot carry comments, which is why its two colours are argued here instead: it
+      declares one `theme_color`, and the two `theme-color` metas above declare two. The light one
+      is what the manifest gets, because an installed application's splash screen is painted before
+      any script has run and therefore before anything knows which scheme the reader prefers. The
+      seam that costs is a light flash on a dark phone, once, at launch.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!--
+      The tab icon, and the home-screen icon iOS uses.
+
+      `apple-touch-icon` is opaque where the two manifest icons are not: iOS composites a
+      transparent touch icon onto black, which turns a mark drawn for a light background into a
+      silhouette. It also applies its own rounded-corner mask, which is why the mark inside it is
+      smaller than the proportions the source file has.
+    -->
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!--
+      What iOS reads instead of the manifest, because it still does not read the manifest for any
+      of this. Without `apple-mobile-web-app-capable` a home-screen launch opens Safari with its
+      chrome, which is both worse to use and — the part that matters — is not the installed
+      context the Push API requires.
+
+      `black-translucent` puts the page under the status bar, which is the same choice
+      `viewport-fit=cover` above already made: `index.css` declares the safe-area insets that pay
+      for it, and a different value here would leave an inert band in a colour nothing controls.
+    -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!--
+      The same statement under the name that replaced it. Chrome logs the Apple-prefixed one as
+      deprecated and asks for this spelling; Safari reads only the Apple one. Both are declared
+      because dropping either loses a platform, and the warning was found by reading a real
+      browser's console rather than by guessing.
+    -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Whispee" />
+
+    <!--
+      Content-Security-Policy, computed at build time: see `csp()` in `src/lib/csp.ts` and the
+      plugin in `vite.config.ts`, which explain why it is not hard-coded here.
     -->
     <meta http-equiv="Content-Security-Policy" content="%CSP%" />
     <meta name="referrer" content="no-referrer" />

@@ -34,6 +34,10 @@
 //! device keys, written once. Separating them allows erasing one without the other, which
 //! `session_clear` needs: forgetting a session must not destroy an identity the server still
 //! knows.
+//!
+//! Two more have joined them since — `master.bin` and `server.txt` — each for the same kind of
+//! reason, argued on its own accessor below. The heading is kept as it was because the argument
+//! it makes is about separation, not about the count.
 
 use std::fs;
 use std::io::Write;
@@ -105,6 +109,20 @@ impl Paths {
     /// session would mean opening the session to find out, which presupposes the key it holds.
     pub fn master(&self) -> PathBuf {
         self.root.join("master.bin")
+    }
+
+    /// Which delivery service this installation talks to.
+    ///
+    /// Plain text, and the one file here that is not a blob: it is a value somebody typed, and
+    /// somebody looking into their own application directory to find out which server it points
+    /// at should be able to read the answer. Nothing in it is secret — the address is in every
+    /// packet this application sends.
+    ///
+    /// A fourth file rather than a field of the session, for the same reason `master.bin` is one:
+    /// it has to be readable **before** the session is, being what the session is fetched from.
+    /// See [`crate::server`].
+    pub fn server(&self) -> PathBuf {
+        self.root.join("server.txt")
     }
 
     /// Reads a file, or `None` if it does not exist.
@@ -192,15 +210,15 @@ mod tests {
         fs::remove_dir_all(root.parent().unwrap().parent().unwrap()).unwrap();
     }
 
-    /// The three files are distinct, and that carries a property.
+    /// The four files are distinct, and that carries a property.
     ///
-    /// Forgetting a session, removing biometric unlock and destroying the device identity are
-    /// three acts with different consequences. Two paths that collided would run the wrong one of
-    /// the three, with nothing to signal it.
+    /// Forgetting a session, removing biometric unlock, destroying the device identity and
+    /// forgetting which server this is are four acts with different consequences. Two paths that
+    /// collided would run the wrong one of the four, with nothing to signal it.
     #[test]
-    fn the_three_files_do_not_collide() {
+    fn the_four_files_do_not_collide() {
         let paths = Paths::new(temp_dir("distinct"));
-        let files = [paths.session(), paths.secrets(), paths.master()];
+        let files = [paths.session(), paths.secrets(), paths.master(), paths.server()];
 
         for (i, one) in files.iter().enumerate() {
             for other in &files[i + 1..] {

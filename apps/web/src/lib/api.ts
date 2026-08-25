@@ -8,7 +8,6 @@
 import type { Admission } from "./call";
 import type { DeviceCipher } from "./cipher";
 import { fromBase64, toBase64, toHex } from "./keys";
-import { isTauri } from "./platform";
 import type { AttestedDevice } from "./wasm";
 
 /** See the note about `buffer` in `keys.ts`. */
@@ -17,12 +16,12 @@ function buffer(bytes: Uint8Array): BufferSource {
 }
 
 /**
- * Where the delivery service is, and why this is no longer compiled in.
+ * Where the delivery service is.
  *
- * # The empty string is the answer, and it is not a fallback
+ * # On the web, the empty string is the answer, and it is not a fallback
  *
- * On the web the API shares this page's origin — `deploy/` puts Caddy in front of both, and the
- * development server proxies `/v1` to make the same thing true there. So the base is relative, and
+ * The API shares this page's origin — `deploy/` puts Caddy in front of both, and the development
+ * server proxies `/v1` to make the same thing true there. So the base is relative, and
  * `fetch("/v1/…")` reaches the right place without anything being configured.
  *
  * That is what it buys, and the reason is not tidiness: `VITE_API_URL` used to be **substituted
@@ -32,50 +31,41 @@ function buffer(bytes: Uint8Array): BufferSource {
  * by anybody, self-hosted deployments included — see `docs/THREAT-MODEL.md` on what that check is
  * and is not.
  *
- * # Why an injected global rather than an import
+ * # On the packaged shell, it is a value somebody typed
  *
- * The desktop shell is the one target where the page's origin says nothing: it is `tauri://`, and
- * the server is elsewhere. The native side sets `__WHISPEE_API__` before the webview runs, which
- * keeps the address out of the bytes this file compiles to.
+ * The shell's own origin is `tauri://` and says nothing about where a server is. This used to be a
+ * compiled-in `http://127.0.0.1:8787`, which made every packaged build — Linux, Windows, macOS,
+ * Android, iOS — an application that could only reach a server on the same machine.
  *
- * A hostile web server could inject that global too. It gains nothing by it: it is already serving
- * every line of this application, so redirecting the API is not a power it lacked.
+ * It is now read from the native side, which validated it before storing it
+ * (`apps/desktop/src/server.rs`), and handed here by `main.tsx` before anything renders. The
+ * address still changes no bytes in this bundle, which is the property that had to survive.
+ *
+ * # Why a variable and not a constant
+ *
+ * Because the value is only known after an `await`: the native side is asked over the IPC. A
+ * module-level constant would have to be computed at import time, and there is no synchronous way
+ * to ask. The write happens exactly once, from `configureApi`, before the first render.
  */
-export const BASE_URL = apiBase();
+let base = "";
 
 /**
- * The address the desktop shell reaches, and the reason a literal here costs nothing.
+ * Points this client at a delivery service. Called once, from `main.tsx`, before anything renders.
  *
- * Compiled in, but **not configurable**, which is the distinction that matters: every build
- * contains this same string, so it changes no bytes between deployments. `tauri.conf.json` already
- * pins the same origin in its own policy, and `csp.test.ts` fails if the two disagree — so this is
- * not a new coupling, it is the existing one written where the code can read it.
+ * The empty string is the web's answer and means "this page's own origin" — it is not a missing
+ * value, so this function does not refuse it.
  *
- * A desktop build aimed at another server would set `__WHISPEE_API__` from the native side. Nothing
- * does today, and inventing the mechanism before there is a caller would be inventing the wrong
- * one.
+ * **What this does not do: validate.** On the packaged shell the address arrived from
+ * `apps/desktop/src/server.rs`, which parsed it and refused anything that was not a bare origin;
+ * repeating that here in a language the page controls would add a check nothing relies on. The
+ * trailing slashes are stripped because the callers below all write `${base}/v1/…`.
  */
-const DESKTOP_API = "http://127.0.0.1:8787";
-
-function apiBase(): string {
-  const injected = (globalThis as { __WHISPEE_API__?: unknown }).__WHISPEE_API__;
-  if (typeof injected === "string" && injected !== "") return injected.replace(/\/+$/, "");
-
-  // The packaged shell is loaded from `tauri://`, so its own origin names nothing reachable.
-  if (isTauri()) return DESKTOP_API;
-
-  return "";
+export function configureApi(origin: string): void {
+  base = origin.replace(/\/+$/, "");
 }
 
-/**
- * The WebSocket URL for a path, whichever way the base is expressed.
- *
- * `BASE_URL.replace(/^http/, "ws")` was enough while the base was absolute. It is not now: an empty
- * base leaves a bare path, and `new WebSocket("/v1/gateway")` throws `SyntaxError` — at the one
- * moment the real-time session is being opened, with a message naming nothing.
- */
 export function socketUrl(path: string): string {
-  const origin = BASE_URL === "" ? globalThis.location.origin : BASE_URL;
+  const origin = base === "" ? globalThis.location.origin : base;
 
   return `${origin.replace(/^http/, "ws")}${path}`;
 }
@@ -173,7 +163,7 @@ export class Api {
    * a name it merely answers to.
    */
   static async createAccount(handle: string, identityKey: Uint8Array): Promise<string> {
-    const response = await fetch(`${BASE_URL}/v1/accounts`, {
+    const response = await fetch(`${base}/v1/accounts`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ handle, identity_key: toBase64(identityKey) }),
@@ -212,7 +202,7 @@ export class Api {
     mlsKey: Uint8Array,
     attestation: Uint8Array,
   ): Promise<void> {
-    const response = await fetch(`${BASE_URL}/v1/devices`, {
+    const response = await fetch(`${base}/v1/devices`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -256,7 +246,7 @@ export class Api {
       await signingPayload(method, path, timestamp, nonce, encoded),
     );
 
-    const response = await fetch(`${BASE_URL}${path}`, {
+    const response = await fetch(`${base}${path}`, {
       method,
       headers: {
         // The server does not inspect the body: this type is indicative, and attachments are
@@ -442,7 +432,7 @@ export class Api {
    * key, the packet is unreadable. Returns `null` while there is nothing.
    */
   static async claimPairing(id: Uint8Array): Promise<Uint8Array | null> {
-    const response = await fetch(`${BASE_URL}/v1/pairings/${toHex(id)}`);
+    const response = await fetch(`${base}/v1/pairings/${toHex(id)}`);
     if (response.status === 404) return null;
     if (!response.ok) throw new ApiError(response.status, await response.text());
 
@@ -499,7 +489,7 @@ export class Api {
     params: Uint8Array;
     sealed: Uint8Array;
   } | null> {
-    const response = await fetch(`${BASE_URL}/v1/recovery/claim`, {
+    const response = await fetch(`${base}/v1/recovery/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ lookup: toBase64(lookup) }),
@@ -594,7 +584,7 @@ export class Api {
    * Unsigned: a name has to be resolvable before there is an account to resolve it with.
    */
   static async resolveHandle(handle: string): Promise<string> {
-    const response = await fetch(`${BASE_URL}/v1/handles/${encodeURIComponent(handle)}`);
+    const response = await fetch(`${base}/v1/handles/${encodeURIComponent(handle)}`);
 
     if (!response.ok) {
       throw new ApiError(
@@ -656,7 +646,7 @@ export class Api {
    * one fewer thing, and the screen hides the control the way it does for calls.
    */
   static async vapidPublicKey(): Promise<string | null> {
-    const response = await fetch(`${BASE_URL}/v1/push/vapid`);
+    const response = await fetch(`${base}/v1/push/vapid`);
 
     if (response.status === 503) return null;
     if (!response.ok) throw new ApiError(response.status, await response.text());
@@ -737,7 +727,7 @@ export class Api {
     nonce: Uint8Array,
     mac: Uint8Array,
   ): Promise<T> {
-    const response = await fetch(`${BASE_URL}${path}`, {
+    const response = await fetch(`${base}${path}`, {
       method: "POST",
       headers: {
         "content-type": "application/octet-stream",
@@ -803,7 +793,7 @@ export class Api {
     const nonce = crypto.getRandomValues(new Uint8Array(16));
     const mac = posting.mac(posting.key, groupId, nonce, payload);
 
-    const response = await fetch(`${BASE_URL}/v1/groups/${toHex(groupId)}/signals`, {
+    const response = await fetch(`${base}/v1/groups/${toHex(groupId)}/signals`, {
       method: "POST",
       headers: {
         "content-type": "application/octet-stream",
@@ -839,7 +829,7 @@ export class Api {
     const nonce = crypto.getRandomValues(new Uint8Array(16));
     const mac = posting.mac(posting.key, groupId, nonce, payload);
 
-    const response = await fetch(`${BASE_URL}/v1/groups/${toHex(groupId)}/call/token`, {
+    const response = await fetch(`${base}/v1/groups/${toHex(groupId)}/call/token`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

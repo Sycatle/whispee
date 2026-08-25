@@ -86,7 +86,9 @@ echo "→ building the front end"
 echo "→ building the binary"
 cargo build -p desktop --release
 
-cp target/release/desktop "$output/whispee"
+# `whispee`, because that is what `apps/desktop/Cargo.toml` names the binary — the crate is called
+# `desktop` and its artefact is not. This line said `target/release/desktop` while it was.
+cp target/release/whispee "$output/whispee"
 
 # Tool versions are part of the release, not of the documentation. Reproducibility holds **for a
 # given environment**: a different `rustc` or `pnpm` produces a different binary without anything

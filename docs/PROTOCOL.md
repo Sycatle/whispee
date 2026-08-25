@@ -577,9 +577,17 @@ KeyPackages published by a client that predates this extension do not declare `0
 leaf capabilities, so adding such a device to a *new* conversation is refused by MLS. The stock is
 consumed one package at a time and nothing flushes it, so an upgraded deployment carries the
 failure until every stale package has been claimed. `identity.rs` states the general rule —
-KeyPackages published before a capability change must be republished — and there is currently no
-mechanism doing it: no stock invalidation route, and no version marker to make one act on.
-Whoever ships this decides between flushing the stock and accepting the window.
+KeyPackages published before a capability change must be republished — and no mechanism does it:
+there is no stock invalidation route, and no version marker one could act on.
+
+**This window is accepted rather than closed**, deliberately and with its cost stated. The same
+trade was already taken once for `0xF100`, and closing it properly means a stock invalidation
+route plus a capability version to trigger it — machinery whose own failure modes (a device that
+flushes its stock and cannot republish is unreachable until it can) are worse than the window it
+removes. What it costs meanwhile: for a device whose published stock predates the release, the
+first invitation into a new conversation fails with a raw MLS error, and keeps failing until that
+stock is drained by ordinary use. It resolves on its own; nothing is corrupted, and no existing
+conversation is affected.
 
 **Who may change it: admin or moderator.** Changing how long the room remembers is moderation, the
 same rank that admits and removes members; handing out power is not, and stays the admin's alone.

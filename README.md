@@ -43,10 +43,11 @@ not their equal and does not try to be.
 
 ## What does not work
 
-- **Push notifications are half-built.** The server records tokens and decides who to wake,
-  and then sends nothing. There is no FCM or APNs provider, no configuration, no device-side
-  token registration and no user-facing setting. It is inert without configuration, and a
-  self-hosted deployment that talks to neither Apple nor Google stays fully functional.
+- **Push reaches browsers, not the packaged mobile app.** Web Push works end to end — a browser
+  subscribes, the server signs a VAPID token, a notification arrives with the tab closed — and it
+  is off until a deployment sets `VAPID_SUBJECT`. FCM and APNs are not written: device-side
+  registration needs a Tauri plugin that does not exist, so the Tauri build is only notified while
+  it is open. The wake-up carries no text, no sender and no group id.
 - **Biometric unlock has never been executed.** The code exists; not one line of it has run.
   There is no Android NDK and no physical device on the development machine, so even the
   compilation of its dependency is unconfirmed.

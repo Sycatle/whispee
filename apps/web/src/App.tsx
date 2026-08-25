@@ -353,6 +353,13 @@ function Frame({
       // timer: retrying on a schedule keeps hammering a server that is down, and the two moments
       // that actually change the answer — a reconnection, a resume — are reported right here.
       void session.flushOutbox().then(bump);
+
+      // And the wake address, on the same two moments and for a related reason: a push
+      // subscription rotates without warning, and a browser that renewed its own would otherwise
+      // be reachable at an address this server does not have — a phone that stops waking, with
+      // nothing anywhere to say why. Does nothing when this browser is not subscribed, so it
+      // never turns the feature on by itself.
+      void session.replayWaking();
     });
 
     const lost = () => setOffline(true);
@@ -471,6 +478,11 @@ function Frame({
       select: (key: string) => navigate({ kind: "conversation", key }),
     });
     title.current ??= countUnreadInTitle();
+
+    // Once per session, beside the notifier that handles the other half of the same job: this one
+    // covers the tab being closed, that one covers it being open. The address is only re-sent, so
+    // a browser that never subscribed stays unsubscribed.
+    void session.replayWaking();
 
     const notices = notifier.current;
     const counter = title.current;

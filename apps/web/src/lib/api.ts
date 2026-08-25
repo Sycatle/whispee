@@ -564,6 +564,44 @@ export class Api {
     return this.request("POST", `/v1/accounts/${encodeURIComponent(account)}/handle`, { handle });
   }
 
+  /**
+   * Hands this device's wake address to the server.
+   *
+   * For Web Push the address is the subscription endpoint, and there is nothing else to send: a
+   * wake-up carries no payload, so the two subscription secrets that would encrypt one are never
+   * needed and never leave the browser. See `lib/push.ts`.
+   */
+  setPushToken(provider: string, token: string): Promise<void> {
+    return this.request("POST", "/v1/push/token", { provider, token });
+  }
+
+  /**
+   * Drops this device's wake address.
+   *
+   * The row goes rather than gaining a disabled flag: what is not stored cannot leak with a
+   * database later.
+   */
+  forgetPushToken(): Promise<void> {
+    return this.request("POST", "/v1/push/forget", {});
+  }
+
+  /**
+   * The key a browser must subscribe against, or `null` when this deployment does not do push.
+   *
+   * Unsigned, and it has to be: a client asks before it has anything to subscribe. `null` on 503
+   * rather than a throw — a deployment without push is not an error, it is a deployment offering
+   * one fewer thing, and the screen hides the control the way it does for calls.
+   */
+  static async vapidPublicKey(): Promise<string | null> {
+    const response = await fetch(`${BASE_URL}/v1/push/vapid`);
+
+    if (response.status === 503) return null;
+    if (!response.ok) throw new ApiError(response.status, await response.text());
+
+    const body = (await response.json()) as { key: string };
+    return body.key;
+  }
+
   /** Stops or resumes broadcasting presence. Reciprocal: opting out means ceasing to see. */
   setPresenceOptout(optout: boolean): Promise<void> {
     return this.request("POST", "/v1/presence/optout", { optout });

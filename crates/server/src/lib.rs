@@ -26,6 +26,7 @@ pub mod routes;
 pub mod storage;
 pub mod stream;
 pub mod throttle;
+pub mod vapid;
 
 use std::sync::Arc;
 
@@ -74,6 +75,13 @@ pub struct AppState {
     /// that talks to neither Apple nor Google must stay fully functional. See `push` for what
     /// this wake-up costs in metadata.
     pub push: Arc<dyn push::Waker>,
+    /// The VAPID public key this deployment advertises, when push is on.
+    ///
+    /// `None` is what an unconfigured deployment carries, and the route that serves it answers
+    /// 503 rather than 404 — the distinction `call.rs` already draws: the client reads it as "this
+    /// deployment does not offer that" and hides the control, instead of retrying something no
+    /// retry fixes.
+    pub push_public_key: Option<String>,
     /// Where calls are relayed, if anywhere.
     ///
     /// Empty by default, and for the reason the waker above is silent by default: a deployment
@@ -103,6 +111,15 @@ impl FromRef<AppState> for Arc<throttle::Throttle> {
 impl FromRef<AppState> for Arc<dyn push::Waker> {
     fn from_ref(state: &AppState) -> Self {
         state.push.clone()
+    }
+}
+
+/// Cloned as an `Option<String>` rather than reached through the pool: it is read on a route that
+/// runs once per client start-up, and a query there would be a query for a value that cannot
+/// change while the process lives.
+impl FromRef<AppState> for Option<String> {
+    fn from_ref(state: &AppState) -> Self {
+        state.push_public_key.clone()
     }
 }
 
@@ -656,6 +673,21 @@ pub fn app_with_waker(
     limits: throttle::Limits,
     push: Arc<dyn push::Waker>,
 ) -> axum::Router {
+    // No advertised key: a test substituting a waker is checking what this server *sends*, and a
+    // deployment that means to be subscribed to goes through `app_with_push`.
+    app_with_push(pool, limits, push::Configured { waker: push, public_key: None })
+}
+
+/// The application, with whatever `push::from_environment` settled on.
+///
+/// The waker and the key it advertises arrive together, because a deployment that advertises one
+/// key and signs with another mints subscriptions that are refused later — see
+/// [`push::Configured`].
+pub fn app_with_push(
+    pool: PgPool,
+    limits: throttle::Limits,
+    push: push::Configured,
+) -> axum::Router {
     use tower_http::limit::RequestBodyLimitLayer;
     use tower_http::trace::TraceLayer;
 
@@ -670,9 +702,10 @@ pub fn app_with_waker(
         writes: Arc::new(limits.writes),
         recovery: Arc::new(limits.recovery),
         storage: Arc::new(limits.storage),
-        // The default is `Silent`, set by `app_with`: wiring up Apple or Google requires secrets
-        // a deployment must provide knowingly, after reading what the wake-up leaks.
-        push,
+        // The default is `Silent`, set by `app_with`: waking a browser requires a deployment to
+        // name a contact knowingly, after reading what the wake-up leaks.
+        push: push.waker,
+        push_public_key: push.public_key,
         // Read from the environment rather than passed in, unlike the waker: there is nothing to
         // substitute here. The tests that matter check what this server *sends* — a token's
         // contents, a refusal when unconfigured — and both are reachable without a media server.

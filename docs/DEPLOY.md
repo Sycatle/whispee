@@ -120,6 +120,44 @@ deployment that rebuilds often and forgets its volume re-issues every time — a
 counts those: fifty certificates a week per domain, after which the domain is unusable for a
 week.
 
+## Turning on push, and what it costs
+
+One variable, `VAPID_SUBJECT` — a `mailto:` or `https:` URL a push service can use to reach
+whoever runs this deployment. There is no private key to generate: the pair belongs to the server
+and is created on its first start.
+
+```sh
+$EDITOR .env            # VAPID_SUBJECT=mailto:ops@example.test
+docker compose up -d
+```
+
+Left empty, subscriptions still register and nobody is woken — the key route answers 503 and the
+client hides the control. A deployment that wants to talk to no push service keeps a fully working
+messenger.
+
+**What it discloses, and the settings screen says this before offering the switch.** The browser's
+push service — Google for Chrome, Mozilla for Firefox — learns each time a message arrives for one
+of your users and can tie that to an address. And this server learns which devices to wake, which
+is what sealed sender was arranged to remove: a server that stops waking four members of five can
+tell who wrote the next message. Nothing cryptographic answers that. The wake-up itself carries no
+text, no sender and no group id.
+
+### Checking it actually works
+
+The suites check the token against RFC 8292 and against the key advertised beside it, against a
+fake push service. What they cannot check is that Google and Mozilla agree with that reading, so
+one pass through a browser is part of standing a deployment up rather than optional:
+
+1. Open the deployment, create an account, allow notifications, then turn on **Wake this browser
+   when a message arrives** in Settings → Notifications.
+2. Close every tab of the site.
+3. From another account — a second browser profile does — send a message.
+4. A notification saying "New message" should appear. Clicking it opens the application.
+
+If nothing arrives, `docker compose logs server | grep -i push` is where the refusal appears: a
+`401` means the service rejected the token, a `403` usually means the subscription was minted
+against a different key than the one now advertised.
+
 ## Calls are not set up here
 
 `MEDIA_URL` and the four variables beside it are for a deployment that already runs a media
@@ -137,10 +175,9 @@ is encrypted under a key derived from the MLS epoch, which is never sent anywher
 
 Written here rather than discovered later.
 
-- **No push notifications.** `crates/server/src/push.rs` registers tokens and its default `Waker`
-  is `Silent`: it sends nothing. Neither provider exists, and the server has no outbound HTTP
-  client. On mobile this means the application is only notified while it is open — see
-  [`./ROADMAP.md`](./ROADMAP.md) for what is missing and what push would cost sealed sender.
+- **No push to the packaged mobile application.** Web Push covers the web client and an Android
+  browser; FCM and APNs do not exist, so the Tauri build is only notified while it is open. See
+  [`./ROADMAP.md`](./ROADMAP.md) for why, and for what push costs sealed sender.
 - **No health endpoint.** The server exposes no route for a load balancer or an uptime check to
   call; `docker compose ps` and the logs are what there is. Adding one means adding a route, and
   it has not been done.

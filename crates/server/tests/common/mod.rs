@@ -181,6 +181,32 @@ pub async fn start_with_waker() -> (TestServer, std::sync::Arc<WakerSpy>) {
     (TestServer { base_url: format!("http://{addr}"), pool }, spy)
 }
 
+/// A server wired to a real push emitter, rather than to a spy.
+///
+/// Distinct from [`start_with_waker`] on purpose: that one observes what the server *decides* to
+/// send, this one observes what it actually puts on the wire. Both are needed — the first proves
+/// the right devices are chosen, the second proves the request is one a push service would
+/// accept and that it carries nothing.
+pub async fn start_with_push(push: server::push::Configured) -> TestServer {
+    let pool = pool().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = server::app_with_push(pool.clone(), Limits::off(), push)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    TestServer { base_url: format!("http://{addr}"), pool }
+}
+
+/// The pool, for a test that has to build something needing one before the server exists.
+pub async fn test_pool() -> PgPool {
+    pool().await
+}
+
 async fn start_with(pool: PgPool, limits: Limits) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

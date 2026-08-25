@@ -17,6 +17,7 @@ import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./atta
 import * as content from "./content";
 import * as envelope from "./envelope";
 import { expiryOf, prune } from "./expiry.ts";
+import { disablePush, enablePush, replayPushToken } from "./push.ts";
 import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
 import * as derive from "./conversation-view.ts";
@@ -1178,6 +1179,40 @@ export class Session {
    */
   enablePasskeyRecovery(): Promise<boolean> {
     return enablePasskeyRecovery(this.api, this.accountId, this.handle, this.account.exportSeed());
+  }
+
+  /**
+   * Subscribes this browser to wake-ups, and hands the address to the server.
+   *
+   * `false` means the deployment does not do push, not that something failed — the screen says so
+   * rather than flipping a switch back with no explanation.
+   *
+   * Per browser, deliberately, and therefore not a preference: it is a fact about this machine,
+   * which is the test `signal-sync.ts` states for what does and does not sync between an account's
+   * devices. Nothing here is stored or announced.
+   */
+  async enableWaking(): Promise<boolean> {
+    // The key is read here rather than inside `enablePush`: the route is unsigned, `Api` exposes
+    // it as a static, and `lib/push.ts` deliberately imports nothing from `api.ts` so that it can
+    // be tested without a browser.
+    return enablePush(this.api, await Api.vapidPublicKey());
+  }
+
+  /** Unsubscribes this browser and drops the address the server holds. */
+  disableWaking(): Promise<void> {
+    return disablePush(this.api);
+  }
+
+  /**
+   * Re-sends the wake address this browser already holds.
+   *
+   * At every start and after every reconnection: a push address rotates without warning, and a
+   * browser that renewed its subscription on its own would otherwise be reachable at an address
+   * the server does not have. Does nothing when there is no subscription — this must never turn
+   * waking on by itself.
+   */
+  replayWaking(): Promise<void> {
+    return replayPushToken(this.api);
   }
 
   /** Removes a recovery factor. Removing one that is not there is a success. */

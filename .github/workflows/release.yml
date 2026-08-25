@@ -45,9 +45,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # **The exact version, from `apps/web/.nvmrc`, and this is the line the manifest rests on.**
+      #
+      # Measured: node 22.21.0 and node 22.23.2 produce different bytes for two of the fourteen
+      # generated files — `index-*.js` and `PdfViewer-*.js` — while the CSS and the other chunks
+      # match. A manifest built here and a deployment built elsewhere would therefore disagree on
+      # two files, and the disagreement would look exactly like an attack.
+      #
+      # `node-version: 22` resolves to whatever 22.x the runner has that week. It happened to
+      # match `deploy/Dockerfile.web` on the day this was written, which is not a property anybody
+      # should rely on — it is the kind of agreement that holds until it silently stops.
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version-file: apps/web/.nvmrc
           # The cache keys on a lockfile path this repository does not have at the root, and a
           # half-hit cache is a slower build with a confusing log.
           package-manager-cache: false

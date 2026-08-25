@@ -53,6 +53,20 @@
  * No browser policy stands in the way — only the desktop app, whose code is packaged into the
  * installed binary, closes that path.
  */
+/**
+ * One origin, spelled both ways.
+ *
+ * A `connect-src` source matches on scheme, so `wss://host` and `https://host` are two sources
+ * and a policy needs whichever the code will actually use. Normalising to HTTP first makes the
+ * function total: it accepts `ws`, `wss`, `http` or `https` and returns the pair, rather than
+ * quietly returning its input for two of the four.
+ */
+function bothSchemes(origin: string): [string, string] {
+  const http = origin.replace(/^ws/, "http");
+
+  return [http, http.replace(/^http/, "ws")];
+}
+
 export function csp(media?: string): string {
   // The media server is a second origin, and it is absent from most deployments: a build with no
   // media server must not widen its policy for a host it will never contact. Empty rather than a
@@ -68,7 +82,15 @@ export function csp(media?: string): string {
   //
   // The audio itself travels over WebRTC, which no directive here can constrain — see
   // `lib/call.ts` for what does.
-  const relay = media ? ` ${media} ${media.replace(/^http/, "ws")}` : "";
+  //
+  // **Both forms are derived, whichever one the deployment wrote.** This used to be
+  // `media.replace(/^http/, "ws")`, which assumed the variable was spelled `http://`. Given the
+  // `ws://` form — which is what `.env.example` recommends for a local media server, and what a
+  // LiveKit URL looks like everywhere — the replacement matched nothing and returned its input.
+  // The policy then listed the same origin twice and **omitted the HTTP one entirely**: the
+  // paragraph above says why that costs a broken call its explanation. The test only ever passed
+  // `https://`, so it agreed.
+  const relay = media ? ` ${bothSchemes(media).join(" ")}` : "";
 
   return [
     "default-src 'self'",

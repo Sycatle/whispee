@@ -116,6 +116,11 @@ export function ConversationSettings({ view }: { view: ConversationView }) {
     roles.admin === session.accountId ||
     roles.moderators.includes(session.accountId);
 
+  // A conversation predating the extension cannot be given one: its members' leaves do not
+  // declare it, and MLS refuses the commit. Offering the buttons there would spend a click to
+  // produce a protocol error nobody can act on.
+  const canSetLifetime = iModerate && session.carriesLifetime(view);
+
   // The choice waiting on a confirmation. Only turning a lifetime *on* asks one, because only
   // that destroys something: it drops this account's archive of the conversation.
   const [confirming, setConfirming] = useState<number | null>(null);
@@ -241,9 +246,11 @@ export function ConversationSettings({ view }: { view: ConversationView }) {
         <Field
           label="Make messages disappear"
           hint={
-            iModerate
-              ? "Messages sent from now on disappear for everybody after this delay. Nothing enforces it on the other side: a modified client keeps what it likes, and screenshots exist. What it does guarantee is that they are not archived on this server."
-              : "Messages sent from now on disappear for everybody after this delay. Changing it needs a role in this group — an admin or a moderator — so it is shown here and not offered."
+            !session.carriesLifetime(view)
+              ? "Messages sent from now on disappear for everybody after this delay. This conversation started before the feature existed, so it cannot be given one: every member's device would have to announce it, and theirs do not. A new conversation has it by default."
+              : iModerate
+                ? "Messages sent from now on disappear for everybody after this delay. Nothing enforces it on the other side: a modified client keeps what it likes, and screenshots exist. What it does guarantee is that they are not archived on this server."
+                : "Messages sent from now on disappear for everybody after this delay. Changing it needs a role in this group — an admin or a moderator — so it is shown here and not offered."
           }
         >
           {(control) => (
@@ -261,7 +268,7 @@ export function ConversationSettings({ view }: { view: ConversationView }) {
                   // rest read as text, and `aria-pressed` carries the same fact to a reader who
                   // sees neither.
                   variant={seconds === lifetime ? "secondary" : "quiet"}
-                  disabled={!iModerate || dropping}
+                  disabled={!canSetLifetime || dropping}
                   aria-pressed={seconds === lifetime}
                   onClick={() => {
                     // Turning it off destroys nothing and asks nothing. Turning it on drops this
@@ -291,7 +298,12 @@ export function ConversationSettings({ view }: { view: ConversationView }) {
               id={control.id}
               aria-describedby={control.describedBy}
               label="Keep a backup of this conversation"
-              checked={shown("archiveToVault", flags.archiveToVault !== false)}
+              // Disabled rather than left on while nothing is deposited. A conversation with a
+              // lifetime is never archived — `session-vault.ts` returns before asking — and a
+              // switch that stays on above that is exactly the defect this file's header names:
+              // a control describing an effect it does not have.
+              disabled={lifetime > 0}
+              checked={lifetime > 0 ? false : shown("archiveToVault", flags.archiveToVault !== false)}
               onCheckedChange={(value) => {
                 setPending((current) => ({ ...current, archiveToVault: value }));
                 // `false` is the only value worth storing: absent means "follow the account", and

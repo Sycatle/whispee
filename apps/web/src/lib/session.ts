@@ -1715,6 +1715,21 @@ export class Session {
   }
 
   /**
+   * Whether this conversation can be given a lifetime at all.
+   *
+   * A group created before the extension existed cannot: its members' leaf nodes were built
+   * without `0xF101` in their capabilities, and MLS refuses a commit that requires an extension
+   * a member does not declare. The commit would fail with a raw protocol error, so the screen
+   * asks first and says why instead.
+   *
+   * The absence of the extension is the exact test: a group that has one — even set to `0` —
+   * went through a client that installed it, so every member already declares it.
+   */
+  carriesLifetime(view: ConversationView): boolean {
+    return (this.client.lifetimeSeconds(view.groupId) as number | undefined) !== undefined;
+  }
+
+  /**
    * Sets how long messages live here, announces it, and drops this account's archive of the
    * conversation when it is turned on.
    *
@@ -1731,16 +1746,24 @@ export class Session {
     const commit = this.client.setLifetime(view.groupId, seconds);
     await this.publishAndApply(view, commit);
 
+    // Persisted here, before anything else can fail. `publishAndApply` has already moved the MLS
+    // epoch and published the commit; a throw from the vault drop below would otherwise leave that
+    // epoch only in memory, and the next reload would restore a state behind an envelope stream
+    // that has moved on — the severed ratchet `ConversationView.stale` describes, from a failed
+    // deletion. The order is the one `pollOnce` states: the cryptographic state reaches the disk
+    // before any further network call.
+    this.refreshView(view);
+    await this.persist();
+
     if (seconds > 0) {
-      // Failing here must not undo the commit: the room's memory has already changed for
-      // everybody, and a vault that outlives it is a defect to report rather than a reason to
-      // pretend the lifetime was never set. The caller sees the throw and says so.
+      // Failing here does not undo the commit — the room's memory has already changed for
+      // everybody, and it is now on disk. A vault that outlives it is a defect to report rather
+      // than a reason to pretend the lifetime was never set, so the throw reaches the caller and
+      // the screen says so.
       await this.api.dropVault(view.groupId);
     }
 
     await this.sendContent(view, { kind: "expiry", seconds });
-    this.refreshView(view);
-    await this.persist();
   }
 
   /**
@@ -3410,7 +3433,15 @@ export class Session {
     // A message that arrived already past its deadline is not inserted at all. A device back from
     // ten days offline must not watch expired messages appear and then vanish — that is the whole
     // history of the conversation replaying in front of somebody before being taken away.
-    if (expiresAt !== undefined && expiresAt <= Date.now()) return;
+    //
+    // The cursor moves anyway, and that is the whole subtlety: it is what receipts are computed
+    // from, so leaving it parked before an expired run would stall the delivered receipt for
+    // every message after it too — the peers would see a live conversation as permanently
+    // undelivered. The message is dropped, not unreceived.
+    if (expiresAt !== undefined && expiresAt <= Date.now()) {
+      view.contentCursor = Math.max(view.contentCursor, seq);
+      return;
+    }
 
     view.messages.push({
       seq,

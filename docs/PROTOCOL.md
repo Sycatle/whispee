@@ -565,6 +565,13 @@ Conversations created by this client start at **604800** — seven days — admi
 is listed in `RequiredCapabilities` alongside the roster, so a client that cannot read it does not
 join and then apply a policy it never saw.
 
+That capability requirement has a migration edge, and it is not worked around: a conversation
+created *before* this extension existed cannot be given a lifetime. Its members' leaf nodes were
+built without `0xF101` in their capabilities, and MLS refuses a commit requiring an extension a
+member does not declare. The interface asks whether the extension is present at all and says so
+rather than spending a click on a protocol error. New conversations carry it from the first
+commit; existing ones keep everything, as they did before.
+
 **Who may change it: admin or moderator.** Changing how long the room remembers is moderation, the
 same rank that admits and removes members; handing out power is not, and stays the admin's alone.
 A client computes the two facts by *comparing* the extensions a commit installs with the ones in

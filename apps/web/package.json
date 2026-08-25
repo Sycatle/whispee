@@ -1,6 +1,7 @@
 {
   "name": "whispee-web",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "wasm": "../../scripts/build-wasm.sh pkg && cp ../../crates/crypto-wasm/pkg/crypto_wasm_bg.wasm public/ && cp ../../crates/crypto-wasm/pkg/crypto_wasm.js src/lib/generated/ && cp ../../crates/crypto-wasm/pkg/crypto_wasm.d.ts src/lib/generated/ && node scripts/patch-wasm-glue.mjs",

@@ -4,7 +4,7 @@ members = ["crates/attest", "crates/transparency", "crates/crypto-core", "crates
 
 [workspace.package]
 edition = "2024"
-license = "UNLICENSED"
+license = "AGPL-3.0-or-later"
 publish = false
 
 [workspace.dependencies]

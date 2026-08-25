@@ -167,7 +167,7 @@ Same position, now actively lying, withholding, injecting and delaying.
   meantime. The server-side membership filter narrows the window without closing it.
 - **serve hostile JavaScript**, on the web target, on every load. No browser policy fixes that —
   which is what the desktop application, with its interface inside the signed binary, exists for.
-- **choose whom to wake**, if push is ever configured. See §4.
+- **choose whom to wake**, wherever push is configured. See §4.
 - **keep an envelope forever.** There is no purge, and no proof of deletion for anything.
 
 ### 2.4 Another group member
@@ -339,9 +339,15 @@ chair. Sharing a secret between the two would silently promote the weaker requir
 This is the one property the project knowingly trades away. The mobile execution plan recorded the
 decision and said it belonged in the documentation; it was never written down. It is written here.
 
-Push is **half-built**: the server records tokens, decides who to wake, and sends nothing. There is
-no FCM or APNs provider, no configuration, no device-side token registration, and no user-facing
-setting. `Silent` is the default waker and it wakes nobody.
+Push **works, over Web Push, and only there**. A browser subscribes from the settings screen, the
+server signs a VAPID token per push service and sends an empty wake-up, and a service worker shows
+a notification with the tab closed. There is no FCM and no APNs provider, so the packaged mobile
+application is still only notified while it is open.
+
+It is off until a deployment sets `VAPID_SUBJECT`. Unset — which is the default, and the state of
+every deployment that has not decided otherwise — `Silent` is the waker, it wakes nobody, and the
+route serving the subscription key answers 503 so the client hides the control. That is not a
+degraded mode: a deployment that talks to no push service keeps a fully working messenger.
 
 The degradation is not caused by the tokens. It is caused by the feature's **existence**:
 
@@ -351,19 +357,29 @@ The degradation is not caused by the tokens. It is caused by the feature's **exi
 > cryptography answers this.
 
 That is the price of the feature. It is also why the feature is strictly optional and inert without
-configuration: a self-hosted deployment that talks to neither Apple nor Google must stay fully
-functional, and does.
+configuration: a self-hosted deployment that talks to no push service must stay fully functional,
+and does.
+
+**Turning it on is the user's decision as well as the operator's**, and the settings screen states
+both halves of the cost — the push service learning the rhythm, and this server learning whom to
+wake — above the switch rather than under it.
 
 Three further limits follow from push, and hold whenever it is configured:
 
-- **the third party learns the rhythm.** For a sleeping phone to learn a message is waiting,
-  Google or Apple must wake it — and they can tie that device to an account. The content stays
-  encrypted; the activity metadata leaks, and that is irreducible, not a defect;
+- **the third party learns the rhythm.** For a closed browser to learn a message is waiting, its
+  vendor's push service — Google for Chrome, Mozilla for Firefox — must wake it, and can tie that
+  browser to an address. The content stays encrypted; the activity metadata leaks, and that is
+  irreducible, not a defect;
 - **the wake-up carries nothing** — no text, no sender, no group id, because putting the message in
-  the notification would show it to the provider *and* to the lock screen;
-- **on iOS, the notification will never show the content.** The service extension is a separate
-  Swift process; the keys live in a WASM module inside the webview. Fixing that would require
-  porting the crypto to native.
+  the notification would show it to the provider *and* to the lock screen. Over Web Push that is
+  not only a policy: with no payload there is nothing to encrypt, so the whole of RFC 8291 is
+  unused and the subscription's own secrets are never read. `tests/webpush.rs` asserts the empty
+  body at the wire;
+- **the notification says only that something arrived.** The service worker cannot decrypt: the MLS
+  keys are in the page's memory, not the worker's, and moving them there would hand the decryption
+  keys to a context that outlives every tab. On iOS the same holds for a different reason — the
+  service extension is a separate Swift process — and fixing that would require porting the crypto
+  to native.
 
 ---
 
@@ -377,6 +393,9 @@ raised. It costs the threat model nothing.
 What it buys is smaller in exact proportion: it fires only while the page is running. A closed
 tab, a killed process or a sleeping phone produces nothing, and no client-side work changes that.
 The honest statement is "you find out sooner while the application is open", not "you find out".
+
+That gap is what §4's feature closes, on browsers, at the price §4 states — and closing it is what
+makes the price worth restating on the screen that offers it.
 
 What it does disclose is on the screen, not on the wire: that this application is installed, and
 that something arrived. The notice carries no sender, no group and no text. Naming the

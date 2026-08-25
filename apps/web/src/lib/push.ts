@@ -104,6 +104,12 @@ export function decodeApplicationServerKey(base64url: string): Uint8Array<ArrayB
  * click has to land. Failure is a `null`, not a throw: an unsupported browser and a blocked
  * registration are the same thing to every caller here — this feature is absent — and neither is
  * worth an error dialog on a path the user did not ask for.
+ *
+ * `main.tsx` registers the same worker at boot, for the cache. This call is kept rather than
+ * replaced by `navigator.serviceWorker.ready`: `register` with the same script and scope answers
+ * with the existing registration rather than making a second one, where `ready` never settles at
+ * all if the boot registration was refused — a hang on the path that turns notifications on,
+ * instead of a `false` that says the browser will not do this.
  */
 async function worker(): Promise<ServiceWorkerRegistration | null> {
   if (!pushSupported()) return null;

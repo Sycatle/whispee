@@ -321,6 +321,7 @@ Everything else follows:
 | Device auth key | Non-extractable `CryptoKey` in IndexedDB | `secrets.bin`, held by the Rust process |
 | State-at-rest key | Non-extractable `CryptoKey` in IndexedDB | Same file, same process |
 | Master key when biometrics are on | Not available | `master.bin` — its existence *is* the on/off flag |
+| Which server this is | This page's own origin | `server.txt`, typed on first launch and parsed by `server.rs` |
 | Purged when | Browser eviction rules apply | Only on uninstall |
 
 Why the native side exists at all: a mobile webview's storage **is not guaranteed**. iOS

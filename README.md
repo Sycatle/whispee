@@ -38,19 +38,28 @@ not their equal and does not try to be.
 | Disappearing messages | **On by default: seven days.** The lifetime is a group-context extension, so every member agrees on it; the server never learns it. Not enforceable on the other side — see [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) |
 | History vault | On by default, encrypted under a key derived from the recovery phrase — **and off for any conversation with a lifetime**, which is what makes disappearing mean anything. Such a conversation does not survive the loss of every device |
 | Storage quota | 256 MiB per account by default, charged on vault writes and attachment uploads, credited back when a purge deletes. Envelopes are outside it: charging a sealed post would mean naming its sender — see [docs/ROADMAP.md](docs/ROADMAP.md) |
-| Web, desktop | Vite 7 + React 19; Tauri 2 wraps the same build |
+| Web, desktop, mobile | Vite 7 + React 19; Tauri 2 wraps the same build for Linux, Windows, macOS, Android and iOS. Each one is pointed at a server on first launch — there is no central service |
+| Installable web client | A manifest, icons and a service worker that caches what is addressed by its content. It starts with no network, carries an unread badge, and — the part that is not cosmetic — is what lets iOS subscribe to push at all |
 | Push notifications | Web Push, off until a deployment names a contact in `VAPID_SUBJECT`. The wake-up carries no text, no sender and no group id — the worker cannot decrypt, so it says only that something arrived |
 | Verifiable web client | The bundle belongs to no deployment, so one published manifest of hashes describes every instance. CI attests it to GitHub; an extension compares what the browser actually received. See [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) § 4quinquies for what that establishes and what it does not |
 | Deployment | `deploy/` — Postgres, the server, and Caddy terminating TLS on one origin. See [docs/DEPLOY.md](docs/DEPLOY.md) |
 | Reproducible, signed releases | `scripts/release.sh`, `scripts/verify-release.sh` |
+| Desktop installers | `.deb`, `.rpm`, AppImage, `.msi`, NSIS and `.dmg`, built by CI on a tag with a `SHA256SUMS` and a Sigstore attestation. **Unsigned by the platforms**: Windows shows SmartScreen and macOS asks for a right-click → Open. The `.dmg` is Apple Silicon only |
 
 ## What does not work
 
-- **Push reaches browsers, not the packaged mobile app.** Web Push works end to end — a browser
-  subscribes, the server signs a VAPID token, a notification arrives with the tab closed — and it
-  is off until a deployment sets `VAPID_SUBJECT`. FCM and APNs are not written: device-side
-  registration needs a Tauri plugin that does not exist, so the Tauri build is only notified while
-  it is open. The wake-up carries no text, no sender and no group id.
+- **Push reaches browsers, not the packaged mobile app** — and the installed web client is
+  therefore *better* at notifications on a phone than the native one, which is a reversal worth
+  stating plainly. Web Push works end to end: a browser subscribes, the server signs a VAPID
+  token, a notification arrives with the tab closed, and iOS can now subscribe because the client
+  is installable. FCM and APNs are not written — not for want of tooling any more, since several
+  Tauri push plugins now exist, but because APNs cannot be exercised without a paid Apple
+  Developer membership and there is no Android device here. A Tauri webview has no service worker
+  either, so a packaged build has **no background wake-up path at all**. The wake-up carries no
+  text, no sender and no group id. See [docs/ROADMAP.md](docs/ROADMAP.md).
+- **Nothing reaches a watch.** An Apple Watch or a Wear OS device shows the notifications its
+  phone received, so this waits entirely on the line above — and even then, a notice that says
+  only "New message" is not much of a wrist.
 - **Biometric unlock has never been executed.** The code exists; not one line of it has run.
   There is no Android NDK and no physical device on the development machine, so even the
   compilation of its dependency is unconfirmed.

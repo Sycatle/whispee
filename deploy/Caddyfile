@@ -21,6 +21,18 @@
 		Strict-Transport-Security "max-age=63072000; includeSubDomains"
 		# Content sniffing turns a file the client uploaded into a script the browser executes.
 		X-Content-Type-Options "nosniff"
+		# **The one directive a `<meta>` Content-Security-Policy cannot carry.**
+		#
+		# `apps/web/src/lib/csp.ts` declares `frame-ancestors 'none'` and `index.html` delivers the
+		# policy in a meta element, where the specification says that directive is ignored — Chrome
+		# logs it as such. The result was a deployment with no defence against being framed at all.
+		# Found by reading a real browser's console against this stack, not by inspection.
+		#
+		# `X-Frame-Options` rather than a `Content-Security-Policy` header: sending the policy from
+		# here would be the third hand-maintained copy of it, which is the drift the note below
+		# refuses. This header says one thing, it is the thing the meta cannot say, and no part of
+		# it repeats a decision made elsewhere.
+		X-Frame-Options "DENY"
 		# A referrer would name this deployment to every site a message links to — which is one
 		# of the metadata leaks the rest of the architecture spends real effort removing.
 		Referrer-Policy "no-referrer"
@@ -65,7 +77,17 @@
 		# The mutable half. `index.html` carries the CSP and the script tags that name the
 		# fingerprinted files: cached, it would pin a client to a version that no longer exists on
 		# disk after a deploy — a blank page nobody can reproduce.
-		@entry path /index.html /
+		#
+		# `sw.js` joins it, and the manifest with it. A stale service worker is the same defect one
+		# level up: it decides what the *next* load is answered from, so a cached one keeps its
+		# routing rules after they have been corrected. Browsers already leave a worker script out
+		# of the HTTP cache on their own — that is what `updateViaCache` defaults to — and this
+		# line is for the proxy in between that does not know it.
+		#
+		# The client does not rely on any of this: `apps/web/public/sw.js` asks for `index.html`
+		# with `cache: "no-cache"` precisely so a deployment that omits these headers still heals.
+		# Two locks on the property that matters most.
+		@entry path /index.html / /sw.js /manifest.webmanifest
 		header @entry Cache-Control "no-cache"
 
 		try_files {path} /index.html

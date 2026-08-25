@@ -13,7 +13,12 @@ import { Onboarding } from "@/components/Onboarding";
 import { RELOCK_MS, networkReported, observeIdle, observeLifecycle } from "@/lib/lifecycle";
 import { compactNameOf } from "@/lib/naming";
 import { addressedIn } from "@/lib/mention";
-import { countUnreadInTitle, createNotifier } from "@/lib/notifications";
+import {
+  clearUnreadBadge,
+  countUnreadInTitle,
+  createNotifier,
+  markUnreadBadge,
+} from "@/lib/notifications";
 import { type ProposedMigration, Session, start } from "@/lib/session";
 import { RouterProvider, useNavigate } from "@/routes/Router";
 import { DetailProvider } from "@/state/detail";
@@ -514,6 +519,7 @@ function Frame({
       // longer knows the count.
       notices.dismissAll();
       counter.restore();
+      clearUnreadBadge();
     };
   }, [session, navigate]);
 
@@ -633,6 +639,8 @@ function Frame({
     }
 
     title.current?.show(unread);
+    // The same count, for the reader who installed this and has no tab to look at.
+    markUnreadBadge(unread);
   });
 
   return (

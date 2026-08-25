@@ -210,9 +210,8 @@ jobs:
       # remove.
       #
       # `vite build` rather than `pnpm run build`: that script runs `tsc --noEmit` first, and the
-      # `web` job already does. `VITE_API_URL` is left unset on purpose — it is frozen into the
-      # bundle and the CSP, which matters for something installed and not at all for a bundle
-      # that exists so a macro can find a directory.
+      # `web` job already does. No API address is passed, and none exists to pass: the bundle
+      # carries no deployment's configuration at all.
       - uses: actions/setup-node@v5
         with:
           node-version: 22

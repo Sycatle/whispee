@@ -80,24 +80,20 @@ jobs:
 
       # Same choice as for Android: the Xcode project is generated on every build rather than
       # committed, so it cannot drift from `tauri.conf.json`.
+      # No API address is passed: the bundle carries none, and the packaged application asks the
+      # person installing it (`apps/desktop/src/server.rs`).
       - name: Generate the Xcode project
         working-directory: apps/desktop
-        env:
-          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
         run: cargo tauri ios init
 
       - name: Build for the simulator
         if: ${{ !inputs.device }}
         working-directory: apps/desktop
-        env:
-          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
         run: cargo tauri ios build --debug --target aarch64-sim
 
       - name: Build for a device
         if: ${{ inputs.device }}
         working-directory: apps/desktop
-        env:
-          VITE_API_URL: ${{ vars.VITE_API_URL || 'http://127.0.0.1:8787' }}
         run: cargo tauri ios build --debug
 
       - uses: actions/upload-artifact@v6

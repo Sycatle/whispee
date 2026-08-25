@@ -373,6 +373,10 @@ impl Device {
         self.signed("GET", path, Vec::new()).await
     }
 
+    pub async fn delete(&self, path: &str) -> reqwest::Response {
+        self.signed("DELETE", path, Vec::new()).await
+    }
+
     pub async fn post(&self, path: &str, body: serde_json::Value) -> reqwest::Response {
         self.signed("POST", path, serde_json::to_vec(&body).unwrap()).await
     }

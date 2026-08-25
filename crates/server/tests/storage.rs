@@ -289,3 +289,55 @@ async fn the_counter_reconciles_with_what_is_actually_stored() {
         "the counter drifted from what is stored"
     );
 }
+
+/// Dropping a group's vault removes that account's entries and gives the bytes back.
+#[tokio::test]
+async fn deleting_a_groups_vault_credits_the_account() {
+    let server = start().await;
+    let (alice, device, group) = account_with_group(&server, "alice").await;
+
+    let path = format!("/v1/vault/{}", hex::encode(&group));
+    device.post(&path, vault_body(1, 1000)).await;
+    assert_eq!(counter(&server.pool, &alice.id).await, 1000);
+
+    let response = device.delete(&path).await;
+    assert!(response.status().is_success(), "delete refused: {}", response.status());
+
+    assert_eq!(counter(&server.pool, &alice.id).await, 0);
+    assert_eq!(
+        counter(&server.pool, &alice.id).await,
+        actually_stored(&server.pool, &alice.id).await
+    );
+}
+
+/// It removes the caller's entries and nobody else's.
+///
+/// The vault is indexed by account, and two members of one group each have their own. A delete
+/// that took the group's rows rather than the caller's would let anybody erase everybody's
+/// archive of a shared conversation.
+#[tokio::test]
+async fn deleting_a_vault_leaves_the_other_members_alone() {
+    let server = start().await;
+    let (alice, alice_device, group) = account_with_group(&server, "alice").await;
+    let bob = TestAccount::create(&server, &unique("bob")).await;
+    let bob_device = bob.device(&server, &unique("device")).await;
+
+    let path = format!("/v1/vault/{}", hex::encode(&group));
+    alice_device
+        .post(
+            &format!("/v1/groups/{}/members", hex::encode(&group)),
+            serde_json::json!({ "device_ids": [alice_device.id, bob_device.id] }),
+        )
+        .await;
+    alice_device.post(&path, vault_body(1, 1000)).await;
+    bob_device.post(&path, vault_body(2, 700)).await;
+
+    alice_device.delete(&path).await;
+
+    assert_eq!(counter(&server.pool, &alice.id).await, 0);
+    assert_eq!(
+        counter(&server.pool, &bob.id).await,
+        700,
+        "one member erased another's archive"
+    );
+}

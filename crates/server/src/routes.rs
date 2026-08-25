@@ -117,7 +117,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/log/proof/{account}", get(log_proof))
         .route("/v1/log/consistency", get(log_consistency))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
-        .route("/v1/vault/{group_id}", post(store_vault).get(fetch_vault))
+        .route("/v1/vault/{group_id}", post(store_vault).get(fetch_vault).delete(drop_vault))
         .route("/v1/recovery", get(list_recovery).post(set_recovery))
         .route("/v1/recovery/forget", post(forget_recovery))
         .route("/v1/key-packages", post(publish_key_packages))
@@ -1903,6 +1903,53 @@ async fn store_vault(
     tx.commit().await?;
 
     Ok(Json(serde_json::json!({ "stored": seqs.len() })))
+}
+
+/// Drops the caller's vault for one group.
+///
+/// # Why the caller's and not the group's
+///
+/// The vault is indexed by account: two members of one conversation each hold their own archive
+/// of it, sealed under their own key. Deleting by group would let either of them destroy the
+/// other's copy of a shared history — which is not what turning on a lifetime asks for, and is
+/// not something one member gets to do to another.
+///
+/// # Why no membership check
+///
+/// The statement can only ever reach rows keyed to the caller's own account, so a non-member
+/// deleting their vault for a group they were never in removes nothing and leaks nothing.
+/// Requiring membership would instead leave somebody who was *removed* from a group unable to
+/// erase their own archive of it — the one case where erasing it matters most.
+///
+/// The bytes are credited in the same transaction that removes the rows: see `crate::storage`
+/// for what drifts when a deletion path forgets.
+async fn drop_vault(
+    State(pool): State<PgPool>,
+    Path(group_id): Path<String>,
+    signed: Signed,
+) -> ApiResult<Json<serde_json::Value>> {
+    let group_id = decode_group_id(&group_id)?;
+    let account = caller_account(&pool, &signed.device_id).await?;
+
+    let mut tx = pool.begin().await?;
+
+    let (removed, bytes): (i64, i64) = sqlx::query_as(
+        "WITH gone AS (
+             DELETE FROM vault_entries
+              WHERE account = $1 AND group_id = $2
+          RETURNING octet_length(payload) AS bytes
+         )
+         SELECT count(*)::bigint, COALESCE(SUM(bytes), 0)::bigint FROM gone",
+    )
+    .bind(&account)
+    .bind(&group_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    crate::storage::credit(&mut tx, &account, bytes).await?;
+    tx.commit().await?;
+
+    Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
 #[derive(Serialize)]

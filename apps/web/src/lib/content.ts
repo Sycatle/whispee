@@ -219,6 +219,29 @@ const TYPE_SIGNALS = 12;
 const TYPE_CALL = 13;
 
 /**
+ * A change to how long this conversation keeps what is said in it: `u8 14 ‖ u32 BE seconds`.
+ *
+ * A notice rather than a silent setting, for the reason membership notices exist: a room whose
+ * memory grows from seven days to a year has changed in the way that matters, and the change
+ * belongs in the history where everybody sees it rather than in a menu somebody may never open.
+ *
+ * # Not the authority, and it does not need to be
+ *
+ * The lifetime itself lives in the MLS group context, authenticated and hashed into every commit
+ * — see `crates/crypto-core/src/lifetime.rs`. This is the announcement, and like the membership
+ * notice it is a claim by its sender: a client could post one without committing anything. It
+ * changes no state, and the reader's own group context is what actually decides when their
+ * messages go.
+ *
+ * # Not control
+ *
+ * It is meant to be read, so it is displayed, archived and counted like anything else in the
+ * thread. Somebody who was away while the room's memory was shortened has had the conversation
+ * change under them, which is news in the same sense a message is.
+ */
+const TYPE_EXPIRY = 14;
+
+/**
  * What happened to a call.
  *
  * `invite` and its conclusion are two envelopes sharing one call id, not one envelope amended:
@@ -251,6 +274,7 @@ export type Content =
   | { kind: "call"; event: CallEvent; call: string; seconds: number }
   | { kind: "membership"; event: MembershipEvent; handle: string }
   | { kind: "handle"; handle: string; at: number }
+  | { kind: "expiry"; seconds: number }
   | { kind: "signals"; sealed: Uint8Array };
 
 /**
@@ -335,6 +359,14 @@ export function encodeMembership(event: MembershipEvent, handle: string): Uint8A
   out[0] = TYPE_MEMBERSHIP;
   out[1] = MEMBERSHIP_EVENTS.indexOf(event);
   out.set(name, 2);
+  return out;
+}
+
+/** A change of lifetime, in seconds; `0` announces that it was turned off. */
+export function encodeExpiry(seconds: number): Uint8Array {
+  const out = new Uint8Array(1 + 4);
+  out[0] = TYPE_EXPIRY;
+  new DataView(out.buffer).setUint32(1, seconds, false);
   return out;
 }
 
@@ -426,6 +458,8 @@ function encodeBody(body: Content): Uint8Array {
       return encodeCall(body.event, body.call, body.seconds);
     case "membership":
       return encodeMembership(body.event, body.handle);
+    case "expiry":
+      return encodeExpiry(body.seconds);
     case "handle":
       return encodeHandle(body.handle, body.at);
     case "signals":
@@ -676,6 +710,18 @@ function decodeBody(bytes: Uint8Array): Content {
         event,
         seconds: new DataView(body.buffer, body.byteOffset).getUint32(1, false),
         call: new TextDecoder().decode(body.subarray(5)),
+      };
+    }
+
+    case TYPE_EXPIRY: {
+      // Four bytes and nothing else. A length nobody checks is how a garbled body becomes a
+      // lifetime somebody did not choose — and the sentence drawn from it would name a delay no
+      // member of the room ever agreed to.
+      if (body.length !== 4) throw new Error("badly sized expiry notice");
+
+      return {
+        kind: "expiry",
+        seconds: new DataView(body.buffer, body.byteOffset).getUint32(0, false),
       };
     }
 

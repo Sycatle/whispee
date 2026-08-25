@@ -7,6 +7,7 @@ import {
   dayLabel,
   opensDay,
   spokenDuration,
+  spokenLifetime,
   timeOf,
 } from "./datetime.ts";
 
@@ -108,4 +109,10 @@ test("a duration is never negative and never a fraction", () => {
   // The value is a difference of two clocks: one of them can be behind the other.
   assert.equal(spokenDuration(-5), "0 s");
   assert.equal(spokenDuration(1.6), "2 s");
+});
+
+test("a lifetime is spoken in the units it was chosen in", () => {
+  assert.equal(spokenLifetime(604800), "7 days");
+  assert.equal(spokenLifetime(86400), "1 day");
+  assert.equal(spokenLifetime(3600), "1 hour");
 });

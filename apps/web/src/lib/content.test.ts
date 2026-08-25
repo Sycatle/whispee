@@ -280,3 +280,25 @@ test("an oversized settings blob is refused rather than allocated", () => {
   assert.throws(() => decode(huge));
   assert.throws(() => encode({ kind: "signals", sealed: new Uint8Array(12 + 16 + 129) }));
 });
+
+test("an expiry notice survives the round trip", () => {
+  const encoded = encode({ kind: "expiry", seconds: 604800 });
+  const decoded = decode(encoded);
+
+  assert.deepEqual(decoded.body, { kind: "expiry", seconds: 604800 });
+});
+
+test("turning it off is a notice too, and is not an absent one", () => {
+  const decoded = decode(encode({ kind: "expiry", seconds: 0 }));
+
+  assert.deepEqual(decoded.body, { kind: "expiry", seconds: 0 });
+});
+
+test("an expiry notice is not control, so the room sees its memory change", () => {
+  assert.equal(isControl({ kind: "expiry", seconds: 604800 }), false);
+});
+
+test("a body of the wrong length is refused, as the other fixed-width bodies are", () => {
+  const truncated = new Uint8Array([14, 0, 0, 0]);
+  assert.throws(() => decode(truncated));
+});

@@ -36,7 +36,7 @@
   - `pub const DEFAULT_SECONDS: u32 = 604_800;`
   - `pub struct Lifetime(u32)` with `Lifetime::seconds(u32) -> Self`, `Lifetime::get(&self) -> u32`, `Lifetime::is_off(&self) -> bool`, `encode(&self) -> [u8; 4]`, `decode(&[u8]) -> Result<Self>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 At the bottom of `crates/crypto-core/src/lifetime.rs`:
 
@@ -74,12 +74,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p crypto-core --lib lifetime`
 Expected: FAIL — `file not found for module lifetime`.
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 ```rust
 //! How long a conversation keeps what is said in it.
@@ -148,12 +148,12 @@ Add to `crates/crypto-core/src/lib.rs`, in the module list kept alphabetical:
 pub mod lifetime;
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p crypto-core --lib lifetime`
 Expected: PASS, four tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/crypto-core/src/lifetime.rs crates/crypto-core/src/lib.rs
@@ -178,7 +178,7 @@ git commit -m "feat(crypto): a lifetime a room agrees on, not a note to oneself"
 
 **This is the task where the feature can silently destroy an existing one.** `update_group_context_extensions` replaces *all* extensions: setting the lifetime with a vector that omits the roster removes the roster, and the group becomes flat — everybody an administrator, silently, in a commit the others accept because it is well formed. Both setters must therefore rebuild the whole set from both current values.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/crypto-core/tests/lifetime.rs`:
 
@@ -252,12 +252,12 @@ ones this file needs into `crates/crypto-core/tests/common/mod.rs`, have the exi
 the shared version, and do not write a second identity builder. `apply_pending` takes the identity
 (`conversation.rs:190`), which is why it appears in every call above.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p crypto-core --test lifetime`
 Expected: FAIL — no method `lifetime` on `Conversation`.
 
-- [ ] **Step 3: Rebuild the whole extension set from both values**
+- [x] **Step 3: Rebuild the whole extension set from both values**
 
 Replace `roster_extension` in `crates/crypto-core/src/conversation.rs`:
 
@@ -385,12 +385,12 @@ In `crates/crypto-core/src/identity.rs`, `capabilities` must advertise both, or 
         ]),
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p crypto-core`
 Expected: PASS — the four new tests, **and the whole existing suite**, `roles.rs` and `conversation.rs` included. A failure there means the extension set was rebuilt wrongly, which is exactly what Task 2 exists to get right.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/crypto-core/src/conversation.rs crates/crypto-core/src/identity.rs crates/crypto-core/tests/lifetime.rs
@@ -412,7 +412,7 @@ git commit -m "feat(crypto): carry the lifetime beside the roster, never instead
 
 `changes_roster` is currently computed as "any `GroupContextExtensions` proposal exists". A lifetime change is such a proposal, so left alone it would demand the admin. Both flags must come from **comparing the proposed extensions with the current ones**.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/crypto-core/tests/roles.rs`, beside the existing rule tests:
 
@@ -467,12 +467,12 @@ fn anyone_changes_the_lifetime_of_a_flat_group() {
 
 Match the construction style of the summaries already in that file — if they are built by a helper, use the helper and give it the new field.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p crypto-core --test roles`
 Expected: FAIL — `CommitSummary` has no field `changes_lifetime`.
 
-- [ ] **Step 3: Add the flag and the rule**
+- [x] **Step 3: Add the flag and the rule**
 
 In `roles.rs`, on `CommitSummary`:
 
@@ -501,7 +501,7 @@ And in the doc table above `authorize`, add the row so the prose keeps matching 
 /// | change the lifetime | admin, moderator |
 ```
 
-- [ ] **Step 4: Compute the two flags by comparison**
+- [x] **Step 4: Compute the two flags by comparison**
 
 In `conversation.rs`, `authorize_commit` replaces the single `changes_roster` line. Proposals carry the extensions they would install; decode them and compare against what the group holds now:
 
@@ -538,7 +538,7 @@ In `conversation.rs`, `authorize_commit` replaces the single `changes_roster` li
 
 Note what the comparison buys beyond the rank: a proposal that **drops** the roster reads as `new_roster = None`, which differs from the sitting roster, so it counts as a roster change and needs the admin. The silent-flattening commit of Task 2 is refused here even if a client is written to send it.
 
-- [ ] **Step 5: Add the commit-path test**
+- [x] **Step 5: Add the commit-path test**
 
 In `crates/crypto-core/tests/lifetime.rs`:
 
@@ -569,12 +569,12 @@ Task 2's lift and call it; if it has no such helper, write it there. Its exact s
 of the method that applies somebody else's commit come from that file — adjust the call, never the
 property being asserted, which is that the refusal happens on application.
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `cargo test -p crypto-core`
 Expected: PASS, whole crate.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/crypto-core/src/roles.rs crates/crypto-core/src/conversation.rs crates/crypto-core/tests/roles.rs crates/crypto-core/tests/lifetime.rs
@@ -592,22 +592,22 @@ git commit -m "feat(crypto): moderation covers the room's memory, not just its m
 **Interfaces:**
 - Produces, on the conversation handle already exposed there: `lifetimeSeconds(): number | undefined` and `setLifetime(seconds: number): Uint8Array` (the commit to publish, matching how the existing `setRoles` returns its commit — read it and mirror it exactly).
 
-- [ ] **Step 1: Add the two bindings**
+- [x] **Step 1: Add the two bindings**
 
 Follow the shape of the existing role bindings in that file: same error mapping through `to_js`, same handling of `Change`, same naming convention (`js_name` in camel case).
 
-- [ ] **Step 2: Rebuild the WebAssembly and its glue**
+- [x] **Step 2: Rebuild the WebAssembly and its glue**
 
 ```bash
 cd apps/web && pnpm run wasm
 ```
 
-- [ ] **Step 3: Verify the committed artefact matches its source**
+- [x] **Step 3: Verify the committed artefact matches its source**
 
 Run: `./scripts/verify-wasm.sh`
 Expected: three `ok` lines. This is what CI's `wasm` job checks, and the reason the binary is committed at all.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/crypto-wasm/src/lib.rs apps/web/src/lib/generated apps/web/public/crypto_wasm_bg.wasm
@@ -625,7 +625,7 @@ git commit -m "feat(crypto-wasm): let the client read and set a conversation's l
 **Interfaces:**
 - Produces: `DELETE /v1/vault/{group_id}`, signed, deleting the calling account's entries for that group and crediting `account_storage`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 /// Dropping a group's vault removes that account's entries and gives the bytes back.
@@ -672,12 +672,12 @@ async fn deleting_a_vault_leaves_the_other_members_alone() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `docker compose up -d && cargo test -p server --test storage`
 Expected: FAIL — 405, the route does not exist.
 
-- [ ] **Step 3: Write the handler**
+- [x] **Step 3: Write the handler**
 
 Beside `store_vault`, and registered as `.delete(drop_vault)` on the existing `/v1/vault/{group_id}` route:
 
@@ -725,12 +725,12 @@ async fn drop_vault(
 
 No membership check, deliberately, and say so in the comment: the caller can only ever delete rows keyed to their own account, so a non-member deleting their own (empty) vault for a group they left is a no-op rather than a leak — and requiring membership would leave somebody who was removed from a group unable to erase their own archive of it.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p server --test storage`
 Expected: PASS, all storage tests including the reconciliation one.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/server/src/routes.rs crates/server/tests/storage.rs
@@ -750,7 +750,7 @@ git commit -m "feat(server): let an account drop its own archive of one conversa
 **Interfaces:**
 - Produces: `{ kind: "expiry"; seconds: number }` in `Content`, `encodeExpiry(seconds: number): Uint8Array`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 test("an expiry notice survives the round trip", () => {
@@ -769,12 +769,12 @@ test("turning it off is a notice too, and is not an absent one", () => {
 
 Use the same `encode`/`decode` entry points the neighbouring tests in that file use, and match their assertion style.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd apps/web && pnpm test`
 Expected: FAIL — the union has no `expiry`.
 
-- [ ] **Step 3: Add the kind**
+- [x] **Step 3: Add the kind**
 
 ```ts
 /**
@@ -798,12 +798,12 @@ Its branch in `encodeBody`, its case in the decoder (four bytes, big-endian, ref
 
 The sentence in the thread names the actor and the value, as membership notices do: *"Alice set messages to disappear after 7 days"*, and for `0`: *"Alice turned off disappearing messages"*. Put it where the membership sentences are built, not in the component.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd apps/web && pnpm test && pnpm run typecheck && pnpm run lint`
 Expected: PASS, all three.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/web/src/lib/content.ts apps/web/src/lib/content.test.ts apps/web/src/lib/session-types.ts apps/web/src/lib/i18n.ts
@@ -825,7 +825,7 @@ git commit -m "feat(content): say in the thread when the room's memory changes"
   - `export function isExpired(message: Message, now: number): boolean`
   - `export function prune(messages: Message[], now: number): Message[]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 import assert from "node:assert/strict";
@@ -879,12 +879,12 @@ test("a message already past its deadline when it arrives is expired on arrival"
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd apps/web && pnpm test`
 Expected: FAIL — cannot find module `./expiry.ts`.
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 ```ts
 /**
@@ -930,16 +930,16 @@ export function prune(messages: Message[], now: number): Message[] {
 }
 ```
 
-- [ ] **Step 4: Remove the flag this replaces**
+- [x] **Step 4: Remove the flag this replaces**
 
 Delete `ephemeralMs` from `ConversationFlags` in `session-types.ts`. It is a local preference promising the same thing and enforcing nothing; leaving it beside a group policy that does would make two features out of one, and the wrong one would be the easier to find. `grep -rn "ephemeralMs" apps/web/src` must come back empty.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cd apps/web && pnpm test && pnpm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add apps/web/src/lib/expiry.ts apps/web/src/lib/expiry.test.ts apps/web/src/lib/session-types.ts
@@ -959,7 +959,7 @@ git commit -m "feat(web): a deadline the sender cannot extend"
 **Interfaces:**
 - Consumes: `expiryOf`, `isExpired`, `prune`, `Conversation.lifetimeSeconds()` from Task 4.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 test("an ephemeral conversation is never archived", async () => {
@@ -983,23 +983,23 @@ test("a conversation with no lifetime is archived as before", async () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd apps/web && pnpm test`
 Expected: FAIL — `store` takes no such argument.
 
-- [ ] **Step 3: Wire the three places**
+- [x] **Step 3: Wire the three places**
 
 1. **On insertion**, every message built from a decoded envelope gets `expiresAt = expiryOf(sentAt, Date.now(), lifetime)`, and one already expired is **not inserted at all**. A device back from ten days offline must not see expired messages appear and then vanish.
 2. **On the poll** that already sweeps conversations every thirty seconds, `prune` each open view and persist the result. Reuse that timer; a second one for expiry would be a second clock to keep in step.
 3. **On the vault**, `Archive.store` takes the conversation's lifetime and returns without asking when it is non-zero.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd apps/web && pnpm test && pnpm run typecheck && pnpm run lint`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/web/src/lib/session.ts apps/web/src/lib/session-vault.ts apps/web/src/lib/session-vault.test.ts apps/web/src/lib/content.ts
@@ -1013,11 +1013,11 @@ git commit -m "feat(web): drop what has expired, and archive nothing that will"
 **Files:**
 - Modify: the conversation information panel (the component holding the per-conversation settings — find it with `grep -rn "archiveToVault" apps/web/src/components`)
 
-- [ ] **Step 1: Add the control**
+- [x] **Step 1: Add the control**
 
 A choice of lifetimes — off, one day, seven days, thirty days — shown to everybody, enabled only for a member who may moderate, and disabled with the reason rather than hidden: somebody who cannot change it should learn that a rank is required, not that the feature does not exist.
 
-- [ ] **Step 2: Write the two sentences that have to be there**
+- [x] **Step 2: Write the two sentences that have to be there**
 
 Above the control, not beneath it:
 
@@ -1027,16 +1027,16 @@ And where the lifetime is on, next to the backup setting:
 
 > This conversation is not backed up. If you lose every device, it does not come back — including what was written today.
 
-- [ ] **Step 3: Turning it on offers the deletion it implies**
+- [x] **Step 3: Turning it on offers the deletion it implies**
 
 Switching a lifetime on calls `DELETE /v1/vault/{group}` from Task 5, and the confirmation says what is about to be destroyed: this account's archive of this conversation, on the server, irreversibly. `archiveToVault`'s own doc comment already states the rule this follows — *"the screen that offers it has to offer the deletion too or it is claiming something it has not done"*.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `cd apps/web && pnpm test && pnpm run typecheck && pnpm run lint`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/web/src/components
@@ -1050,21 +1050,21 @@ git commit -m "feat(ui): offer a lifetime, and say what it does not do first"
 **Files:**
 - Modify: `README.md`, `docs/PROTOCOL.md`, `docs/THREAT-MODEL.md`, `docs/SECURITY-PROPERTIES.md`, `docs/ROADMAP.md`
 
-- [ ] **Step 1: Document the extension where the other one is documented**
+- [x] **Step 1: Document the extension where the other one is documented**
 
 `docs/PROTOCOL.md` describes `0xF100` and its encoding. `0xF101` goes beside it: four bytes big-endian, seconds, `0` off, absent off, required capabilities, and the rank that may change it.
 
-- [ ] **Step 2: State the change of default**
+- [x] **Step 2: State the change of default**
 
 `README.md`'s status table and `docs/ROADMAP.md`: conversations keep seven days by default, and an ephemeral conversation is not archived, so it does not survive the loss of every device. That is a different product from the one the vault row currently describes, and both rows have to agree.
 
-- [ ] **Step 3: State what it does not defend against**
+- [x] **Step 3: State what it does not defend against**
 
 `docs/THREAT-MODEL.md`: deletion is client-side and unenforceable — screenshots, a modified client, a member who keeps what they like. The server keeps ciphertext up to thirty days and never learns the lifetime. A message never delivered inside the lifetime is lost rather than deleted.
 
 `docs/SECURITY-PROPERTIES.md`: what is actually claimed is that an ephemeral message is never deposited in the vault, and that is testable — it is the test of Task 8.
 
-- [ ] **Step 4: Run everything**
+- [x] **Step 4: Run everything**
 
 ```bash
 docker compose up -d
@@ -1076,6 +1076,6 @@ cd apps/web && pnpm test && pnpm run typecheck && pnpm run lint
 
 Expected: green throughout.
 
-- [ ] **Step 5: Open the pull request against `dev`**
+- [x] **Step 5: Open the pull request against `dev`**
 
 Explain the decision rather than the diff: why the lifetime is a group policy and not a preference, why the clamp on `sentAt` exists, why the vault loses, why turning it on is not retroactive for messages and is for the vault, and that the default changes what the product is. Say what was run.

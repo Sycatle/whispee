@@ -572,6 +572,15 @@ member does not declare. The interface asks whether the extension is present at 
 rather than spending a click on a protocol error. New conversations carry it from the first
 commit; existing ones keep everything, as they did before.
 
+The same edge cuts a second way, and it is a **deployment concern rather than a protocol one**:
+KeyPackages published by a client that predates this extension do not declare `0xF101` in their
+leaf capabilities, so adding such a device to a *new* conversation is refused by MLS. The stock is
+consumed one package at a time and nothing flushes it, so an upgraded deployment carries the
+failure until every stale package has been claimed. `identity.rs` states the general rule —
+KeyPackages published before a capability change must be republished — and there is currently no
+mechanism doing it: no stock invalidation route, and no version marker to make one act on.
+Whoever ships this decides between flushing the stock and accepting the window.
+
 **Who may change it: admin or moderator.** Changing how long the room remembers is moderation, the
 same rank that admits and removes members; handing out power is not, and stays the admin's alone.
 A client computes the two facts by *comparing* the extensions a commit installs with the ones in

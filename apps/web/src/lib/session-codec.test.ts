@@ -182,7 +182,7 @@ test("conversation flags survive a round trip through the native codec", () => {
   const original = session({
     conversationFlags: {
       "0a0b": { pinned: true, mutedUntil: 1_700_000_000_000 },
-      "0c0d": { archived: true, ephemeralMs: 86_400_000 },
+      "0c0d": { archived: true, archiveToVault: false },
     },
   });
 

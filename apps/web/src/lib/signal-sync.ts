@@ -324,8 +324,7 @@ function isFlags(value: unknown): value is ConversationFlags {
     optional(flags.archived, "boolean") &&
     optional(flags.mutedUntil, "number") &&
     optional(flags.discloseName, "boolean") &&
-    optional(flags.archiveToVault, "boolean") &&
-    optional(flags.ephemeralMs, "number")
+    optional(flags.archiveToVault, "boolean")
   );
 }
 

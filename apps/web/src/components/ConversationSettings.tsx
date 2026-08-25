@@ -29,11 +29,6 @@
  *    entries stay on the server under a key derived from a phrase that does not rotate. Saying
  *    "stops archiving" is true; letting somebody read it as "erases" is not.
  *
- * # What is not here
- *
- * Ephemeral messages. `ConversationFlags.ephemeralMs` is typed and persisted and nothing enforces
- * it; offering the control before the behaviour would be a switch that describes an effect it does
- * not have, which is exactly the defect `storage.ts` now documents about `contactPolicy`.
  */
 import { useState } from "react";
 

@@ -71,8 +71,11 @@ docker compose up -d
 # 2. Configuration. The committed defaults point at that container.
 cp .env.example .env
 
-# 3. Server — listens on 127.0.0.1:8787. The script loads .env, which the
-#    server does not do itself, and gives the branch its own database and port.
+# 3. Server — listens on 127.0.0.1:8787. The script passes .env through, which
+#    the server does not read itself, and gives the branch its own database and
+#    port. Everything the file defines reaches the server: the two values the
+#    script computes — the database and the address — are the only ones it
+#    overrides.
 ./scripts/dev-server.sh
 
 # 4. Client, in a second terminal. `wasm` builds crypto-core to WebAssembly

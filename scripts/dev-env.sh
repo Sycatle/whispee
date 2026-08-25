@@ -114,3 +114,39 @@ printf "export ALLOWED_ORIGINS='http://127.0.0.1:%s,http://localhost:%s'\n" "$we
 printf "export WEB_PORT='%s'\n" "$web_port"
 printf "export WHISPEE_DEV_DATABASE='%s'\n" "$database"
 printf "export WHISPEE_DEV_BRANCH='%s'\n" "$branch"
+
+# And everything else the file defines, unchanged.
+#
+# # The bug this closes, which cost an afternoon
+#
+# This script sources `.env` and then printed seven names. Everything else it had just read died
+# with the subshell, because the callers do `eval "$(scripts/dev-env.sh)"` — so a variable added
+# to `.env` never reached the server. `README.md` said "the script loads .env, which the server
+# does not do itself", and it loaded seven keys.
+#
+# The failure is silent and splits in two. `MEDIA_URL` unset makes the call route answer 503,
+# while `VITE_MEDIA_URL` — read by Vite from `apps/web/.env`, a different file entirely — still
+# shows the call button. So the client offers a call the server refuses, and neither side says
+# why: it takes reading the network panel to find the 503. `VAPID_SUBJECT` behaves the same way,
+# and `ACCOUNT_STORAGE_BYTES` silently reverts to its default.
+#
+# # Why the names come from the file rather than from the environment
+#
+# `set -a` exported `.env` into this process, but so is `PATH` and everything else a shell
+# carries. Emitting the whole environment would hand the caller a copy of ours. Reading the keys
+# back out of the file is what makes "what the file defines" the exact boundary.
+#
+# The five above are excluded because this script *computes* them: re-emitting `DATABASE_URL` or
+# `SERVER_ADDR` from the file would put every branch back on one database and one port, which is
+# the thing this file exists to prevent.
+derived=" DATABASE_URL SERVER_ADDR WHISPEE_API ALLOWED_ORIGINS WEB_PORT "
+
+sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$env_file" | while read -r name; do
+  case "$derived" in *" $name "*) continue ;; esac
+
+  # Indirect expansion, and `-` so that a key with no value is an empty string rather than an
+  # error under `set -u`. Single quotes inside the value are escaped the only way sh allows:
+  # close the quote, emit an escaped one, open again.
+  value=${!name-}
+  printf "export %s='%s'\n" "$name" "${value//\'/\'\\\'\'}"
+done

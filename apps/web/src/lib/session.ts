@@ -16,6 +16,7 @@ import { type PairingCode, decodePairingCode } from "./pairing";
 import { type AttachmentRef, downloadAndDecrypt, encryptAndUpload } from "./attachments";
 import * as content from "./content";
 import * as envelope from "./envelope";
+import { expiryOf, prune } from "./expiry.ts";
 import { type Cached, decodeHistory } from "./history";
 import { PINNED_LOG_KEY } from "./pinning";
 import * as derive from "./conversation-view.ts";
@@ -1700,6 +1701,49 @@ export class Session {
   }
 
   /**
+   * How long this conversation keeps what is said in it, in seconds; `0` when nothing expires.
+   *
+   * Read from the MLS group context on every call rather than cached on the view: it is
+   * authenticated state, it changes by commit, and a copy kept beside the view would be the copy
+   * that goes stale on the device that was offline when the room's memory changed.
+   *
+   * A group created before the extension existed reports nothing, and nothing means off — the
+   * same answer as `0`, which is what keeps every existing conversation readable.
+   */
+  lifetimeSeconds(view: ConversationView): number {
+    return (this.client.lifetimeSeconds(view.groupId) as number | undefined) ?? 0;
+  }
+
+  /**
+   * Sets how long messages live here, announces it, and drops this account's archive of the
+   * conversation when it is turned on.
+   *
+   * The deletion is the half MLS cannot do: the commit reaches every member's group context, and
+   * nothing in the protocol reaches a copy already deposited on a server. Turning a lifetime on
+   * while leaving that copy in place would be a claim rather than a mechanism — so the vault is
+   * dropped here, in the same call, and it is this account's own archive that goes: the other
+   * members' copies are theirs and are not ours to destroy.
+   *
+   * Not retroactive for messages members already hold. That is stated on `expiry.ts` and it is
+   * the honest half: what is on somebody's screen stays there.
+   */
+  async setLifetime(view: ConversationView, seconds: number): Promise<void> {
+    const commit = this.client.setLifetime(view.groupId, seconds);
+    await this.publishAndApply(view, commit);
+
+    if (seconds > 0) {
+      // Failing here must not undo the commit: the room's memory has already changed for
+      // everybody, and a vault that outlives it is a defect to report rather than a reason to
+      // pretend the lifetime was never set. The caller sees the throw and says so.
+      await this.api.dropVault(view.groupId);
+    }
+
+    await this.sendContent(view, { kind: "expiry", seconds });
+    this.refreshView(view);
+    await this.persist();
+  }
+
+  /**
    * Replaces a group's roles.
    *
    * The roster lives in the MLS group context, so in the authenticated state: it is neither
@@ -2951,7 +2995,18 @@ export class Session {
       return;
     }
 
-    const message: Message = { seq, sender: this.deviceId, content: body, mine: true, sentAt };
+    // Our own message gets the same deadline the recipients will compute for it. `sentAt` is our
+    // own clock here, so the clamp is a no-op — what matters is that the sender's copy goes at the
+    // same time as everybody else's, and not a lifetime after it was read back from disk.
+    const expiresAt = expiryOf(sentAt, Date.now(), this.lifetimeSeconds(view));
+    const message: Message = {
+      seq,
+      sender: this.deviceId,
+      content: body,
+      mine: true,
+      sentAt,
+      ...(expiresAt === undefined ? {} : { expiresAt }),
+    };
     view.messages.push(message);
     touch(view);
     // Same order as the poll, for the same reason: the write goes first, and the upload after.
@@ -2975,10 +3030,37 @@ export class Session {
    * that offers it has to say so too: turning it off stops future deposits and leaves the past
    * where it is, on a server, under a key derived from a phrase that does not rotate.
    */
+  /**
+   * Drops what has passed its deadline, everywhere it is held.
+   *
+   * Every conversation and not only the open one: a thread nobody is looking at is exactly where
+   * an expired message would sit until somebody opened it, and the promise was that it goes.
+   *
+   * The persist is what makes it real — the messages are on disk in `history.ts`, so a deletion
+   * that only touched the view would come back on the next reload.
+   */
+  private dropExpired(): void {
+    const now = Date.now();
+    let dropped = false;
+
+    for (const view of this.conversations.values()) {
+      const kept = prune(view.messages, now);
+      if (kept.length === view.messages.length) continue;
+
+      view.messages = kept;
+      touch(view);
+      dropped = true;
+    }
+
+    if (dropped) void this.persist();
+  }
+
   private async deposit(view: ConversationView, messages: Message[]): Promise<void> {
     if (!archivesToVault(this.flagsIn(view))) return;
 
-    await this.archive.store(this.api, view.groupId, messages);
+    await this.archive.store(this.api, view.groupId, messages, {
+      lifetimeSeconds: this.lifetimeSeconds(view),
+    });
   }
 
   /**
@@ -3128,6 +3210,11 @@ export class Session {
         console.warn("display name announcement deferred", error);
       });
     }
+
+    // What has expired goes on the sweep that already runs every thirty seconds. Reusing that
+    // timer rather than starting one for expiry is deliberate: a second clock is a second thing
+    // to keep in step, and the two would drift on a tab the browser has throttled.
+    this.dropExpired();
 
     for (const view of this.conversations.values()) {
       // A severed ratchet does not heal by being asked again. See `ConversationView.stale`.
@@ -3316,6 +3403,15 @@ export class Session {
     // Without this, the sender appears to keep typing for the whole TTL after pressing Enter.
     if (incoming.sender) view.typing = without(view.typing, incoming.sender);
 
+    // Stamped on arrival, from the lifetime in force now: see `expiry.ts` for why the deadline is
+    // `min(sentAt, first seen here) + lifetime` and not the sender's word for it.
+    const expiresAt = expiryOf(sentAt, Date.now(), this.lifetimeSeconds(view));
+
+    // A message that arrived already past its deadline is not inserted at all. A device back from
+    // ten days offline must not watch expired messages appear and then vanish — that is the whole
+    // history of the conversation replaying in front of somebody before being taken away.
+    if (expiresAt !== undefined && expiresAt <= Date.now()) return;
+
     view.messages.push({
       seq,
       sender: incoming.sender,
@@ -3325,6 +3421,7 @@ export class Session {
       // The thread renders that as a message with no time rather than inventing one: guessing
       // "now" for something received during a catch-up would date a week-old message to today.
       ...(sentAt === undefined ? {} : { sentAt }),
+      ...(expiresAt === undefined ? {} : { expiresAt }),
     });
 
     // An invitation is a message like any other — which is what gives it MLS's authentication,

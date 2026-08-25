@@ -171,14 +171,18 @@ export class Api {
     }
   }
 
-  private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: "GET" | "POST" | "DELETE",
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     const encoded = body === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(body));
     return this.requestRaw(method, path, encoded, "json");
   }
 
   /** Binary variant, for bodies that are not JSON. */
   private async requestRaw<T>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "DELETE",
     path: string,
     encoded: Uint8Array,
     expect: "json" | "bytes",
@@ -200,7 +204,9 @@ export class Api {
         "x-signature": signature,
         "x-nonce": toBase64(nonce),
       },
-      body: method === "GET" ? undefined : buffer(encoded),
+      // A bodiless method carries no body, and the signature covers the empty bytes the
+      // server verifies against. `fetch` refuses a body on GET outright.
+      body: method === "POST" ? buffer(encoded) : undefined,
     });
 
     if (!response.ok) throw new ApiError(response.status, await response.text());
@@ -463,6 +469,17 @@ export class Api {
     return this.request("POST", `/v1/vault/${toHex(groupId)}`, {
       entries: entries.map((entry) => ({ seq: entry.seq, payload: toBase64(entry.payload) })),
     });
+  }
+
+  /**
+   * Drops this account's vault for one group, and gets the bytes back against the quota.
+   *
+   * This account's own entries and nobody else's: two members of one conversation each hold a
+   * separate archive, sealed under their own key, and one member destroying another's copy of a
+   * shared history is not something turning on a lifetime asks for.
+   */
+  dropVault(groupId: Uint8Array): Promise<{ removed: number }> {
+    return this.request("DELETE", `/v1/vault/${toHex(groupId)}`);
   }
 
   /** Collects the account's vault. The server only serves the signing device's own. */

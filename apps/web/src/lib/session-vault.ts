@@ -176,9 +176,24 @@ export class Archive {
    * backup is missing, and it will be retried on the next send. Hence the swallowed error — the
    * one place in this file where failing quietly is the right answer, and `full` above is the one
    * refusal that is not.
+   *
+   * # Why the lifetime is a required argument
+   *
+   * A conversation that forgets its messages after seven days must not be leaving copies on a
+   * server that keeps them for good — the vault would quietly turn the whole feature into a
+   * label. The two are one decision, so the caller cannot deposit without stating it: an optional
+   * argument here is an argument somebody forgets at one of the two call sites, and half a thread
+   * is archived depending on who talks more.
    */
-  async store(api: VaultApi, groupId: Uint8Array, messages: Message[]): Promise<void> {
+  async store(
+    api: VaultApi,
+    groupId: Uint8Array,
+    messages: Message[],
+    conversation: { lifetimeSeconds: number },
+  ): Promise<void> {
     if (!this.key || messages.length === 0) return;
+    // Never asked, rather than asked and refused: the point is that nothing leaves this device.
+    if (conversation.lifetimeSeconds > 0) return;
 
     try {
       await vault.store(api, this.key, groupId, messages);

@@ -44,7 +44,7 @@ test("an account that turned the vault off archives nothing", async () => {
   const api = server();
 
   assert.equal(archive.enabled, false);
-  await archive.store(api, GROUP, [said(1, "hi")]);
+  await archive.store(api, GROUP, [said(1, "hi")], { lifetimeSeconds: 0 });
 
   // Not "tried and failed" — never asked. The setting is honoured before the network, not after.
   assert.equal((api as unknown as { kept: number }).kept, 0);
@@ -120,7 +120,7 @@ test("a failed archive is swallowed, because the message is already delivered", 
 
   // Only the backup is missing, and it is retried on the next send. Throwing here would block a
   // conversation over a copy of it.
-  await archive.store(api, GROUP, [said(1, "hi")]);
+  await archive.store(api, GROUP, [said(1, "hi")], { lifetimeSeconds: 0 });
 });
 
 /**
@@ -144,7 +144,7 @@ function refusing(status: number): VaultApi {
 test("a full vault is remembered, not swallowed", async () => {
   const archive = await Archive.open(() => KEY);
 
-  await archive.store(refusing(507), GROUP, [said(1, "hi")]);
+  await archive.store(refusing(507), GROUP, [said(1, "hi")], { lifetimeSeconds: 0 });
 
   // The user has to be told: retrying never clears a ceiling, and a silent failure leaves them
   // believing their history is being archived while nothing is.
@@ -154,7 +154,7 @@ test("a full vault is remembered, not swallowed", async () => {
 test("a transient failure is not a full vault", async () => {
   const archive = await Archive.open(() => KEY);
 
-  await archive.store(refusing(503), GROUP, [said(1, "hi")]);
+  await archive.store(refusing(503), GROUP, [said(1, "hi")], { lifetimeSeconds: 0 });
 
   assert.equal(archive.full, false);
 });
@@ -162,10 +162,30 @@ test("a transient failure is not a full vault", async () => {
 test("a successful store clears the flag", async () => {
   const archive = await Archive.open(() => KEY);
 
-  await archive.store(refusing(507), GROUP, [said(1, "hi")]);
+  await archive.store(refusing(507), GROUP, [said(1, "hi")], { lifetimeSeconds: 0 });
   assert.equal(archive.full, true);
 
-  await archive.store(server(), GROUP, [said(2, "still here")]);
+  await archive.store(server(), GROUP, [said(2, "still here")], { lifetimeSeconds: 0 });
 
   assert.equal(archive.full, false);
+});
+
+test("an ephemeral conversation is never archived", async () => {
+  const archive = await Archive.open(() => KEY);
+  const api = server();
+
+  await archive.store(api, GROUP, [said(1, "hi")], { lifetimeSeconds: 604800 });
+
+  // Not "tried and refused" — never asked. A room that forgets must not be leaving copies on a
+  // server that does not.
+  assert.equal((api as unknown as { kept: number }).kept, 0);
+});
+
+test("a conversation with no lifetime is archived as before", async () => {
+  const archive = await Archive.open(() => KEY);
+  const api = server();
+
+  await archive.store(api, GROUP, [said(1, "hi")], { lifetimeSeconds: 0 });
+
+  assert.equal((api as unknown as { kept: number }).kept, 1);
 });

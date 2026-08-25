@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ResolvedAccount } from "@/lib/account";
 import { describePresence } from "@/lib/presence";
+import { configuredServer } from "@/lib/server";
 import { useBump, useSession } from "@/state/SessionProvider";
 import { useReport } from "@/state/report";
 import { Avatar } from "@/ui/Avatar";
@@ -46,6 +47,24 @@ export function DeviceSettings({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [rotation, setRotation] = useState(false);
   const [phrase, setPhrase] = useState<string | null>(null);
+  /**
+   * Which server knows these devices.
+   *
+   * Empty on the web, where it is this page's own origin and saying so would be telling the
+   * reader the address in their own URL bar. A packaged application is the case that needs it:
+   * its window carries no address anywhere, and "this device is known to a server" is a sentence
+   * with no meaning until the server is named.
+   *
+   * Read-only, and there is no control beside it. Changing server means changing account — this
+   * device is attested by an account key the other server has never heard of — so an editable
+   * field here would be a field that silently discards an identity. Erasing the device is the
+   * exit, and it is the last thing on this panel already.
+   */
+  const [server, setServer] = useState("");
+
+  useEffect(() => {
+    void configuredServer().then((address) => setServer(address ?? ""));
+  }, []);
 
   const reload = () => {
     session
@@ -183,6 +202,14 @@ export function DeviceSettings({ onClose }: { onClose: () => void }) {
             </li>
           ))}
         </ul>
+      )}
+
+      {server !== "" && (
+        <p className="mt-section text-caption text-(--color-ink-muted)">
+          Known to{" "}
+          <span className="break-all font-(--font-evidence) text-(--color-ink)">{server}</span>.
+          This cannot be changed: your account exists there and nowhere else.
+        </p>
       )}
 
       {/* The list above and the explanation below are two different kinds of thing — a roster

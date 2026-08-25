@@ -39,7 +39,6 @@ Host port 55432 avoids colliding with a system Postgres (5432) or a local Supaba
 | `ALLOWED_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,tauri://localhost,http://tauri.localhost` | CORS allow-list. Derived per branch in development |
 | `THROTTLE_PER_MINUTE` | `60` | Per-address limit on the four routes that cannot be authenticated |
 | `CLAIM_QUOTA_PER_MINUTE` | `5` | Per caller-target pair limit on KeyPackage consumption |
-| `VITE_API_URL` | `http://127.0.0.1:8787` | **Build-time**, web side. See below |
 
 The two Tauri origins are in the default rather than only in the documentation: the operating
 system imposes them — `tauri://localhost` on Linux and macOS, `http://tauri.localhost` on
@@ -85,7 +84,7 @@ cannot undo. The only recovery was to drop the volume, which destroys every othe
 data along with the offending row.
 
 **The ports**, because four values have to agree before a client reaches a server at all:
-`SERVER_ADDR`, the client's `VITE_API_URL`, the CSP computed from it, and the server's
+`SERVER_ADDR`, `WHISPEE_API` (where Vite proxies `/v1`), `WEB_PORT`, and the server's
 `ALLOWED_ORIGINS`. Move one and the browser refuses the request before sending it — "Failed to
 fetch", no server log, no cause named. `dev-env.sh` emits all four together, which is why the
 client has a launcher of its own rather than a documented `pnpm run dev`.
@@ -94,11 +93,17 @@ Run `scripts/dev-env.sh` by hand to see what a branch resolves to; it prints she
 lines and changes nothing else. `cargo run -p server` still works in a shell that has evaluated
 them.
 
-**`cargo tauri dev` does not follow.** `apps/desktop/tauri.conf.json` pins `devUrl` to port 5173
-and repeats the CSP by hand for `127.0.0.1:8787`; that duplication is deliberate and guarded by
-`csp.test.ts` (see the header of `apps/web/src/lib/csp.ts`). The desktop shell therefore only
-runs against index 0, unless you edit that configuration for the session. Widening a security
-policy for a development convenience is not a trade worth making.
+**`cargo tauri dev` follows only halfway.** `apps/desktop/tauri.conf.json` pins `devUrl` to port
+5173, so the shell loads the client of index 0 whatever branch is checked out. What it no longer
+pins is the *server*: the address is typed on first launch and validated in
+`apps/desktop/src/server.rs`, and the shell's `connect-src` allows any loopback port for exactly
+this case — `dev-env.sh` hands each branch its own, and a policy naming 8787 would have worked on
+`main` and failed silently everywhere else.
+
+That policy is still written twice — computed for the web in `apps/web/src/lib/csp.ts`, typed by
+hand into `tauri.conf.json` — and `csp.test.ts` still fails on any divergence neither copy
+declares. Its `DESKTOP_ONLY` list is where the shell's extra transports are argued, `https:` and
+`wss:` included.
 
 Migrations in `crates/server/migrations/` are applied by the process at startup, along with
 creating the transparency log's signing key on first run and backfilling accounts that predate
@@ -168,16 +173,24 @@ APK contains the module as a versioned artefact under `apps/web/`, so changing
 The binary is about 1.5 MB raw, 512 KB gzipped. Serve it compressed and with a long cache: it
 is a direct user cost on every first load.
 
-### `VITE_API_URL` drives two things
+### The bundle carries no deployment's configuration
 
-It sets the API origin **and** the Content-Security-Policy, which is computed at build time by
-`csp()` in `apps/web/vite.config.ts` rather than written into `index.html`. A hard-coded policy
-and a configurable origin diverge on the first deployment, and the symptom is a "Failed to
-fetch" the browser emits before sending anything — the server sees nothing and the message
-does not name the cause.
+There is no `VITE_API_URL` any more. The web client asks its own origin for `/v1` — `deploy/`
+puts one reverse proxy in front of both, and the development server proxies — so the API needs
+no address, and `connect-src 'self'` covers the WebSocket too under CSP level 3.
 
-`connect-src` carries **both** origins, `http(s)://` and `ws(s)://`: the second is not derived
-from the first, and keeping only one cuts half the client without the other half reporting it.
+That is what lets **one** build serve every deployment, and therefore what lets one published
+manifest of hashes describe every deployment. While the origin was substituted in at build time,
+three files out of two hundred and twenty-six differed per instance, and the manifest could only
+ever have described the official one. See `apps/web/src/lib/api.ts` and `scripts/release-web.sh`.
+
+The one variable that still reaches the bytes is `VITE_MEDIA_URL`, which widens `connect-src` for
+a media server. A deployment configuring calls therefore stops matching the published manifest —
+verifiable or calls, not both, until the media server sits behind the same origin. `release-web.sh`
+builds without it on purpose.
+
+The policy is still computed rather than written into `index.html`, by `csp()` in
+`apps/web/src/lib/csp.ts` via the plugin in `vite.config.ts`.
 
 Two settings in `vite.config.ts` must not be undone. `build.modulePreload.polyfill` is `false`
 because Vite otherwise injects a small inline script — reintroducing exactly the inline script
@@ -323,8 +336,10 @@ cargo tauri ios init                                  # regenerates gen/apple, m
 cargo tauri ios build --debug --target aarch64-sim
 ```
 
-`VITE_API_URL` must be set for both: it is frozen into the bundle **and** into the CSP.
-Missing, it produces a client pointing at the phone's own loopback — that is, at nothing.
+Neither needs an API address at build time any more: the packaged application asks for one on
+first launch and keeps it in `server.txt` (`apps/desktop/src/server.rs`). Before that, both
+workflows froze `http://127.0.0.1:8787` into the bundle, which produced an application pointing at
+the phone's own loopback — that is, at nothing.
 
 The native projects under `apps/desktop/gen/` are **regenerated on every build rather than
 versioned**: a generated project that drifts from its source is a source of silent errors.

@@ -10,6 +10,7 @@ use openmls_traits::OpenMlsProvider;
 
 use crate::error::{CryptoError, Result, mls};
 use crate::identity::{Identity, fingerprint, parse_key_package};
+use crate::lifetime::{LIFETIME_EXTENSION, Lifetime};
 use crate::roles::{self, ROSTER_EXTENSION, Roster};
 
 /// What adding a member produces. The parts travel by different paths: the commit goes to the
@@ -38,28 +39,51 @@ pub struct Conversation {
     group: MlsGroup,
 }
 
-/// Wraps the roster into the group context extensions, with the matching capability.
+/// The group context extensions, built from **every** policy the group carries.
 ///
-/// # Why `RequiredCapabilities` accompanies the roster
+/// # Why this takes both, always
+///
+/// `update_group_context_extensions` replaces the whole set. A setter that builds only its own
+/// extension therefore deletes the other one, and the deletion is silent: the commit is well
+/// formed, the other members apply it, and an administered group becomes flat — everybody an
+/// admin — because somebody changed how long messages live. Both setters go through here, and
+/// here reads the current state of both.
+///
+/// # Why `RequiredCapabilities` accompanies them
 ///
 /// MLS requires every group context extension to appear in the required capabilities. That is
-/// a useful constraint rather than a formality: it stops a client that **cannot read the
-/// roster** from joining an administered group. Without it, such a client would join, apply an
-/// empty policy, accept commits the others refuse — and fork the group with nothing to signal
-/// it.
-///
-/// The error is propagated rather than assumed impossible: a badly chosen constant is then
-/// rejected at group creation, and not months later on a roster change.
-fn roster_extension(roster: &Roster) -> Result<Extensions<GroupContext>> {
-    Extensions::from_vec(vec![
-        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
-            &[ExtensionType::Unknown(ROSTER_EXTENSION)],
-            &[],
-            &[],
-        )),
-        Extension::Unknown(ROSTER_EXTENSION, UnknownExtension(roster.encode()?)),
-    ])
-    .map_err(mls)
+/// a useful constraint rather than a formality: it stops a client that **cannot read** one of
+/// them from joining, applying a policy it never saw, and accepting commits the others refuse —
+/// forking the group with nothing to signal it.
+fn context_extensions(
+    roster: Option<&Roster>,
+    lifetime: Option<Lifetime>,
+) -> Result<Extensions<GroupContext>> {
+    let mut types = Vec::new();
+    let mut extensions = Vec::new();
+
+    if let Some(roster) = roster {
+        types.push(ExtensionType::Unknown(ROSTER_EXTENSION));
+        extensions.push(Extension::Unknown(
+            ROSTER_EXTENSION,
+            UnknownExtension(roster.encode()?),
+        ));
+    }
+
+    if let Some(lifetime) = lifetime {
+        types.push(ExtensionType::Unknown(LIFETIME_EXTENSION));
+        extensions.push(Extension::Unknown(
+            LIFETIME_EXTENSION,
+            UnknownExtension(lifetime.encode().to_vec()),
+        ));
+    }
+
+    extensions.insert(
+        0,
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&types, &[], &[])),
+    );
+
+    Extensions::from_vec(extensions).map_err(mls)
 }
 
 /// Handle carried by an MLS credential. A non-basic credential has no usable handle and can
@@ -98,9 +122,13 @@ impl Conversation {
             .ciphersuite(crate::identity::CIPHERSUITE)
             .capabilities(crate::identity::capabilities());
 
-        if let Some(roster) = &roster {
-            builder = builder.with_group_context_extensions(roster_extension(roster)?);
-        }
+        // Every conversation starts at seven days, administered or flat. A 1-to-1 has no roster
+        // and still has a lifetime: the two policies are independent, which is why the builder is
+        // now called unconditionally.
+        builder = builder.with_group_context_extensions(context_extensions(
+            roster.as_ref(),
+            Some(Lifetime::seconds(crate::lifetime::DEFAULT_SECONDS)),
+        )?);
 
         let group = MlsGroup::new(
             &identity.provider,
@@ -124,6 +152,40 @@ impl Conversation {
         }
     }
 
+    /// The conversation's lifetime, or `None` for a group predating the extension.
+    ///
+    /// Read from the group context, hence from authenticated state: neither the server nor a
+    /// single member can forge it.
+    pub fn lifetime(&self) -> Result<Option<Lifetime>> {
+        match self.group.extensions().unknown(LIFETIME_EXTENSION) {
+            Some(raw) => Lifetime::decode(&raw.0).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Sets how long messages live here. Subject to the policy: a member without a role sees
+    /// their commit refused by the others.
+    ///
+    /// Not retroactive for what members already hold — MLS has no way to reach into their
+    /// storage, and a policy that pretended otherwise would be a claim rather than a mechanism.
+    /// What it does reach is the vault, and that is arranged on the client side.
+    ///
+    /// Same discipline as the rest: publish the commit before [`Conversation::apply_pending`].
+    pub fn set_lifetime(&mut self, identity: &Identity, lifetime: Lifetime) -> Result<Change> {
+        let roster = self.roster()?;
+
+        let (commit, _welcome, _group_info) = self
+            .group
+            .update_group_context_extensions(
+                &identity.provider,
+                context_extensions(roster.as_ref(), Some(lifetime))?,
+                &identity.signer,
+            )
+            .map_err(mls)?;
+
+        Ok(Change { commit: commit.tls_serialize_detached().map_err(mls)? })
+    }
+
     /// Replaces the roster: admin and moderators. Subject to the policy like everything else —
     /// the other members will refuse the commit if it does not come from the sitting admin.
     ///
@@ -143,7 +205,7 @@ impl Conversation {
             .group
             .update_group_context_extensions(
                 &identity.provider,
-                roster_extension(&roster)?,
+                context_extensions(Some(&roster), self.lifetime()?)?,
                 &identity.signer,
             )
             .map_err(mls)?;

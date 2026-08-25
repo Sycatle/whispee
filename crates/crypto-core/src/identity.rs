@@ -21,7 +21,7 @@ use crate::provider::Provider;
 /// worth revisiting if the web becomes the primary platform.
 /// Capabilities declared by every leaf in the tree.
 ///
-/// They must cover `ROSTER_EXTENSION`, or MLS rejects any leaf in an administered group. Two
+/// They must cover every group context extension in use, or MLS rejects the leaf. Two
 /// places consume them and must agree: KeyPackages, for members we add, and the creation
 /// config, for the creator — who has no KeyPackage. Hence this function rather than two
 /// literals.
@@ -31,7 +31,10 @@ pub fn capabilities() -> Capabilities {
     Capabilities::new(
         None,
         None,
-        Some(&[ExtensionType::Unknown(crate::roles::ROSTER_EXTENSION)]),
+        Some(&[
+            ExtensionType::Unknown(crate::roles::ROSTER_EXTENSION),
+            ExtensionType::Unknown(crate::lifetime::LIFETIME_EXTENSION),
+        ]),
         None,
         None,
     )

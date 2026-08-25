@@ -1,24 +1,9 @@
 //! Full life cycle of a 1-to-1 conversation: publication, invitation, exchange, persistence.
 
+mod common;
+
+use common::two_member_conversation;
 use crypto_core::{Conversation, Identity, Incoming, fingerprint};
-
-/// Stands up a two-member conversation the way the real flow would: Bob publishes a KeyPackage,
-/// Alice creates the group and invites him, Bob joins through the Welcome.
-fn two_member_conversation() -> (Identity, Identity, Conversation, Conversation) {
-    let alice = Identity::create("alice@device-1").unwrap();
-    let bob = Identity::create("bob@device-1").unwrap();
-
-    let bob_key_package = bob.publish_key_package().unwrap();
-
-    let mut alice_group = Conversation::create(&alice).unwrap();
-    let invitation = alice_group.invite(&alice, &bob_key_package).unwrap();
-    let tree = alice_group.apply_pending(&alice).unwrap();
-
-    let bob_group =
-        Conversation::join(&bob, &invitation.welcome, &tree).unwrap();
-
-    (alice, bob, alice_group, bob_group)
-}
 
 #[test]
 fn full_1_to_1_cycle() {

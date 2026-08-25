@@ -12,6 +12,7 @@ import { useTheme } from "@/lib/theme";
 import { useOcclusion } from "@/lib/viewport";
 import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
+import { Dialog } from "@/ui/Dialog";
 import { Panel } from "@/ui/Panel";
 import { cn } from "@/ui/cn";
 import type { SettingsSection } from "@/routes/route";
@@ -207,6 +208,44 @@ function Navigation({ section }: { section: SettingsSection | null }) {
   );
 }
 
+/**
+ * Settings, over whatever was on screen.
+ *
+ * # Why a modal and not a route that replaces the centre
+ *
+ * Because settings are not a place in the application, they are an interruption of it. Rendering
+ * them into the centre column made the whole window claim you had gone somewhere — the
+ * conversation you were reading disappeared to show you a theme picker, and coming back meant
+ * navigating rather than closing.
+ *
+ * # The URL is kept, and that is the part worth defending
+ *
+ * `#/settings/notifications` still works, still deep-links, and the back gesture still steps out
+ * of a section into the list before leaving. A modal driven by local state would have been
+ * simpler and would have thrown all of that away: the route is what makes a setting something you
+ * can send somebody, and what makes `RouteAnnouncer` able to say where the reader has arrived.
+ *
+ * So `open` is derived from the route rather than held here, and closing navigates rather than
+ * flipping a boolean. There is exactly one source of truth for whether settings are showing.
+ */
+export function SettingsDialog({ section }: { section: SettingsSection | null }) {
+  return (
+    <Dialog
+      open
+      // Escape, the scrim, and the cross inside all end up here. `history.back()` rather than a
+      // destination, the rule `routes/Router.tsx` states: closing undoes the navigation that
+      // opened this, so the reader lands where they were instead of somewhere plausible.
+      onOpenChange={(next) => {
+        if (!next) history.back();
+      }}
+      size="panel"
+      title={section === null ? "Settings" : `Settings, ${TITLES[section]}`}
+    >
+      <SettingsScreen section={section} />
+    </Dialog>
+  );
+}
+
 export function SettingsScreen({ section }: { section: SettingsSection | null }) {
   const duo = useDuo();
   const occlusion = useOcclusion();
@@ -216,7 +255,7 @@ export function SettingsScreen({ section }: { section: SettingsSection | null })
   const showNavigation = duo || section === null;
 
   return (
-    <section className="flex min-h-0 flex-1 bg-(--color-surface)">
+    <section className="flex min-h-0 w-full flex-1 bg-(--color-surface)">
       {showNavigation && (
         // No `border-r`. The shell no longer divides anything with a hairline — panes are
         // separated by the gutter of ground between them — and a rule drawn here would be the

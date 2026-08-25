@@ -46,6 +46,20 @@ import { useOverlayContainer } from "./Overlays.tsx";
  * `variant="destructive"` action by its caller, because only the caller knows which of its
  * actions is the dangerous one.
  *
+ * # `size="panel"` is for a screen, not a question
+ *
+ * The default is a prompt: narrow, padded, one thing to answer. Settings are neither — ten
+ * sections in three groups, a list beside the section it opens — and cramming that into `max-w-md`
+ * would produce a column of truncated labels.
+ *
+ * It is a size on this component rather than a second modal elsewhere, because the four absences
+ * above are the reason this file exists. A settings modal built beside it would omit the same
+ * four, invisibly, and nobody would notice until a keyboard user tabbed out of it into a
+ * conversation they could not see.
+ *
+ * What `panel` changes is layout only: wider, taller, and no padding of its own — the content owns
+ * its own scrolling regions, which a prompt never needs.
+ *
  * What this does not solve: nothing here debounces. A dialog opened by a key that repeats, or by
  * two components at once, is a call-site problem — `open` is controlled, and whoever owns it
  * owns that.
@@ -59,6 +73,7 @@ export function Dialog({
   actions,
   children,
   tone = "default",
+  size = "prompt",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -72,6 +87,8 @@ export function Dialog({
   actions?: ReactNode;
   children?: ReactNode;
   tone?: "default" | "danger";
+  /** `prompt` asks one question; `panel` holds a screen. See the note above. */
+  size?: "prompt" | "panel";
 }): ReactElement {
   const container = useOverlayContainer();
 
@@ -100,18 +117,25 @@ export function Dialog({
             "fixed left-1/2 top-1/2 z-(--z-index-overlay) -translate-x-1/2 -translate-y-1/2",
             // Never wider than the window minus a margin, never taller than it: a dialog that
             // overflows the viewport puts its actions off-screen, where they cannot be reached.
-            "w-[calc(100%-2rem)] max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto",
+            "w-[calc(100%-2rem)] max-h-[calc(100dvh-2rem)]",
+            size === "panel"
+              // Tall as well as wide, and a fixed height rather than a maximum: the content is two
+              // scrolling columns, and a box that shrinks to its shortest column would make the
+              // list jump every time a section with less in it is opened.
+              ? "max-w-3xl h-[calc(100dvh-2rem)] sm:h-[44rem] overflow-hidden flex flex-col"
+              : "max-w-md overflow-y-auto",
             // The portal is outside the layout, so the shell's insets do not reach it.
             "safe-sides",
-            "rounded-control border bg-(--color-surface-raised) p-pane shadow-overlay",
+            "rounded-control border bg-(--color-surface-raised) shadow-overlay",
+            size === "panel" ? null : "p-pane",
             tone === "danger" ? "border-(--color-danger)" : "border-(--color-border-strong)",
           )}
         >
-          <div className="flex items-start gap-gutter">
+          <div className={cn("flex items-start gap-gutter", size === "panel" ? "contents" : null)}>
             <div className="min-w-0 flex-1">
               <RadixDialog.Title
                 className={cn(
-                  hideTitle
+                  hideTitle || size === "panel"
                     ? "sr-only"
                     : cn(
                         "text-title font-medium",
@@ -125,8 +149,8 @@ export function Dialog({
               {description === undefined ? null : (
                 <RadixDialog.Description
                   className={cn(
-                    "text-body text-(--color-ink-muted)",
-                    hideTitle ? null : "mt-snug",
+                    size === "panel" ? "sr-only" : "text-body text-(--color-ink-muted)",
+                    hideTitle || size === "panel" ? null : "mt-snug",
                   )}
                 >
                   {description}
@@ -135,13 +159,31 @@ export function Dialog({
             </div>
 
             {/* Escape and a click outside already close it; this is for the pointer user who
-                looks for a cross, and for the touch user who has neither. */}
-            <RadixDialog.Close asChild>
-              <IconButton label="Close" icon={<Icon name="close" />} className="-mr-snug -mt-snug" />
-            </RadixDialog.Close>
+                looks for a cross, and for the touch user who has neither.
+
+                Not in a panel: the content carries its own close control there, and a second one
+                hidden off-screen would still be in the tab order — a button a keyboard user
+                reaches and cannot see, which is the mirror image of the hover-only control this
+                project refuses everywhere. */}
+            {size === "panel" ? null : (
+              <RadixDialog.Close asChild>
+                <IconButton label="Close" icon={<Icon name="close" />} className="-mr-snug -mt-snug" />
+              </RadixDialog.Close>
+            )}
           </div>
 
-          {children === undefined ? null : <div className="mt-pane text-body">{children}</div>}
+          {children === undefined ? null : (
+            <div
+              className={cn(
+                "text-body",
+                // In a panel the content is the dialog: it fills what is left and does its own
+                // scrolling. A top margin here would push the last row under the bottom edge.
+                size === "panel" ? "flex min-h-0 flex-1" : "mt-pane",
+              )}
+            >
+              {children}
+            </div>
+          )}
 
           {actions === undefined ? null : (
             <div className="mt-section flex flex-wrap justify-end gap-snug">{actions}</div>

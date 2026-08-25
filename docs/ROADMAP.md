@@ -93,9 +93,17 @@ follow carrying a bearer token. No request is made unless a deployment sets the 
 
 **There is a service worker**, and `notifications.ts` used to argue against one. The objection was
 that a worker would cache the application shell served by the server the desktop build exists to
-stop trusting. This one caches nothing — no `fetch` handler, no `Cache`, no precache manifest —
-and `push.test.ts` asserts that rather than trusting the comment. It exists because a push message
-wakes a worker and never a document.
+stop trusting. It exists because a push message wakes a worker and never a document — and it
+caches now as well.
+
+What makes that acceptable is written in its header and asserted in `push.test.ts`, which runs the
+file in a sandbox and checks what it decides: `index.html` is fetched from the network every time
+and read from the cache only when there is none, so a corrected deployment takes effect on the next
+load; what is answered from the cache first is either addressed by its content (`/assets/`, which
+Vite fingerprints) or is not code (`/emoji/*.json`, `/fonts/`). `crypto_wasm_bg.wasm` and
+`pdfjs/wasm/` are excluded for being both executable and stably named. The residual cost is stated
+rather than buried: offline, the application starts from the last `index.html` this browser
+received.
 
 ### What is still missing
 

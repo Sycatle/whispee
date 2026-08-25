@@ -317,12 +317,16 @@ export function createNotifier({
         //
         // **This used to say there was no service worker here, and that a worker would be a cache
         // of the application shell served by the same server the desktop build exists to stop
-        // trusting.** There is one now — `public/sw.js` — and the sentence needed amending rather
-        // than deleting, because the objection it made is still right about the thing it names.
-        // That worker caches nothing: no `fetch` handler, no `Cache`, no precache manifest, and
-        // `push.test.ts` asserts the absence rather than trusting the comment. It exists because
-        // the Push API has no other delivery point — a push message wakes the worker, never a
-        // document — and it cannot serve a stale application because it cannot serve one at all.
+        // trusting.** There is one now — `public/sw.js` — and it does cache, which is the second
+        // amendment this comment has taken.
+        //
+        // The objection was right about `index.html`, and that is what the worker answers: the
+        // entry point is fetched from the network every time and read from the cache only when
+        // there is none, so a corrected deployment takes effect on the next load. What it answers
+        // from the cache first is addressed by its content, or is not code at all. `push.test.ts`
+        // runs the worker in a sandbox and asserts those decisions rather than trusting this
+        // paragraph; the worker's own header carries the argument in full, the residual cost
+        // included.
         //
         // What that does **not** fix is the path this `catch` is on: the worker only runs for a
         // push, so a tab open on Android Chrome still has no notification to show. The feature is

@@ -538,6 +538,16 @@ answers differently to a second request defeats this and nothing here detects it
 the cost of an attack from "serve anything" to "serve one thing consistently and hope nobody
 compares" — real, and not the same as impossible.
 
+**A service worker now sits between the page and the network.** `public/sw.js` answers
+`/assets/*`, `/emoji/*.json` and `/fonts/*` from a cache, and it is itself covered by the manifest
+like every other file in `dist`. Two consequences worth naming: the extension's re-request may be
+answered by that cache rather than by the server, which is a check of the bytes that ran and not of
+the bytes the server would serve now; and offline, the application starts from the last
+`index.html` this browser received. Neither is a new way in — the entry point is revalidated
+against the server on every load, and the cached assets are named by their own content — but both
+are places where "what this browser is running" and "what that server is serving" can differ for
+as long as there is no network.
+
 **Verifiable or calls, not both.** `VITE_MEDIA_URL` still enters the Content-Security-Policy, so a
 deployment configuring calls produces a bundle that no longer matches the published one. Until the
 media server sits behind the same origin, an operator chooses between the two.

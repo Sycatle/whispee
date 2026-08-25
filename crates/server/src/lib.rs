@@ -580,7 +580,12 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
 
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST])
+        // Every method a route answers on must be listed, for the same reason the headers below
+        // are: the browser blocks an unlisted one at the preflight, and the server never sees it.
+        // `DELETE` is the vault drop, which is how turning on a lifetime erases this account's
+        // archive — a route the integration tests reach without a preflight, and would therefore
+        // have called working while every browser refused it.
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         // Every header the client sends must be listed here, otherwise the browser blocks the
         // request **before** it leaves: the server sees nothing, and the client only gets a
         // "Failed to fetch" that does not name the cause. Integration tests do not go through

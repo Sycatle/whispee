@@ -341,3 +341,34 @@ async fn deleting_a_vault_leaves_the_other_members_alone() {
         "one member erased another's archive"
     );
 }
+
+/// The browser is allowed to send the vault delete at all.
+///
+/// The rest of this file signs its requests with `reqwest`, which never issues a preflight — so
+/// every test here would pass on a server whose CORS layer refuses the method, and every real
+/// browser would fail before the request left. `cors_layer` says as much about its header list;
+/// the same trap applies to the method list, and this is the test that springs it.
+#[tokio::test]
+async fn the_browser_may_preflight_a_vault_delete() {
+    let server = start().await;
+
+    let response = reqwest::Client::new()
+        .request(reqwest::Method::OPTIONS, format!("{}/v1/vault/00", server.base_url))
+        .header("origin", "http://localhost:5173")
+        .header("access-control-request-method", "DELETE")
+        .header("access-control-request-headers", "x-device-id")
+        .send()
+        .await
+        .unwrap();
+
+    let allowed = response
+        .headers()
+        .get("access-control-allow-methods")
+        .map(|value| value.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+
+    assert!(
+        allowed.contains("DELETE"),
+        "the preflight refuses the vault delete: allow-methods is {allowed:?}"
+    );
+}

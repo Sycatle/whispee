@@ -1925,9 +1925,17 @@ async fn store_vault(
 /// for what drifts when a deletion path forgets.
 async fn drop_vault(
     State(pool): State<PgPool>,
+    State(writes): State<Arc<Writes>>,
     Path(group_id): Path<String>,
     signed: Signed,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Throttled like the deposit it undoes, and for a reason of its own: each call is a
+    // `DELETE … RETURNING` and a counter update inside one transaction, which is work a signed
+    // device could otherwise ask for without end.
+    if !writes.allows(Written::Vault, &signed.device_id) {
+        return Err(ApiError::TooManyRequests);
+    }
+
     let group_id = decode_group_id(&group_id)?;
     let account = caller_account(&pool, &signed.device_id).await?;
 

@@ -36,10 +36,12 @@ pub mod api;
 pub mod enrolment;
 pub mod error;
 pub mod gateway;
+pub mod store;
 pub mod transport;
 
 pub use api::{Api, ClaimedKeyPackage, Envelope, EnvelopePage};
 pub use enrolment::Enrolled;
 pub use error::{ClientError, Result};
 pub use gateway::{Cursor, Event, Gateway, Poll};
+pub use store::StateStore;
 pub use transport::{Transport, unix_millis};

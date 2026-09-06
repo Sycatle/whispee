@@ -21,7 +21,8 @@ use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 
 use crate::api::{Api, KEY_PACKAGE_TARGET};
-use crate::error::Result;
+use crate::error::{ClientError, Result};
+use crate::store::{DeviceState, StateStore};
 use crate::transport::Transport;
 
 /// A device that exists on a server and can speak for its account.
@@ -77,5 +78,77 @@ impl Enrolled {
         api.publish_key_packages(&packages).await?;
 
         Ok(Self { api, account, account_id, identity, device_id })
+    }
+}
+
+impl Enrolled {
+    /// Writes everything needed to come back as this device.
+    ///
+    /// Call it after anything that changes MLS state — joining a conversation, processing a
+    /// commit — not only at enrolment. The blob is monolithic, so this rewrites all groups at
+    /// once; see the note on [`crate::store`].
+    pub fn persist(&self, store: &dyn StateStore) -> Result<()> {
+        let state = DeviceState {
+            account_seed: self.account.export_seed(),
+            device_id: self.device_id.clone(),
+            auth_key: self.api.transport().signing_key().to_bytes(),
+            mls_state: self.identity.export_state()?,
+        };
+        store.save_identity(&state.encode())
+    }
+
+    /// Comes back as a device that was persisted, or `None` if nothing was.
+    ///
+    /// Restoring rather than re-enrolling matters more than it looks: a new enrolment produces a
+    /// **different account**, which is a stranger to every conversation the old one was in. A
+    /// client that silently falls back to creating one looks like it recovered and has in fact
+    /// abandoned all its groups.
+    pub fn restore(base_url: &str, store: &dyn StateStore) -> Result<Option<Self>> {
+        let Some(blob) = store.load_identity()? else { return Ok(None) };
+        let state = DeviceState::decode(&blob)?;
+
+        let account = Account::from_seed(state.account_seed);
+        let account_id = account.id();
+        let identity = Identity::restore(&state.mls_state)?;
+
+        if !state.device_id.starts_with(&account_id) {
+            return Err(ClientError::Storage(format!(
+                "saved device {} does not belong to account {account_id}",
+                state.device_id
+            )));
+        }
+
+        let transport = Transport::new(
+            base_url,
+            state.device_id.clone(),
+            SigningKey::from_bytes(&state.auth_key),
+        );
+
+        Ok(Some(Self {
+            api: Api::new(transport),
+            account,
+            account_id,
+            identity,
+            device_id: state.device_id,
+        }))
+    }
+
+    /// Restores the persisted device, or enrols a new one and persists it.
+    ///
+    /// The shape almost every long-running client wants, written once here so that the fallback
+    /// is deliberate rather than the accidental result of an unhandled `None`.
+    pub async fn load_or_create(
+        base_url: &str,
+        store: &dyn StateStore,
+        handle: &str,
+        device_name: &str,
+    ) -> Result<Self> {
+        if let Some(restored) = Self::restore(base_url, store)? {
+            return Ok(restored);
+        }
+
+        let enrolled = Self::create(base_url, handle, device_name).await?;
+        enrolled.persist(store)?;
+        Ok(enrolled)
     }
 }

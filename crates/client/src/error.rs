@@ -56,6 +56,10 @@ pub enum ClientError {
     #[error("crypto: {0}")]
     Crypto(#[from] crypto_core::CryptoError),
 
+    /// State could not be read from, or written to, where the host keeps it.
+    #[error("state store: {0}")]
+    Storage(String),
+
     /// A canonical message could not be built.
     #[error("attest: a field was too long to encode")]
     Attest,

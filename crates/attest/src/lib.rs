@@ -338,6 +338,53 @@ pub fn gateway_message(device_id: &str, nonce: &[u8]) -> Result<Vec<u8>, AttestE
     encode(DOMAIN_GATEWAY, &[device_id.as_bytes(), nonce])
 }
 
+/// The payload an HTTP request signature covers.
+///
+/// `method ‖ \n ‖ path ‖ \n ‖ timestamp ‖ \n ‖ nonce ‖ \n ‖ SHA-256(body)`.
+///
+/// # Why the digest and not the body
+///
+/// So that signing an upload does not mean holding it in memory twice.
+///
+/// # Why the nonce is inside
+///
+/// It is what makes the message unique when everything else is identical: two similar requests
+/// in the same second would otherwise produce the same signature, Ed25519 being deterministic.
+/// Being **inside** the signed message, a third party cannot replay a captured request by
+/// merely changing the header's nonce.
+///
+/// # Why it lives here and not in the server
+///
+/// It used to live in `server::auth`, which made every client depend on the server crate to
+/// speak to the server — including the SDK, which must not pull in Axum, sqlx and a Postgres
+/// driver to sign a GET. The format is unchanged: this is the same bytes, in the crate that
+/// already owns every other canonical message.
+///
+/// Note that it does **not** go through the domain-separated `encode` the other messages use.
+/// Changing that now would invalidate every signature in flight, so the shape is kept as it
+/// was; the separation from other domains comes from the leading method and path, which no
+/// other message in this crate begins with.
+#[must_use]
+pub fn http_signing_payload(
+    method: &str,
+    path: &str,
+    timestamp: u64,
+    nonce: &[u8],
+    body: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(method.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(path.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(timestamp.to_string().as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(nonce);
+    payload.push(b'\n');
+    payload.extend_from_slice(&Sha256::digest(body));
+    payload
+}
+
 /// Length of an account id, in hexadecimal characters. 128 bits.
 pub const ID_HEX_LEN: usize = 32;
 

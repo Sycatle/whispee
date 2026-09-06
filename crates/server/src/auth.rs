@@ -45,7 +45,6 @@ use axum::extract::{FromRequest, Request};
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use ed25519_dalek::{Signature, VerifyingKey};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 use crate::error::{ApiError, ApiResult};
@@ -81,6 +80,10 @@ pub struct Signed {
 /// requests in the same second would otherwise produce the same signature, Ed25519 being
 /// deterministic. It is **inside the signed message**, so a third party cannot replay a captured
 /// request by merely changing the header's nonce.
+///
+/// The format itself now lives in `attest`, with every other canonical message: a client has to
+/// produce these bytes to talk to us, and making it link the server crate to do so was the wrong
+/// shape. This stays as the name the server and its tests already use.
 pub fn signing_payload(
     method: &str,
     path: &str,
@@ -88,17 +91,7 @@ pub fn signing_payload(
     nonce: &[u8],
     body: &[u8],
 ) -> Vec<u8> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(method.as_bytes());
-    payload.push(b'\n');
-    payload.extend_from_slice(path.as_bytes());
-    payload.push(b'\n');
-    payload.extend_from_slice(timestamp.to_string().as_bytes());
-    payload.push(b'\n');
-    payload.extend_from_slice(nonce);
-    payload.push(b'\n');
-    payload.extend_from_slice(&Sha256::digest(body));
-    payload
+    attest::http_signing_payload(method, path, timestamp, nonce, body)
 }
 
 impl<S> FromRequest<S> for Signed

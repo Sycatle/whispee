@@ -1,0 +1,23 @@
+# The wire formats a Whispee client speaks, above MLS and below the UI.
+#
+# Apache-2.0 rather than the workspace's AGPL: this crate is part of the client SDK, and a
+# copyleft licence on a library a third party links into their own service would make the SDK
+# unusable for the audience it exists for. Nothing here is a cryptographic primitive — it is
+# framing, padding and content typing, all of which a reimplementer could write from the
+# documentation in this crate.
+[package]
+name = "wire"
+version = "0.1.0"
+edition.workspace = true
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+# The attachment descriptor is JSON on the wire — a choice `content.ts` made and this crate
+# has to speak, not relitigate.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+hex.workspace = true

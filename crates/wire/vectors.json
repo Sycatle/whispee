@@ -1,0 +1,335 @@
+{
+  "content": [
+    {
+      "name": "text",
+      "body": {
+        "kind": "text",
+        "text": "hello"
+      },
+      "sentAt": null,
+      "hex": "0068656c6c6f"
+    },
+    {
+      "name": "text_utf8",
+      "body": {
+        "kind": "text",
+        "text": "déjà vu — ✓"
+      },
+      "sentAt": null,
+      "hex": "0064c3a96ac3a020767520e2809420e29c93"
+    },
+    {
+      "name": "text_empty",
+      "body": {
+        "kind": "text",
+        "text": ""
+      },
+      "sentAt": null,
+      "hex": "00"
+    },
+    {
+      "name": "gossip",
+      "body": {
+        "kind": "gossip",
+        "head": {
+          "size": 7,
+          "root": "abababababababababababababababababababababababababababababababab"
+        }
+      },
+      "sentAt": null,
+      "hex": "0200000007abababababababababababababababababababababababababababababababab"
+    },
+    {
+      "name": "posting_key",
+      "body": {
+        "kind": "posting-key",
+        "key": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "sentAt": null,
+      "hex": "031111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "name": "receipt_delivered",
+      "body": {
+        "kind": "receipt",
+        "state": "delivered",
+        "seq": 1
+      },
+      "sentAt": null,
+      "hex": "04000000000000000001"
+    },
+    {
+      "name": "receipt_read",
+      "body": {
+        "kind": "receipt",
+        "state": "read",
+        "seq": 4096
+      },
+      "sentAt": null,
+      "hex": "04010000000000001000"
+    },
+    {
+      "name": "reaction",
+      "body": {
+        "kind": "reaction",
+        "target": 12,
+        "emoji": "👍"
+      },
+      "sentAt": null,
+      "hex": "05000000000000000cf09f918d"
+    },
+    {
+      "name": "reply",
+      "body": {
+        "kind": "reply",
+        "target": 99,
+        "text": "d'accord"
+      },
+      "sentAt": null,
+      "hex": "06000000000000006364276163636f7264"
+    },
+    {
+      "name": "profile",
+      "body": {
+        "kind": "profile",
+        "name": "Charlie",
+        "at": 1767225600000
+      },
+      "sentAt": null,
+      "hex": "080000019b76daa800436861726c6965"
+    },
+    {
+      "name": "handle",
+      "body": {
+        "kind": "handle",
+        "handle": "charlie_01",
+        "at": 1767225600000
+      },
+      "sentAt": null,
+      "hex": "0b0000019b76daa800636861726c69655f3031"
+    },
+    {
+      "name": "membership_joined",
+      "body": {
+        "kind": "membership",
+        "event": "joined",
+        "handle": "asap_bot"
+      },
+      "sentAt": null,
+      "hex": "0a00617361705f626f74"
+    },
+    {
+      "name": "membership_removed",
+      "body": {
+        "kind": "membership",
+        "event": "removed",
+        "handle": "asap_bot"
+      },
+      "sentAt": null,
+      "hex": "0a01617361705f626f74"
+    },
+    {
+      "name": "membership_left",
+      "body": {
+        "kind": "membership",
+        "event": "left",
+        "handle": "asap_bot"
+      },
+      "sentAt": null,
+      "hex": "0a02617361705f626f74"
+    },
+    {
+      "name": "signals",
+      "body": {
+        "kind": "signals",
+        "sealed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b"
+      },
+      "sentAt": null,
+      "hex": "0c000102030405060708090a0b0c0d0e0f101112131415161718191a1b"
+    },
+    {
+      "name": "call_invite",
+      "body": {
+        "kind": "call",
+        "event": "invite",
+        "seconds": 0,
+        "call": "c-1"
+      },
+      "sentAt": null,
+      "hex": "0d0000000000632d31"
+    },
+    {
+      "name": "call_ended",
+      "body": {
+        "kind": "call",
+        "event": "ended",
+        "seconds": 90,
+        "call": "c-1"
+      },
+      "sentAt": null,
+      "hex": "0d010000005a632d31"
+    },
+    {
+      "name": "call_missed",
+      "body": {
+        "kind": "call",
+        "event": "missed",
+        "seconds": 0,
+        "call": "c-2"
+      },
+      "sentAt": null,
+      "hex": "0d0200000000632d32"
+    },
+    {
+      "name": "expiry_off",
+      "body": {
+        "kind": "expiry",
+        "seconds": 0
+      },
+      "sentAt": null,
+      "hex": "0e00000000"
+    },
+    {
+      "name": "expiry_week",
+      "body": {
+        "kind": "expiry",
+        "seconds": 604800
+      },
+      "sentAt": null,
+      "hex": "0e00093a80"
+    },
+    {
+      "name": "attachment",
+      "body": {
+        "kind": "attachment",
+        "ref": {
+          "id": "blob-1",
+          "key": "a2V5",
+          "iv": "aXY=",
+          "name": "devis.pdf",
+          "mime": "application/pdf",
+          "size": 1024,
+          "padded": true
+        }
+      },
+      "sentAt": null,
+      "hex": "017b226964223a22626c6f622d31222c226b6579223a2261325635222c226976223a226158593d222c226e616d65223a2264657669732e706466222c226d696d65223a226170706c69636174696f6e2f706466222c2273697a65223a313032342c22706164646564223a747275657d"
+    },
+    {
+      "name": "text_stamped",
+      "body": {
+        "kind": "text",
+        "text": "hello"
+      },
+      "sentAt": 1767225600000,
+      "hex": "070000019b76daa8000068656c6c6f"
+    },
+    {
+      "name": "reply_stamped",
+      "body": {
+        "kind": "reply",
+        "target": 99,
+        "text": "ok"
+      },
+      "sentAt": 1767225600000,
+      "hex": "070000019b76daa8000600000000000000636f6b"
+    },
+    {
+      "name": "receipt_never_stamped",
+      "body": {
+        "kind": "receipt",
+        "state": "read",
+        "seq": 3
+      },
+      "sentAt": 1767225600000,
+      "hex": "04010000000000000003"
+    },
+    {
+      "name": "gossip_never_stamped",
+      "body": {
+        "kind": "gossip",
+        "head": {
+          "size": 1,
+          "root": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "sentAt": 1767225600000,
+      "hex": "02000000010000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "profile_never_stamped",
+      "body": {
+        "kind": "profile",
+        "name": "C",
+        "at": 1767225600000
+      },
+      "sentAt": 1767225600000,
+      "hex": "080000019b76daa80043"
+    }
+  ],
+  "envelope": [
+    {
+      "name": "mls",
+      "kind": "mls",
+      "payload": "63697068",
+      "hex": "0063697068"
+    },
+    {
+      "name": "mls_empty",
+      "kind": "mls",
+      "payload": "",
+      "hex": "00"
+    },
+    {
+      "name": "welcome",
+      "kind": "welcome",
+      "welcome": "6162",
+      "ratchetTree": "6364",
+      "hex": "010000000261626364"
+    },
+    {
+      "name": "welcome_empty",
+      "kind": "welcome",
+      "welcome": "",
+      "ratchetTree": "",
+      "hex": "0100000000"
+    }
+  ],
+  "padding": [
+    {
+      "length": 0,
+      "paddedLength": 256,
+      "marker": 128
+    },
+    {
+      "length": 3,
+      "paddedLength": 256,
+      "marker": 128
+    },
+    {
+      "length": 200,
+      "paddedLength": 256,
+      "marker": 128
+    },
+    {
+      "length": 255,
+      "paddedLength": 256,
+      "marker": 128
+    },
+    {
+      "length": 256,
+      "paddedLength": 512,
+      "marker": 128
+    },
+    {
+      "length": 512,
+      "paddedLength": 1024,
+      "marker": 128
+    },
+    {
+      "length": 1000,
+      "paddedLength": 1024,
+      "marker": 128
+    }
+  ]
+}

@@ -35,3 +35,4 @@ futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+base64 = "0.22"

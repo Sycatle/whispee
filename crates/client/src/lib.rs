@@ -33,6 +33,7 @@
 //! `CONTRIBUTING.md`.
 
 pub mod api;
+pub mod attachments;
 pub mod enrolment;
 pub mod error;
 pub mod gateway;

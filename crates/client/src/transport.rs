@@ -82,6 +82,34 @@ impl Transport {
         self.send("POST", path, body).await
     }
 
+    /// A signed POST whose body is raw bytes rather than JSON.
+    ///
+    /// Attachments go up this way: they are already ciphertext, and base64 in a JSON envelope
+    /// would cost a third more bandwidth on the largest write the server accepts.
+    pub async fn post_bytes<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<T> {
+        self.send("POST", path, body).await
+    }
+
+    /// A signed GET returning raw bytes.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let response = self.raw("GET", path, Vec::new()).await?;
+        let status = response.status();
+
+        if !status.is_success() {
+            return Err(ClientError::Status {
+                method: "GET",
+                path: path.to_owned(),
+                status: status.as_u16(),
+            });
+        }
+
+        Ok(response.bytes().await?.to_vec())
+    }
+
     /// A signed request whose status is returned rather than raised.
     ///
     /// For the callers that expect a refusal and need to tell which one — a bot checking that a

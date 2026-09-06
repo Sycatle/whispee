@@ -41,5 +41,5 @@ pub mod transport;
 pub use api::{Api, ClaimedKeyPackage, Envelope, EnvelopePage};
 pub use enrolment::Enrolled;
 pub use error::{ClientError, Result};
-pub use gateway::{Cursor, Event, Gateway};
+pub use gateway::{Cursor, Event, Gateway, Poll};
 pub use transport::{Transport, unix_millis};

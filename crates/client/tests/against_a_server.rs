@@ -11,7 +11,7 @@
 //! **Release only.** In debug, OpenMLS panics rather than returning its decryption error, so
 //! `a_tampered_ciphertext_is_refused` measures a `debug_assert` instead of the protocol.
 
-use client::{Cursor, Enrolled, Event, Gateway};
+use client::{Cursor, Enrolled, Event, Gateway, Poll};
 use crypto_core::{Conversation, Incoming, roles};
 use wire::{content, envelope, padding};
 
@@ -119,7 +119,7 @@ async fn a_native_client_joins_a_conversation_and_exchanges_messages() {
     .expect("gateway");
 
     assert!(
-        matches!(gateway.next_event().await.expect("ready"), Some(Event::Ready { .. })),
+        matches!(gateway.poll().await.expect("ready"), Poll::Event(Event::Ready { .. })),
         "the session announces itself before anything else"
     );
 
@@ -140,13 +140,13 @@ async fn a_native_client_joins_a_conversation_and_exchanges_messages() {
         .expect("post message");
 
     let seq = loop {
-        match gateway.next_event().await.expect("event") {
-            Some(Event::Envelope { seq, group }) => {
+        match gateway.poll().await.expect("event") {
+            Poll::Event(Event::Envelope { seq, group }) => {
                 assert_eq!(group, hex::encode(&group_id));
                 break seq;
             }
-            Some(_) => continue,
-            None => panic!("the gateway never announced the envelope"),
+            Poll::Event(_) | Poll::Idle => continue,
+            Poll::Closed => panic!("the gateway closed before announcing the envelope"),
         }
     };
     assert_eq!(seq, welcome_seq + 1);
@@ -212,7 +212,9 @@ async fn the_server_refuses_what_it_should() {
     let owner = Enrolled::create(&base, &unique("owner"), "web").await.expect("owner enrols");
     let stranger = Enrolled::create(&base, &unique("nosy"), "web").await.expect("stranger enrols");
 
-    let group_id = b"a-group-the-stranger-is-not-in".to_vec();
+    // Unique per run: a mailbox already declared cannot be declared again, so a fixed id
+    // makes the test pass exactly once per database.
+    let group_id = unique("mailbox").into_bytes();
     owner.api.add_members(&group_id, std::slice::from_ref(&owner.device_id)).await.expect("declare");
     owner.api.post_envelope(&group_id, &[0u8, 1, 2, 3]).await.expect("post");
 

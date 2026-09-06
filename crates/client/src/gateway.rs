@@ -18,8 +18,12 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::error::{ClientError, Result};
 use crate::transport::Transport;
 
-/// How long to wait for a frame before deciding the server has nothing to say.
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// How long to wait for a frame before deciding the server has nothing to say **right now**.
+///
+/// Below the thirty-second heartbeat interval on purpose: a quiet read is what prompts the
+/// heartbeat, and a client that waited longer than the server's eighty-second silence limit
+/// would be disconnected while believing itself idle.
+pub(crate) const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
 type Socket = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -75,6 +79,17 @@ pub enum Event {
     },
 }
 
+/// What one read of the socket produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Poll {
+    /// The server said something.
+    Event(Event),
+    /// Nothing arrived in the read window. The session is fine; beat the heart and read again.
+    Idle,
+    /// The session is over. Open a new one.
+    Closed,
+}
+
 /// An authenticated gateway session.
 pub struct Gateway {
     socket: Socket,
@@ -95,9 +110,11 @@ impl Gateway {
             .await
             .map_err(|error| ClientError::Gateway(format!("cannot open {url}: {error}")))?;
 
-        let hello = read_frame(&mut socket)
-            .await?
-            .ok_or_else(|| ClientError::Gateway("the server sent no hello".to_owned()))?;
+        let Frame::Text(hello) = read_frame(&mut socket).await? else {
+            return Err(ClientError::Gateway(
+                "the server closed or said nothing instead of sending a hello".to_owned(),
+            ));
+        };
 
         if hello["op"] != "hello" {
             return Err(ClientError::Gateway(format!("expected hello, got {}", hello["op"])));
@@ -136,18 +153,26 @@ impl Gateway {
         Ok(Self { socket })
     }
 
-    /// The next thing the server has to say, or `None` if it went quiet or closed.
+    /// The next thing the server has to say.
+    ///
+    /// Three outcomes, and conflating the last two is a bug worth naming: `Idle` means nothing
+    /// arrived in the read window, which is a statement about the machine, while `Closed` means
+    /// the session is over and a new one has to be opened. A client that treats a quiet moment
+    /// as a disconnection reconnects in a loop; one that treats a disconnection as quiet waits
+    /// forever.
     ///
     /// Ping and pong are answered by the library and never surface here.
-    pub async fn next_event(&mut self) -> Result<Option<Event>> {
-        let Some(frame) = read_frame(&mut self.socket).await? else {
-            return Ok(None);
+    pub async fn poll(&mut self) -> Result<Poll> {
+        let frame = match read_frame(&mut self.socket).await? {
+            Frame::Text(frame) => frame,
+            Frame::Idle => return Ok(Poll::Idle),
+            Frame::Closed => return Ok(Poll::Closed),
         };
 
         let op = frame["op"].as_str().unwrap_or_default().to_owned();
         let group = || frame["group_id"].as_str().unwrap_or_default().to_owned();
 
-        Ok(Some(match op.as_str() {
+        Ok(Poll::Event(match op.as_str() {
             "ready" => Event::Ready {
                 groups: frame["groups"]
                     .as_array()
@@ -187,20 +212,29 @@ impl Gateway {
     }
 }
 
-async fn read_frame(socket: &mut Socket) -> Result<Option<serde_json::Value>> {
+/// What came back, or what did not.
+enum Frame {
+    Text(serde_json::Value),
+    /// The server closed the session, or the stream ended.
+    Closed,
+    /// Nothing arrived in the read window. A statement about the machine, not the protocol.
+    Idle,
+}
+
+async fn read_frame(socket: &mut Socket) -> Result<Frame> {
     let outcome = tokio::time::timeout(READ_TIMEOUT, async {
         while let Some(message) = socket.next().await {
             match message {
-                Ok(Message::Text(text)) => return serde_json::from_str(&text).ok(),
-                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(Message::Text(text)) => {
+                    return serde_json::from_str(&text).map_or(Frame::Closed, Frame::Text);
+                }
+                Ok(Message::Close(_)) | Err(_) => return Frame::Closed,
                 _ => continue,
             }
         }
-        None
+        Frame::Closed
     })
     .await;
 
-    // A timeout is a statement about the machine, not about the protocol; both mean "nothing to
-    // report", and a caller that wants to tell them apart is a caller with a bug elsewhere.
-    Ok(outcome.unwrap_or(None))
+    Ok(outcome.unwrap_or(Frame::Idle))
 }

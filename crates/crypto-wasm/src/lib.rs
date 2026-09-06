@@ -170,8 +170,12 @@ impl Client {
 
     /// Creates an administered group. The creator is its one and only admin.
     ///
-    /// Reserve this for real groups. A 1-to-1 must go through `createConversation`: roles make
-    /// no sense there, and the flat group is the correct shape.
+    /// The default shape for a 1-to-1 is flat — `createConversation` — because roles make no
+    /// sense between two people. A two-person conversation meant to grow later should be created
+    /// here instead, and the reason is not that the alternative is impossible: MLS adds a third
+    /// member to a flat group without complaint. It is that the result has **no administrator**,
+    /// and `roles.rs` gives a flat group no authority at all — so any member may remove any
+    /// other. There is no way to convert a conversation afterwards; the choice is made once.
     #[wasm_bindgen(js_name = createGroup)]
     pub fn create_group(&mut self, admin: String) -> Result<Vec<u8>, JsError> {
         let conversation =

@@ -1,6 +1,7 @@
 import { type FormEvent, useState } from "react";
 
 import { Button } from "@/ui/Button";
+import { Checkbox } from "../ui/Checkbox.tsx";
 import { Field } from "@/ui/Field";
 import { Icon } from "@/ui/Icon";
 import { IconButton } from "@/ui/IconButton";
@@ -38,6 +39,12 @@ export function NewConversation() {
   const duo = useDuo();
   const occlusion = useOcclusion();
   const [peer, setPeer] = useState("");
+  const [extensible, setExtensible] = useState(false);
+
+  // Derived from the field as it is typed, not from the parsed submission: the checkbox has to
+  // appear and disappear as the person adds or removes a comma.
+  const oneRecipient =
+    peer.split(",").map(normalize).filter((handle) => handle.length > 0).length === 1;
   const [busy, setBusy] = useState(false);
 
   const start = async (event: FormEvent) => {
@@ -70,7 +77,7 @@ export function NewConversation() {
         return;
       }
 
-      const view = await session.startConversation(handles);
+      const view = await session.startConversation(handles, { administered: extensible });
       setPeer("");
       bump();
       // Replaces rather than pushes: this screen has served its purpose and nobody wants the
@@ -125,6 +132,17 @@ export function NewConversation() {
             />
           )}
         </Field>
+
+        {/* Only for a one-to-one: three people or more is already an administered group, and
+            offering the choice there would suggest it could be declined. */}
+        {oneRecipient && (
+          <Checkbox
+            label="Allow adding people later"
+            description="A two-person conversation has no administrator, so Whispee will not let anyone be added to it later — the result would be a group where anyone can remove anyone. Tick this to become its administrator and keep it open. The choice cannot be changed afterwards."
+            checked={extensible}
+            onChange={(e) => setExtensible(e.target.checked)}
+          />
+        )}
 
         <Button type="submit" variant="primary" busy={busy}>
           Start a conversation

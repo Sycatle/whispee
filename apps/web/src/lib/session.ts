@@ -1598,11 +1598,24 @@ export class Session {
    *
    * # Flat or administered
    *
-   * With two accounts the conversation is **flat**: admin roles would make no sense there, and a
-   * flat group is the correct shape for a 1-to-1. Beyond that, the creator becomes the first
-   * admin.
+   * With two accounts the conversation is **flat** by default: admin roles would make no sense
+   * there, and a flat group is the correct shape for a 1-to-1. Beyond that, the creator becomes
+   * the first admin.
+   *
+   * `administered` overrides that for a one-to-one meant to grow later. Not because the protocol
+   * forbids the alternative — MLS adds a third member to a flat group without complaint, which
+   * `crates/client/tests/flat_groups.rs` demonstrates — but because the result would have **no
+   * administrator**, and in a flat group any member may remove any other. Between a freelancer
+   * and their client that means either can eject the other, or a service, with no recourse.
+   *
+   * There is no way to convert a conversation afterwards, so the caller decides once, at
+   * creation. Asking for an administered one also declines to reuse a flat conversation with the
+   * same person: handing that back would satisfy the lookup and defeat the request.
    */
-  async startConversation(handles: string | string[]): Promise<ConversationView> {
+  async startConversation(
+    handles: string | string[],
+    { administered = false }: { administered?: boolean } = {},
+  ): Promise<ConversationView> {
     // The one boundary where a **handle** enters this class, and the only place the directory is
     // consulted. Everything downstream is an account id: a name is resolved once, here, rather
     // than carried through the protocol where it would have to be re-resolved — and re-resolving
@@ -1619,7 +1632,12 @@ export class Session {
     // members: messages spread across the two depending on which one was selected, and the user
     // concludes messages are being lost. Nothing in the protocol forbids it — it is up to the
     // app to decide that a conversation is identified by its participants.
-    const existing = derive.matchingConversation(this.conversations.values(), wanted, this.accountId);
+    const existing = derive.matchingConversation(
+      this.conversations.values(),
+      wanted,
+      this.accountId,
+      administered ? (view) => this.roles(view) !== null : undefined,
+    );
     if (existing) return existing;
 
     const peers: ResolvedAccount[] = [];
@@ -1641,11 +1659,11 @@ export class Session {
       peers.push(peer);
     }
 
-    // A group is administered, a 1-to-1 is not. The creator is the first admin; they can appoint
-    // others, but never step down alone — the policy refuses to leave a group without an admin,
-    // which would freeze it for good.
+    // A group is administered; a 1-to-1 is not, unless the caller said it intends to extend it.
+    // The creator is the first admin; they can appoint others, but never step down alone — the
+    // policy refuses to leave a group without an admin, which would freeze it for good.
     const groupId =
-      peers.length > 1
+      administered || peers.length > 1
         ? this.client.createGroup(this.accountId)
         : this.client.createConversation();
 
@@ -1947,8 +1965,15 @@ export class Session {
     // A one-to-one has no roles and no admin: turning one into a group by adding a third person
     // would leave a conversation nobody administers, which the policy treats as frozen. Starting
     // a new conversation with all three is the operation that exists for that.
+    //
+    // The message names the way out, and it is not obvious: a conversation created with "allow
+    // adding people later" ticked is administered from the start and does take new members. Left
+    // as "start a new one instead", the person starts another two-person one and hits this again.
     if (this.roles(view) === null) {
-      throw new Error("This conversation cannot take new members. Start a new one instead.");
+      throw new Error(
+        "This conversation has no administrator, so adding a third person would leave a group " +
+          'where anyone can remove anyone. Start a new one with "Allow adding people later" ticked.',
+      );
     }
 
     const peer = await this.resolve(account);

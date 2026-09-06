@@ -40,11 +40,27 @@ const MEMBER_SEPARATOR = "\u0000";
  *
  * We compare sets, not lists: typing order must not produce two different groups. An account with
  * several devices appears several times in the tree, hence the `Set`.
+ *
+ * # Why a caller may refuse a match
+ *
+ * A one-to-one is created **flat**, and `session.ts` refuses to add anyone to a flat
+ * conversation. That refusal is a product decision, not a protocol one — MLS takes the third
+ * member without complaint — and the reason for it is that the result would have no
+ * administrator, so any member could remove any other. `crates/client/tests/flat_groups.rs`
+ * pins both halves.
+ *
+ * So a caller opening a conversation it intends to extend later — with a colleague, or with a
+ * service — must not be handed the flat one that already exists with the same person: it would
+ * satisfy the lookup and defeat the request. It says so here, gets `undefined`, and creates an
+ * administered conversation instead.
+ *
+ * Omitting it leaves every existing caller exactly as it was.
  */
 export function matchingConversation(
   views: Iterable<ConversationView>,
   handles: string[],
   self: string,
+  accept?: (view: ConversationView) => boolean,
 ): ConversationView | undefined {
   const target = [...new Set(handles)].sort().join(MEMBER_SEPARATOR);
 
@@ -54,7 +70,7 @@ export function matchingConversation(
       .sort()
       .join(MEMBER_SEPARATOR);
 
-    if (members === target) return view;
+    if (members === target && (accept === undefined || accept(view))) return view;
   }
 
   return undefined;

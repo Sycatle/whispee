@@ -61,6 +61,21 @@ test("a peer's several devices count once", () => {
   assert.equal(matchingConversation([duo], ["bob"], "alice"), duo);
 });
 
+test("a caller can refuse a match that does not suit it", () => {
+  // The case this exists for: a one-to-one is created flat, and a flat group can never take a
+  // third member — `roles::authorize` has no authority to appeal to. So a caller opening a
+  // conversation it intends to extend later must not be handed the frozen one that already
+  // exists with the same person. It gets `undefined` and creates an administered one instead.
+  const flat = view({ key: "flat", peers: peers("alice", "bob") });
+  const administered = view({ key: "administered", peers: peers("alice", "bob") });
+  const extensible = (candidate: ConversationView) => candidate.key === "administered";
+
+  assert.equal(matchingConversation([flat], ["bob"], "alice", extensible), undefined);
+  assert.equal(matchingConversation([flat, administered], ["bob"], "alice", extensible), administered);
+  // And with no predicate, nothing changes for every existing caller.
+  assert.equal(matchingConversation([flat], ["bob"], "alice"), flat);
+});
+
 test("a strict subset is not a match", () => {
   const group = view({ peers: peers("alice", "bob", "carol") });
 

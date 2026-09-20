@@ -149,3 +149,7 @@ it in law while the code fought it in practice would be an odd pair.
 
 `publish = false` stays on every crate. The licence says what may be done with the source; it does
 not make any of this fit to publish to a registry, and the status section above has not changed.
+
+---
+
+Built by [Sycode](https://sycode.fr) — freelance SaaS developer.
